@@ -1,0 +1,3176 @@
+/**
+ * CH POS App — Modern POS interface for GoGizmo & GoFix.
+ * Layout: Sidebar (left) | Content (center) | Cart (right)
+ */
+frappe.provide("ch_pos");
+
+ch_pos.PosApp = class PosApp {
+	constructor(wrapper) {
+		this.wrapper = $(wrapper);
+		this.page = wrapper.page;
+		this.pos_profile = null;
+		this.cart = [];
+		this.customer = null;
+		this.item_page = 0;
+		this.item_page_size = 20;
+		this.total_items = 0;
+		this.search_term = "";
+		this.item_group_filter = "";
+		this.view_mode = "list";
+		this.in_stock_only = false;
+		this.payment_modes = [];
+		// Discount state
+		this.additional_discount_pct = 0;
+		this.additional_discount_amt = 0;
+		this.coupon_code = null;
+		this.coupon_discount = 0;
+		// Exchange state
+		this.exchange_assessment = null;
+		this.exchange_amount = 0;
+		this.exchange_order = null;
+		// Return / product-exchange state
+		this.return_against = null;
+		this.return_items = [];
+		this.product_exchange_credit = 0;
+		this.product_exchange_invoice = null;
+		// Loyalty
+		this.loyalty_points = 0;
+		this.loyalty_program = null;
+		this.conversion_factor = 0;
+		// Scanner buffer
+		this._scan_buffer = "";
+		this._scan_timer = null;
+		this.init();
+	}
+
+	init() {
+		this.page.clear_actions();
+		this.wrapper.find(".page-content").addClass("ch-pos-page");
+		// Full-screen: hide page head, navbar, footer
+		this.wrapper.find(".page-head").hide();
+		$("header.navbar").hide();
+		$("body").addClass("ch-pos-fullscreen");
+		this.offline = new ch_pos.OfflineManager(this);
+		this.check_pos_profile();
+	}
+
+	// ── Profile Selection ─────────────────────────────────
+	check_pos_profile() {
+		frappe.call({
+			method: "erpnext.selling.page.point_of_sale.point_of_sale.check_opening_entry",
+			args: { user: frappe.session.user },
+			callback: (r) => {
+				if (r.message && r.message.pos_profile) {
+					this.pos_profile = r.message.pos_profile;
+					this.company = r.message.company;
+					this.pos_opening_entry = r.message.name;
+					this.load_profile_and_render();
+				} else {
+					this.show_profile_selector();
+				}
+			},
+		});
+	}
+
+	show_profile_selector() {
+		const me = this;
+		const dialog = new frappe.ui.Dialog({
+			title: __("Select POS Profile"),
+			fields: [
+				{
+					fieldname: "pos_profile",
+					fieldtype: "Link",
+					label: __("POS Profile"),
+					options: "POS Profile",
+					reqd: 1,
+					get_query: () => ({ filters: { disabled: 0 } }),
+				},
+			],
+			primary_action_label: __("Open POS"),
+			primary_action(values) {
+				dialog.hide();
+				// Build opening balance details (zero amounts for each payment mode)
+				frappe.xcall("frappe.client.get", {
+					doctype: "POS Profile",
+					name: values.pos_profile,
+				}).then((profile) => {
+					const balance_details = (profile.payments || []).map((p) => ({
+						mode_of_payment: p.mode_of_payment,
+						opening_amount: 0,
+					}));
+					frappe.call({
+						method: "erpnext.selling.page.point_of_sale.point_of_sale.create_opening_voucher",
+						args: {
+							pos_profile: values.pos_profile,
+							company: profile.company,
+							balance_details: JSON.stringify(balance_details),
+						},
+						callback: (r) => {
+							if (r.message) {
+								me.pos_profile = values.pos_profile;
+								me.company = r.message.company;
+								me.pos_opening_entry = r.message.name;
+								me.load_profile_and_render();
+							}
+						},
+					});
+				});
+			},
+		});
+		dialog.show();
+	}
+
+	load_profile_and_render() {
+		frappe.xcall("frappe.client.get", {
+			doctype: "POS Profile",
+			name: this.pos_profile,
+		}).then((profile) => {
+			this.profile_doc = profile;
+			this.warehouse = profile.warehouse;
+			this.price_list = profile.selling_price_list;
+			this.customer = profile.customer || null;
+			this.payment_modes = (profile.payments || []).map((p) => ({
+				mode: p.mode_of_payment,
+				default: p.default,
+			}));
+			// Load extension for store capabilities + feature flags
+			return frappe.xcall("frappe.client.get_value", {
+				doctype: "POS Profile Extension",
+				filters: { pos_profile: this.pos_profile },
+				fieldname: ["store", "enable_repair_intake", "enable_buyback_intake"],
+			});
+		}).then((ext) => {
+			this.pos_ext = ext || {};
+			if (ext && ext.store) {
+				return frappe.xcall("frappe.client.get_value", {
+					doctype: "CH Store",
+					filters: { name: ext.store },
+					fieldname: ["is_buyback_enabled", "is_service_enabled", "is_retail_enabled",
+								"store_name", "store_code"],
+				});
+			}
+			return null;
+		}).then((store) => {
+			this.store_caps = store || {};
+			this._build_modes();
+			this.render_layout();
+			this.load_items();
+			this.load_item_groups();
+			this.offline.cache_profile_data();
+		});
+	}
+
+	_build_modes() {
+		const ext = this.pos_ext || {};
+		const caps = this.store_caps || {};
+
+		// Build grouped sidebar sections
+		this.sidebar_sections = [
+			{ label: __("Sales"), items: [
+				{ key: "sell", label: __("Sell"), icon: "fa-shopping-cart" },
+				{ key: "returns", label: __("Returns"), icon: "fa-undo" },
+			]},
+		];
+
+		const services = [];
+		if (ext.enable_buyback_intake || caps.is_buyback_enabled) {
+			services.push({ key: "buyback", label: __("Buyback"), icon: "fa-exchange" });
+		}
+		if (ext.enable_repair_intake || caps.is_service_enabled) {
+			services.push({ key: "repair", label: __("Repair"), icon: "fa-wrench" });
+			services.push({ key: "service", label: __("Service"), icon: "fa-cog" });
+		}
+		if (services.length) {
+			this.sidebar_sections.push({ label: __("Services"), items: services });
+		}
+
+		this.sidebar_sections.push(
+			{ label: __("Lookup"), items: [
+				{ key: "imei", label: __("IMEI History"), icon: "fa-barcode" },
+				{ key: "customer360", label: __("Customer 360"), icon: "fa-user" },
+			]},
+			{ label: __("Reports"), items: [
+				{ key: "reports", label: __("Dashboard"), icon: "fa-bar-chart" },
+			]}
+		);
+
+		// Flatten for mode lookup
+		this.pos_modes = this.sidebar_sections.flatMap((s) => s.items);
+		this.active_mode = "sell";
+	}
+
+	_render_sidebar() {
+		let html = '';
+		this.sidebar_sections.forEach((section) => {
+			html += `<div class="ch-pos-sidebar-section">${section.label}</div>`;
+			section.items.forEach((m) => {
+				html += `<button class="ch-pos-sidebar-item ${m.key === this.active_mode ? 'active' : ''}"
+					data-mode="${m.key}" title="${m.label}">
+					<i class="fa ${m.icon}"></i>
+					<span>${m.label}</span>
+				</button>`;
+			});
+		});
+		html += `<div class="ch-pos-sidebar-bottom">
+			<span class="ch-pos-online-dot ${navigator.onLine ? '' : 'offline'}"></span>
+			<span style="color:rgba(255,255,255,.4);font-size:10px;">${navigator.onLine ? __('Online') : __('Offline')}</span>
+		</div>`;
+		return `<div class="ch-pos-sidebar">${html}</div>`;
+	}
+
+	// ── Main Layout ───────────────────────────────────────
+	render_layout() {
+		const content = this.wrapper.find(".layout-main-section");
+		content.empty();
+		content.append(`
+			<div class="ch-pos-offline-bar">
+				<span class="ch-pos-offline-dot"></span>
+				<i class="fa fa-wifi ch-pos-offline-icon"></i>
+				<span class="ch-pos-offline-text">${__("You are offline — transactions will be queued")}</span>
+				<span class="ch-pos-offline-queue" style="display:none"></span>
+				<button class="btn btn-xs ch-pos-offline-retry" style="display:none">
+					<i class="fa fa-refresh"></i> ${__("Retry Sync")}
+				</button>
+			</div>
+			<div class="ch-pos-container">
+				${this._render_sidebar()}
+				<!-- CENTER: Content Panel -->
+				<div class="ch-pos-items-panel">
+					<div class="ch-pos-toolbar">
+						<div class="ch-pos-search-wrap">
+							<i class="fa fa-search ch-pos-search-icon"></i>
+							<input type="text" class="ch-pos-search"
+								placeholder="${__("Search items...")}">
+							<span class="ch-pos-scanner-indicator" title="${__("Barcode scanner active")}"><i class="fa fa-barcode"></i></span>
+						</div>
+						<select class="form-select ch-pos-group-filter">
+							<option value="">${__("All Groups")}</option>
+						</select>
+						<label class="ch-pos-stock-toggle" title="${__("Show only in-stock items")}">
+							<input type="checkbox" class="ch-pos-stock-check">
+							${__("In Stock")}
+						</label>
+						<div class="ch-pos-view-toggle">
+							<button class="btn btn-xs btn-default ch-pos-view-card">${__("CARD")}</button>
+							<button class="btn btn-xs btn-primary ch-pos-view-list active">${__("LIST")}</button>
+						</div>
+					</div>
+					<div class="ch-pos-items-grid"></div>
+					<div class="ch-pos-items-pager"></div>
+				</div>
+				<!-- RIGHT: Cart Panel -->
+				<div class="ch-pos-cart-panel">
+					<div class="ch-pos-customer-bar">
+						<div class="ch-pos-customer-select"></div>
+					</div>
+					<div class="ch-pos-quick-actions">
+						<button class="btn btn-xs ch-pos-btn-exchange">
+							<i class="fa fa-exchange"></i> ${__("Exchange")}
+						</button>
+						<button class="btn btn-xs ch-pos-btn-vas">
+							<i class="fa fa-plus-circle"></i> ${__("Add VAS")}
+						</button>
+						<button class="btn btn-xs ch-pos-btn-product-exchange">
+							<i class="fa fa-retweet"></i> ${__("Product Swap")}
+						</button>
+						<div class="ch-pos-exchange-banner" style="display:none"></div>
+						<div class="ch-pos-product-exchange-banner" style="display:none"></div>
+					</div>
+					<div class="ch-pos-cart-header">
+						<span class="col-name">${__("Item")}</span>
+						<span class="col-qty">${__("Qty")}</span>
+						<span class="col-rate">${__("Rate")}</span>
+						<span class="col-amount">${__("Amount")}</span>
+					</div>
+					<div class="ch-pos-cart-items"></div>
+					<div class="ch-pos-discount-bar">
+						<div class="ch-pos-discount-row">
+							<input type="text" class="form-control ch-pos-coupon-input"
+								placeholder="${__('Coupon code...')}">
+							<button class="btn btn-xs ch-pos-coupon-apply">${__("Apply")}</button>
+						</div>
+						<div class="ch-pos-discount-row">
+							<span class="ch-pos-discount-label">${__("Manual Discount")}</span>
+							<div class="ch-pos-discount-inputs">
+								<input type="number" class="form-control ch-pos-disc-pct" placeholder="%" min="0" max="100" step="0.5">
+								<span class="ch-pos-disc-or">${__("or")}</span>
+								<input type="number" class="form-control ch-pos-disc-amt" placeholder="₹" min="0" step="1">
+							</div>
+						</div>
+						<div class="ch-pos-coupon-msg"></div>
+					</div>
+					<div class="ch-pos-cart-summary">
+						<div class="summary-row total-qty">
+							<span>${__("Total Qty")}</span>
+							<span class="value">0</span>
+						</div>
+						<div class="summary-row discount-total">
+							<span>${__("Item Discounts")}</span>
+							<span class="value">₹0</span>
+						</div>
+						<div class="summary-row additional-disc" style="display:none">
+							<span>${__("Additional Discount")}</span>
+							<span class="value">₹0</span>
+						</div>
+						<div class="summary-row coupon-disc" style="display:none">
+							<span>🏷 ${__("Coupon")}</span>
+							<span class="value">₹0</span>
+						</div>
+						<div class="summary-row exchange-credit" style="display:none">
+							<span>⚔ ${__("Exchange Credit")}</span>
+							<span class="value">₹0</span>
+						</div>
+						<div class="summary-row product-exchange-credit" style="display:none">
+							<span><i class="fa fa-retweet"></i> ${__("Product Exchange Credit")}</span>
+							<span class="value">₹0</span>
+						</div>
+						<div class="summary-row grand-total">
+							<span>${__("Grand Total")}</span>
+							<span class="value">₹0</span>
+						</div>
+					</div>
+					<div class="ch-pos-cart-actions">
+						<button class="btn btn-sm ch-pos-btn-cancel">${__("CANCEL")}</button>
+						<button class="btn btn-sm ch-pos-btn-hold">${__("HOLD")}</button>
+						<button class="btn btn-lg ch-pos-btn-pay">${__("PAY")}</button>
+					</div>
+				</div>
+			</div>
+		`);
+
+		this.bind_events();
+		this.render_customer_selector();
+	}
+
+	// ── Event Bindings ────────────────────────────────────
+	bind_events() {
+		const me = this;
+		const container = this.wrapper;
+
+		// Offline retry sync button
+		container.on("click", ".ch-pos-offline-retry", function () {
+			if (me.offline) me.offline.sync_pending();
+		});
+
+		// Item search with debounce
+		let search_timer;
+		container.on("input", ".ch-pos-search", function () {
+			clearTimeout(search_timer);
+			search_timer = setTimeout(() => {
+				me.search_term = $(this).val().trim();
+				me.item_page = 0;
+				me.load_items();
+			}, 300);
+		});
+
+		// Item group filter
+		container.on("change", ".ch-pos-group-filter", function () {
+			me.item_group_filter = $(this).val();
+			me.item_page = 0;
+			me.load_items();
+		});
+
+		// Stock filter toggle
+		container.on("change", ".ch-pos-stock-check", function () {
+			const checked = $(this).is(":checked");
+			container.find(".ch-pos-stock-toggle").toggleClass("active", checked);
+			me.in_stock_only = checked;
+			me.item_page = 0;
+			me.load_items();
+		});
+
+		// View toggle
+		container.on("click", ".ch-pos-view-card", function () {
+			me.view_mode = "card";
+			$(this).addClass("btn-primary active").removeClass("btn-default");
+			container.find(".ch-pos-view-list").addClass("btn-default").removeClass("btn-primary active");
+			me.render_items(me._last_items || []);
+		});
+		container.on("click", ".ch-pos-view-list", function () {
+			me.view_mode = "list";
+			$(this).addClass("btn-primary active").removeClass("btn-default");
+			container.find(".ch-pos-view-card").addClass("btn-default").removeClass("btn-primary active");
+			me.render_items(me._last_items || []);
+		});
+
+		// Add item to cart from grid
+		container.on("click", ".ch-pos-item-card, .ch-pos-item-row", function (e) {
+			// Ignore clicks on nearby-store pill
+			if ($(e.target).closest(".ch-pos-nearby-store").length) return;
+			const $el = $(this);
+			if ($el.hasClass("out-of-stock")) {
+				// Show nearby stock dialog instead
+				const item_code = $el.data("item-code");
+				me.show_nearby_stock_dialog(item_code);
+				return;
+			}
+			const item_code = $el.data("item-code");
+			const item_data = (me._last_items || []).find((i) => i.item_code === item_code);
+			if (item_data) me.add_to_cart(item_data);
+		});
+
+		// Cart item qty change
+		container.on("click", ".ch-pos-cart-plus", function () {
+			const idx = $(this).closest(".ch-pos-cart-line").data("idx");
+			me.cart[idx].qty += 1;
+			me.update_cart_display();
+		});
+		container.on("click", ".ch-pos-cart-minus", function () {
+			const idx = $(this).closest(".ch-pos-cart-line").data("idx");
+			if (me.cart[idx].qty > 1) {
+				me.cart[idx].qty -= 1;
+			} else {
+				me.cart.splice(idx, 1);
+			}
+			me.update_cart_display();
+		});
+		container.on("click", ".ch-pos-cart-remove", function () {
+			const idx = $(this).closest(".ch-pos-cart-line").data("idx");
+			me.cart.splice(idx, 1);
+			me.update_cart_display();
+		});
+
+		// Cart actions
+		container.on("click", ".ch-pos-btn-cancel", function () {
+			if (me.cart.length) {
+				frappe.confirm(__("Clear all items from cart?"), () => {
+					me.cart = [];
+					me._clear_discounts();
+					me.clear_exchange();
+					me.update_cart_display();
+				});
+			}
+		});
+		container.on("click", ".ch-pos-btn-hold", function () {
+			me.hold_invoice();
+		});
+		container.on("click", ".ch-pos-btn-pay", function () {
+			me.show_payment_dialog();
+		});
+
+		// Exchange button
+		container.on("click", ".ch-pos-btn-exchange", function () {
+			me.show_exchange_dialog();
+		});
+
+		// VAS button
+		container.on("click", ".ch-pos-btn-vas", function () {
+			me.show_vas_dialog();
+		});
+
+		// Product Exchange (swap) button
+		container.on("click", ".ch-pos-btn-product-exchange", function () {
+			me.show_product_exchange_dialog();
+		});
+
+		// Clear exchange
+		container.on("click", ".ch-pos-exchange-clear", function () {
+			me.clear_exchange();
+		});
+
+		// Clear product exchange
+		container.on("click", ".ch-pos-product-exchange-clear", function () {
+			me.clear_product_exchange();
+		});
+
+		// Sidebar navigation
+		container.on("click", ".ch-pos-sidebar-item", function () {
+			const mode = $(this).data("mode");
+			if (mode === me.active_mode) return;
+			container.find(".ch-pos-sidebar-item").removeClass("active");
+			$(this).addClass("active");
+			me.active_mode = mode;
+			me._switch_mode(mode);
+		});
+
+		// Barcode scanner — physical scanners send rapid keystrokes + Enter
+		$(document).on("keydown.ch_pos_scanner", (e) => {
+			// Ignore if focus is in an input/textarea (let regular typing work)
+			const tag = (e.target.tagName || "").toLowerCase();
+			if (tag === "input" || tag === "textarea" || tag === "select") return;
+			// Collect keystrokes into buffer
+			if (e.key === "Enter" && me._scan_buffer.length >= 4) {
+				e.preventDefault();
+				me._handle_scan(me._scan_buffer);
+				me._scan_buffer = "";
+				return;
+			}
+			if (e.key.length === 1) {
+				me._scan_buffer += e.key;
+				clearTimeout(me._scan_timer);
+				me._scan_timer = setTimeout(() => { me._scan_buffer = ""; }, 100);
+			}
+		});
+
+		// Coupon apply
+		container.on("click", ".ch-pos-coupon-apply", function () {
+			me._apply_coupon();
+		});
+		container.on("keypress", ".ch-pos-coupon-input", function (e) {
+			if (e.which === 13) me._apply_coupon();
+		});
+
+		// Manual discount — percentage
+		container.on("change", ".ch-pos-disc-pct", function () {
+			const pct = flt($(this).val());
+			if (pct > 0) {
+				me.additional_discount_pct = Math.min(pct, 100);
+				me.additional_discount_amt = 0;
+				container.find(".ch-pos-disc-amt").val("");
+			} else {
+				me.additional_discount_pct = 0;
+			}
+			me.update_cart_display();
+		});
+
+		// Manual discount — amount
+		container.on("change", ".ch-pos-disc-amt", function () {
+			const amt = flt($(this).val());
+			if (amt > 0) {
+				me.additional_discount_amt = amt;
+				me.additional_discount_pct = 0;
+				container.find(".ch-pos-disc-pct").val("");
+			} else {
+				me.additional_discount_amt = 0;
+			}
+			me.update_cart_display();
+		});
+	}
+
+	// ── Coupon / Discount Helpers ──────────────────────────
+	_apply_coupon() {
+		const code = this.wrapper.find(".ch-pos-coupon-input").val().trim();
+		const msg_el = this.wrapper.find(".ch-pos-coupon-msg");
+
+		if (!code) {
+			msg_el.html(`<span class="text-warning">${__("Enter a coupon code")}</span>`);
+			return;
+		}
+
+		frappe.call({
+			method: "ch_pos.api.pos_api.validate_coupon",
+			args: {
+				coupon_code: code,
+				customer: this.customer || "",
+				cart_total: this._pre_discount_total || 0,
+			},
+			callback: (r) => {
+				if (r.message && r.message.valid) {
+					this.coupon_code = code;
+					this.coupon_discount = flt(r.message.discount_amount);
+					msg_el.html(`<span class="text-success">\ud83c\udff7 ${frappe.utils.escape_html(r.message.coupon_name)} \u2014 \u20b9${format_number(this.coupon_discount)} ${__("off")}</span>`);
+					this.update_cart_display();
+				} else {
+					this.coupon_code = null;
+					this.coupon_discount = 0;
+					const err = r.message ? r.message.reason : __("Invalid coupon");
+					msg_el.html(`<span class="text-danger">${frappe.utils.escape_html(err)}</span>`);
+					this.update_cart_display();
+				}
+			},
+		});
+	}
+
+	_clear_discounts() {
+		this.additional_discount_pct = 0;
+		this.additional_discount_amt = 0;
+		this.coupon_code = null;
+		this.coupon_discount = 0;
+		this.wrapper.find(".ch-pos-disc-pct, .ch-pos-disc-amt, .ch-pos-coupon-input").val("");
+		this.wrapper.find(".ch-pos-coupon-msg").empty();
+	}
+
+	// ── Barcode / IMEI Scanner ────────────────────────────
+	_handle_scan(barcode) {
+		const me = this;
+		// Flash the scanner indicator
+		this.wrapper.find(".ch-pos-scanner-indicator").addClass("scanning");
+		setTimeout(() => me.wrapper.find(".ch-pos-scanner-indicator").removeClass("scanning"), 600);
+
+		frappe.call({
+			method: "ch_pos.api.pos_api.scan_barcode",
+			args: { barcode, pos_profile: this.pos_profile },
+			callback: (r) => {
+				const data = r.message;
+				if (!data || !data.item_code) {
+					frappe.show_alert({ message: __("No item found for barcode: {0}", [barcode]), indicator: "red" });
+					return;
+				}
+				// If we're in sell mode, add to cart directly
+				if (me.active_mode === "sell") {
+					me.add_to_cart({
+						item_code: data.item_code,
+						item_name: data.item_name,
+						rate: flt(data.rate),
+						mrp: flt(data.mrp || data.rate),
+						uom: data.uom || "Nos",
+						stock_qty: data.stock_qty,
+						offers: data.offers || [],
+						brand: data.brand || "",
+						serial_no: data.serial_no || "",
+					});
+					frappe.show_alert({ message: __("{0} scanned \u2192 added to cart", [data.item_name]), indicator: "green" });
+				} else if (me.active_mode === "imei") {
+					// Auto-fill the IMEI search field and trigger lookup
+					me.wrapper.find(".ch-imei-search").val(barcode);
+					me.wrapper.find(".ch-imei-lookup").click();
+				} else {
+					// For other modes, put the value in search
+					me.wrapper.find(".ch-pos-search").val(barcode).trigger("input");
+				}
+			},
+		});
+	}
+
+	// ── Fetch Customer Loyalty ────────────────────────────
+	_fetch_loyalty(customer) {
+		if (!customer) {
+			this.loyalty_points = 0;
+			this.loyalty_program = null;
+			this.conversion_factor = 0;
+			this.wrapper.find(".ch-pos-loyalty-badge").remove();
+			return;
+		}
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_customer_loyalty",
+			args: { customer, company: this.company || "" },
+			callback: (r) => {
+				if (r.message) {
+					this.loyalty_points = r.message.points || 0;
+					this.loyalty_program = r.message.loyalty_program || null;
+					this.conversion_factor = flt(r.message.conversion_factor);
+					this._show_loyalty_badge();
+				}
+			},
+		});
+	}
+
+	_show_loyalty_badge() {
+		this.wrapper.find(".ch-pos-loyalty-badge").remove();
+		if (!this.loyalty_program || !this.loyalty_points) return;
+		const value = flt(this.loyalty_points * this.conversion_factor);
+		const badge = `<div class="ch-pos-loyalty-badge">
+			<i class="fa fa-star"></i>
+			<span>${format_number(this.loyalty_points)} ${__("pts")}</span>
+			<span class="text-muted">(≈ ₹${format_number(value)})</span>
+		</div>`;
+		this.wrapper.find(".ch-pos-customer-select").after(badge);
+	}
+
+	// ── Customer Selector ─────────────────────────────────
+	render_customer_selector() {
+		const me = this;
+		const field = frappe.ui.form.make_control({
+			df: {
+				fieldname: "customer",
+				fieldtype: "Link",
+				options: "Customer",
+				label: __("Customer"),
+				placeholder: __("Search customer..."),
+				change: () => {
+					me.customer = field.get_value();
+					me._fetch_loyalty(me.customer);
+				},
+			},
+			parent: this.wrapper.find(".ch-pos-customer-select"),
+			render_input: true,
+		});
+		field.set_value(this.customer || "");
+		this.customer_field = field;
+		// Fetch loyalty on initial load if customer is set
+		if (this.customer) this._fetch_loyalty(this.customer);
+	}
+
+	// ── Item Loading ──────────────────────────────────────
+	load_items() {
+		const filters = {};
+		if (this.item_group_filter) filters.item_group = this.item_group_filter;
+		if (this.in_stock_only) filters.in_stock_only = true;
+
+		if (!navigator.onLine) {
+			// Serve from offline cache
+			this.offline.get_cached_items(this.search_term, filters).then((result) => {
+				this._last_items = result.items;
+				this.total_items = result.total;
+				this.render_items(result.items);
+				this.render_pager();
+			});
+			return;
+		}
+
+		frappe.call({
+			method: "ch_pos.api.search.pos_item_search",
+			args: {
+				search_term: this.search_term,
+				pos_profile: this.pos_profile,
+				filters: filters,
+				page: this.item_page,
+				page_size: this.item_page_size,
+			},
+			callback: (r) => {
+				if (r.message) {
+					this._last_items = r.message.items;
+					this.total_items = r.message.total;
+					this.render_items(r.message.items);
+					this.render_pager();
+					// Cache items for offline use
+					this.offline.cache_items(r.message.items);
+				}
+			},
+		});
+	}
+
+	load_item_groups() {
+		frappe.call({
+			method: "frappe.client.get_list",
+			args: {
+				doctype: "Item Group",
+				filters: { is_group: 0 },
+				fields: ["name"],
+				order_by: "name asc",
+				limit_page_length: 0,
+			},
+			callback: (r) => {
+				const select = this.wrapper.find(".ch-pos-group-filter");
+				(r.message || []).forEach((g) => {
+					select.append(`<option value="${g.name}">${g.name}</option>`);
+				});
+			},
+		});
+	}
+
+	// ── Render Items ──────────────────────────────────────
+	render_items(items) {
+		const grid = this.wrapper.find(".ch-pos-items-grid");
+		grid.empty();
+
+		if (!items.length) {
+			grid.append(`<div class="ch-pos-no-items">${__("No items found")}</div>`);
+			return;
+		}
+
+		if (this.view_mode === "card") {
+			const html = items.map((item) => this.item_card_html(item)).join("");
+			grid.addClass("card-view").removeClass("list-view").html(html);
+		} else {
+			const header = `<div class="ch-pos-list-header">
+				<span class="col-code">${__("Code")}</span>
+				<span class="col-name">${__("Item Name")}</span>
+				<span class="col-brand">${__("Brand")}</span>
+				<span class="col-price">${__("Price")}</span>
+				<span class="col-stock">${__("Stock")}</span>
+			</div>`;
+			const rows = items.map((item) => this.item_row_html(item)).join("");
+			grid.addClass("list-view").removeClass("card-view").html(header + rows);
+		}
+	}
+
+	item_card_html(item) {
+		const abbr = frappe.get_abbr(item.item_name);
+		const colors = ['#e8eaf6','#e0f2f1','#fce4ec','#fff3e0','#f3e5f5','#e8f5e9','#fff8e1','#e3f2fd'];
+		const text_colors = ['#3949ab','#00695c','#c62828','#e65100','#6a1b9a','#2e7d32','#f57f17','#1565c0'];
+		const color_idx = (item.item_code || '').split('').reduce((a,c) => a + c.charCodeAt(0), 0) % colors.length;
+		const bg_color = colors[color_idx];
+		const txt_color = text_colors[color_idx];
+		const img = item.image
+			? `<img src="${item.image}" alt="${frappe.utils.escape_html(item.item_name)}">`
+			: `<div class="ch-pos-item-placeholder" style="background:${bg_color};color:${txt_color}">${abbr}</div>`;
+
+		const sell_price = item.selling_price || item.mrp || 0;
+		const has_offer = item.offers && item.offers.length;
+		const show_mrp = has_offer && item.mrp && item.mrp > sell_price;
+		const price_html = sell_price
+			? `<span class="ch-pos-item-price${has_offer ? ' has-offer' : ''}">₹${format_number(sell_price)}</span>
+			   ${show_mrp ? `<span class="ch-pos-item-mrp">₹${format_number(item.mrp)}</span>` : ""}`
+			: `<span class="ch-pos-item-price">—</span>`;
+
+		const in_stock = item.stock_qty > 0;
+
+		// Only show one stock indicator: badge for in-stock, bottom overlay for OOS
+		const stock_badge = in_stock
+			? `<span class="ch-pos-stock-badge in-stock">${Math.floor(item.stock_qty)} in stock</span>`
+			: "";
+
+		// Offer ribbon
+		const offer_ribbon = has_offer
+			? `<div class="ch-pos-offer-ribbon">${frappe.utils.escape_html(item.offers[0].offer_name)}</div>`
+			: "";
+
+		// Brand
+		const brand_html = item.brand
+			? `<div class="ch-pos-item-brand">${frappe.utils.escape_html(item.brand)}</div>`
+			: "";
+
+		// Nearby store (shown for out-of-stock items)
+		let nearby_html = "";
+		if (!in_stock && item.nearby_stores && item.nearby_stores.length) {
+			const ns = item.nearby_stores[0];
+			nearby_html = `<span class="ch-pos-nearby-store"
+				title="${__("Available at nearby stores")}"
+				>📍 ${frappe.utils.escape_html(ns.store_name)} (${Math.floor(ns.qty)})</span>`;
+		}
+
+		// OOS ribbon at bottom of image
+		const oos_label = !in_stock ? `<div class="ch-pos-oos-label">${__("OUT OF STOCK")}</div>` : "";
+
+		return `
+			<div class="ch-pos-item-card ${!in_stock ? 'out-of-stock' : ''}"
+				data-item-code="${frappe.utils.escape_html(item.item_code)}">
+				<div class="ch-pos-item-img">
+					${img}
+					${stock_badge}
+					${offer_ribbon}
+					${oos_label}
+				</div>
+				<div class="ch-pos-item-info">
+					${brand_html}
+					<div class="ch-pos-item-name">${frappe.utils.escape_html(item.item_name)}</div>
+					<div class="ch-pos-item-meta">
+						<div>${price_html}</div>
+					</div>
+					${nearby_html}
+				</div>
+			</div>`;
+	}
+
+	item_row_html(item) {
+		const price = item.selling_price
+			? `₹${format_number(item.selling_price)}`
+			: (item.mrp ? `₹${format_number(item.mrp)}` : "—");
+		const in_stock = item.stock_qty > 0;
+		const stock_html = in_stock
+			? `<span class="stock-badge in">${Math.floor(item.stock_qty)}</span>`
+			: `<span class="stock-badge out">0</span>`;
+		return `
+			<div class="ch-pos-item-row ${!in_stock ? 'out-of-stock' : ''}"
+				data-item-code="${frappe.utils.escape_html(item.item_code)}">
+				<span class="col-code">${frappe.utils.escape_html(item.item_code)}</span>
+				<span class="col-name">${frappe.utils.escape_html(item.item_name)}</span>
+				<span class="col-brand">${frappe.utils.escape_html(item.brand || '')}</span>
+				<span class="col-price">${price}</span>
+				<span class="col-stock">${stock_html}</span>
+			</div>`;
+	}
+
+	render_pager() {
+		const pager = this.wrapper.find(".ch-pos-items-pager");
+		pager.empty();
+		const total_pages = Math.ceil(this.total_items / this.item_page_size);
+		if (total_pages <= 1) return;
+
+		let html = `<span class="ch-pos-page-info">${this.item_page + 1} / ${total_pages}</span>`;
+		if (this.item_page > 0) {
+			html = `<button class="btn btn-xs btn-default ch-pos-page-prev">&laquo; ${__("Prev")}</button>` + html;
+		}
+		if (this.item_page < total_pages - 1) {
+			html += `<button class="btn btn-xs btn-default ch-pos-page-next">${__("Next")} &raquo;</button>`;
+		}
+		pager.html(html);
+
+		const me = this;
+		pager.find(".ch-pos-page-prev").on("click", () => {
+			me.item_page--;
+			me.load_items();
+		});
+		pager.find(".ch-pos-page-next").on("click", () => {
+			me.item_page++;
+			me.load_items();
+		});
+	}
+
+	// ── Cart Operations ───────────────────────────────────
+	add_to_cart(item_data) {
+		// Block out-of-stock items
+		if (item_data.stock_qty <= 0) {
+			frappe.show_alert({
+				message: __("Item {0} is out of stock", [item_data.item_name]),
+				indicator: "red",
+			});
+			return;
+		}
+		const existing = this.cart.find((c) => c.item_code === item_data.item_code && !c.is_warranty);
+		if (existing) {
+			existing.qty += 1;
+			this._apply_best_offer(existing);
+			this.update_cart_display();
+		} else {
+			const cart_item = {
+				item_code: item_data.item_code,
+				item_name: item_data.item_name,
+				qty: 1,
+				rate: item_data.selling_price || item_data.mrp || 0,
+				mrp: item_data.mrp || 0,
+				uom: item_data.stock_uom || "Nos",
+				discount_percentage: 0,
+				discount_amount: 0,
+				offers: item_data.offers || [],
+				applied_offer: null,
+				warranty_plan: null,
+				is_warranty: false,
+			};
+			this._apply_best_offer(cart_item);
+			this.cart.push(cart_item);
+			this.update_cart_display();
+			// Prompt warranty after adding
+			this._prompt_warranty(item_data, cart_item);
+		}
+	}
+
+	_apply_best_offer(cart_item) {
+		const offers = cart_item.offers || [];
+		if (!offers.length) {
+			cart_item.applied_offer = null;
+			cart_item.discount_amount = 0;
+			cart_item.discount_percentage = 0;
+			return;
+		}
+		// Pick highest-priority (lowest number) offer
+		const best = offers[0];
+		cart_item.applied_offer = best;
+		if (best.value_type === "Percentage") {
+			cart_item.discount_percentage = flt(best.value);
+			cart_item.discount_amount = flt(cart_item.rate * best.value / 100);
+		} else if (best.value_type === "Amount") {
+			cart_item.discount_amount = flt(best.value);
+			cart_item.discount_percentage = cart_item.rate ? flt(best.value / cart_item.rate * 100) : 0;
+		} else if (best.value_type === "Price Override") {
+			cart_item.discount_amount = flt(cart_item.rate - best.value);
+			cart_item.discount_percentage = cart_item.rate ? flt(cart_item.discount_amount / cart_item.rate * 100) : 0;
+		}
+	}
+
+	_prompt_warranty(item_data, cart_item) {
+		// Fetch available warranty plans for this item
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_warranty_plans",
+			args: {
+				item_code: item_data.item_code,
+				item_group: item_data.item_group,
+				brand: item_data.brand,
+			},
+			callback: (r) => {
+				const plans = r.message || [];
+				if (!plans.length) return;
+				this._show_warranty_dialog(plans, cart_item);
+			},
+		});
+	}
+
+	_show_warranty_dialog(plans, cart_item) {
+		const options = plans.map((p) =>
+			`${p.name} — ${p.plan_name} (${p.duration_months}m) ₹${format_number(p.price)}`
+		);
+		const dialog = new frappe.ui.Dialog({
+			title: __('Add Warranty / Protection Plan?'),
+			fields: [
+				{
+					fieldtype: "HTML",
+					options: `<p class="text-muted">${__("Available plans for")} <b>${frappe.utils.escape_html(cart_item.item_name)}</b></p>`,
+				},
+				{
+					fieldname: "plan",
+					fieldtype: "Select",
+					label: __("Warranty Plan"),
+					options: ["None", ...options].join("\n"),
+					default: "None",
+				},
+			],
+			primary_action_label: __("Add"),
+			primary_action: (values) => {
+				dialog.hide();
+				if (values.plan === "None") return;
+				const sel_name = values.plan.split(" — ")[0];
+				const sel_plan = plans.find((p) => p.name === sel_name);
+				if (!sel_plan) return;
+				cart_item.warranty_plan = sel_plan.name;
+				// Add warranty as its own line in cart
+				this.cart.push({
+					item_code: sel_plan.service_item || sel_plan.name,
+					item_name: `🛡 ${sel_plan.plan_name} (${sel_plan.duration_months}m)`,
+					qty: 1,
+					rate: flt(sel_plan.price),
+					mrp: flt(sel_plan.price),
+					uom: "Nos",
+					discount_percentage: 0,
+					discount_amount: 0,
+					offers: [],
+					applied_offer: null,
+					warranty_plan: sel_plan.name,
+					for_item_code: cart_item.item_code,
+					is_warranty: true,
+				});
+				this.update_cart_display();
+				frappe.show_alert({
+					message: __("{0} added", [sel_plan.plan_name]),
+					indicator: "green",
+				});
+			},
+			secondary_action_label: __("Skip"),
+			secondary_action: () => dialog.hide(),
+		});
+		dialog.show();
+	}
+
+	update_cart_display() {
+		const cart_el = this.wrapper.find(".ch-pos-cart-items");
+		cart_el.empty();
+
+		let total_qty = 0;
+		let total_discount = 0;
+		let grand_total = 0;
+
+		this.cart.forEach((item, idx) => {
+			const amount = item.qty * item.rate;
+			const discount = item.discount_amount * item.qty;
+			const net = amount - discount;
+			total_qty += item.qty;
+			total_discount += discount;
+			grand_total += net;
+
+			// Offer badge
+			let offer_html = "";
+			if (item.applied_offer) {
+				const o = item.applied_offer;
+				const label = o.value_type === "Percentage"
+					? `${o.value}% off`
+					: `₹${format_number(item.discount_amount)} off`;
+				offer_html = `<span class="cart-offer-tag" title="${frappe.utils.escape_html(o.offer_name)}">
+					🏷 ${frappe.utils.escape_html(o.offer_name)} (${label})</span>`;
+			}
+
+			// Warranty icon
+			const warranty_icon = item.is_warranty
+				? `<span class="cart-warranty-tag">🛡</span>` : "";
+
+			cart_el.append(`
+				<div class="ch-pos-cart-line ${item.is_warranty ? 'is-warranty-line' : ''} ${item.is_vas ? 'is-vas-line' : ''}" data-idx="${idx}">
+					<div class="cart-line-top">
+						<span class="cart-item-name">${warranty_icon}${frappe.utils.escape_html(item.item_name)}</span>
+						<span class="cart-item-amount">₹${format_number(net)}</span>
+					</div>
+					${offer_html}
+					<div class="cart-line-bottom">
+						<div class="cart-qty-controls">
+							<button class="btn btn-xs btn-default ch-pos-cart-minus">−</button>
+							<span class="cart-qty-display">${item.qty}</span>
+							<button class="btn btn-xs btn-default ch-pos-cart-plus">+</button>
+						</div>
+						<span class="cart-item-rate">@ ₹${format_number(item.rate)}</span>
+						<button class="btn btn-xs btn-link text-danger ch-pos-cart-remove">
+							<i class="fa fa-trash"></i>
+						</button>
+					</div>
+				</div>
+			`);
+		});
+
+		if (!this.cart.length) {
+			cart_el.append(`<div class="ch-pos-cart-empty">${__("No items in cart")}</div>`);
+		}
+
+		this.wrapper.find(".total-qty .value").text(total_qty);
+		this.wrapper.find(".discount-total .value").text(`₹${format_number(total_discount)}`);
+
+		// Pre-discount total (for coupon validation)
+		this._pre_discount_total = grand_total;
+
+		// Additional manual discount
+		let add_disc = 0;
+		if (this.additional_discount_pct > 0) {
+			add_disc = flt(grand_total * this.additional_discount_pct / 100);
+		} else if (this.additional_discount_amt > 0) {
+			add_disc = Math.min(this.additional_discount_amt, grand_total);
+		}
+		if (add_disc > 0) {
+			this.wrapper.find(".additional-disc").show();
+			this.wrapper.find(".additional-disc .value").text(`−₹${format_number(add_disc)}`);
+			grand_total = Math.max(0, grand_total - add_disc);
+		} else {
+			this.wrapper.find(".additional-disc").hide();
+		}
+
+		// Coupon discount
+		if (this.coupon_discount > 0) {
+			const coupon_amt = Math.min(this.coupon_discount, grand_total);
+			this.wrapper.find(".coupon-disc").show();
+			this.wrapper.find(".coupon-disc .value").text(`−₹${format_number(coupon_amt)}`);
+			grand_total = Math.max(0, grand_total - coupon_amt);
+		} else {
+			this.wrapper.find(".coupon-disc").hide();
+		}
+
+		// Exchange credit (buyback)
+		if (this.exchange_amount > 0) {
+			this.wrapper.find(".exchange-credit").show();
+			this.wrapper.find(".exchange-credit .value").text(`−₹${format_number(this.exchange_amount)}`);
+			grand_total = Math.max(0, grand_total - this.exchange_amount);
+		} else {
+			this.wrapper.find(".exchange-credit").hide();
+		}
+
+		// Product exchange credit (return-and-swap)
+		if (this.product_exchange_credit > 0) {
+			this.wrapper.find(".product-exchange-credit").show();
+			this.wrapper.find(".product-exchange-credit .value").text(`−₹${format_number(this.product_exchange_credit)}`);
+			grand_total = Math.max(0, grand_total - this.product_exchange_credit);
+		} else {
+			this.wrapper.find(".product-exchange-credit").hide();
+		}
+
+		this.wrapper.find(".grand-total .value").text(`₹${format_number(grand_total)}`);
+		this._grand_total = grand_total;
+	}
+
+	// ── Exchange Flow ─────────────────────────────────────
+	show_exchange_dialog() {
+		const me = this;
+		const dialog = new frappe.ui.Dialog({
+			title: __("Buyback Exchange"),
+			fields: [
+				{
+					fieldname: "lookup_mode",
+					fieldtype: "Select",
+					label: __("Find by"),
+					options: "Assessment ID\nIMEI / Serial\nCustomer Mobile",
+					default: "Assessment ID",
+				},
+				{
+					fieldname: "assessment",
+					fieldtype: "Link",
+					label: __("Buyback Assessment"),
+					options: "Buyback Assessment",
+					depends_on: "eval:doc.lookup_mode === 'Assessment ID'",
+					get_query: () => ({
+						filters: { status: ["in", ["Submitted", "Inspection Created"]] },
+					}),
+				},
+				{
+					fieldname: "imei_serial",
+					fieldtype: "Data",
+					label: __("IMEI / Serial No"),
+					depends_on: "eval:doc.lookup_mode === 'IMEI / Serial'",
+				},
+				{
+					fieldname: "mobile_no",
+					fieldtype: "Data",
+					label: __("Customer Mobile"),
+					depends_on: "eval:doc.lookup_mode === 'Customer Mobile'",
+				},
+				{ fieldtype: "Section Break", label: __("Exchange Details") },
+				{
+					fieldname: "exchange_details_html",
+					fieldtype: "HTML",
+					options: `<p class="text-muted">${__("Search for an assessment above")}</p>`,
+				},
+			],
+			size: "large",
+			primary_action_label: __("Apply Exchange"),
+			primary_action: (values) => {
+				if (!me._exchange_data) {
+					frappe.show_alert({ message: __("No exchange data loaded"), indicator: "red" });
+					return;
+				}
+				dialog.hide();
+				me.apply_exchange(me._exchange_data);
+			},
+		});
+
+		// Lookup assessment on field change
+		const lookup = () => {
+			const mode = dialog.get_value("lookup_mode");
+			const args = {};
+			if (mode === "Assessment ID") {
+				args.assessment = dialog.get_value("assessment");
+			} else if (mode === "IMEI / Serial") {
+				args.imei_serial = dialog.get_value("imei_serial");
+			} else {
+				args.mobile_no = dialog.get_value("mobile_no");
+			}
+			if (!args.assessment && !args.imei_serial && !args.mobile_no) return;
+
+			frappe.call({
+				method: "ch_pos.api.pos_api.lookup_exchange",
+				args: args,
+				callback: (r) => {
+					me._exchange_data = r.message;
+					if (r.message) {
+						const d = r.message;
+						dialog.fields_dict.exchange_details_html.$wrapper.html(`
+							<div class="ch-pos-exchange-preview">
+								<table class="table table-sm">
+									<tr><td><b>${__("Device")}</b></td><td>${d.item_name} (${d.item_code})</td></tr>
+									<tr><td><b>${__("IMEI/Serial")}</b></td><td>${d.imei_serial || "—"}</td></tr>
+									<tr><td><b>${__("Grade")}</b></td><td>${d.condition_grade || "—"}</td></tr>
+									<tr><td><b>${__("Buyback Value")}</b></td>
+										<td class="text-success"><b>₹${format_number(d.buyback_amount)}</b></td></tr>
+									<tr><td><b>${__("Assessment")}</b></td><td>${d.assessment}</td></tr>
+									${d.order ? `<tr><td><b>${__("Order")}</b></td><td>${d.order}</td></tr>` : ""}
+								</table>
+							</div>
+						`);
+					} else {
+						dialog.fields_dict.exchange_details_html.$wrapper.html(
+							`<p class="text-danger">${__("No eligible exchange found")}</p>`
+						);
+					}
+				},
+			});
+		};
+
+		dialog.fields_dict.assessment.$input.on("change", lookup);
+		dialog.fields_dict.imei_serial.$input.on("change", lookup);
+		dialog.fields_dict.mobile_no.$input.on("change", lookup);
+
+		dialog.show();
+	}
+
+	apply_exchange(data) {
+		this.exchange_assessment = data.assessment;
+		this.exchange_order = data.order || null;
+		this.exchange_amount = flt(data.buyback_amount);
+
+		// Set customer from assessment if not already set
+		if (data.customer && !this.customer) {
+			this.customer = data.customer;
+			if (this.customer_field) this.customer_field.set_value(data.customer);
+		}
+
+		// Show banner
+		this.wrapper.find(".ch-pos-exchange-banner").show().html(`
+			<div class="exchange-active-banner">
+				<span>⚔ ${__("Exchange")}: ${frappe.utils.escape_html(data.item_name)}
+				— ${__("Credit")} ₹${format_number(data.buyback_amount)}</span>
+				<button class="btn btn-xs btn-link text-danger ch-pos-exchange-clear">
+					<i class="fa fa-times"></i>
+				</button>
+			</div>
+		`);
+
+		this.update_cart_display();
+		frappe.show_alert({
+			message: __("Exchange credit ₹{0} applied", [format_number(data.buyback_amount)]),
+			indicator: "green",
+		});
+	}
+
+	clear_exchange() {
+		this.exchange_assessment = null;
+		this.exchange_order = null;
+		this.exchange_amount = 0;
+		this._exchange_data = null;
+		this.wrapper.find(".ch-pos-exchange-banner").hide().empty();
+		this.update_cart_display();
+	}
+
+	// ── VAS (Value Added Services) ────────────────────────
+	show_vas_dialog() {
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_vas_plans",
+			callback: (r) => {
+				const plans = r.message || [];
+				if (!plans.length) {
+					frappe.show_alert({ message: __("No VAS plans available"), indicator: "orange" });
+					return;
+				}
+				this._render_vas_selector(plans);
+			},
+		});
+	}
+
+	_render_vas_selector(plans) {
+		const me = this;
+		const dialog = new frappe.ui.Dialog({
+			title: __("Add Value Added Service"),
+			fields: [
+				{
+					fieldname: "plan",
+					fieldtype: "Select",
+					label: __("VAS Plan"),
+					options: plans.map((p) =>
+						`${p.name} — ${p.plan_name} — ₹${format_number(p.price)}`
+					).join("\n"),
+					reqd: 1,
+				},
+				{
+					fieldname: "for_item",
+					fieldtype: "Select",
+					label: __("For Item (optional)"),
+					options: ["", ...me.cart.filter((c) => !c.is_warranty && !c.is_vas).map((c) => c.item_code)].join("\n"),
+				},
+			],
+			primary_action_label: __("Add to Cart"),
+			primary_action: (values) => {
+				dialog.hide();
+				const plan_name = values.plan.split(" — ")[0];
+				const plan = plans.find((p) => p.name === plan_name);
+				if (!plan) return;
+
+				me.cart.push({
+					item_code: plan.service_item || plan.name,
+					item_name: `✦ ${plan.plan_name}`,
+					qty: 1,
+					rate: flt(plan.price),
+					mrp: flt(plan.price),
+					uom: "Nos",
+					discount_percentage: 0,
+					discount_amount: 0,
+					offers: [],
+					applied_offer: null,
+					warranty_plan: plan.name,
+					for_item_code: values.for_item || null,
+					is_warranty: false,
+					is_vas: true,
+				});
+				me.update_cart_display();
+				frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
+			},
+		});
+		dialog.show();
+	}
+
+	// ── Payment Dialog ────────────────────────────────────
+	show_payment_dialog() {
+		if (!this.cart.length) {
+			frappe.show_alert({ message: __("Cart is empty"), indicator: "orange" });
+			return;
+		}
+		if (!this.customer) {
+			frappe.show_alert({ message: __("Please select a customer"), indicator: "orange" });
+			return;
+		}
+
+		const me = this;
+		const grand_total = this._grand_total || 0;
+		const default_mode = this.payment_modes.find((p) => p.default);
+		const mode_options = this.payment_modes.map((p) => p.mode).join("\n");
+
+		const loyalty_available = me.loyalty_points > 0 && me.loyalty_program;
+		const max_loyalty_amount = loyalty_available ? flt(me.loyalty_points * me.conversion_factor) : 0;
+
+		const fields = [
+			{
+				fieldtype: "HTML",
+				fieldname: "payment_summary",
+				options: `<div class="ch-pos-payment-total">
+					<h3>${__("Total")}: ₹${format_number(grand_total)}</h3>
+				</div>`,
+			},
+			{ fieldtype: "Column Break" },
+			{
+				fieldname: "mode_of_payment",
+				fieldtype: "Select",
+				label: __("Mode of Payment"),
+				options: mode_options || "Cash",
+				default: default_mode ? default_mode.mode : "Cash",
+				reqd: 1,
+			},
+		];
+
+		if (loyalty_available) {
+			fields.push(
+				{ fieldtype: "Section Break", label: __("Loyalty Points") },
+				{
+					fieldname: "redeem_loyalty",
+					fieldtype: "Check",
+					label: `${__("Redeem Loyalty Points")} (${format_number(me.loyalty_points)} ${__("pts")} ≈ ₹${format_number(max_loyalty_amount)})`,
+					default: 0,
+				},
+				{
+					fieldname: "loyalty_amount",
+					fieldtype: "Currency",
+					label: __("Loyalty Amount to Redeem"),
+					default: Math.min(max_loyalty_amount, grand_total),
+					depends_on: "eval:doc.redeem_loyalty",
+					description: `${__("Max")}: ₹${format_number(max_loyalty_amount)}`,
+				},
+				{ fieldtype: "Section Break" }
+			);
+		}
+
+		fields.push(
+			{
+				fieldname: "amount",
+				fieldtype: "Currency",
+				label: __("Amount Paid"),
+				default: grand_total,
+				reqd: 1,
+			},
+			{
+				fieldtype: "HTML",
+				fieldname: "change_html",
+				options: `<div class="ch-pos-change"></div>`,
+			}
+		);
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Payment"),
+			fields: fields,
+			size: "small",
+			primary_action_label: __("Submit"),
+			primary_action(values) {
+				// Validate loyalty
+				if (values.redeem_loyalty && flt(values.loyalty_amount) > max_loyalty_amount) {
+					frappe.show_alert({ message: __("Loyalty amount exceeds available balance"), indicator: "red" });
+					return;
+				}
+				dialog.hide();
+				me.submit_invoice(values);
+			},
+		});
+
+		// Update amount due when loyalty changes
+		const update_balance = () => {
+			const loyalty_amt = dialog.get_value("redeem_loyalty") ? flt(dialog.get_value("loyalty_amount")) : 0;
+			const due = Math.max(0, grand_total - loyalty_amt);
+			dialog.set_value("amount", due);
+		};
+
+		if (loyalty_available) {
+			dialog.fields_dict.redeem_loyalty.$input.on("change", update_balance);
+			dialog.fields_dict.loyalty_amount.$input.on("change", update_balance);
+		}
+
+		dialog.fields_dict.amount.$input.on("change", function () {
+			const loyalty_amt = dialog.get_value("redeem_loyalty") ? flt(dialog.get_value("loyalty_amount")) : 0;
+			const paid = flt($(this).val()) + loyalty_amt;
+			const change = paid - grand_total;
+			dialog.$wrapper.find(".ch-pos-change").html(
+				change > 0
+					? `<b>${__("Change")}: ₹${format_number(change)}</b>`
+					: ""
+			);
+		});
+
+		dialog.show();
+	}
+
+	// ── Submit Invoice ────────────────────────────────────
+	submit_invoice(payment_values) {
+		const me = this;
+		const items = this.cart.map((c) => ({
+			item_code: c.item_code,
+			item_name: c.item_name,
+			qty: c.qty,
+			rate: c.rate,
+			uom: c.uom,
+			discount_amount: c.discount_amount || 0,
+			applied_offer: c.applied_offer ? c.applied_offer.name : null,
+			warranty_plan: c.warranty_plan || null,
+			for_item_code: c.for_item_code || null,
+			is_warranty: c.is_warranty || false,
+			is_vas: c.is_vas || false,
+		}));
+
+		const invoice_data = {
+			pos_profile: this.pos_profile,
+			customer: this.customer,
+			items: items,
+			mode_of_payment: payment_values.mode_of_payment,
+			amount_paid: payment_values.amount,
+			exchange_assessment: this.exchange_assessment || null,
+			additional_discount_percentage: this.additional_discount_pct || 0,
+			additional_discount_amount: this.additional_discount_amt || this.coupon_discount || 0,
+			coupon_code: this.coupon_code || null,
+			redeem_loyalty_points: payment_values.redeem_loyalty ? 1 : 0,
+			loyalty_points: payment_values.redeem_loyalty ? cint(flt(payment_values.loyalty_amount) / (this.conversion_factor || 1)) : 0,
+			loyalty_amount: payment_values.redeem_loyalty ? flt(payment_values.loyalty_amount) : 0,
+			product_exchange_invoice: this.product_exchange_invoice || null,
+			return_items: this.return_items.length ? this.return_items : null,
+		};
+
+		// If offline, queue the transaction
+		if (!navigator.onLine) {
+			this.offline.queue_invoice(invoice_data).then(() => {
+				frappe.show_alert({
+					message: __("Invoice queued — will sync when online"),
+					indicator: "blue",
+				});
+				me._post_submit_cleanup();
+			});
+			return;
+		}
+
+		// If product exchange, create return first then new invoice
+		const do_create = () => {
+			frappe.call({
+				method: "ch_pos.api.pos_api.create_pos_invoice",
+				args: invoice_data,
+				freeze: true,
+				freeze_message: __("Creating Invoice..."),
+				callback: (r) => {
+					if (r.message) {
+						frappe.show_alert({
+							message: __("Invoice {0} created", [r.message.name]),
+							indicator: "green",
+						});
+						me._post_submit_cleanup();
+					}
+				},
+			});
+		};
+
+		if (this.product_exchange_invoice && this.return_items.length) {
+			frappe.call({
+				method: "ch_pos.api.pos_api.create_pos_return",
+				args: {
+					original_invoice: this.product_exchange_invoice,
+					return_items: this.return_items,
+				},
+				freeze: true,
+				freeze_message: __("Creating Return Credit Note..."),
+				callback: (r) => {
+					if (r.message) {
+						frappe.show_alert({
+							message: __("Return {0} processed", [r.message.name]),
+							indicator: "blue",
+						});
+						do_create();
+					}
+				},
+			});
+		} else {
+			do_create();
+		}
+	}
+
+	_post_submit_cleanup() {
+		this.cart = [];
+		this._clear_discounts();
+		this.clear_exchange();
+		this.clear_product_exchange();
+		this.update_cart_display();
+	}
+
+	// ── Mode Switching (GoFix Unified POS) ────────────────
+	_switch_mode(mode) {
+		const panel = this.wrapper.find(".ch-pos-items-panel");
+		const cart = this.wrapper.find(".ch-pos-cart-panel");
+		if (mode === "sell") {
+			panel.find(".ch-pos-toolbar, .ch-pos-items-grid, .ch-pos-items-pager").show();
+			panel.find(".ch-pos-mode-panel").remove();
+			cart.show();
+			this.load_items();
+		} else {
+			panel.find(".ch-pos-toolbar, .ch-pos-items-grid, .ch-pos-items-pager").hide();
+			panel.find(".ch-pos-mode-panel").remove();
+			const html = this._get_mode_panel_html(mode);
+			panel.append(`<div class="ch-pos-mode-panel" style="flex:1;overflow-y:auto;padding:24px;">${html}</div>`);
+			this._bind_mode_events(mode);
+			// Hide cart for non-transactional modes
+			if (["reports", "imei", "customer360", "service"].includes(mode)) {
+				cart.hide();
+			} else {
+				cart.show();
+			}
+		}
+	}
+
+	_get_mode_panel_html(mode) {
+		if (mode === "buyback") {
+			return `
+				<div class="ch-pos-buyback-panel">
+					<div class="ch-mode-header">
+						<h4><i class="fa fa-exchange"></i> ${__("Buyback")}</h4>
+						<span class="ch-mode-hint">${__("Lookup existing assessment or open Buyback app")}</span>
+					</div>
+					<div class="ch-mode-search-row">
+						<div class="ch-pos-field-group" style="flex:1;margin:0">
+							<label>${__("Search by Mobile / IMEI / Assessment ID")}</label>
+							<input type="text" class="form-control ch-bb-search"
+								placeholder="${__("e.g. 9876543210 or BBA-2026-00012")}">
+						</div>
+						<button class="btn btn-primary ch-bb-lookup" style="align-self:flex-end">
+							<i class="fa fa-search"></i> ${__("Search")}
+						</button>
+					</div>
+					<div class="ch-bb-results" style="margin-top:16px;"></div>
+					<div class="ch-mode-actions">
+						<button class="btn btn-primary-light ch-bb-new-assessment">
+							<i class="fa fa-plus"></i> ${__("New Buyback Assessment")}
+						</button>
+						<button class="btn btn-default ch-bb-open-app">
+							<i class="fa fa-external-link"></i> ${__("Open Buyback App")}
+						</button>
+					</div>
+				</div>`;
+		}
+
+		if (mode === "repair") {
+			return `
+				<div class="ch-pos-repair-panel">
+					<div class="ch-mode-header">
+						<h4><i class="fa fa-wrench"></i> ${__("Repair / Service Intake")}</h4>
+						<span class="ch-mode-hint">${__("Creates a GoFix Service Request directly")}</span>
+					</div>
+					<div class="row">
+						<div class="col-md-6">
+							<div class="ch-pos-field-group">
+								<label>${__("Customer")} <span class="text-danger">*</span></label>
+								<div class="ch-repair-customer-link"></div>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Contact Phone")} <span class="text-danger">*</span></label>
+								<input type="text" class="form-control ch-rep-phone" placeholder="Phone">
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Device")} <span class="text-danger">*</span></label>
+								<div class="ch-repair-device-link"></div>
+							</div>
+						</div>
+						<div class="col-md-6">
+							<div class="ch-pos-field-group">
+								<label>${__("Serial / IMEI")}</label>
+								<div class="ch-repair-serial-link"></div>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Issue Category")}</label>
+								<div class="ch-repair-issue-cat-link"></div>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Warranty Status")}</label>
+								<select class="form-control ch-rep-warranty">
+									<option value="">-- ${__("Select")} --</option>
+									<option value="Under Warranty">${__("Under Warranty")}</option>
+									<option value="Out of Warranty">${__("Out of Warranty")}</option>
+									<option value="No Warranty">${__("No Warranty")}</option>
+								</select>
+							</div>
+						</div>
+					</div>
+					<div class="ch-pos-field-group" style="margin-top:12px;">
+						<label>${__("Issue Description")} <span class="text-danger">*</span></label>
+						<textarea class="form-control ch-rep-issue" rows="3"
+							placeholder="${__("Describe the issue...")}"></textarea>
+					</div>
+					<div class="ch-mode-actions">
+						<button class="btn btn-primary ch-rep-create">
+							<i class="fa fa-plus"></i> ${__("Create Service Request")}
+						</button>
+						<button class="btn btn-default ch-rep-clear">${__("Clear")}</button>
+					</div>
+				</div>`;
+		}
+
+		if (mode === "service") {
+			return `
+				<div class="ch-pos-service-panel">
+					<div class="ch-mode-header">
+						<h4><i class="fa fa-cog"></i> ${__("Service Tracker")}</h4>
+						<span class="ch-mode-hint">${__("Track GoFix Service Requests")}</span>
+					</div>
+					<div class="ch-mode-search-row">
+						<div class="ch-pos-field-group" style="flex:1;margin:0">
+							<label>${__("Search by SR# / Phone / IMEI / Customer")}</label>
+							<input type="text" class="form-control ch-svc-search"
+								placeholder="${__("SR-260309-0001 or phone or IMEI...")}">
+						</div>
+						<button class="btn btn-primary ch-svc-lookup" style="align-self:flex-end">
+							<i class="fa fa-search"></i> ${__("Search")}
+						</button>
+					</div>
+					<div class="ch-svc-results" style="margin-top:16px;"></div>
+					<div class="ch-mode-actions">
+						<button class="btn btn-default ch-svc-open-gofix">
+							<i class="fa fa-external-link"></i> ${__("Open GoFix Service Requests")}
+						</button>
+					</div>
+				</div>`;
+		}
+
+		if (mode === "returns") {
+			return `
+				<div class="ch-pos-returns-panel">
+					<div class="ch-mode-header">
+						<h4><i class="fa fa-undo"></i> ${__("Returns & Product Exchange")}</h4>
+						<span class="ch-mode-hint">${__("Process returns or exchange products from a previous sale")}</span>
+					</div>
+					<div class="ch-mode-search-row">
+						<div class="ch-pos-field-group" style="flex:1;margin:0">
+							<label>${__("Find Original Invoice")}</label>
+							<input type="text" class="form-control ch-ret-search"
+								placeholder="${__("Invoice #, phone, or customer name...")}">
+						</div>
+						<button class="btn btn-primary ch-ret-lookup" style="align-self:flex-end">
+							<i class="fa fa-search"></i> ${__("Search")}
+						</button>
+					</div>
+					<div class="ch-ret-results" style="margin-top:16px;"></div>
+					<div class="ch-ret-detail" style="display:none;margin-top:16px;"></div>
+				</div>`;
+		}
+
+		if (mode === "imei") {
+			return `
+				<div class="ch-pos-imei-panel">
+					<div class="ch-mode-header">
+						<h4><i class="fa fa-barcode"></i> ${__("IMEI / Serial Lookup")}</h4>
+						<span class="ch-mode-hint">${__("Scan or enter IMEI/Serial to see full device lifecycle")}</span>
+					</div>
+					<div class="ch-mode-search-row">
+						<div class="ch-pos-field-group" style="flex:1;margin:0">
+							<label>${__("IMEI / Serial No / Barcode")}</label>
+							<input type="text" class="form-control ch-imei-search"
+								placeholder="${__("Scan barcode or type IMEI...")}">
+						</div>
+						<button class="btn btn-primary ch-imei-lookup" style="align-self:flex-end">
+							<i class="fa fa-search"></i> ${__("Lookup")}
+						</button>
+					</div>
+					<div class="ch-imei-result" style="margin-top:16px;"></div>
+				</div>`;
+		}
+
+		if (mode === "customer360") {
+			return `
+				<div class="ch-pos-customer360-panel">
+					<div class="ch-mode-header">
+						<h4><i class="fa fa-user"></i> ${__("Customer 360\u00b0")}</h4>
+						<span class="ch-mode-hint">${__("Complete customer history: purchases, returns, repairs, buybacks, loyalty")}</span>
+					</div>
+					<div class="ch-mode-search-row">
+						<div class="ch-pos-field-group" style="flex:1;margin:0">
+							<label>${__("Phone Number / Name / Customer ID")}</label>
+							<input type="text" class="form-control ch-cust360-search"
+								placeholder="${__("9876543210 or customer name...")}">
+						</div>
+						<button class="btn btn-primary ch-cust360-lookup" style="align-self:flex-end">
+							<i class="fa fa-search"></i> ${__("Search")}
+						</button>
+					</div>
+					<div class="ch-cust360-result" style="margin-top:16px;"></div>
+				</div>`;
+		}
+
+		if (mode === "reports") {
+			return `
+				<div class="ch-pos-reports-panel">
+					<div class="ch-rpt-toolbar">
+						<div>
+							<h4 class="ch-rpt-title"><i class="fa fa-bar-chart"></i> ${__("Store Dashboard")}</h4>
+							<span class="ch-rpt-subtitle">${__("Today's performance at a glance")}</span>
+						</div>
+						<button class="btn btn-sm btn-default ch-rpt-refresh">
+							<i class="fa fa-refresh"></i> ${__("Refresh")}
+						</button>
+					</div>
+
+					<div class="ch-rpt-loading">
+						<i class="fa fa-spinner fa-spin fa-2x"></i>
+						<span>${__("Loading dashboard...")}</span>
+					</div>
+
+					<div class="ch-rpt-content" style="display:none;">
+						<!-- KPI Cards Row -->
+						<div class="ch-rpt-kpi-row">
+							<div class="ch-rpt-kpi">
+								<div class="ch-rpt-kpi-icon" style="background:#dbeafe;color:#2563eb;"><i class="fa fa-inr"></i></div>
+								<div class="ch-rpt-kpi-body">
+									<div class="ch-rpt-kpi-value ch-rpt-revenue">\u20b90</div>
+									<div class="ch-rpt-kpi-label">${__("Revenue")}</div>
+								</div>
+							</div>
+							<div class="ch-rpt-kpi">
+								<div class="ch-rpt-kpi-icon" style="background:#dcfce7;color:#16a34a;"><i class="fa fa-file-text-o"></i></div>
+								<div class="ch-rpt-kpi-body">
+									<div class="ch-rpt-kpi-value ch-rpt-invoices">0</div>
+									<div class="ch-rpt-kpi-label">${__("Invoices")}</div>
+								</div>
+							</div>
+							<div class="ch-rpt-kpi">
+								<div class="ch-rpt-kpi-icon" style="background:#fef3c7;color:#d97706;"><i class="fa fa-shopping-bag"></i></div>
+								<div class="ch-rpt-kpi-body">
+									<div class="ch-rpt-kpi-value ch-rpt-items-sold">0</div>
+									<div class="ch-rpt-kpi-label">${__("Items Sold")}</div>
+								</div>
+							</div>
+							<div class="ch-rpt-kpi">
+								<div class="ch-rpt-kpi-icon" style="background:#e0e7ff;color:#4f46e5;"><i class="fa fa-calculator"></i></div>
+								<div class="ch-rpt-kpi-body">
+									<div class="ch-rpt-kpi-value ch-rpt-avg-basket">\u20b90</div>
+									<div class="ch-rpt-kpi-label">${__("Avg Basket")}</div>
+								</div>
+							</div>
+							<div class="ch-rpt-kpi ch-rpt-kpi-danger">
+								<div class="ch-rpt-kpi-icon" style="background:#fef2f2;color:#dc2626;"><i class="fa fa-undo"></i></div>
+								<div class="ch-rpt-kpi-body">
+									<div class="ch-rpt-kpi-value ch-rpt-returns">0</div>
+									<div class="ch-rpt-kpi-label">${__("Returns")}</div>
+								</div>
+							</div>
+						</div>
+
+						<!-- Hourly Sales Chart -->
+						<div class="ch-rpt-section">
+							<h5 class="ch-rpt-section-title"><i class="fa fa-area-chart"></i> ${__("Hourly Sales")}</h5>
+							<div class="ch-rpt-chart-wrap">
+								<div class="ch-rpt-chart" data-chart="hourly"></div>
+								<div class="ch-rpt-chart-empty" style="display:none;">
+									<i class="fa fa-bar-chart" style="font-size:24px;opacity:.15;"></i>
+									<span>${__("No sales recorded yet today")}</span>
+								</div>
+							</div>
+						</div>
+
+						<!-- Two-column layout: Top Items + Staff -->
+						<div class="ch-rpt-grid-2">
+							<div class="ch-rpt-section">
+								<h5 class="ch-rpt-section-title"><i class="fa fa-trophy"></i> ${__("Top Sellers")}</h5>
+								<table class="ch-rpt-table">
+									<thead><tr>
+										<th>${__("#")}</th>
+										<th>${__("Item")}</th>
+										<th class="text-right">${__("Qty")}</th>
+										<th class="text-right">${__("Revenue")}</th>
+									</tr></thead>
+									<tbody class="ch-rpt-top-items"></tbody>
+								</table>
+							</div>
+							<div class="ch-rpt-section">
+								<h5 class="ch-rpt-section-title"><i class="fa fa-users"></i> ${__("Staff")}</h5>
+								<table class="ch-rpt-table">
+									<thead><tr>
+										<th>${__("Cashier")}</th>
+										<th class="text-right">${__("Bills")}</th>
+										<th class="text-right">${__("Revenue")}</th>
+									</tr></thead>
+									<tbody class="ch-rpt-staff"></tbody>
+								</table>
+							</div>
+						</div>
+
+						<!-- Inventory Alerts -->
+						<div class="ch-rpt-section">
+							<h5 class="ch-rpt-section-title"><i class="fa fa-exclamation-triangle"></i> ${__("Low Stock Alerts")}</h5>
+							<div class="ch-rpt-inventory-grid"></div>
+						</div>
+					</div>
+				</div>`;
+		}
+		return '';
+	}
+
+	_bind_mode_events(mode) {
+		const me = this;
+		const panel = this.wrapper.find(".ch-pos-mode-panel");
+
+		if (mode === "buyback") {
+			// Search assessments by mobile / IMEI / assessment ID
+			const do_bb_search = () => {
+				const q = panel.find(".ch-bb-search").val().trim();
+				if (!q) {
+					frappe.show_alert({ message: __("Enter mobile, IMEI, or assessment ID"), indicator: "orange" });
+					return;
+				}
+				frappe.call({
+					method: "frappe.client.get_list",
+					args: {
+						doctype: "Buyback Assessment",
+						or_filters: [
+							["name", "like", `%${q}%`],
+							["mobile_no", "like", `%${q}%`],
+							["imei_serial", "like", `%${q}%`],
+						],
+						fields: ["name", "item_name", "brand", "mobile_no", "imei_serial",
+								 "estimated_grade", "estimated_price", "quoted_price",
+								 "status", "creation"],
+						order_by: "creation desc",
+						limit_page_length: 20,
+					},
+					callback: (r) => {
+						const el = panel.find(".ch-bb-results");
+						const items = r.message || [];
+						if (!items.length) {
+							el.html(`<p class="text-muted text-center" style="padding:20px;">
+								${__("No assessments found for")}
+								"<b>${frappe.utils.escape_html(q)}</b>"</p>`);
+							return;
+						}
+						const status_color = (s) => {
+							if (s === "Submitted" || s === "Inspection Created") return "green";
+							if (s === "Draft") return "orange";
+							return "gray";
+						};
+						const rows = items.map((a) => {
+							const price = a.quoted_price || a.estimated_price;
+							const can_exchange = ["Submitted", "Inspection Created"].includes(a.status);
+							return `<div class="ch-bb-card" data-name="${a.name}">
+								<div class="ch-bb-card-top">
+									<div>
+										<span class="ch-bb-card-id">${a.name}</span>
+										<span class="indicator-pill ${status_color(a.status)}">${a.status}</span>
+									</div>
+									<span class="ch-bb-card-price">₹${format_number(price)}</span>
+								</div>
+								<div class="ch-bb-card-body">
+									<span>${frappe.utils.escape_html(a.item_name || "")} ${a.brand ? "(" + frappe.utils.escape_html(a.brand) + ")" : ""}</span>
+									<span class="text-muted">${a.imei_serial || ""} · ${a.mobile_no || ""}</span>
+								</div>
+								<div class="ch-bb-card-actions">
+									<button class="btn btn-xs btn-default ch-bb-open"
+										data-name="${a.name}">
+										<i class="fa fa-external-link"></i> ${__("Open")}
+									</button>
+									${can_exchange ? `<button class="btn btn-xs btn-primary ch-bb-use-exchange"
+										data-name="${a.name}"
+										data-amount="${price}"
+										data-item-name="${frappe.utils.escape_html(a.item_name || "")}"
+										data-imei="${a.imei_serial || ""}"
+										data-grade="${a.estimated_grade || ""}">
+										<i class="fa fa-exchange"></i> ${__("Use as Exchange")}
+									</button>` : ""}
+								</div>
+							</div>`;
+						}).join("");
+						el.html(rows);
+					},
+				});
+			};
+			panel.on("click", ".ch-bb-lookup", do_bb_search);
+			panel.find(".ch-bb-search").on("keypress", (e) => { if (e.which === 13) do_bb_search(); });
+
+			// Open assessment in Buyback app
+			panel.on("click", ".ch-bb-open", function () {
+				frappe.set_route("Form", "Buyback Assessment", $(this).data("name"));
+			});
+
+			// Use as exchange credit
+			panel.on("click", ".ch-bb-use-exchange", function () {
+				const btn = $(this);
+				me.apply_exchange({
+					assessment: btn.data("name"),
+					buyback_amount: flt(btn.data("amount")),
+					item_name: btn.data("item-name"),
+					imei_serial: btn.data("imei"),
+					condition_grade: btn.data("grade"),
+				});
+				me.active_mode = "sell";
+				me.wrapper.find(".ch-pos-sidebar-item").removeClass("active");
+				me.wrapper.find('.ch-pos-sidebar-item[data-mode="sell"]').addClass("active");
+				me._switch_mode("sell");
+			});
+
+			// New assessment — create in-POS via dialog
+			panel.on("click", ".ch-bb-new-assessment", () => {
+				const dlg = new frappe.ui.Dialog({
+					title: __("New Buyback Assessment"),
+					fields: [
+						{ fieldname: "mobile_no", fieldtype: "Data", label: __("Customer Mobile"), reqd: 1 },
+						{ fieldname: "customer", fieldtype: "Link", options: "Customer", label: __("Customer") },
+						{ fieldtype: "Column Break" },
+						{ fieldname: "item", fieldtype: "Link", options: "Item", label: __("Device"), reqd: 1 },
+						{ fieldname: "imei_serial", fieldtype: "Data", label: __("IMEI / Serial") },
+						{ fieldtype: "Section Break" },
+						{ fieldname: "device_age_months", fieldtype: "Int", label: __("Device Age (months)") },
+						{ fieldname: "warranty_status", fieldtype: "Select", label: __("Warranty Status"),
+						  options: "\nUnder Warranty\nOut of Warranty\nNo Warranty" },
+					],
+					size: "large",
+					primary_action_label: __("Create Assessment"),
+					primary_action: (values) => {
+						frappe.xcall("frappe.client.insert", {
+							doc: {
+								doctype: "Buyback Assessment",
+								source: "Store Manual",
+								store: me.warehouse || "",
+								mobile_no: values.mobile_no,
+								customer: values.customer || "",
+								item: values.item,
+								imei_serial: values.imei_serial || "",
+								device_age_months: values.device_age_months || 0,
+								warranty_status: values.warranty_status || "",
+							},
+						}).then((doc) => {
+							dlg.hide();
+							frappe.show_alert({
+								message: `${__("Assessment")} <b>${doc.name}</b> ${__("created")} — ${__("Est. Price")}: ₹${format_number(doc.estimated_price || 0)}`,
+								indicator: "green",
+							});
+							// Show new assessment in results
+							panel.find(".ch-bb-search").val(doc.name);
+							panel.find(".ch-bb-lookup").click();
+						});
+					},
+				});
+				dlg.show();
+			});
+
+			// Open Buyback list
+			panel.on("click", ".ch-bb-open-app", () => {
+				frappe.set_route("List", "Buyback Assessment");
+			});
+		}
+
+		if (mode === "repair") {
+			// Render proper Frappe Link fields for Customer, Device (Item), Serial, Issue Category
+			const cust_field = frappe.ui.form.make_control({
+				df: { fieldname: "customer", fieldtype: "Link", options: "Customer", placeholder: __("Select customer") },
+				parent: panel.find(".ch-repair-customer-link"),
+				render_input: true,
+			});
+			const device_field = frappe.ui.form.make_control({
+				df: { fieldname: "device_item", fieldtype: "Link", options: "Item", placeholder: __("Device model") },
+				parent: panel.find(".ch-repair-device-link"),
+				render_input: true,
+			});
+			const serial_field = frappe.ui.form.make_control({
+				df: { fieldname: "serial_no", fieldtype: "Link", options: "Serial No", placeholder: __("IMEI / Serial") },
+				parent: panel.find(".ch-repair-serial-link"),
+				render_input: true,
+			});
+			const issue_cat_field = frappe.ui.form.make_control({
+				df: { fieldname: "issue_category", fieldtype: "Link", options: "Issue Category", placeholder: __("Issue category") },
+				parent: panel.find(".ch-repair-issue-cat-link"),
+				render_input: true,
+			});
+
+			panel.on("click", ".ch-rep-create", function () {
+				const customer = cust_field.get_value();
+				const device_item = device_field.get_value();
+				const phone = panel.find(".ch-rep-phone").val().trim();
+				const issue_desc = panel.find(".ch-rep-issue").val().trim();
+
+				if (!customer || !phone || !device_item || !issue_desc) {
+					frappe.show_alert({ message: __("Customer, phone, device, and issue description are required"), indicator: "orange" });
+					return;
+				}
+
+				// Create GoFix Service Request directly
+				frappe.xcall("frappe.client.insert", {
+					doc: {
+						doctype: "Service Request",
+						customer: customer,
+						contact_number: phone,
+						device_item: device_item,
+						serial_no: serial_field.get_value() || "",
+						issue_category: issue_cat_field.get_value() || "",
+						issue_description: issue_desc,
+						warranty_status: panel.find(".ch-rep-warranty").val() || "",
+						mode_of_service: "Walk-in",
+						company: me.company || "",
+						source_warehouse: me.warehouse || "",
+						service_date: frappe.datetime.get_today(),
+						decision: "Draft",
+						priority: "Medium",
+						walkin_source: "POS Counter",
+					},
+				}).then((doc) => {
+					frappe.show_alert({
+						message: `${__("Service Request")} <b>${doc.name}</b> ${__("created")}`,
+						indicator: "green",
+					});
+					// Show success with link to open
+					panel.find(".ch-rep-result").remove();
+					panel.find(".ch-mode-actions").before(`
+						<div class="ch-rep-result" style="padding:14px;background:var(--pos-success-light);
+							border:1px solid #86efac;border-radius:var(--pos-r-sm);margin-top:12px;">
+							<b>${doc.name}</b> ${__("created successfully")}
+							<button class="btn btn-xs btn-default" style="margin-left:12px;"
+								onclick="frappe.set_route('Form','Service Request','${doc.name}')">
+								<i class="fa fa-external-link"></i> ${__("Open in GoFix")}
+							</button>
+						</div>`);
+					// Clear form
+					panel.find("input, textarea").val("");
+					panel.find("select").prop("selectedIndex", 0);
+					cust_field.set_value("");
+					device_field.set_value("");
+					serial_field.set_value("");
+					issue_cat_field.set_value("");
+				});
+			});
+			panel.on("click", ".ch-rep-clear", () => {
+				panel.find("input, select, textarea").val("");
+				panel.find(".ch-rep-result").remove();
+				cust_field.set_value("");
+				device_field.set_value("");
+				serial_field.set_value("");
+				issue_cat_field.set_value("");
+			});
+		}
+
+		if (mode === "service") {
+			const do_svc_search = () => {
+				const q = panel.find(".ch-svc-search").val().trim();
+				if (!q) return;
+				frappe.call({
+					method: "frappe.client.get_list",
+					args: {
+						doctype: "Service Request",
+						or_filters: [
+							["name", "like", `%${q}%`],
+							["contact_number", "like", `%${q}%`],
+							["actual_imei", "like", `%${q}%`],
+							["customer_name", "like", `%${q}%`],
+						],
+						fields: ["name", "customer_name", "status", "device_item_name",
+								 "issue_category", "decision", "service_date", "estimated_cost"],
+						order_by: "creation desc",
+						limit_page_length: 20,
+					},
+					callback: (r) => {
+						const el = panel.find(".ch-svc-results");
+						const items = r.message || [];
+						if (!items.length) {
+							el.html(`<p class="text-muted text-center" style="padding:20px;">
+								${__("No service requests found for")}
+								"<b>${frappe.utils.escape_html(q)}</b>"</p>`);
+							return;
+						}
+						const decision_color = (d) => {
+							const map = {Draft:'orange',Accepted:'blue','In Service':'yellow',
+								Completed:'green',Invoiced:'purple',Delivered:'green',
+								Withdrawn:'gray',Rejected:'red',Cancelled:'gray'};
+							return map[d] || 'gray';
+						};
+						const cards = items.map((sr) => `
+							<div class="ch-svc-card">
+								<div class="ch-svc-card-top">
+									<div>
+										<span class="ch-svc-card-id">${sr.name}</span>
+										<span class="indicator-pill ${decision_color(sr.decision)}">${sr.decision || sr.status}</span>
+									</div>
+									<span class="text-muted" style="font-size:12px;">${sr.service_date || ""}</span>
+								</div>
+								<div class="ch-svc-card-body">
+									<span><b>${frappe.utils.escape_html(sr.customer_name || "")}</b></span>
+									<span>${frappe.utils.escape_html(sr.device_item_name || "")} · ${frappe.utils.escape_html(sr.issue_category || "")}</span>
+									${sr.estimated_cost ? `<span class="text-muted">Est: ₹${format_number(sr.estimated_cost)}</span>` : ""}
+								</div>
+								<div class="ch-svc-card-actions">
+									<button class="btn btn-xs btn-default"
+										onclick="frappe.set_route('Form','Service Request','${sr.name}')">
+										<i class="fa fa-external-link"></i> ${__("Open in GoFix")}
+									</button>
+								</div>
+							</div>`).join("");
+						el.html(cards);
+					},
+				});
+			};
+			panel.on("click", ".ch-svc-lookup", do_svc_search);
+			panel.find(".ch-svc-search").on("keypress", (e) => { if (e.which === 13) do_svc_search(); });
+
+			// Open GoFix list
+			panel.on("click", ".ch-svc-open-gofix", () => {
+				frappe.set_route("List", "Service Request");
+			});
+		}
+
+		if (mode === "returns") {
+			const do_ret_search = () => {
+				const q = panel.find(".ch-ret-search").val().trim();
+				if (!q) return;
+				frappe.call({
+					method: "ch_pos.api.pos_api.search_invoices_for_return",
+					args: { search_term: q, pos_profile: me.pos_profile },
+					callback: (r) => {
+						const el = panel.find(".ch-ret-results");
+						panel.find(".ch-ret-detail").hide().empty();
+						const invoices = r.message || [];
+						if (!invoices.length) {
+							el.html(`<p class="text-muted text-center" style="padding:20px;">
+								${__("No invoices found for")} "<b>${frappe.utils.escape_html(q)}</b>"</p>`);
+							return;
+						}
+						const cards = invoices.map((inv) => {
+							const status_cls = inv.status === "Paid" ? "green" :
+								inv.status === "Credit Note Issued" ? "orange" : "blue";
+							return `<div class="ch-ret-inv-card" data-name="${inv.name}">
+								<div class="ch-ret-inv-top">
+									<div>
+										<span class="ch-ret-inv-id">${inv.name}</span>
+										<span class="indicator-pill ${status_cls}">${inv.status}</span>
+									</div>
+									<span class="ch-ret-inv-total">₹${format_number(inv.grand_total)}</span>
+								</div>
+								<div class="ch-ret-inv-body">
+									<span>${frappe.utils.escape_html(inv.customer_name || inv.customer)}</span>
+									<span class="text-muted">${inv.posting_date} · ${inv.items_count || 0} items</span>
+								</div>
+								<div class="ch-ret-inv-actions">
+									<button class="btn btn-xs btn-warning ch-ret-select-return"
+										data-name="${inv.name}" ${inv.status === "Credit Note Issued" ? "disabled" : ""}>
+										<i class="fa fa-undo"></i> ${__("Return Items")}
+									</button>
+									<button class="btn btn-xs btn-primary ch-ret-select-exchange"
+										data-name="${inv.name}" ${inv.status === "Credit Note Issued" ? "disabled" : ""}>
+										<i class="fa fa-retweet"></i> ${__("Product Exchange")}
+									</button>
+								</div>
+							</div>`;
+						}).join("");
+						el.html(cards);
+					},
+				});
+			};
+			panel.on("click", ".ch-ret-lookup", do_ret_search);
+			panel.find(".ch-ret-search").on("keypress", (e) => { if (e.which === 13) do_ret_search(); });
+
+			// Return items — show item picker from invoice
+			panel.on("click", ".ch-ret-select-return", function () {
+				const inv_name = $(this).data("name");
+				me._show_return_item_picker(inv_name, "return");
+			});
+
+			// Product exchange — show item picker then switch to sell mode with credit
+			panel.on("click", ".ch-ret-select-exchange", function () {
+				const inv_name = $(this).data("name");
+				me._show_return_item_picker(inv_name, "exchange");
+			});
+		}
+
+		if (mode === "imei") {
+			const do_imei_search = () => {
+				const q = panel.find(".ch-imei-search").val().trim();
+				if (!q) {
+					frappe.show_alert({ message: __("Enter an IMEI, serial number, or barcode"), indicator: "orange" });
+					return;
+				}
+				panel.find(".ch-imei-result").html(
+					`<div class="text-center text-muted" style="padding:30px;"><i class="fa fa-spinner fa-spin"></i> ${__("Looking up")} ${frappe.utils.escape_html(q)}...</div>`
+				);
+				frappe.call({
+					method: "ch_pos.api.pos_api.imei_history",
+					args: { serial_no: q },
+					callback: (r) => {
+						const d = r.message;
+						if (!d || d.error) {
+							panel.find(".ch-imei-result").html(`<p class="text-muted text-center" style="padding:20px;">
+								${d?.error || __("No records found for")} "<b>${frappe.utils.escape_html(q)}</b>"</p>`);
+							return;
+						}
+						me._render_imei_history(d);
+					},
+				});
+			};
+			panel.on("click", ".ch-imei-lookup", do_imei_search);
+			panel.find(".ch-imei-search").on("keypress", (e) => { if (e.which === 13) do_imei_search(); });
+		}
+
+		if (mode === "customer360") {
+			const do_cust_search = () => {
+				const q = panel.find(".ch-cust360-search").val().trim();
+				if (!q) {
+					frappe.show_alert({ message: __("Enter a phone number, name, or customer ID"), indicator: "orange" });
+					return;
+				}
+				panel.find(".ch-cust360-result").html(
+					`<div class="text-center text-muted" style="padding:30px;"><i class="fa fa-spinner fa-spin"></i> ${__("Searching")}...</div>`
+				);
+				frappe.call({
+					method: "ch_pos.api.pos_api.customer_360",
+					args: { identifier: q, company: me.company },
+					callback: (r) => {
+						const d = r.message;
+						if (!d || d.error) {
+							panel.find(".ch-cust360-result").html(`<p class="text-muted text-center" style="padding:20px;">
+								${d?.error || __("No customer found for")} "<b>${frappe.utils.escape_html(q)}</b>"</p>`);
+							return;
+						}
+						me._render_customer_360(d);
+					},
+				});
+			};
+			panel.on("click", ".ch-cust360-lookup", do_cust_search);
+			panel.find(".ch-cust360-search").on("keypress", (e) => { if (e.which === 13) do_cust_search(); });
+		}
+
+		if (mode === "reports") {
+			this._load_reports_data(panel);
+			panel.on("click", ".ch-rpt-refresh", () => {
+				panel.find(".ch-rpt-content").hide();
+				panel.find(".ch-rpt-loading").show();
+				this._load_reports_data(panel);
+			});
+		}
+	}
+
+	_load_reports_data(panel) {
+		const me = this;
+		frappe.call({
+			method: "ch_pos.api.pos_api.store_dashboard",
+			args: { pos_profile: me.pos_profile },
+			callback: (r) => {
+				panel.find(".ch-rpt-loading").hide();
+				const content = panel.find(".ch-rpt-content");
+				content.show();
+				const d = r.message || {};
+
+				// KPI values
+				content.find(".ch-rpt-revenue").text(`\u20b9${format_number(d.total_revenue || 0)}`);
+				content.find(".ch-rpt-invoices").text(d.total_invoices || 0);
+				content.find(".ch-rpt-items-sold").text(d.total_items_sold || 0);
+				const avg = d.total_invoices ? (d.total_revenue / d.total_invoices) : 0;
+				content.find(".ch-rpt-avg-basket").text(`\u20b9${format_number(avg)}`);
+				content.find(".ch-rpt-returns").text(d.total_returns || 0);
+
+				// Hourly sales bar chart (pure CSS)
+				const hourly = d.hourly_sales || [];
+				const chart_el = content.find('.ch-rpt-chart[data-chart="hourly"]');
+				const chart_empty = content.find('.ch-rpt-chart-empty');
+				if (hourly.length) {
+					const max_rev = Math.max(...hourly.map(h => h.revenue));
+					let bars_html = '';
+					for (let hr = 9; hr <= 21; hr++) {
+						const match = hourly.find(h => h.hour === hr);
+						const rev = match ? match.revenue : 0;
+						const cnt = match ? match.count : 0;
+						const pct = max_rev > 0 ? Math.max((rev / max_rev) * 100, 2) : 2;
+						const label = hr > 12 ? `${hr - 12}p` : (hr === 12 ? '12p' : `${hr}a`);
+						bars_html += `<div class="ch-rpt-bar-col" title="${label}: \u20b9${format_number(rev)} (${cnt} bills)">
+							<div class="ch-rpt-bar" style="height:${pct}%"></div>
+							<span class="ch-rpt-bar-label">${label}</span>
+						</div>`;
+					}
+					chart_el.html(bars_html).show();
+					chart_empty.hide();
+				} else {
+					chart_el.hide();
+					chart_empty.show();
+				}
+
+				// Top items with rank medals
+				const top_body = content.find(".ch-rpt-top-items");
+				top_body.empty();
+				(d.top_items || []).forEach((item, idx) => {
+					const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : (idx + 1);
+					top_body.append(`<tr>
+						<td style="width:30px;text-align:center">${medal}</td>
+						<td>${frappe.utils.escape_html(item.item_name)}</td>
+						<td class="text-right">${item.qty}</td>
+						<td class="text-right font-weight-bold">\u20b9${format_number(item.revenue)}</td>
+					</tr>`);
+				});
+				if (!(d.top_items || []).length) {
+					top_body.append(`<tr><td colspan="4" class="text-muted text-center" style="padding:20px">${__("No sales today")}</td></tr>`);
+				}
+
+				// Staff performance
+				const staff_body = content.find(".ch-rpt-staff");
+				staff_body.empty();
+				(d.staff_performance || []).forEach((s) => {
+					staff_body.append(`<tr>
+						<td>${frappe.utils.escape_html(s.cashier)}</td>
+						<td class="text-right">${s.invoices}</td>
+						<td class="text-right font-weight-bold">\u20b9${format_number(s.revenue)}</td>
+					</tr>`);
+				});
+				if (!(d.staff_performance || []).length) {
+					staff_body.append(`<tr><td colspan="3" class="text-muted text-center" style="padding:20px">${__("No staff data")}</td></tr>`);
+				}
+
+				// Inventory alerts as pills
+				const inv_grid = content.find(".ch-rpt-inventory-grid");
+				inv_grid.empty();
+				(d.inventory_alerts || []).forEach((item) => {
+					const is_oos = item.qty <= 0;
+					const cls = is_oos ? 'ch-rpt-inv-pill-oos' : 'ch-rpt-inv-pill-low';
+					inv_grid.append(`<span class="ch-rpt-inv-pill ${cls}">
+						${frappe.utils.escape_html(item.item_name)}
+						<b>${Math.floor(item.qty)}</b>
+					</span>`);
+				});
+				if (!(d.inventory_alerts || []).length) {
+					inv_grid.html(`<div class="text-muted" style="padding:16px;text-align:center;">
+						<i class="fa fa-check-circle" style="color:#16a34a;margin-right:4px;"></i>
+						${__("All stock levels healthy")}
+					</div>`);
+				}
+			},
+		});
+	}
+
+	// ── IMEI History Renderer ─────────────────────────────
+	_render_imei_history(d) {
+		const panel = this.wrapper.find(".ch-pos-mode-panel");
+		const el = panel.find(".ch-imei-result");
+
+		const warranty_badge = (exp) => {
+			if (!exp) return `<span class="indicator-pill gray">${__("No Warranty Info")}</span>`;
+			const exp_date = frappe.datetime.str_to_obj(exp);
+			const today = new Date();
+			if (exp_date > today) {
+				const days = Math.ceil((exp_date - today) / 86400000);
+				return `<span class="indicator-pill green">${__("Under Warranty")} (${days} ${__("days left")})</span>`;
+			}
+			return `<span class="indicator-pill red">${__("Warranty Expired")} ${frappe.datetime.str_to_user(exp)}</span>`;
+		};
+
+		let html = `
+		<div class="ch-imei-detail">
+			<div class="ch-imei-device-card">
+				<div class="ch-imei-device-header">
+					<div>
+						<h5 style="margin:0;">${frappe.utils.escape_html(d.item_name || d.item_code || __("Unknown Device"))}</h5>
+						<span class="text-muted">${frappe.utils.escape_html(d.serial_no)}</span>
+					</div>
+					<div style="text-align:right;">
+						<span class="indicator-pill ${d.status === "Active" ? "green" : d.status === "Delivered" ? "blue" : "gray"}">${d.status || __("Unknown")}</span>
+						${warranty_badge(d.warranty_expiry_date)}
+					</div>
+				</div>
+				<div class="ch-imei-device-meta">
+					${d.brand ? `<span><b>${__("Brand")}:</b> ${frappe.utils.escape_html(d.brand)}</span>` : ""}
+					${d.warehouse ? `<span><b>${__("Location")}:</b> ${frappe.utils.escape_html(d.warehouse)}</span>` : ""}
+					${d.customer ? `<span><b>${__("Owner")}:</b> ${frappe.utils.escape_html(d.customer_name || d.customer)}</span>` : ""}
+					${d.amc_expiry_date ? `<span><b>${__("AMC Expiry")}:</b> ${frappe.datetime.str_to_user(d.amc_expiry_date)}</span>` : ""}
+				</div>
+			</div>`;
+
+		const section = (title, icon, items, render_fn) => {
+			if (!items || !items.length) return "";
+			const rows = items.map(render_fn).join("");
+			return `<div class="ch-imei-section">
+				<h6><i class="fa fa-${icon}"></i> ${title} (${items.length})</h6>
+				<div class="ch-imei-timeline">${rows}</div>
+			</div>`;
+		};
+
+		html += section(__("Sales History"), "shopping-cart", d.sales, (s) => `
+			<div class="ch-timeline-item">
+				<div class="ch-timeline-dot sale"></div>
+				<div class="ch-timeline-content">
+					<div class="ch-timeline-top">
+						<a class="ch-timeline-link" data-doctype="POS Invoice" data-name="${s.invoice}">${s.invoice}</a>
+						<span class="text-muted">${frappe.datetime.str_to_user(s.date)}</span>
+					</div>
+					<span>${__("Sold to")} <b>${frappe.utils.escape_html(s.customer || "")}</b> — ₹${format_number(s.rate)}</span>
+				</div>
+			</div>`);
+
+		html += section(__("Returns"), "undo", d.returns, (r) => `
+			<div class="ch-timeline-item">
+				<div class="ch-timeline-dot return"></div>
+				<div class="ch-timeline-content">
+					<div class="ch-timeline-top">
+						<a class="ch-timeline-link" data-doctype="POS Invoice" data-name="${r.invoice}">${r.invoice}</a>
+						<span class="text-muted">${frappe.datetime.str_to_user(r.date)}</span>
+					</div>
+					<span>${__("Returned")} — ₹${format_number(Math.abs(r.rate))}</span>
+				</div>
+			</div>`);
+
+		html += section(__("Service History"), "wrench", d.services, (s) => `
+			<div class="ch-timeline-item">
+				<div class="ch-timeline-dot service"></div>
+				<div class="ch-timeline-content">
+					<div class="ch-timeline-top">
+						<a class="ch-timeline-link" data-doctype="Service Request" data-name="${s.name}">${s.name}</a>
+						<span class="indicator-pill ${s.decision === "Completed" ? "green" : s.decision === "In Service" ? "yellow" : "blue"}">${s.decision}</span>
+						<span class="text-muted">${frappe.datetime.str_to_user(s.date)}</span>
+					</div>
+					<span>${frappe.utils.escape_html(s.issue_category || "")} — ${frappe.utils.escape_html(s.issue_description || "")}</span>
+				</div>
+			</div>`);
+
+		html += section(__("Buyback History"), "exchange", d.buybacks, (b) => `
+			<div class="ch-timeline-item">
+				<div class="ch-timeline-dot buyback"></div>
+				<div class="ch-timeline-content">
+					<div class="ch-timeline-top">
+						<a class="ch-timeline-link" data-doctype="Buyback Assessment" data-name="${b.name}">${b.name}</a>
+						<span class="indicator-pill ${b.status === "Submitted" ? "green" : "orange"}">${b.status}</span>
+						<span class="text-muted">${frappe.datetime.str_to_user(b.date)}</span>
+					</div>
+					<span>${__("Grade")}: ${b.grade || "—"} — ₹${format_number(b.price || 0)}</span>
+				</div>
+			</div>`);
+
+		html += `</div>`;
+		el.html(html);
+
+		// Clickable timeline links
+		el.find(".ch-timeline-link").on("click", function () {
+			frappe.set_route("Form", $(this).data("doctype"), $(this).data("name"));
+		});
+	}
+
+	// ── Customer 360 Renderer ─────────────────────────────
+	_render_customer_360(d) {
+		const panel = this.wrapper.find(".ch-pos-mode-panel");
+		const el = panel.find(".ch-cust360-result");
+		const me = this;
+
+		const section_table = (title, icon, items, columns) => {
+			if (!items || !items.length) return `<div class="ch-c360-section">
+				<h6><i class="fa fa-${icon}"></i> ${title}</h6>
+				<p class="text-muted" style="padding:8px 0;font-size:13px;">${__("None found")}</p>
+			</div>`;
+			const thead = columns.map((c) => `<th>${c.label}</th>`).join("");
+			const tbody = items.map((row) => {
+				const tds = columns.map((c) => `<td>${c.render(row)}</td>`).join("");
+				return `<tr>${tds}</tr>`;
+			}).join("");
+			return `<div class="ch-c360-section">
+				<h6><i class="fa fa-${icon}"></i> ${title} (${items.length})</h6>
+				<div class="ch-c360-table-wrap"><table class="table table-sm ch-c360-table">
+					<thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody>
+				</table></div>
+			</div>`;
+		};
+
+		let html = `<div class="ch-c360-detail">
+			<div class="ch-c360-header">
+				<div class="ch-c360-profile">
+					<div class="ch-c360-avatar"><i class="fa fa-user"></i></div>
+					<div>
+						<h5 style="margin:0;">${frappe.utils.escape_html(d.customer_name || d.customer)}</h5>
+						<span class="text-muted">${frappe.utils.escape_html(d.customer)}</span>
+						${d.mobile_no ? `<span class="text-muted"> · ${frappe.utils.escape_html(d.mobile_no)}</span>` : ""}
+						${d.email_id ? `<span class="text-muted"> · ${frappe.utils.escape_html(d.email_id)}</span>` : ""}
+					</div>
+				</div>
+				<div class="ch-c360-stats">
+					<div class="ch-c360-stat">
+						<span class="ch-c360-stat-val">₹${format_number(d.total_spent || 0)}</span>
+						<span class="ch-c360-stat-label">${__("Total Spent")}</span>
+					</div>
+					<div class="ch-c360-stat">
+						<span class="ch-c360-stat-val">${d.total_invoices || 0}</span>
+						<span class="ch-c360-stat-label">${__("Purchases")}</span>
+					</div>
+					${d.loyalty ? `<div class="ch-c360-stat ch-c360-loyalty-stat">
+						<span class="ch-c360-stat-val">${format_number(d.loyalty.points || 0)}</span>
+						<span class="ch-c360-stat-label">${__("Loyalty Points")}</span>
+						<span class="text-muted" style="font-size:11px;">≈ ₹${format_number(d.loyalty.currency_value || 0)}</span>
+					</div>` : ""}
+				</div>
+			</div>`;
+
+		html += section_table(__("Recent Purchases"), "shopping-cart", d.invoices, [
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
+			{ label: __("Items"), render: (r) => `${r.items_count || 0}` },
+			{ label: __("Total"), render: (r) => `₹${format_number(r.grand_total)}` },
+			{ label: __("Status"), render: (r) => {
+				const cls = r.status === "Paid" ? "green" : r.status === "Return" ? "red" : "blue";
+				return `<span class="indicator-pill ${cls}">${r.status}</span>`;
+			}},
+		]);
+
+		html += section_table(__("Service Requests"), "wrench", d.service_requests, [
+			{ label: __("ID"), render: (r) => `<a class="ch-c360-link" data-doctype="Service Request" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.service_date || r.creation) },
+			{ label: __("Device"), render: (r) => frappe.utils.escape_html(r.device_item_name || "") },
+			{ label: __("Issue"), render: (r) => frappe.utils.escape_html(r.issue_category || "") },
+			{ label: __("Status"), render: (r) => {
+				const cls = { Completed: "green", "In Service": "yellow", Draft: "orange", Delivered: "green" }[r.decision] || "blue";
+				return `<span class="indicator-pill ${cls}">${r.decision || r.status}</span>`;
+			}},
+		]);
+
+		html += section_table(__("Buyback Assessments"), "exchange", d.buybacks, [
+			{ label: __("ID"), render: (r) => `<a class="ch-c360-link" data-doctype="Buyback Assessment" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.creation) },
+			{ label: __("Device"), render: (r) => frappe.utils.escape_html(r.item_name || "") },
+			{ label: __("Grade"), render: (r) => r.estimated_grade || "—" },
+			{ label: __("Price"), render: (r) => `₹${format_number(r.quoted_price || r.estimated_price || 0)}` },
+			{ label: __("Status"), render: (r) => {
+				const cls = r.status === "Submitted" ? "green" : r.status === "Draft" ? "orange" : "gray";
+				return `<span class="indicator-pill ${cls}">${r.status}</span>`;
+			}},
+		]);
+
+		html += `</div>`;
+		el.html(html);
+
+		// Clickable links
+		el.find(".ch-c360-link").on("click", function () {
+			frappe.set_route("Form", $(this).data("doctype"), $(this).data("name"));
+		});
+	}
+
+	// ── Nearby Stock Dialog ───────────────────────────────
+	show_nearby_stock_dialog(item_code) {
+		const item_data = (this._last_items || []).find((i) => i.item_code === item_code);
+		const item_name = item_data ? item_data.item_name : item_code;
+		frappe.call({
+			method: "ch_pos.api.search.get_nearby_stock",
+			args: { item_code, pos_profile: this.pos_profile },
+			callback: (r) => {
+				const stores = r.message || [];
+				let body = "";
+				if (stores.length) {
+					const rows = stores.map((s) => {
+						const qty_cls = s.qty > 0 ? "stock-ok" : "stock-zero";
+						return `<tr>
+							<td>${frappe.utils.escape_html(s.store_name)}</td>
+							<td>${frappe.utils.escape_html(s.city || "")}</td>
+							<td class="${qty_cls}">${Math.floor(s.qty)}</td>
+						</tr>`;
+					}).join("");
+					body = `<table class="table table-sm ch-pos-nearby-table">
+						<thead><tr><th>${__("Store")}</th><th>${__("City")}</th><th>${__("Qty")}</th></tr></thead>
+						<tbody>${rows}</tbody>
+					</table>`;
+				} else {
+					body = `<p class="text-muted text-center">${__("Not available at any nearby stores")}</p>`;
+				}
+				const d = new frappe.ui.Dialog({
+					title: __("Stock Availability — {0}", [frappe.utils.escape_html(item_name)]),
+					fields: [{ fieldtype: "HTML", options: body }],
+					size: "small",
+				});
+				d.show();
+			},
+		});
+	}
+
+	// ── Return / Product Exchange Methods ─────────────────
+	_show_return_item_picker(invoice_name, action) {
+		const me = this;
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_invoice_items_for_return",
+			args: { invoice_name },
+			callback: (r) => {
+				const items = r.message || [];
+				if (!items.length) {
+					frappe.show_alert({ message: __("No returnable items in this invoice"), indicator: "orange" });
+					return;
+				}
+
+				const fields = [
+					{
+						fieldtype: "HTML",
+						fieldname: "items_html",
+						options: `<p class="text-muted" style="margin-bottom:12px;">
+							${action === "return" ? __("Select items to return. Quantities will be credited back.") :
+							__("Select items to return for exchange. Credit will be applied to new purchase.")}
+						</p>`,
+					},
+				];
+
+				items.forEach((item, i) => {
+					fields.push({
+						fieldtype: "Section Break",
+						collapsible: 0,
+					});
+					fields.push({
+						fieldtype: "HTML",
+						fieldname: `item_label_${i}`,
+						options: `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;">
+							<div>
+								<b>${frappe.utils.escape_html(item.item_name)}</b>
+								<span class="text-muted"> (${item.item_code})</span>
+							</div>
+							<div class="text-muted">
+								Sold: ${item.qty} @ ₹${format_number(item.rate)}
+								${item.already_returned ? `<span class="text-warning"> · Returned: ${Math.abs(item.already_returned)}</span>` : ""}
+							</div>
+						</div>`,
+					});
+					fields.push({
+						fieldname: `return_qty_${i}`,
+						fieldtype: "Int",
+						label: __("Return Qty"),
+						default: 0,
+						description: __("Max: {0}", [item.returnable_qty]),
+					});
+				});
+
+				const dlg = new frappe.ui.Dialog({
+					title: action === "return" ? __("Return Items — {0}", [invoice_name]) :
+						__("Exchange Items — {0}", [invoice_name]),
+					fields: fields,
+					size: "large",
+					primary_action_label: action === "return" ? __("Process Return") : __("Apply Exchange Credit"),
+					primary_action: (values) => {
+						const return_items = [];
+						let total_credit = 0;
+						items.forEach((item, i) => {
+							const qty = Math.min(
+								Math.max(0, cint(values[`return_qty_${i}`])),
+								item.returnable_qty
+							);
+							if (qty > 0) {
+								return_items.push({
+									item_code: item.item_code,
+									item_name: item.item_name,
+									qty: qty,
+									rate: item.rate,
+									original_item_row: item.name,
+									serial_no: item.serial_no || "",
+								});
+								total_credit += qty * flt(item.rate);
+							}
+						});
+
+						if (!return_items.length) {
+							frappe.show_alert({ message: __("Select at least one item to return"), indicator: "orange" });
+							return;
+						}
+
+						dlg.hide();
+
+						if (action === "return") {
+							me._process_return(invoice_name, return_items, total_credit);
+						} else {
+							me._process_product_exchange(invoice_name, return_items, total_credit);
+						}
+					},
+				});
+				dlg.show();
+			},
+		});
+	}
+
+	_process_return(invoice_name, return_items, total_credit) {
+		const me = this;
+		frappe.call({
+			method: "ch_pos.api.pos_api.create_pos_return",
+			args: {
+				original_invoice: invoice_name,
+				return_items: return_items,
+			},
+			freeze: true,
+			freeze_message: __("Processing Return..."),
+			callback: (r) => {
+				if (r.message) {
+					const credit_note = r.message;
+					frappe.msgprint({
+						title: __("Return Processed"),
+						indicator: "green",
+						message: `
+							<div style="text-align:center;padding:16px;">
+								<i class="fa fa-check-circle text-success" style="font-size:48px;"></i>
+								<h4 style="margin:16px 0 8px;">${__("Credit Note Created")}</h4>
+								<p><b>${credit_note.name}</b></p>
+								<p>${__("Refund Amount")}: <b class="text-success">₹${format_number(Math.abs(credit_note.grand_total))}</b></p>
+								<p class="text-muted">${__("Customer")}: ${frappe.utils.escape_html(credit_note.customer_name || credit_note.customer)}</p>
+							</div>`,
+					});
+				}
+			},
+		});
+	}
+
+	_process_product_exchange(invoice_name, return_items, total_credit) {
+		// Apply the returned items as credit and switch to Sell mode
+		this.product_exchange_invoice = invoice_name;
+		this.product_exchange_credit = total_credit;
+		this.return_items = return_items;
+
+		// Set customer from original invoice
+		frappe.db.get_value("POS Invoice", invoice_name, "customer").then((r) => {
+			if (r.message && r.message.customer) {
+				this.customer = r.message.customer;
+				if (this.customer_field) this.customer_field.set_value(r.message.customer);
+			}
+		});
+
+		// Show banner in cart
+		this.wrapper.find(".ch-pos-product-exchange-banner").show().html(`
+			<div class="exchange-active-banner product-exchange">
+				<span><i class="fa fa-retweet"></i> ${__("Product Exchange")}: ${return_items.length} ${__("item(s)")}
+				— ${__("Credit")} ₹${format_number(total_credit)}</span>
+				<button class="btn btn-xs btn-link text-danger ch-pos-product-exchange-clear">
+					<i class="fa fa-times"></i>
+				</button>
+			</div>
+		`);
+
+		// Switch to sell mode
+		this.active_mode = "sell";
+		this.wrapper.find(".ch-pos-sidebar-item").removeClass("active");
+		this.wrapper.find('.ch-pos-sidebar-item[data-mode="sell"]').addClass("active");
+		this._switch_mode("sell");
+		this.update_cart_display();
+
+		frappe.show_alert({
+			message: __("Exchange credit ₹{0} applied. Add new items to cart.", [format_number(total_credit)]),
+			indicator: "blue",
+		});
+	}
+
+	show_product_exchange_dialog() {
+		// Quick shortcut — same as returns panel but for exchange
+		const me = this;
+		const dialog = new frappe.ui.Dialog({
+			title: __("Product Exchange"),
+			fields: [
+				{
+					fieldname: "invoice",
+					fieldtype: "Link",
+					label: __("Original Invoice"),
+					options: "POS Invoice",
+					reqd: 1,
+					get_query: () => ({
+						filters: { is_return: 0, docstatus: 1, status: ["!=", "Credit Note Issued"] },
+					}),
+				},
+			],
+			size: "small",
+			primary_action_label: __("Select Items"),
+			primary_action: (values) => {
+				dialog.hide();
+				me._show_return_item_picker(values.invoice, "exchange");
+			},
+		});
+		dialog.show();
+	}
+
+	clear_product_exchange() {
+		this.product_exchange_invoice = null;
+		this.product_exchange_credit = 0;
+		this.return_items = [];
+		this.wrapper.find(".ch-pos-product-exchange-banner").hide().empty();
+		this.update_cart_display();
+	}
+
+	// ── Hold Invoice ──────────────────────────────────────
+	hold_invoice() {
+		if (!this.cart.length) return;
+		// Store in local storage
+		const key = `ch_pos_held_${frappe.datetime.now_datetime()}`;
+		const data = {
+			customer: this.customer,
+			cart: this.cart,
+			timestamp: frappe.datetime.now_datetime(),
+		};
+		localStorage.setItem(key, JSON.stringify(data));
+		frappe.show_alert({ message: __("Invoice held"), indicator: "blue" });
+		this.cart = [];
+		this.update_cart_display();
+	}
+};
+
+// ══════════════════════════════════════════════════════
+//  Offline Manager — IndexedDB cache + sync queue
+// ══════════════════════════════════════════════════════
+ch_pos.OfflineManager = class OfflineManager {
+	constructor(app) {
+		this.app = app;
+		this.db = null;
+		this.DB_NAME = "ch_pos_offline";
+		this.DB_VERSION = 1;
+		this._syncing = false;
+		this._init_db();
+		this._bind_network_events();
+	}
+
+	/* ── IndexedDB Setup ────────────────────────────── */
+	_init_db() {
+		return new Promise((resolve, reject) => {
+			const request = indexedDB.open(this.DB_NAME, this.DB_VERSION);
+			request.onupgradeneeded = (e) => {
+				const db = e.target.result;
+				// Items cache
+				if (!db.objectStoreNames.contains("items")) {
+					const store = db.createObjectStore("items", { keyPath: "item_code" });
+					store.createIndex("item_group", "item_group", { unique: false });
+					store.createIndex("item_name", "item_name", { unique: false });
+				}
+				// Pending invoices queue
+				if (!db.objectStoreNames.contains("pending_invoices")) {
+					db.createObjectStore("pending_invoices", { keyPath: "id", autoIncrement: true });
+				}
+				// Profile data
+				if (!db.objectStoreNames.contains("profile")) {
+					db.createObjectStore("profile", { keyPath: "key" });
+				}
+				// Customers cache
+				if (!db.objectStoreNames.contains("customers")) {
+					db.createObjectStore("customers", { keyPath: "name" });
+				}
+			};
+			request.onsuccess = (e) => {
+				this.db = e.target.result;
+				resolve(this.db);
+			};
+			request.onerror = (e) => {
+				console.error("CH POS: IndexedDB init failed", e);
+				reject(e);
+			};
+		});
+	}
+
+	_get_db() {
+		if (this.db) return Promise.resolve(this.db);
+		return this._init_db();
+	}
+
+	/* ── Network Event Listeners ────────────────────── */
+	_bind_network_events() {
+		window.addEventListener("online", () => this._on_online());
+		window.addEventListener("offline", () => this._on_offline());
+		// Set initial state
+		if (!navigator.onLine) this._on_offline();
+	}
+
+	_on_online() {
+		const bar = this.app.wrapper.find(".ch-pos-offline-bar");
+		this._update_sync_badge();
+		this._get_pending_count().then((count) => {
+			if (count > 0) {
+				this._set_bar_state("syncing", count);
+				this.sync_pending();
+			} else {
+				bar.removeClass("visible");
+				// Update sidebar dot
+				this.app.wrapper.find(".ch-pos-online-dot").removeClass("offline");
+			}
+		});
+		frappe.show_alert({ message: __("Back online"), indicator: "green" });
+	}
+
+	_on_offline() {
+		const bar = this.app.wrapper.find(".ch-pos-offline-bar");
+		this._set_bar_state("offline");
+		this.app.wrapper.find(".ch-pos-online-dot").addClass("offline");
+	}
+
+	_set_bar_state(state, queue_count) {
+		const bar = this.app.wrapper.find(".ch-pos-offline-bar");
+		const icon = bar.find(".ch-pos-offline-icon");
+		const text = bar.find(".ch-pos-offline-text");
+		const dot = bar.find(".ch-pos-offline-dot");
+		const queue = bar.find(".ch-pos-offline-queue");
+		const retry = bar.find(".ch-pos-offline-retry");
+
+		bar.removeClass("state-offline state-syncing state-error").addClass("visible");
+		icon.removeClass("fa-wifi fa-spinner fa-spin fa-exclamation-triangle");
+		retry.hide();
+		queue.hide();
+
+		if (state === "offline") {
+			bar.addClass("state-offline");
+			dot.css("background", "#ef4444");
+			icon.addClass("fa-wifi");
+			text.text(__("You are offline — transactions will be queued"));
+			this._get_pending_count().then((c) => {
+				if (c > 0) {
+					queue.show().text(__("{0} pending", [c]));
+				}
+			});
+		} else if (state === "syncing") {
+			bar.addClass("state-syncing");
+			dot.css("background", "#f59e0b");
+			icon.addClass("fa-spinner fa-spin");
+			const msg = queue_count ? __("Syncing {0} pending transaction(s)...", [queue_count]) : __("Syncing...");
+			text.text(msg);
+		} else if (state === "error") {
+			bar.addClass("state-error");
+			dot.css("background", "#ef4444");
+			icon.addClass("fa-exclamation-triangle");
+			text.text(__("Sync failed — will retry automatically"));
+			retry.show();
+		}
+	}
+
+	_get_pending_count() {
+		return this._get_db().then((db) => {
+			return new Promise((resolve) => {
+				const tx = db.transaction("pending_invoices", "readonly");
+				const store = tx.objectStore("pending_invoices");
+				const request = store.count();
+				request.onsuccess = () => resolve(request.result);
+				request.onerror = () => resolve(0);
+			});
+		}).catch(() => 0);
+	}
+
+	/* ── Cache Items ────────────────────────────────── */
+	cache_items(items) {
+		if (!items || !items.length) return;
+		this._get_db().then((db) => {
+			const tx = db.transaction("items", "readwrite");
+			const store = tx.objectStore("items");
+			items.forEach((item) => store.put(item));
+		});
+	}
+
+	get_cached_items(search_term, filters) {
+		return this._get_db().then((db) => {
+			return new Promise((resolve) => {
+				const tx = db.transaction("items", "readonly");
+				const store = tx.objectStore("items");
+				const request = store.getAll();
+				request.onsuccess = () => {
+					let items = request.result || [];
+					// Apply filters client-side
+					if (filters.item_group) {
+						items = items.filter((i) => i.item_group === filters.item_group);
+					}
+					if (filters.in_stock_only) {
+						items = items.filter((i) => flt(i.actual_qty) > 0);
+					}
+					if (search_term) {
+						const q = search_term.toLowerCase();
+						items = items.filter((i) =>
+							(i.item_name || "").toLowerCase().includes(q) ||
+							(i.item_code || "").toLowerCase().includes(q) ||
+							(i.barcode || "").toLowerCase().includes(q)
+						);
+					}
+					resolve({ items: items.slice(0, 40), total: items.length });
+				};
+				request.onerror = () => resolve({ items: [], total: 0 });
+			});
+		});
+	}
+
+	/* ── Cache Profile Data ─────────────────────────── */
+	cache_profile_data() {
+		this._get_db().then((db) => {
+			const tx = db.transaction("profile", "readwrite");
+			const store = tx.objectStore("profile");
+			store.put({
+				key: "pos_profile",
+				pos_profile: this.app.pos_profile,
+				company: this.app.company,
+				warehouse: this.app.warehouse,
+				price_list: this.app.price_list,
+				payment_modes: this.app.payment_modes,
+				store_caps: this.app.store_caps,
+				pos_ext: this.app.pos_ext,
+			});
+		});
+	}
+
+	/* ── Queue Invoice for Offline Submission ───────── */
+	queue_invoice(invoice_data) {
+		return this._get_db().then((db) => {
+			return new Promise((resolve, reject) => {
+				const tx = db.transaction("pending_invoices", "readwrite");
+				const store = tx.objectStore("pending_invoices");
+				const record = {
+					data: invoice_data,
+					created_at: new Date().toISOString(),
+					status: "pending",
+				};
+				const request = store.add(record);
+				request.onsuccess = () => {
+					this._update_sync_badge();
+					resolve(request.result);
+				};
+				request.onerror = () => reject(request.error);
+			});
+		});
+	}
+
+	/* ── Sync Pending Invoices ──────────────────────── */
+	sync_pending() {
+		if (this._syncing || !navigator.onLine) return;
+		this._syncing = true;
+
+		this._get_pending_count().then((count) => {
+			if (count > 0) this._set_bar_state("syncing", count);
+		});
+
+		this._get_db().then((db) => {
+			return new Promise((resolve) => {
+				const tx = db.transaction("pending_invoices", "readonly");
+				const store = tx.objectStore("pending_invoices");
+				const request = store.getAll();
+				request.onsuccess = () => resolve(request.result || []);
+				request.onerror = () => resolve([]);
+			});
+		}).then((pending) => {
+			return this._sync_batch(pending);
+		}).then(() => {
+			this._syncing = false;
+			const bar = this.app.wrapper.find(".ch-pos-offline-bar");
+			bar.removeClass("visible state-syncing");
+			this.app.wrapper.find(".ch-pos-online-dot").removeClass("offline");
+			this._update_sync_badge();
+		}).catch((err) => {
+			console.error("CH POS: Sync failed", err);
+			this._syncing = false;
+			this._set_bar_state("error");
+			// Retry in 30s
+			setTimeout(() => this.sync_pending(), 30000);
+		});
+	}
+
+	_sync_batch(pending) {
+		if (!pending.length) return Promise.resolve();
+		const item = pending.shift();
+
+		// Handle product exchange (return + new invoice)
+		const do_create = () => {
+			return new Promise((resolve, reject) => {
+				frappe.call({
+					method: "ch_pos.api.pos_api.create_pos_invoice",
+					args: item.data,
+					callback: (r) => {
+						if (r.message) {
+							this._remove_pending(item.id).then(() => {
+								frappe.show_alert({
+									message: __("Synced: {0}", [r.message.name]),
+									indicator: "green",
+								});
+								resolve();
+							});
+						} else {
+							reject(new Error("Invoice creation returned no result"));
+						}
+					},
+					error: () => reject(new Error("API call failed")),
+				});
+			});
+		};
+
+		let chain;
+		if (item.data.product_exchange_invoice && item.data.return_items) {
+			chain = new Promise((resolve, reject) => {
+				frappe.call({
+					method: "ch_pos.api.pos_api.create_pos_return",
+					args: {
+						original_invoice: item.data.product_exchange_invoice,
+						return_items: item.data.return_items,
+					},
+					callback: (r) => {
+						if (r.message) resolve();
+						else reject(new Error("Return creation failed"));
+					},
+					error: () => reject(new Error("Return API failed")),
+				});
+			}).then(do_create);
+		} else {
+			chain = do_create();
+		}
+
+		return chain.then(() => this._sync_batch(pending));
+	}
+
+	_remove_pending(id) {
+		return this._get_db().then((db) => {
+			return new Promise((resolve) => {
+				const tx = db.transaction("pending_invoices", "readwrite");
+				const store = tx.objectStore("pending_invoices");
+				store.delete(id);
+				tx.oncomplete = () => resolve();
+			});
+		});
+	}
+
+	/* ── Pending Count Badge ────────────────────────── */
+	_update_sync_badge() {
+		this._get_db().then((db) => {
+			return new Promise((resolve) => {
+				const tx = db.transaction("pending_invoices", "readonly");
+				const store = tx.objectStore("pending_invoices");
+				const request = store.count();
+				request.onsuccess = () => resolve(request.result);
+				request.onerror = () => resolve(0);
+			});
+		}).then((count) => {
+			const sidebar = this.app.wrapper.find(".ch-pos-sidebar");
+			sidebar.find(".ch-pos-sync-badge").remove();
+			if (count > 0) {
+				sidebar.append(`
+					<div class="ch-pos-sync-badge" title="${__("{0} pending invoices", [count])}">
+						<i class="fa fa-cloud-upload"></i>
+						<span>${count}</span>
+					</div>
+				`);
+			}
+		});
+	}
+};
+
+// ── Utility ───────────────────────────────────────────
+function format_number(val) {
+	const num = parseFloat(val) || 0;
+	return num.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}

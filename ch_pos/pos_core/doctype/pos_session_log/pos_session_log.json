@@ -1,0 +1,165 @@
+{
+ "actions": [],
+ "creation": "2026-03-08 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "store",
+  "pos_profile",
+  "pos_mode",
+  "column_break_info",
+  "user",
+  "status",
+  "session_section",
+  "session_start",
+  "session_end",
+  "column_break_session",
+  "duration_sec",
+  "device_info",
+  "stats_section",
+  "items_browsed",
+  "comparisons_made",
+  "column_break_stats",
+  "tokens_generated",
+  "guided_sessions"
+ ],
+ "fields": [
+  {
+   "default": "PSSL-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "PSSL-.YYYY.-.#####",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Store",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "POS Profile",
+   "options": "POS Profile"
+  },
+  {
+   "fieldname": "pos_mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "POS Mode",
+   "options": "System\nTablet\nKiosk"
+  },
+  {
+   "fieldname": "column_break_info",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "User",
+   "options": "User"
+  },
+  {
+   "default": "Active",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Active\nClosed"
+  },
+  {
+   "fieldname": "session_section",
+   "fieldtype": "Section Break",
+   "label": "Session Timing"
+  },
+  {
+   "default": "Now",
+   "fieldname": "session_start",
+   "fieldtype": "Datetime",
+   "label": "Session Start"
+  },
+  {
+   "fieldname": "session_end",
+   "fieldtype": "Datetime",
+   "label": "Session End"
+  },
+  {
+   "fieldname": "column_break_session",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "duration_sec",
+   "fieldtype": "Int",
+   "label": "Duration (seconds)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "device_info",
+   "fieldtype": "Small Text",
+   "label": "Device Info"
+  },
+  {
+   "fieldname": "stats_section",
+   "fieldtype": "Section Break",
+   "label": "Session Stats"
+  },
+  {
+   "default": "0",
+   "fieldname": "items_browsed",
+   "fieldtype": "Int",
+   "label": "Items Browsed"
+  },
+  {
+   "default": "0",
+   "fieldname": "comparisons_made",
+   "fieldtype": "Int",
+   "label": "Comparisons Made"
+  },
+  {
+   "fieldname": "column_break_stats",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "tokens_generated",
+   "fieldtype": "Int",
+   "label": "Tokens Generated"
+  },
+  {
+   "default": "0",
+   "fieldname": "guided_sessions",
+   "fieldtype": "Int",
+   "label": "Guided Sessions"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-08 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS Session Log",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "All"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -1,0 +1,188 @@
+{
+ "actions": [],
+ "creation": "2026-03-08 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "pos_profile",
+  "pos_mode",
+  "column_break_mode",
+  "store",
+  "disabled",
+  "features_section",
+  "enable_guided_selling",
+  "enable_ai_comparison",
+  "enable_ai_upsell",
+  "column_break_features",
+  "enable_repair_intake",
+  "enable_buyback_intake",
+  "max_comparison_items",
+  "display_section",
+  "show_cost_price",
+  "allow_manual_discount",
+  "allow_rate_change",
+  "column_break_display",
+  "receipt_template",
+  "kiosk_section",
+  "kiosk_idle_timeout_sec",
+  "kiosk_allowed_item_groups"
+ ],
+ "fields": [
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "POS Profile",
+   "options": "POS Profile",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "System",
+   "fieldname": "pos_mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "POS Mode",
+   "options": "System\nTablet\nKiosk",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_mode",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "label": "Store",
+   "options": "CH Store"
+  },
+  {
+   "default": "0",
+   "fieldname": "disabled",
+   "fieldtype": "Check",
+   "label": "Disabled"
+  },
+  {
+   "fieldname": "features_section",
+   "fieldtype": "Section Break",
+   "label": "Features"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_guided_selling",
+   "fieldtype": "Check",
+   "label": "Enable Guided Selling"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_ai_comparison",
+   "fieldtype": "Check",
+   "label": "Enable AI Comparison"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_ai_upsell",
+   "fieldtype": "Check",
+   "label": "Enable AI Upsell"
+  },
+  {
+   "fieldname": "column_break_features",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_repair_intake",
+   "fieldtype": "Check",
+   "label": "Enable Repair Intake"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_buyback_intake",
+   "fieldtype": "Check",
+   "label": "Enable Buyback Intake"
+  },
+  {
+   "default": "3",
+   "fieldname": "max_comparison_items",
+   "fieldtype": "Int",
+   "label": "Max Comparison Items"
+  },
+  {
+   "fieldname": "display_section",
+   "fieldtype": "Section Break",
+   "label": "Display & Permissions"
+  },
+  {
+   "default": "0",
+   "fieldname": "show_cost_price",
+   "fieldtype": "Check",
+   "label": "Show Cost Price"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_manual_discount",
+   "fieldtype": "Check",
+   "label": "Allow Manual Discount"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_rate_change",
+   "fieldtype": "Check",
+   "label": "Allow Rate Change"
+  },
+  {
+   "fieldname": "column_break_display",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "receipt_template",
+   "fieldtype": "Link",
+   "label": "Receipt Template",
+   "options": "Print Format"
+  },
+  {
+   "depends_on": "eval:doc.pos_mode === 'Kiosk'",
+   "fieldname": "kiosk_section",
+   "fieldtype": "Section Break",
+   "label": "Kiosk Settings"
+  },
+  {
+   "default": "120",
+   "fieldname": "kiosk_idle_timeout_sec",
+   "fieldtype": "Int",
+   "label": "Kiosk Idle Timeout (seconds)"
+  },
+  {
+   "fieldname": "kiosk_allowed_item_groups",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Item Groups",
+   "options": "POS Kiosk Allowed Item Group"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-08 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS Profile Extension",
+ "naming_rule": "Expression",
+ "autoname": "field:pos_profile",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "All"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "pos_profile"
+}

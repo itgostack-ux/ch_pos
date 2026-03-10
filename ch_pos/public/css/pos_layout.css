@@ -1,0 +1,419 @@
+/* ═══════════════════════════════════════════════════════════
+   CH POS — Premium Retail Layout System
+   Full-screen, touch-first, electronics POS shell
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Full Screen Reset ───────────────────────────────────── */
+body.ch-pos-fullscreen {
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+body.ch-pos-fullscreen header.navbar,
+body.ch-pos-fullscreen footer,
+body.ch-pos-fullscreen .page-head { display: none !important; }
+body.ch-pos-fullscreen .layout-side-section { display: none !important; }
+body.ch-pos-fullscreen #body,
+body.ch-pos-fullscreen #body_div {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+body.ch-pos-fullscreen .main-section {
+  margin: 0 !important;
+  padding: 0 !important;
+  max-width: 100% !important;
+}
+
+/* ── Page Reset ──────────────────────────────────────────── */
+.ch-pos-page { padding: 0 !important; margin: 0 !important; }
+.ch-pos-page .layout-main-section {
+  padding: 0 !important; margin: 0 !important;
+  max-width: 100% !important; width: 100vw !important;
+  display: flex !important; flex-direction: column !important;
+  height: 100vh !important; overflow: hidden !important;
+  background: var(--pos-bg) !important;
+}
+.ch-pos-page .layout-main-section-wrapper,
+.ch-pos-page .container,
+.ch-pos-page .layout-main {
+  max-width: 100% !important; width: 100% !important;
+  padding: 0 !important; margin: 0 !important;
+}
+.ch-pos-page .page-body { margin: 0 !important; padding: 0 !important; }
+.ch-pos-page .row { margin: 0 !important; }
+.ch-pos-page .col-md-12 { padding: 0 !important; }
+.ch-pos-page .page-container { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
+body.ch-pos-fullscreen .container-fluid,
+body.ch-pos-fullscreen .container { max-width: 100% !important; padding: 0 !important; }
+
+/* ═══════════════════════════════════════════════════
+   3-Column Shell: [Sidebar] [Content] [Cart]
+   ═══════════════════════════════════════════════════ */
+.ch-pos-container {
+  display: flex !important;
+  flex: 1 1 0% !important;
+  min-height: 0 !important;
+  overflow: hidden;
+  background: var(--pos-bg);
+  font-family: var(--pos-font);
+  color: var(--pos-text);
+  font-size: var(--pos-fs-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+.ch-pos-sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  max-width: var(--sidebar-w);
+  background: var(--sidebar-bg);
+  display: flex !important;
+  flex-direction: column !important;
+  flex-shrink: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  z-index: 10;
+  scrollbar-width: none;
+}
+.ch-pos-sidebar::-webkit-scrollbar { display: none; }
+
+/* Section Headers */
+.ch-pos-sidebar-section {
+  padding: 20px 20px 8px;
+  font-size: var(--pos-fs-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.8px;
+  color: var(--sidebar-section-text);
+  user-select: none;
+}
+.ch-pos-sidebar-section:first-child { padding-top: 20px; }
+
+/* Nav Items — large touch targets */
+.ch-pos-sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: calc(100% - 12px);
+  margin: 2px 6px;
+  padding: 10px 14px;
+  min-height: var(--pos-touch-min);
+  border: none;
+  background: transparent;
+  color: var(--sidebar-text);
+  font-size: var(--pos-fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--pos-transition);
+  position: relative;
+  outline: none;
+  text-align: left;
+  border-radius: var(--pos-radius-sm);
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+.ch-pos-sidebar-item .sidebar-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--pos-radius-sm);
+  background: rgba(255,255,255,0.05);
+  font-size: 14px;
+  flex-shrink: 0;
+  transition: all var(--pos-transition);
+}
+.ch-pos-sidebar-item:hover {
+  color: var(--sidebar-text-hover);
+  background: var(--sidebar-hover-bg);
+}
+.ch-pos-sidebar-item:hover .sidebar-icon {
+  background: rgba(255,255,255,0.08);
+}
+.ch-pos-sidebar-item.active {
+  color: var(--sidebar-text-active);
+  background: var(--sidebar-active-bg);
+}
+.ch-pos-sidebar-item.active .sidebar-icon {
+  background: var(--sidebar-active-border);
+  color: #fff;
+}
+.ch-pos-sidebar-item.active::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  background: var(--sidebar-active-border);
+  border-radius: 0 3px 3px 0;
+}
+
+/* Sidebar Bottom — Operator + Store info */
+.ch-pos-sidebar-bottom {
+  margin-top: auto;
+  padding: 16px;
+  border-top: 1px solid var(--sidebar-divider);
+}
+.ch-pos-sidebar-bottom .store-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+.ch-pos-sidebar-bottom .store-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: rgba(79,110,247,0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--pos-primary);
+  flex-shrink: 0;
+}
+.ch-pos-sidebar-bottom .store-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ch-pos-sidebar-bottom .store-name {
+  color: rgba(255,255,255,0.8);
+  font-size: var(--pos-fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ch-pos-sidebar-bottom .store-operator {
+  color: rgba(255,255,255,0.35);
+  font-size: var(--pos-fs-2xs);
+}
+.ch-pos-sidebar-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 2px;
+}
+.ch-pos-online-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--pos-success);
+  flex-shrink: 0;
+  box-shadow: 0 0 6px rgba(16,185,129,0.4);
+  transition: all var(--pos-transition);
+}
+.ch-pos-online-dot.offline {
+  background: var(--pos-danger);
+  box-shadow: 0 0 6px rgba(239,68,68,0.4);
+}
+.ch-pos-online-label {
+  color: rgba(255,255,255,0.35);
+  font-size: var(--pos-fs-2xs);
+  font-weight: 600;
+}
+.ch-pos-sync-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  margin: 4px 6px;
+  border-radius: var(--pos-radius-sm);
+  background: rgba(245,158,11,0.1);
+  color: #fbbf24;
+  font-size: var(--pos-fs-xs);
+  font-weight: 600;
+}
+
+/* ── Sidebar Toggle Button ───────────────────────────────── */
+.ch-pos-sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 12px);
+  margin: 12px 6px 4px;
+  padding: 6px;
+  min-height: 28px;
+  border: 1px solid var(--sidebar-divider);
+  border-radius: var(--pos-radius-sm);
+  background: transparent;
+  color: var(--sidebar-text);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--pos-transition);
+  outline: none;
+}
+.ch-pos-sidebar-toggle:hover {
+  background: var(--sidebar-hover-bg);
+  color: var(--sidebar-text-hover);
+}
+
+/* ── Sidebar Collapsed State ─────────────────────────────── */
+.ch-pos-sidebar.collapsed {
+  width: 64px !important;
+  min-width: 64px !important;
+  max-width: 64px !important;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-section {
+  font-size: 0;
+  padding: 12px 0 4px;
+  text-align: center;
+  overflow: hidden;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-section::after {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 1px;
+  background: var(--sidebar-divider);
+  margin: 0 auto;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-item {
+  justify-content: center;
+  padding: 10px 0;
+  width: calc(100% - 12px);
+  margin: 2px 6px;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-item .sidebar-label {
+  display: none;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-item .sidebar-icon {
+  margin: 0;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-item.active::before {
+  left: -6px;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-bottom .store-detail {
+  display: none;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-bottom .store-info {
+  justify-content: center;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-bottom {
+  padding: 12px 6px;
+}
+.ch-pos-sidebar.collapsed .ch-pos-online-label {
+  display: none;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-status {
+  justify-content: center;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sidebar-toggle {
+  width: calc(100% - 16px);
+  margin: 12px 8px 4px;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sync-badge {
+  justify-content: center;
+  padding: 6px;
+  font-size: 0;
+}
+.ch-pos-sidebar.collapsed .ch-pos-sync-badge i {
+  font-size: 12px;
+}
+
+/* ── Center Content Panel ────────────────────────────────── */
+.ch-pos-content-panel {
+  flex: 1 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden;
+  padding: var(--pos-space-lg) var(--pos-space-xl) var(--pos-space-sm) !important;
+  gap: var(--pos-space-md) !important;
+  min-width: 0 !important;
+  background: var(--pos-bg) !important;
+}
+
+/* ── Right Cart Panel ────────────────────────────────────── */
+.ch-pos-cart-panel {
+  width: var(--cart-w);
+  min-width: var(--cart-w-min);
+  display: flex;
+  flex-direction: column;
+  background: var(--pos-surface);
+  border-left: 1px solid var(--pos-border);
+  flex-shrink: 0;
+  box-shadow: -2px 0 8px rgba(0,0,0,0.03);
+}
+
+/* ── Offline Status Bar ──────────────────────────────────── */
+.ch-pos-offline-bar {
+  display: none;
+  align-items: center;
+  gap: var(--pos-space-sm);
+  padding: 8px var(--pos-space-xl);
+  font-size: var(--pos-fs-sm);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.ch-pos-offline-bar.visible { display: flex; }
+.ch-pos-offline-bar.state-offline {
+  background: var(--pos-danger-light);
+  border-bottom: 1px solid #fca5a5;
+  color: var(--pos-danger);
+}
+.ch-pos-offline-bar.state-syncing {
+  background: var(--pos-warning-light);
+  border-bottom: 1px solid #fcd34d;
+  color: var(--pos-warning);
+}
+.ch-pos-offline-bar.state-error {
+  background: var(--pos-danger-light);
+  border-bottom: 1px solid #fca5a5;
+  color: var(--pos-danger);
+}
+.ch-pos-offline-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ch-pos-offline-bar.state-offline .ch-pos-offline-dot { background: var(--pos-danger); }
+.ch-pos-offline-bar.state-syncing .ch-pos-offline-dot {
+  background: var(--pos-warning);
+  animation: pos-dot-pulse 1.5s infinite;
+}
+.ch-pos-offline-bar.state-error .ch-pos-offline-dot { background: var(--pos-danger); }
+@keyframes pos-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.ch-pos-offline-queue {
+  margin-left: auto;
+  padding: 2px 10px;
+  background: rgba(0,0,0,0.08);
+  border-radius: var(--pos-radius-pill);
+  font-size: var(--pos-fs-2xs);
+  font-weight: 700;
+}
+.ch-pos-offline-retry {
+  padding: 4px 12px !important;
+  font-size: var(--pos-fs-xs) !important;
+  font-weight: 700 !important;
+  border-radius: var(--pos-radius-sm) !important;
+  border: 1px solid currentColor !important;
+  background: transparent !important;
+  color: inherit !important;
+  cursor: pointer !important;
+  min-height: var(--pos-touch-min);
+}
+
+/* ═══════════════════════════════════════════════════
+   RESPONSIVE
+   ═══════════════════════════════════════════════════ */
+@media (max-width: 1024px) {
+  .ch-pos-sidebar .ch-pos-sidebar-item span { display: none; }
+  .ch-pos-sidebar .ch-pos-sidebar-section { display: none; }
+  .ch-pos-sidebar .ch-pos-sidebar-item { justify-content: center; padding: 10px 8px; width: calc(100% - 8px); margin: 2px 4px; }
+  .ch-pos-sidebar .store-detail { display: none; }
+  .ch-pos-sidebar .store-info { justify-content: center; }
+  .ch-pos-sidebar .ch-pos-online-label { display: none; }
+}
+@media (max-width: 768px) {
+  .ch-pos-container { flex-direction: column !important; }
+  .ch-pos-sidebar {
+    width: 100% !important; min-width: auto !important; max-width: none !important;
+    flex-direction: row !important; padding: 4px 8px; overflow-x: auto;
+  }
+  .ch-pos-sidebar-item { width: auto; padding: 8px 12px; min-height: 36px; }
+  .ch-pos-sidebar-item.active::before { display: none; }
+  .ch-pos-content-panel { max-height: 50vh; }
+  .ch-pos-cart-panel { width: 100% !important; min-width: auto !important; border-left: none; border-top: 1px solid var(--pos-border); }
+}

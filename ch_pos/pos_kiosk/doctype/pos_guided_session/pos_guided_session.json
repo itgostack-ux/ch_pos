@@ -1,0 +1,147 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-03-08 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "store",
+  "pos_profile",
+  "column_break_hdr",
+  "status",
+  "category",
+  "sub_category",
+  "responses_section",
+  "responses",
+  "recommendations_section",
+  "recommended_items",
+  "links_section",
+  "comparison_request",
+  "kiosk_token",
+  "column_break_links",
+  "session_duration_sec"
+ ],
+ "fields": [
+  {
+   "default": "PGS-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "PGS-.YYYY.-.#####",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "label": "Store",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "label": "POS Profile",
+   "options": "POS Profile"
+  },
+  {
+   "fieldname": "column_break_hdr",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "In Progress",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "In Progress\nCompleted\nAbandoned"
+  },
+  {
+   "fieldname": "category",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Category",
+   "options": "CH Category"
+  },
+  {
+   "fieldname": "sub_category",
+   "fieldtype": "Link",
+   "label": "Sub Category",
+   "options": "CH Sub Category"
+  },
+  {
+   "fieldname": "responses_section",
+   "fieldtype": "Section Break",
+   "label": "Customer Responses"
+  },
+  {
+   "fieldname": "responses",
+   "fieldtype": "Table",
+   "label": "Responses",
+   "options": "POS Guided Response"
+  },
+  {
+   "fieldname": "recommendations_section",
+   "fieldtype": "Section Break",
+   "label": "Recommendations"
+  },
+  {
+   "fieldname": "recommended_items",
+   "fieldtype": "Table",
+   "label": "Recommended Items",
+   "options": "POS Guided Recommendation"
+  },
+  {
+   "fieldname": "links_section",
+   "fieldtype": "Section Break",
+   "label": "Linked Documents"
+  },
+  {
+   "fieldname": "comparison_request",
+   "fieldtype": "Link",
+   "label": "Comparison Request",
+   "options": "POS Comparison Request"
+  },
+  {
+   "fieldname": "kiosk_token",
+   "fieldtype": "Link",
+   "label": "Kiosk Token",
+   "options": "POS Kiosk Token"
+  },
+  {
+   "fieldname": "column_break_links",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "session_duration_sec",
+   "fieldtype": "Int",
+   "label": "Session Duration (seconds)",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-08 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Kiosk",
+ "name": "POS Guided Session",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "All"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

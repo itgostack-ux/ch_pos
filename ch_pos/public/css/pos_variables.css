@@ -1,0 +1,126 @@
+/* ═══════════════════════════════════════════════════════════
+   CH POS — Premium Retail Design Tokens
+   Electronics POS · Touch-first · Retail-grade
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Surface Colors ────────────────────────────────────── */
+  --pos-bg: #f0f2f5;
+  --pos-surface: #ffffff;
+  --pos-surface-raised: #ffffff;
+  --pos-surface-sunken: #f7f8fa;
+  --pos-surface-hover: #f5f7fa;
+
+  /* ── Border Colors ─────────────────────────────────────── */
+  --pos-border: #e4e7ec;
+  --pos-border-light: #f0f1f4;
+  --pos-border-focus: #4f6ef7;
+
+  /* ── Text Colors ───────────────────────────────────────── */
+  --pos-text: #111827;
+  --pos-text-secondary: #4b5563;
+  --pos-text-muted: #9ca3af;
+  --pos-text-inverse: #ffffff;
+
+  /* ── Primary Brand ─────────────────────────────────────── */
+  --pos-primary: #4f6ef7;
+  --pos-primary-hover: #3b5de7;
+  --pos-primary-light: #eef2ff;
+  --pos-primary-bg: #dbeafe;
+  --pos-primary-text: #3730a3;
+
+  /* ── Semantic Colors ───────────────────────────────────── */
+  --pos-success: #10b981;
+  --pos-success-light: #d1fae5;
+  --pos-success-dark: #065f46;
+  --pos-danger: #ef4444;
+  --pos-danger-light: #fee2e2;
+  --pos-warning: #f59e0b;
+  --pos-warning-light: #fef3c7;
+  --pos-info: #3b82f6;
+  --pos-info-light: #dbeafe;
+
+  /* ── Sidebar — Deep premium dark ───────────────────────── */
+  --sidebar-bg: #0f172a;
+  --sidebar-w: 220px;
+  --sidebar-text: rgba(255, 255, 255, 0.5);
+  --sidebar-text-hover: rgba(255, 255, 255, 0.9);
+  --sidebar-text-active: #ffffff;
+  --sidebar-section-text: rgba(255, 255, 255, 0.25);
+  --sidebar-hover-bg: rgba(255, 255, 255, 0.05);
+  --sidebar-active-bg: rgba(79, 110, 247, 0.18);
+  --sidebar-active-border: #4f6ef7;
+  --sidebar-divider: rgba(255, 255, 255, 0.06);
+
+  /* ── Shadows ───────────────────────────────────────────── */
+  --pos-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --pos-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --pos-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --pos-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
+  --pos-shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+  --pos-shadow-card: 0 1px 3px rgba(0,0,0,0.04), 0 0 0 1px rgba(0,0,0,0.03);
+  --pos-shadow-card-hover: 0 8px 25px -5px rgba(0,0,0,0.1), 0 0 0 1px rgba(79,110,247,0.15);
+
+  /* ── Radii ─────────────────────────────────────────────── */
+  --pos-radius: 12px;
+  --pos-radius-sm: 8px;
+  --pos-radius-lg: 16px;
+  --pos-radius-xl: 20px;
+  --pos-radius-pill: 9999px;
+
+  /* ── Spacing ───────────────────────────────────────────── */
+  --pos-space-2xs: 2px;
+  --pos-space-xs: 4px;
+  --pos-space-sm: 8px;
+  --pos-space-md: 12px;
+  --pos-space-lg: 16px;
+  --pos-space-xl: 24px;
+  --pos-space-2xl: 32px;
+
+  /* ── Typography ────────────────────────────────────────── */
+  --pos-font: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+  --pos-font-mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+  --pos-fs-2xs: 10px;
+  --pos-fs-xs: 11px;
+  --pos-fs-sm: 12px;
+  --pos-fs-base: 13px;
+  --pos-fs-md: 14px;
+  --pos-fs-lg: 16px;
+  --pos-fs-xl: 18px;
+  --pos-fs-2xl: 22px;
+  --pos-fs-3xl: 28px;
+  --pos-fw-normal: 400;
+  --pos-fw-medium: 500;
+  --pos-fw-semibold: 600;
+  --pos-fw-bold: 700;
+  --pos-fw-black: 800;
+
+  /* ── Transitions ───────────────────────────────────────── */
+  --pos-transition: 0.15s ease;
+  --pos-transition-slow: 0.25s ease;
+  --pos-transition-bounce: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ── Cart Panel ────────────────────────────────────────── */
+  --cart-w: 380px;
+  --cart-w-min: 360px;
+
+  /* ── Touch Targets ─────────────────────────────────────── */
+  --pos-touch-min: 44px;
+  --pos-touch-comfortable: 48px;
+}
+
+/* ── Responsive Overrides ────────────────────────────────── */
+@media (max-width: 1280px) {
+  :root {
+    --sidebar-w: 200px;
+    --cart-w: 360px;
+    --cart-w-min: 340px;
+  }
+}
+@media (max-width: 1024px) {
+  :root {
+    --sidebar-w: 64px;
+    --cart-w: 340px;
+    --cart-w-min: 320px;
+  }
+}

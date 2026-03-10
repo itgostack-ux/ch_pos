@@ -1,0 +1,73 @@
+{
+ "actions": [],
+ "creation": "2026-03-08 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_1",
+  "item_2",
+  "item_3",
+  "comparison_data",
+  "recommendation",
+  "last_reviewed"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_1",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item 1",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "item_2",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item 2",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "item_3",
+   "fieldtype": "Link",
+   "label": "Item 3",
+   "options": "Item"
+  },
+  {
+   "fieldname": "comparison_data",
+   "fieldtype": "JSON",
+   "label": "Comparison Data",
+   "reqd": 1
+  },
+  {
+   "fieldname": "recommendation",
+   "fieldtype": "Long Text",
+   "label": "Recommendation"
+  },
+  {
+   "fieldname": "last_reviewed",
+   "fieldtype": "Date",
+   "label": "Last Reviewed"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-08 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS AI",
+ "name": "POS Comparison Template",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

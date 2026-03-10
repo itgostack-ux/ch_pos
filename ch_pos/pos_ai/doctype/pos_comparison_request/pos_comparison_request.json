@@ -1,0 +1,124 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-03-08 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "source",
+  "ai_model",
+  "column_break_hdr",
+  "ai_latency_ms",
+  "created_at_store",
+  "items_section",
+  "items",
+  "preferences_section",
+  "customer_preferences",
+  "results_section",
+  "comparison_result",
+  "recommendation"
+ ],
+ "fields": [
+  {
+   "default": "PCR-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "PCR-.YYYY.-.#####",
+   "print_hide": 1
+  },
+  {
+   "default": "AI",
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Source",
+   "options": "AI\nStatic Fallback"
+  },
+  {
+   "fieldname": "ai_model",
+   "fieldtype": "Data",
+   "label": "AI Model"
+  },
+  {
+   "fieldname": "column_break_hdr",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "ai_latency_ms",
+   "fieldtype": "Int",
+   "label": "AI Latency (ms)"
+  },
+  {
+   "fieldname": "created_at_store",
+   "fieldtype": "Link",
+   "label": "Store",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "items_section",
+   "fieldtype": "Section Break",
+   "label": "Compared Items"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Items",
+   "options": "POS Comparison Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "preferences_section",
+   "fieldtype": "Section Break",
+   "label": "Customer Preferences"
+  },
+  {
+   "fieldname": "customer_preferences",
+   "fieldtype": "JSON",
+   "label": "Customer Preferences"
+  },
+  {
+   "fieldname": "results_section",
+   "fieldtype": "Section Break",
+   "label": "Comparison Results"
+  },
+  {
+   "fieldname": "comparison_result",
+   "fieldtype": "JSON",
+   "label": "Comparison Result"
+  },
+  {
+   "fieldname": "recommendation",
+   "fieldtype": "Long Text",
+   "label": "Recommendation"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-08 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS AI",
+ "name": "POS Comparison Request",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "All"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

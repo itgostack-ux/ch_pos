@@ -1,0 +1,857 @@
+/**
+ * CH POS — Cart Service
+ *
+ * Business logic for cart operations: add, remove, qty change,
+ * best offer application, warranty prompts, VAS, coupon validation,
+ * exchange and product-exchange flows, hold invoice.
+ */
+import { PosState, EventBus } from "../state.js";
+import { format_number } from "../shared/helpers.js";
+
+export class CartService {
+	constructor() {
+		this._bind_events();
+	}
+
+	_bind_events() {
+		EventBus.on("cart:add_item", (item_data) => this.add_to_cart(item_data));
+
+		EventBus.on("cart:qty_plus", (idx) => {
+			const item = PosState.cart[idx];
+			if (item.has_serial_no) {
+				frappe.show_alert({
+					message: __("Scan another IMEI to add more units of {0}", [item.item_name]),
+					indicator: "orange",
+				});
+				return;
+			}
+			item.qty += 1;
+			this._apply_best_offer(item);
+			EventBus.emit("cart:updated");
+		});
+
+		EventBus.on("cart:qty_minus", (idx) => {
+			if (PosState.cart[idx].qty > 1) {
+				PosState.cart[idx].qty -= 1;
+				this._apply_best_offer(PosState.cart[idx]);
+			} else {
+				PosState.cart.splice(idx, 1);
+			}
+			EventBus.emit("cart:updated");
+		});
+
+		EventBus.on("cart:remove", (idx) => {
+			PosState.cart.splice(idx, 1);
+			EventBus.emit("cart:updated");
+		});
+
+		EventBus.on("cart:cancel", () => {
+			if (!PosState.cart.length) return;
+			frappe.confirm(__("Clear all items from cart?"), () => {
+				PosState.reset_transaction();
+			});
+		});
+
+		EventBus.on("cart:hold", () => this.hold_invoice());
+		EventBus.on("cart:pay", () => {
+			// Last-chance customer sync — Link control may not have fired change
+			EventBus.emit("cart:pre_pay_sync");
+			EventBus.emit("payment:open");
+		});
+
+		EventBus.on("coupon:apply", (code) => this._apply_coupon(code));
+		EventBus.on("discount:changed", () => EventBus.emit("cart:updated"));
+
+		EventBus.on("exchange:open", () => this._show_exchange_dialog());
+		EventBus.on("vas:open", () => this._show_vas_dialog());
+		EventBus.on("product_exchange:open", () => this._show_product_exchange_dialog());
+	}
+
+	// ── Add to Cart ─────────────────────────────────────
+	add_to_cart(item_data) {
+		if (item_data.stock_qty <= 0) {
+			frappe.show_alert({
+				message: __("Item {0} is out of stock", [item_data.item_name]),
+				indicator: "red",
+			});
+			return;
+		}
+
+		// Serial/IMEI items: force scan before adding
+		if (cint(item_data.has_serial_no)) {
+			this._prompt_serial_scan(item_data);
+			return;
+		}
+
+		const existing = PosState.cart.find(
+			(c) => c.item_code === item_data.item_code && !c.is_warranty && !c.is_vas
+		);
+
+		if (existing) {
+			existing.qty += 1;
+			this._apply_best_offer(existing);
+			EventBus.emit("cart:updated");
+		} else {
+			this._add_new_cart_item(item_data);
+		}
+	}
+
+	_add_new_cart_item(item_data, serial_no) {
+		const cart_item = {
+			item_code: item_data.item_code,
+			item_name: item_data.item_name,
+			qty: 1,
+			rate: item_data.selling_price || item_data.mrp || 0,
+			mrp: item_data.mrp || 0,
+			uom: item_data.stock_uom || "Nos",
+			discount_percentage: 0,
+			discount_amount: 0,
+			offers: item_data.offers || [],
+			applied_offer: null,
+			warranty_plan: null,
+			is_warranty: false,
+			is_vas: false,
+			has_serial_no: cint(item_data.has_serial_no),
+			serial_no: serial_no || "",
+		};
+		this._apply_best_offer(cart_item);
+		PosState.cart.push(cart_item);
+		EventBus.emit("cart:updated");
+		this._prompt_warranty(item_data, cart_item);
+	}
+
+	/** Prompt for IMEI/serial selection from available stock, with manual scan fallback */
+	_prompt_serial_scan(item_data) {
+		const dlg = new frappe.ui.Dialog({
+			title: __("Select IMEI — {0}", [item_data.item_name]),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "serials_area",
+					options: `<div class="ch-imei-picker">
+						<div style="text-align:center;padding:16px 0;">
+							<i class="fa fa-spinner fa-spin" style="font-size:24px;opacity:0.4"></i>
+							<p class="text-muted" style="margin-top:8px">${__("Loading available IMEIs...")}</p>
+						</div>
+					</div>`,
+				},
+				{ fieldtype: "Section Break", label: __("Or scan manually") },
+				{
+					fieldname: "serial_no",
+					fieldtype: "Data",
+					label: __("IMEI / Serial No"),
+					description: __("Scan barcode or type IMEI if not in list above"),
+				},
+			],
+			size: "large",
+			primary_action_label: __("Add to Cart"),
+			primary_action: (values) => {
+				const serial = (values.serial_no || "").trim();
+				// Check if one was selected from the picker
+				const selected = dlg.$wrapper.find(".ch-imei-row.selected").data("serial");
+				const final_serial = selected || serial;
+				if (!final_serial) {
+					frappe.show_alert({ message: __("Select or scan an IMEI"), indicator: "orange" });
+					return;
+				}
+
+				// Check if this serial is already in the cart
+				const dup = PosState.cart.find((c) => c.serial_no === final_serial);
+				if (dup) {
+					frappe.show_alert({ message: __("Serial {0} is already in the cart", [final_serial]), indicator: "orange" });
+					return;
+				}
+
+				dlg.disable_primary_action();
+				frappe.call({
+					method: "ch_pos.api.pos_api.validate_serial_for_sale",
+					args: {
+						serial_no: final_serial,
+						item_code: item_data.item_code,
+						warehouse: PosState.warehouse,
+					},
+					callback: (r) => {
+						if (r.message && r.message.valid) {
+							dlg.hide();
+							this._add_new_cart_item(item_data, final_serial);
+							frappe.show_alert({
+								message: __("{0} added with IMEI {1}", [item_data.item_name, final_serial]),
+								indicator: "green",
+							});
+						} else {
+							dlg.enable_primary_action();
+							frappe.show_alert({
+								message: r.message?.reason || __("Invalid serial number"),
+								indicator: "red",
+							});
+						}
+					},
+				});
+			},
+		});
+		dlg.show();
+
+		// Load available serials
+		frappe.xcall("ch_pos.api.search.get_available_serials", {
+			item_code: item_data.item_code,
+			warehouse: PosState.warehouse,
+		}).then((serials) => {
+			const area = dlg.$wrapper.find(".ch-imei-picker");
+			if (!serials || !serials.length) {
+				area.html(`<div class="text-muted text-center" style="padding:12px">
+					${__("No IMEIs in stock at this warehouse. Use manual scan below.")}
+				</div>`);
+				setTimeout(() => dlg.fields_dict.serial_no.$input.focus(), 100);
+				return;
+			}
+
+			// Filter out serials already in cart
+			const cart_serials = new Set(PosState.cart.map(c => c.serial_no).filter(Boolean));
+			const available = serials.filter(s => !cart_serials.has(s.serial_no));
+
+			const rows = available.map((s) => {
+				const warranty_info = s.warranty_expiry_date
+					? `<span class="text-muted" style="font-size:11px">WE: ${frappe.datetime.str_to_user(s.warranty_expiry_date)}</span>`
+					: "";
+				return `<div class="ch-imei-row" data-serial="${frappe.utils.escape_html(s.serial_no)}">
+					<span class="ch-imei-serial">${frappe.utils.escape_html(s.serial_no)}</span>
+					${warranty_info}
+				</div>`;
+			}).join("");
+
+			area.html(`
+				<div style="font-size:12px;color:var(--pos-text-muted);margin-bottom:6px">
+					${__("{0} available", [available.length])}
+				</div>
+				<div class="ch-imei-list" style="max-height:240px;overflow-y:auto;border:1px solid var(--pos-border-light, #e5e7eb);border-radius:var(--pos-radius, 8px)">
+					${rows}
+				</div>
+			`);
+
+			// Click to select
+			area.on("click", ".ch-imei-row", function () {
+				area.find(".ch-imei-row").removeClass("selected");
+				$(this).addClass("selected");
+				dlg.set_value("serial_no", $(this).data("serial"));
+			});
+		});
+	}
+
+	// ── Offer Application ───────────────────────────────
+	_apply_best_offer(cart_item) {
+		const offers = cart_item.offers || [];
+		if (!offers.length) {
+			cart_item.applied_offer = null;
+			cart_item.discount_amount = 0;
+			cart_item.discount_percentage = 0;
+			return;
+		}
+		const best = offers[0];
+		cart_item.applied_offer = best;
+		if (best.value_type === "Percentage") {
+			cart_item.discount_percentage = flt(best.value);
+			cart_item.discount_amount = flt(cart_item.rate * best.value / 100);
+		} else if (best.value_type === "Amount") {
+			cart_item.discount_amount = flt(best.value);
+			cart_item.discount_percentage = cart_item.rate ? flt(best.value / cart_item.rate * 100) : 0;
+		} else if (best.value_type === "Price Override") {
+			cart_item.discount_amount = flt(cart_item.rate - best.value);
+			cart_item.discount_percentage = cart_item.rate ? flt(cart_item.discount_amount / cart_item.rate * 100) : 0;
+		}
+	}
+
+	// ── Warranty Prompt ─────────────────────────────────
+	_prompt_warranty(item_data, cart_item) {
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_warranty_plans",
+			args: {
+				item_code: item_data.item_code,
+				item_group: item_data.item_group,
+				brand: item_data.brand,
+			},
+			callback: (r) => {
+				const plans = r.message || [];
+				if (!plans.length) return;
+				this._show_warranty_dialog(plans, cart_item);
+			},
+		});
+	}
+
+	_show_warranty_dialog(plans, cart_item) {
+		const options = plans.map(
+			(p) => `${p.name} — ${p.plan_name} (${p.duration_months}m) ₹${format_number(p.price)}`
+		);
+		const dialog = new frappe.ui.Dialog({
+			title: __("Add Warranty / Protection Plan?"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					options: `<p class="text-muted">${__("Available plans for")} <b>${frappe.utils.escape_html(cart_item.item_name)}</b></p>`,
+				},
+				{
+					fieldname: "plan",
+					fieldtype: "Select",
+					label: __("Warranty Plan"),
+					options: ["None", ...options].join("\n"),
+					default: "None",
+				},
+			],
+			primary_action_label: __("Add"),
+			primary_action: (values) => {
+				dialog.hide();
+				if (values.plan === "None") return;
+				const sel_name = values.plan.split(" — ")[0];
+				const sel_plan = plans.find((p) => p.name === sel_name);
+				if (!sel_plan) return;
+
+				cart_item.warranty_plan = sel_plan.name;
+				PosState.cart.push({
+					item_code: sel_plan.service_item || sel_plan.name,
+					item_name: `🛡 ${sel_plan.plan_name} (${sel_plan.duration_months}m)`,
+					qty: 1,
+					rate: flt(sel_plan.price),
+					mrp: flt(sel_plan.price),
+					uom: "Nos",
+					discount_percentage: 0,
+					discount_amount: 0,
+					offers: [],
+					applied_offer: null,
+					warranty_plan: sel_plan.name,
+					for_item_code: cart_item.item_code,
+					is_warranty: true,
+					is_vas: false,
+				});
+				EventBus.emit("cart:updated");
+				frappe.show_alert({ message: __("{0} added", [sel_plan.plan_name]), indicator: "green" });
+			},
+			secondary_action_label: __("Skip"),
+			secondary_action: () => dialog.hide(),
+		});
+		dialog.show();
+	}
+
+	// ── Coupon ──────────────────────────────────────────
+	_apply_coupon(code) {
+		frappe.call({
+			method: "ch_pos.api.pos_api.validate_coupon",
+			args: {
+				coupon_code: code,
+				customer: PosState.customer,
+				cart_total: this._get_subtotal(),
+			},
+			callback: (r) => {
+				if (r.message && r.message.valid) {
+					PosState.coupon_code = code;
+					PosState.coupon_discount = flt(r.message.discount_amount);
+					EventBus.emit("cart:updated");
+					EventBus.emit("coupon:applied", { code, amount: PosState.coupon_discount });
+				} else {
+					EventBus.emit("coupon:invalid", r.message?.error || __("Invalid coupon"));
+				}
+			},
+		});
+	}
+
+	// ── Exchange Dialog ─────────────────────────────────
+	_show_exchange_dialog() {
+		let exchange_data = null;
+		let active_tab = "lookup";
+		const dialog = new frappe.ui.Dialog({
+			title: __("Buyback Exchange"),
+			fields: [
+				{
+					fieldname: "tab_bar_html",
+					fieldtype: "HTML",
+					options: `<div class="ch-pos-exchange-tabs" style="display:flex;gap:8px;margin-bottom:12px">
+						<button class="btn btn-sm btn-primary ch-exc-tab" data-tab="lookup">${__("Find Existing")}</button>
+						<button class="btn btn-sm btn-default ch-exc-tab" data-tab="new">${__("Add Old Device")}</button>
+					</div>`,
+				},
+				// --- Lookup tab fields ---
+				{
+					fieldname: "lookup_mode",
+					fieldtype: "Select",
+					label: __("Find by"),
+					options: "Assessment ID\nIMEI / Serial\nCustomer Mobile",
+					default: "Assessment ID",
+					depends_on: "eval:doc.__tab === 'lookup'",
+				},
+				{
+					fieldname: "assessment",
+					fieldtype: "Link",
+					label: __("Buyback Assessment"),
+					options: "Buyback Assessment",
+					depends_on: "eval:doc.__tab === 'lookup' && doc.lookup_mode === 'Assessment ID'",
+					get_query: () => ({ filters: { status: ["in", ["Submitted", "Inspection Created"]] } }),
+				},
+				{
+					fieldname: "imei_serial",
+					fieldtype: "Data",
+					label: __("IMEI / Serial No"),
+					depends_on: "eval:doc.__tab === 'lookup' && doc.lookup_mode === 'IMEI / Serial'",
+				},
+				{
+					fieldname: "mobile_no",
+					fieldtype: "Data",
+					label: __("Customer Mobile"),
+					depends_on: "eval:doc.__tab === 'lookup' && doc.lookup_mode === 'Customer Mobile'",
+				},
+				// --- New Device tab fields ---
+				{
+					fieldname: "new_item_code",
+					fieldtype: "Link",
+					label: __("Device Model"),
+					options: "Item",
+					depends_on: "eval:doc.__tab === 'new'",
+					get_query: () => ({
+						filters: { has_serial_no: 1, disabled: 0 },
+					}),
+				},
+				{
+					fieldname: "new_imei",
+					fieldtype: "Data",
+					label: __("IMEI / Serial"),
+					depends_on: "eval:doc.__tab === 'new'",
+				},
+				{
+					fieldname: "new_mobile",
+					fieldtype: "Data",
+					label: __("Customer Mobile"),
+					depends_on: "eval:doc.__tab === 'new'",
+				},
+				{ fieldtype: "Section Break", label: __("Condition Checks"), depends_on: "eval:doc.__tab === 'new'" },
+				{ fieldname: "chk_screen", fieldtype: "Check", label: __("Screen OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
+				{ fieldname: "chk_body", fieldtype: "Check", label: __("Body OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
+				{ fieldname: "chk_buttons", fieldtype: "Check", label: __("Buttons OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
+				{ fieldtype: "Column Break", depends_on: "eval:doc.__tab === 'new'" },
+				{ fieldname: "chk_charging", fieldtype: "Check", label: __("Charging OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
+				{ fieldname: "chk_camera", fieldtype: "Check", label: __("Camera OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
+				{ fieldname: "chk_speaker_mic", fieldtype: "Check", label: __("Speaker/Mic OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
+				// --- Shared result section ---
+				{ fieldtype: "Section Break", label: __("Exchange Details") },
+				{
+					fieldname: "exchange_details_html",
+					fieldtype: "HTML",
+					options: `<p class="text-muted">${__("Search for an assessment or add a new device above")}</p>`,
+				},
+			],
+			size: "large",
+			primary_action_label: __("Apply Exchange"),
+			primary_action: () => {
+				if (active_tab === "new" && !exchange_data) {
+					// Create assessment then apply
+					this._create_and_apply_exchange(dialog);
+					return;
+				}
+				if (!exchange_data) {
+					frappe.show_alert({ message: __("No exchange data loaded"), indicator: "red" });
+					return;
+				}
+				dialog.hide();
+				this._apply_exchange(exchange_data);
+			},
+		});
+
+		// Tab switching
+		dialog.set_value("__tab", "lookup");
+		dialog.$wrapper.on("click", ".ch-exc-tab", function () {
+			const tab = $(this).data("tab");
+			active_tab = tab;
+			exchange_data = null;
+			dialog.set_value("__tab", tab);
+			dialog.$wrapper.find(".ch-exc-tab").removeClass("btn-primary").addClass("btn-default");
+			$(this).removeClass("btn-default").addClass("btn-primary");
+			dialog.fields_dict.exchange_details_html.$wrapper.html(
+				`<p class="text-muted">${tab === "lookup"
+					? __("Search for an assessment above")
+					: __("Fill device details, then click Evaluate")}</p>`
+			);
+			if (tab === "new") {
+				dialog.set_df_property("primary_action_label", "label", __("Evaluate"));
+				dialog.get_primary_btn().text(__("Evaluate"));
+			} else {
+				dialog.get_primary_btn().text(__("Apply Exchange"));
+			}
+		});
+
+		// Live valuation when condition checks change (new device tab)
+		const check_fields = ["chk_screen", "chk_body", "chk_buttons", "chk_charging", "chk_camera", "chk_speaker_mic"];
+		const run_valuation = frappe.utils.debounce(() => {
+			if (active_tab !== "new") return;
+			const item_code = dialog.get_value("new_item_code");
+			if (!item_code) return;
+			const checks = {
+				screen: !!dialog.get_value("chk_screen"),
+				body: !!dialog.get_value("chk_body"),
+				buttons: !!dialog.get_value("chk_buttons"),
+				charging: !!dialog.get_value("chk_charging"),
+				camera: !!dialog.get_value("chk_camera"),
+				speaker_mic: !!dialog.get_value("chk_speaker_mic"),
+			};
+			frappe.xcall("ch_pos.api.pos_api.calculate_buyback_valuation", {
+				item_code, condition_checks: checks,
+			}).then((val) => {
+				if (!val) return;
+				const deductions_html = val.deductions.length
+					? val.deductions.map(d =>
+						`<tr><td class="text-danger">${frappe.utils.escape_html(d.label)}</td><td class="text-danger">−₹${format_number(d.amount)}</td></tr>`
+					).join("")
+					: `<tr><td colspan="2" class="text-success">${__("No deductions — perfect condition")}</td></tr>`;
+				dialog.fields_dict.exchange_details_html.$wrapper.html(`
+					<div class="ch-pos-exchange-preview">
+						<table class="table table-sm">
+							<tr><td><b>${__("Base Value")}</b></td><td>₹${format_number(val.base_price)}</td></tr>
+							${deductions_html}
+							<tr style="border-top:2px solid var(--border-color)"><td><b>${__("Exchange Value")}</b></td>
+								<td class="text-success" style="font-size:1.2em"><b>₹${format_number(val.final_price)}</b></td></tr>
+							<tr><td><b>${__("Grade")}</b></td><td><span class="badge badge-info">${val.grade}</span></td></tr>
+						</table>
+					</div>`);
+			});
+		}, 400);
+
+		check_fields.forEach((f) => dialog.fields_dict[f].$input.on("change", run_valuation));
+		dialog.fields_dict.new_item_code.$input.on("change", run_valuation);
+
+		// Lookup (existing assessment) handler
+		const lookup = () => {
+			if (active_tab !== "lookup") return;
+			const mode = dialog.get_value("lookup_mode");
+			const args = {};
+			if (mode === "Assessment ID") args.assessment = dialog.get_value("assessment");
+			else if (mode === "IMEI / Serial") args.imei_serial = dialog.get_value("imei_serial");
+			else args.mobile_no = dialog.get_value("mobile_no");
+
+			if (!args.assessment && !args.imei_serial && !args.mobile_no) return;
+
+			frappe.call({
+				method: "ch_pos.api.pos_api.lookup_exchange",
+				args: args,
+				callback: (r) => {
+					exchange_data = r.message;
+					if (r.message) {
+						const d = r.message;
+						dialog.fields_dict.exchange_details_html.$wrapper.html(`
+							<div class="ch-pos-exchange-preview">
+								<table class="table table-sm">
+									<tr><td><b>${__("Device")}</b></td><td>${frappe.utils.escape_html(d.item_name)} (${frappe.utils.escape_html(d.item_code)})</td></tr>
+									<tr><td><b>${__("IMEI/Serial")}</b></td><td>${d.imei_serial || "—"}</td></tr>
+									<tr><td><b>${__("Grade")}</b></td><td>${d.condition_grade || "—"}</td></tr>
+									<tr><td><b>${__("Buyback Value")}</b></td>
+										<td class="text-success"><b>₹${format_number(d.buyback_amount)}</b></td></tr>
+									<tr><td><b>${__("Assessment")}</b></td><td>${d.assessment}</td></tr>
+									${d.order ? `<tr><td><b>${__("Order")}</b></td><td>${d.order}</td></tr>` : ""}
+								</table>
+							</div>`);
+					} else {
+						dialog.fields_dict.exchange_details_html.$wrapper.html(
+							`<p class="text-danger">${__("No eligible exchange found")}</p>`
+						);
+					}
+				},
+			});
+		};
+
+		dialog.fields_dict.assessment.$input.on("change", lookup);
+		dialog.fields_dict.imei_serial.$input.on("change", lookup);
+		dialog.fields_dict.mobile_no.$input.on("change", lookup);
+		dialog.show();
+	}
+
+	/** Create a Buyback Assessment from the "Add Old Device" tab and apply exchange */
+	_create_and_apply_exchange(dialog) {
+		const item_code = dialog.get_value("new_item_code");
+		const imei = (dialog.get_value("new_imei") || "").trim();
+		const mobile_no = (dialog.get_value("new_mobile") || "").trim();
+
+		if (!item_code) {
+			frappe.show_alert({ message: __("Select a device model"), indicator: "orange" });
+			return;
+		}
+		if (!mobile_no) {
+			frappe.show_alert({ message: __("Enter customer mobile"), indicator: "orange" });
+			return;
+		}
+
+		const checks = {
+			screen: !!dialog.get_value("chk_screen"),
+			body: !!dialog.get_value("chk_body"),
+			buttons: !!dialog.get_value("chk_buttons"),
+			charging: !!dialog.get_value("chk_charging"),
+			camera: !!dialog.get_value("chk_camera"),
+			speaker_mic: !!dialog.get_value("chk_speaker_mic"),
+		};
+
+		dialog.disable_primary_action();
+		frappe.xcall("ch_pos.api.pos_api.create_buyback_assessment_with_grading", {
+			mobile_no,
+			item_code,
+			imei_serial: imei || undefined,
+			customer: PosState.customer || undefined,
+			condition_checks: checks,
+		}).then((result) => {
+			if (!result || !result.name) {
+				dialog.enable_primary_action();
+				frappe.show_alert({ message: __("Failed to create assessment"), indicator: "red" });
+				return;
+			}
+			dialog.hide();
+			const item_name = frappe.boot.item_names?.[item_code] || item_code;
+			this._apply_exchange({
+				assessment: result.name,
+				item_code,
+				item_name,
+				imei_serial: imei,
+				condition_grade: result.grade,
+				buyback_amount: result.estimated_price,
+			});
+		}).catch(() => {
+			dialog.enable_primary_action();
+		});
+	}
+
+	_apply_exchange(data) {
+		PosState.exchange_assessment = data.assessment;
+		PosState.exchange_order = data.order || null;
+		PosState.exchange_amount = flt(data.buyback_amount);
+
+		if (data.customer && !PosState.customer) {
+			PosState.customer = data.customer;
+			EventBus.emit("customer:set", data.customer);
+		}
+
+		EventBus.emit("exchange:applied", data);
+		EventBus.emit("cart:updated");
+		frappe.show_alert({
+			message: __("Exchange credit ₹{0} applied", [format_number(data.buyback_amount)]),
+			indicator: "green",
+		});
+	}
+
+	// ── VAS Dialog ──────────────────────────────────────
+	_show_vas_dialog() {
+		// Pass current cart items for device-dependency enforcement
+		const cart_items = PosState.cart.map((c) => ({
+			item_code: c.item_code,
+			is_warranty: c.is_warranty,
+			is_vas: c.is_vas,
+		}));
+		frappe.xcall("ch_pos.api.pos_api.get_vas_plans_with_rules", {
+			cart_items,
+		}).then((plans) => {
+			if (!plans || !plans.length) {
+				frappe.show_alert({ message: __("No VAS plans available"), indicator: "orange" });
+				return;
+			}
+			this._render_vas_selector(plans);
+		});
+	}
+
+	_render_vas_selector(plans) {
+		const device_items = PosState.cart.filter((c) => !c.is_warranty && !c.is_vas);
+
+		// Build plan cards HTML
+		const plan_cards = plans.map((p) => {
+			const blocked = p.blocked;
+			const type_badge = p.plan_type === "Protection Plan"
+				? `<span class="badge badge-warning" style="font-size:10px">🛡 Protection</span>`
+				: `<span class="badge badge-info" style="font-size:10px">✦ VAS</span>`;
+			const brand_badge = p.brand
+				? `<span class="badge badge-light" style="font-size:10px">${frappe.utils.escape_html(p.brand)}</span>`
+				: "";
+			const blocked_html = blocked
+				? `<div class="text-danger" style="font-size:11px;margin-top:4px"><i class="fa fa-ban"></i> ${frappe.utils.escape_html(p.blocked_reason)}</div>`
+				: "";
+			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}"
+				style="padding:10px 12px;border:1.5px solid ${blocked ? '#fecaca' : 'var(--border-color)'};border-radius:8px;margin-bottom:8px;cursor:${blocked ? 'not-allowed' : 'pointer'};opacity:${blocked ? '0.6' : '1'};transition:all .15s">
+				<div style="display:flex;justify-content:space-between;align-items:center">
+					<div>
+						<b>${frappe.utils.escape_html(p.plan_name)}</b>
+						<span style="margin-left:6px">${type_badge} ${brand_badge}</span>
+					</div>
+					<span style="font-weight:700;color:var(--primary)">₹${format_number(p.price)}</span>
+				</div>
+				<div class="text-muted" style="font-size:12px">${p.duration_months || 0} months${p.coverage_description ? ' — ' + frappe.utils.escape_html(p.coverage_description) : ''}</div>
+				${blocked_html}
+			</div>`;
+		}).join("");
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Add Value Added Service"),
+			fields: [
+				{
+					fieldname: "plans_html",
+					fieldtype: "HTML",
+					options: `<div class="ch-vas-plans">${plan_cards}</div>`,
+				},
+				{
+					fieldname: "selected_plan",
+					fieldtype: "Data",
+					hidden: 1,
+				},
+				{
+					fieldname: "for_item",
+					fieldtype: "Select",
+					label: __("Apply to Device"),
+					options: [
+						"",
+						...device_items.map((c) => c.item_code + (c.serial_no ? ` (${c.serial_no})` : "")),
+					].join("\n"),
+					description: __("Select which device this plan covers"),
+				},
+			],
+			size: "large",
+			primary_action_label: __("Add to Cart"),
+			primary_action: (values) => {
+				const sel = values.selected_plan;
+				if (!sel) {
+					frappe.show_alert({ message: __("Select a plan first"), indicator: "orange" });
+					return;
+				}
+				const plan = plans.find((p) => p.name === sel);
+				if (!plan || plan.blocked) return;
+
+				const for_item_code = (values.for_item || "").split(" (")[0] || null;
+
+				dialog.hide();
+				PosState.cart.push({
+					item_code: plan.service_item || plan.name,
+					item_name: `✦ ${plan.plan_name}`,
+					qty: 1,
+					rate: flt(plan.price),
+					mrp: flt(plan.price),
+					uom: "Nos",
+					discount_percentage: 0,
+					discount_amount: 0,
+					offers: [],
+					applied_offer: null,
+					warranty_plan: plan.name,
+					for_item_code,
+					is_warranty: false,
+					is_vas: true,
+				});
+				EventBus.emit("cart:updated");
+				frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
+			},
+		});
+
+		// Click to select plan card
+		dialog.$wrapper.on("click", ".ch-vas-card:not(.ch-vas-blocked)", function () {
+			dialog.$wrapper.find(".ch-vas-card").css("border-color", "").css("background", "");
+			$(this).css("border-color", "var(--primary)").css("background", "var(--control-bg)");
+			dialog.set_value("selected_plan", $(this).data("plan"));
+		});
+
+		dialog.show();
+	}
+
+	// ── Product Exchange (Swap) Dialog ──────────────────
+	_show_product_exchange_dialog() {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Product Exchange / Swap"),
+			fields: [
+				{
+					fieldname: "invoice",
+					fieldtype: "Link",
+					label: __("Original Invoice"),
+					options: "POS Invoice",
+					reqd: 1,
+					get_query: () => ({
+						filters: { is_return: 0, docstatus: 1, status: ["!=", "Credit Note Issued"] },
+					}),
+				},
+				{
+					fieldname: "eligibility_html",
+					fieldtype: "HTML",
+					options: `<p class="text-muted">${__("Select an invoice to check swap eligibility")}</p>`,
+				},
+			],
+			size: "small",
+			primary_action_label: __("Select Items to Return"),
+			primary_action: (values) => {
+				if (!dialog._swap_eligible) {
+					frappe.show_alert({ message: __("Invoice not eligible for swap"), indicator: "red" });
+					return;
+				}
+				dialog.hide();
+				EventBus.emit("returns:pick_items", {
+					invoice: values.invoice,
+					action: "exchange",
+				});
+			},
+		});
+
+		dialog._swap_eligible = false;
+
+		// Check eligibility when invoice changes
+		dialog.fields_dict.invoice.$input.on("change", () => {
+			const inv = dialog.get_value("invoice");
+			if (!inv) {
+				dialog._swap_eligible = false;
+				dialog.fields_dict.eligibility_html.$wrapper.html(
+					`<p class="text-muted">${__("Select an invoice to check swap eligibility")}</p>`
+				);
+				return;
+			}
+
+			dialog.fields_dict.eligibility_html.$wrapper.html(
+				`<p class="text-muted"><i class="fa fa-spinner fa-spin"></i> ${__("Checking eligibility...")}</p>`
+			);
+
+			frappe.xcall("ch_pos.api.pos_api.validate_swap_eligibility", {
+				invoice_name: inv,
+			}).then((res) => {
+				if (!res) return;
+				if (res.eligible) {
+					dialog._swap_eligible = true;
+					dialog.fields_dict.eligibility_html.$wrapper.html(`
+						<div class="alert alert-success" style="margin-top:8px;padding:10px 14px">
+							<div style="display:flex;justify-content:space-between;align-items:center">
+								<div>
+									<i class="fa fa-check-circle"></i> <b>${__("Eligible for Swap")}</b>
+								</div>
+								<span class="badge badge-success">${res.days_remaining} ${__("days left")}</span>
+							</div>
+							<div class="text-muted" style="font-size:12px;margin-top:6px">
+								${__("Customer")}: <b>${frappe.utils.escape_html(res.customer_name || res.customer)}</b> ·
+								${__("Purchased")}: ${frappe.datetime.str_to_user(res.posting_date)} ·
+								${__("Total")}: ₹${format_number(res.grand_total)}
+							</div>
+						</div>`);
+				} else {
+					dialog._swap_eligible = false;
+					dialog.fields_dict.eligibility_html.$wrapper.html(`
+						<div class="alert alert-danger" style="margin-top:8px;padding:10px 14px">
+							<i class="fa fa-times-circle"></i> <b>${__("Not Eligible")}</b>
+							<div class="text-muted" style="font-size:12px;margin-top:4px">
+								${frappe.utils.escape_html(res.reason)}
+							</div>
+						</div>`);
+				}
+			});
+		});
+
+		dialog.show();
+	}
+
+	// ── Hold Invoice ────────────────────────────────────
+	hold_invoice() {
+		if (!PosState.cart.length) return;
+		const key = `ch_pos_held_${frappe.datetime.now_datetime()}`;
+		const data = {
+			customer: PosState.customer,
+			cart: PosState.cart,
+			timestamp: frappe.datetime.now_datetime(),
+		};
+		localStorage.setItem(key, JSON.stringify(data));
+		frappe.show_alert({ message: __("Invoice held"), indicator: "blue" });
+		PosState.reset_transaction();
+	}
+
+	// ── Helpers ─────────────────────────────────────────
+	_get_subtotal() {
+		return PosState.cart.reduce((sum, item) => {
+			return sum + flt(item.qty) * flt(item.rate) - flt(item.discount_amount || 0) * flt(item.qty);
+		}, 0);
+	}
+}

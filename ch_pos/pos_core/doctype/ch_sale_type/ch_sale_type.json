@@ -1,0 +1,152 @@
+{
+ "actions": [],
+ "autoname": "field:sale_type_name",
+ "creation": "2026-03-10 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sale_type_name",
+  "code",
+  "is_default",
+  "enabled",
+  "column_break_1",
+  "requires_customer",
+  "requires_payment",
+  "description",
+  "section_sub_types",
+  "sub_types",
+  "section_settings",
+  "default_payment_mode",
+  "column_break_settings",
+  "allowed_companies"
+ ],
+ "fields": [
+  {
+   "fieldname": "sale_type_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Sale Type Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Short Code",
+   "reqd": 1,
+   "unique": 1,
+   "description": "Short code for quick reference (e.g. DS, CS, FS, SS, FREE)"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "label": "Is Default"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "requires_customer",
+   "fieldtype": "Check",
+   "label": "Requires Customer",
+   "description": "Uncheck for walk-in / scratch card sales where customer is optional"
+  },
+  {
+   "default": "1",
+   "fieldname": "requires_payment",
+   "fieldtype": "Check",
+   "label": "Requires Payment",
+   "description": "Uncheck for free giveaway sales (scratch card, loyalty redemption)"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "section_sub_types",
+   "fieldtype": "Section Break",
+   "label": "Sub Types"
+  },
+  {
+   "fieldname": "sub_types",
+   "fieldtype": "Table",
+   "label": "Sub Types",
+   "options": "CH Sale Sub Type",
+   "description": "e.g. Finance → Bajaj, HDFC, Tata Capital"
+  },
+  {
+   "fieldname": "section_settings",
+   "fieldtype": "Section Break",
+   "label": "Settings"
+  },
+  {
+   "fieldname": "default_payment_mode",
+   "fieldtype": "Data",
+   "label": "Default Payment Mode",
+   "description": "Auto-select this payment mode when sale type is chosen"
+  },
+  {
+   "fieldname": "column_break_settings",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "allowed_companies",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Companies",
+   "options": "POS Allowed Company",
+   "description": "Leave empty to allow for all companies"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-10 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH Sale Type",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Sales User"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "ASC",
+ "states": [],
+ "track_changes": 1
+}

@@ -1,0 +1,141 @@
+{
+ "actions": [],
+ "creation": "2026-03-08 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "issingle": 1,
+ "field_order": [
+  "enable_ai",
+  "ai_provider",
+  "api_endpoint",
+  "api_key",
+  "models_section",
+  "comparison_model",
+  "upsell_model",
+  "column_break_models",
+  "max_tokens",
+  "timeout_sec",
+  "cache_ttl_hours",
+  "fallback_to_static",
+  "prompts_section",
+  "comparison_system_prompt",
+  "upsell_system_prompt",
+  "offer_explain_prompt"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "fieldname": "enable_ai",
+   "fieldtype": "Check",
+   "label": "Enable AI Features"
+  },
+  {
+   "default": "OpenAI",
+   "depends_on": "eval:doc.enable_ai",
+   "fieldname": "ai_provider",
+   "fieldtype": "Select",
+   "label": "AI Provider",
+   "options": "OpenAI\nAnthropic\nGoogle\nCustom"
+  },
+  {
+   "depends_on": "eval:doc.enable_ai",
+   "fieldname": "api_endpoint",
+   "fieldtype": "Data",
+   "label": "API Endpoint"
+  },
+  {
+   "depends_on": "eval:doc.enable_ai",
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "label": "API Key"
+  },
+  {
+   "depends_on": "eval:doc.enable_ai",
+   "fieldname": "models_section",
+   "fieldtype": "Section Break",
+   "label": "Model Configuration"
+  },
+  {
+   "default": "gpt-4o",
+   "fieldname": "comparison_model",
+   "fieldtype": "Data",
+   "label": "Comparison Model"
+  },
+  {
+   "default": "gpt-4o-mini",
+   "fieldname": "upsell_model",
+   "fieldtype": "Data",
+   "label": "Upsell / Offer Model"
+  },
+  {
+   "fieldname": "column_break_models",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "2000",
+   "fieldname": "max_tokens",
+   "fieldtype": "Int",
+   "label": "Max Tokens per Request"
+  },
+  {
+   "default": "10",
+   "fieldname": "timeout_sec",
+   "fieldtype": "Int",
+   "label": "Timeout (seconds)"
+  },
+  {
+   "default": "24",
+   "fieldname": "cache_ttl_hours",
+   "fieldtype": "Int",
+   "label": "Cache TTL (hours)"
+  },
+  {
+   "default": "1",
+   "fieldname": "fallback_to_static",
+   "fieldtype": "Check",
+   "label": "Fallback to Static Templates"
+  },
+  {
+   "depends_on": "eval:doc.enable_ai",
+   "fieldname": "prompts_section",
+   "fieldtype": "Section Break",
+   "label": "System Prompts"
+  },
+  {
+   "default": "You are a mobile device expert assistant for a retail store. You help customers compare phones, laptops, and tablets.\n\nRules:\n- Be objective and factual about specs.\n- Write pros/cons in simple language a non-technical person can understand.\n- Never mention competitor stores or pricing from other retailers.\n- Format output strictly as JSON matching the provided schema.\n- Base recommendation on the customer's stated preferences.\n- Keep each pro/con to one sentence.\n- Maximum 4 pros and 3 cons per product.",
+   "fieldname": "comparison_system_prompt",
+   "fieldtype": "Long Text",
+   "label": "Comparison System Prompt"
+  },
+  {
+   "default": "You are a helpful retail assistant. Given the customer's selected item, suggest 2-3 relevant accessories or services they might need. Be helpful, not pushy. Each suggestion: one sentence explaining why. Return JSON only.",
+   "fieldname": "upsell_system_prompt",
+   "fieldtype": "Long Text",
+   "label": "Upsell System Prompt"
+  },
+  {
+   "default": "You are a friendly retail assistant. Explain the discounts and offers applied to a customer's shopping cart in simple, clear language. One short paragraph, max 3 sentences. Use Indian Rupee for currency. Do not mention internal codes or rule names.",
+   "fieldname": "offer_explain_prompt",
+   "fieldtype": "Long Text",
+   "label": "Offer Explain Prompt"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-08 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS AI",
+ "name": "POS AI Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

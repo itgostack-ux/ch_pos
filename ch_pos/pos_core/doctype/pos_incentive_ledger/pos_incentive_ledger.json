@@ -1,0 +1,257 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-03-10 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_executive",
+  "pos_executive",
+  "executive_name",
+  "store",
+  "company",
+  "column_break_exec",
+  "posting_date",
+  "transaction_type",
+  "section_transaction",
+  "invoice",
+  "return_invoice",
+  "item_code",
+  "item_name",
+  "column_break_txn",
+  "item_group",
+  "brand",
+  "qty",
+  "billing_amount",
+  "section_incentive",
+  "incentive_slab",
+  "incentive_type",
+  "incentive_value",
+  "column_break_inc",
+  "incentive_amount",
+  "status",
+  "section_payout",
+  "payout_month",
+  "payout_reference"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_executive",
+   "fieldtype": "Section Break",
+   "label": "Executive"
+  },
+  {
+   "fieldname": "pos_executive",
+   "fieldtype": "Link",
+   "label": "POS Executive",
+   "options": "POS Executive",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "executive_name",
+   "fieldtype": "Data",
+   "label": "Executive Name",
+   "fetch_from": "pos_executive.executive_name",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "label": "Store",
+   "options": "CH Store",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "column_break_exec",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "label": "Date",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "transaction_type",
+   "fieldtype": "Select",
+   "label": "Transaction Type",
+   "options": "Sale\nReturn\nExchange\nSwap\nWarranty\nVAS\nAccessory",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "section_transaction",
+   "fieldtype": "Section Break",
+   "label": "Transaction Details"
+  },
+  {
+   "fieldname": "invoice",
+   "fieldtype": "Link",
+   "label": "POS Invoice",
+   "options": "POS Invoice"
+  },
+  {
+   "fieldname": "return_invoice",
+   "fieldtype": "Link",
+   "label": "Return Invoice",
+   "options": "POS Invoice",
+   "description": "For returns/swaps, the credit note"
+  },
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "label": "Item Code",
+   "options": "Item"
+  },
+  {
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "label": "Item Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_txn",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "item_group",
+   "fieldtype": "Link",
+   "label": "Item Group",
+   "options": "Item Group"
+  },
+  {
+   "fieldname": "brand",
+   "fieldtype": "Link",
+   "label": "Brand",
+   "options": "Brand"
+  },
+  {
+   "fieldname": "qty",
+   "fieldtype": "Float",
+   "label": "Qty",
+   "default": "1"
+  },
+  {
+   "fieldname": "billing_amount",
+   "fieldtype": "Currency",
+   "label": "Billing Amount",
+   "in_list_view": 1,
+   "description": "Net item amount (rate × qty after discounts)"
+  },
+  {
+   "fieldname": "section_incentive",
+   "fieldtype": "Section Break",
+   "label": "Incentive Calculation"
+  },
+  {
+   "fieldname": "incentive_slab",
+   "fieldtype": "Link",
+   "label": "Incentive Slab",
+   "options": "POS Incentive Slab"
+  },
+  {
+   "fieldname": "incentive_type",
+   "fieldtype": "Select",
+   "label": "Incentive Type",
+   "options": "\nPercentage\nFixed Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "incentive_value",
+   "fieldtype": "Float",
+   "label": "Incentive Value",
+   "read_only": 1,
+   "precision": 2
+  },
+  {
+   "fieldname": "column_break_inc",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "incentive_amount",
+   "fieldtype": "Currency",
+   "label": "Incentive Amount",
+   "in_list_view": 1,
+   "read_only": 1,
+   "bold": 1,
+   "description": "Calculated incentive earned"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Pending\nApproved\nPaid\nCancelled",
+   "default": "Pending",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "section_payout",
+   "fieldtype": "Section Break",
+   "label": "Payout"
+  },
+  {
+   "fieldname": "payout_month",
+   "fieldtype": "Data",
+   "label": "Payout Month",
+   "description": "e.g. 2026-03",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payout_reference",
+   "fieldtype": "Data",
+   "label": "Payout Reference",
+   "description": "Payroll / Journal Entry reference",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-10 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS Incentive Ledger",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Stock Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Sales User"
+  }
+ ],
+ "sort_field": "posting_date",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

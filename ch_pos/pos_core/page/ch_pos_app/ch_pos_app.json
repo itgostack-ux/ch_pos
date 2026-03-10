@@ -1,0 +1,37 @@
+{
+ "content": null,
+ "creation": "2026-03-09 10:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Page",
+ "icon": "retail",
+ "idx": 0,
+ "modified": "2026-03-09 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "ch-pos-app",
+ "owner": "Administrator",
+ "page_name": "CH POS",
+ "restrict_to_domain": "",
+ "roles": [
+  {
+   "role": "Accounts User"
+  },
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "Sales User"
+  },
+  {
+   "role": "Sales Manager"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "CH POS"
+}

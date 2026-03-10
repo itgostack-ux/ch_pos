@@ -1,0 +1,167 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-03-10 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_scope",
+  "company",
+  "item_group",
+  "brand",
+  "column_break_scope",
+  "applicable_on",
+  "priority",
+  "is_active",
+  "section_slab",
+  "from_amount",
+  "to_amount",
+  "column_break_slab",
+  "incentive_type",
+  "incentive_value",
+  "section_notes",
+  "description"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_scope",
+   "fieldtype": "Section Break",
+   "label": "Applicability"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "item_group",
+   "fieldtype": "Link",
+   "label": "Item Group",
+   "options": "Item Group",
+   "description": "Leave blank to apply to all item groups"
+  },
+  {
+   "fieldname": "brand",
+   "fieldtype": "Link",
+   "label": "Brand",
+   "options": "Brand",
+   "description": "Leave blank to apply to all brands"
+  },
+  {
+   "fieldname": "column_break_scope",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "applicable_on",
+   "fieldtype": "Select",
+   "label": "Applicable On",
+   "options": "Sale\nReturn\nWarranty\nVAS\nAccessory\nExchange\nSwap",
+   "default": "Sale",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "priority",
+   "fieldtype": "Int",
+   "label": "Priority",
+   "default": "0",
+   "description": "Higher priority slabs are evaluated first. Most-specific match wins."
+  },
+  {
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "label": "Active",
+   "default": "1"
+  },
+  {
+   "fieldname": "section_slab",
+   "fieldtype": "Section Break",
+   "label": "Slab Range & Incentive"
+  },
+  {
+   "fieldname": "from_amount",
+   "fieldtype": "Currency",
+   "label": "From Amount",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Minimum billing amount for this slab"
+  },
+  {
+   "fieldname": "to_amount",
+   "fieldtype": "Currency",
+   "label": "To Amount",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Maximum billing amount for this slab (use large number for no upper limit)"
+  },
+  {
+   "fieldname": "column_break_slab",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "incentive_type",
+   "fieldtype": "Select",
+   "label": "Incentive Type",
+   "options": "Percentage\nFixed Amount",
+   "default": "Percentage",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "incentive_value",
+   "fieldtype": "Float",
+   "label": "Incentive Value",
+   "reqd": 1,
+   "in_list_view": 1,
+   "precision": 2,
+   "description": "Percentage (e.g. 1.5) or fixed amount (e.g. 500)"
+  },
+  {
+   "fieldname": "section_notes",
+   "fieldtype": "Section Break",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-10 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS Incentive Slab",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Stock Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "priority",
+ "sort_order": "DESC",
+ "track_changes": 1
+}
