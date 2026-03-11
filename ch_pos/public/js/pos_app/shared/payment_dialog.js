@@ -264,7 +264,8 @@ export class PaymentDialog {
 	_build_summary_html(grand_total) {
 		const cart = PosState.cart;
 		const product_items = cart.filter((c) => !c.is_warranty && !c.is_vas);
-		const addon_items = cart.filter((c) => c.is_warranty || c.is_vas);
+		const warranty_items = cart.filter((c) => c.is_warranty);
+		const vas_items = cart.filter((c) => c.is_vas);
 
 		let subtotal = 0, discount_total = 0;
 		cart.forEach((item) => {
@@ -294,7 +295,15 @@ export class PaymentDialog {
 			</tr>`;
 		}).join("");
 
-		const addon_lines = addon_items.map((c) => {
+		const warranty_lines = warranty_items.map((c) => {
+			return `<tr style="color:var(--pos-success)">
+				<td>${frappe.utils.escape_html(c.item_name)}</td>
+				<td style="text-align:center">${c.qty}</td>
+				<td style="text-align:right">₹${format_number(flt(c.qty) * flt(c.rate))}</td>
+			</tr>`;
+		}).join("");
+
+		const vas_lines = vas_items.map((c) => {
 			return `<tr style="color:var(--pos-info)">
 				<td>${frappe.utils.escape_html(c.item_name)}</td>
 				<td style="text-align:center">${c.qty}</td>
@@ -329,16 +338,36 @@ export class PaymentDialog {
 				<thead><tr><th>${__("Item")}</th><th style="text-align:center">${__("Qty")}</th><th style="text-align:right">${__("Amount")}</th></tr></thead>
 				<tbody>
 					${item_lines}
-					${addon_lines}
+					${warranty_lines ? `<tr><td colspan="3" style="font-size:11px;font-weight:600;color:var(--pos-success);padding-top:6px">🛡 ${__("Warranty")}</td></tr>` + warranty_lines : ""}
+					${vas_lines ? `<tr><td colspan="3" style="font-size:11px;font-weight:600;color:var(--pos-info);padding-top:6px">✦ ${__("Value Added Services")}</td></tr>` + vas_lines : ""}
 				</tbody>
-			</table>
-			<table class="ch-pay-totals-table">
+			</table>			${this._margin_summary_html(cart)}			<table class="ch-pay-totals-table">
 				<tbody>
 					<tr><td colspan="2"><b>${__("Subtotal")}</b></td><td style="text-align:right"><b>₹${format_number(subtotal)}</b></td></tr>
 					${deductions}
 					<tr class="ch-pay-grand-total"><td colspan="2"><b>${__("Net Payable")}</b></td><td style="text-align:right"><b>₹${format_number(grand_total)}</b></td></tr>
 				</tbody>
 			</table>
+		</div>`;
+	}
+
+	_margin_summary_html(cart) {
+		const margin_items = cart.filter(
+			(c) => c.ch_item_type === "Refurbished" || c.ch_item_type === "Pre-Owned"
+		);
+		if (!margin_items.length) return "";
+
+		const margin_total = margin_items.reduce(
+			(s, c) => s + flt(c.qty) * flt(c.rate), 0
+		);
+
+		return `<div class="ch-pos-margin-info" style="background:var(--pos-bg-alt,#fffbea);border-radius:8px;padding:8px 12px;margin:6px 0;font-size:12px;border:1px solid var(--pos-warning,#f0c060);">
+			<div style="font-weight:600;margin-bottom:2px;color:var(--pos-warning-dark,#8a6d00);">
+				<i class="fa fa-info-circle"></i> ${__("Margin Scheme")}
+			</div>
+			<div style="color:var(--pos-text-muted)">
+				${margin_items.length} ${__("item(s)")} — ${__("GST on margin only")} &middot; ₹${format_number(margin_total)} ${__("total")}
+			</div>
 		</div>`;
 	}
 }

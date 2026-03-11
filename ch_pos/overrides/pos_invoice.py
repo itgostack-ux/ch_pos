@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import flt
+from frappe.utils import flt, cint
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import POSInvoice
 
 
@@ -9,6 +9,51 @@ class CustomPOSInvoice(POSInvoice):
     def validate(self):
         super().validate()
         _apply_margin_scheme(self)
+
+    def get_gl_entries(self, warehouse_account=None):
+        gl_entries = super().get_gl_entries(warehouse_account)
+        if not cint(self.get("custom_is_margin_scheme")):
+            return gl_entries
+
+        # For mixed carts: reduce GST GL amounts by the margin-item GST saving
+        margin_gst = flt(self.get("custom_margin_gst"))
+        if margin_gst <= 0:
+            return gl_entries
+
+        # Calculate what GST SHOULD have been on margin items at full value
+        total_margin_amount = sum(
+            flt(item.amount) for item in self.items if cint(item.get("custom_is_margin_item"))
+        )
+        total_margin_taxable = sum(
+            flt(item.get("custom_taxable_value")) for item in self.items
+            if cint(item.get("custom_is_margin_item"))
+        )
+        # GST saving = GST that would have been charged on full amount minus actual margin GST
+        gst_saving = 0
+        for tax in self.taxes:
+            if tax.charge_type != "On Net Total":
+                continue
+            full_margin_gst = (total_margin_amount * flt(tax.rate)) / 100
+            actual_margin_gst = (total_margin_taxable * flt(tax.rate)) / 100
+            gst_saving += full_margin_gst - actual_margin_gst
+
+        if gst_saving <= 0:
+            return gl_entries
+
+        # Adjust GST GL entries downward by the saving amount
+        adjusted = []
+        for gl in gl_entries:
+            if "gst" in (gl.account or "").lower():
+                if flt(gl.debit) > 0:
+                    gl.debit = max(0, flt(gl.debit) - gst_saving / 2)
+                    gl.debit_in_account_currency = gl.debit
+                if flt(gl.credit) > 0:
+                    gl.credit = max(0, flt(gl.credit) - gst_saving / 2)
+                    gl.credit_in_account_currency = gl.credit
+                if flt(gl.debit) == 0 and flt(gl.credit) == 0:
+                    continue
+            adjusted.append(gl)
+        return adjusted
 
 
 # ── doc_event handlers (called via hooks.py) ─────────────────────
@@ -182,6 +227,7 @@ def _apply_margin_scheme(doc):
         total_gst += margin_tax
 
     # Calculate exempted value per margin item
+    total_exempted = 0
     for item in doc.items:
         if not item.get("custom_is_margin_item"):
             continue
@@ -200,6 +246,12 @@ def _apply_margin_scheme(doc):
         if exempted < 0:
             frappe.throw(f"Exempted value cannot be negative for item {item.item_code}")
         item.custom_exempted_value = exempted
+        total_exempted += exempted
+
+    # Populate header-level margin summary fields
+    doc.custom_margin_taxable = total_margin_taxable
+    doc.custom_margin_gst = total_gst
+    doc.custom_margin_exempted = total_exempted
 
 
 def _get_incoming_rate(item):

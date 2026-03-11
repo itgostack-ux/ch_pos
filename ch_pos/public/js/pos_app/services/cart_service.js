@@ -113,6 +113,7 @@ export class CartService {
 			is_vas: false,
 			has_serial_no: cint(item_data.has_serial_no),
 			serial_no: serial_no || "",
+			ch_item_type: item_data.ch_item_type || "",
 		};
 		this._apply_best_offer(cart_item);
 		PosState.cart.push(cart_item);
@@ -282,11 +283,11 @@ export class CartService {
 			(p) => `${p.name} — ${p.plan_name} (${p.duration_months}m) ₹${format_number(p.price)}`
 		);
 		const dialog = new frappe.ui.Dialog({
-			title: __("Add Warranty / Protection Plan?"),
+			title: __("Add Extended Warranty?"),
 			fields: [
 				{
 					fieldtype: "HTML",
-					options: `<p class="text-muted">${__("Available plans for")} <b>${frappe.utils.escape_html(cart_item.item_name)}</b></p>`,
+					options: `<p class="text-muted">${__("Warranty plans for")} <b>${frappe.utils.escape_html(cart_item.item_name)}</b></p>`,
 				},
 				{
 					fieldname: "plan",

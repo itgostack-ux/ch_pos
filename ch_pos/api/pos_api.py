@@ -127,6 +127,16 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
         # Set warranty_plan on the invoice item if custom field exists
         if item.get("warranty_plan"):
             row["custom_warranty_plan"] = item.get("warranty_plan")
+
+        # Pass serial_no so margin scheme can look up purchase cost
+        if item.get("serial_no"):
+            row["serial_no"] = item.get("serial_no")
+
+        # Auto-detect margin items from ch_item_type (Refurbished / Pre-Owned)
+        ch_item_type = frappe.db.get_value("Item", item.get("item_code"), "ch_item_type")
+        if ch_item_type in ("Refurbished", "Pre-Owned"):
+            row["custom_is_margin_item"] = 1
+
         inv.append("items", row)
 
         # Collect warranty/VAS info for post-submit processing
@@ -244,10 +254,11 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
 
 @frappe.whitelist()
 def get_warranty_plans(item_code, item_group=None, brand=None):
-    """Return active warranty plans applicable to an item."""
+    """Return active warranty plans (Own / Extended) applicable to an item."""
     today = nowdate()
     filters = {
         "status": "Active",
+        "plan_type": ["in", ["Own Warranty", "Extended Warranty"]],
     }
     # Check channel applicability later; first get all active plans
     plans = frappe.get_all(
@@ -607,7 +618,7 @@ def validate_serial_for_sale(serial_no, item_code, warehouse):
 
     sn = frappe.db.get_value(
         "Serial No", serial_no,
-        ["item_code", "warehouse", "status", "delivery_document_type"],
+        ["item_code", "warehouse", "status"],
         as_dict=True,
     )
 
@@ -2188,11 +2199,16 @@ def _create_incentive_entries(invoice, pos_executive, transaction_type="Sale"):
     payout_month = str(posting_date)[:7]  # YYYY-MM
 
     for item in invoice.items:
-        # Skip warranty/VAS child items from incentive on "Sale" type
-        # They get their own type incentive
+        # Warranty / VAS items get their own incentive type
         item_type = transaction_type
         if item.get("custom_warranty_plan"):
-            item_type = "Warranty"
+            wp_type = frappe.db.get_value(
+                "CH Warranty Plan", item.custom_warranty_plan, "plan_type"
+            )
+            if wp_type in ("Value Added Service", "Protection Plan"):
+                item_type = "VAS"
+            else:
+                item_type = "Warranty"
 
         billing_amount = flt(item.amount)
         if billing_amount <= 0:

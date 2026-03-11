@@ -760,6 +760,17 @@
   font-weight: 600;
   font-family: var(--pos-font-mono);
 }
+.cart-margin-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-left: 4px;
+  border-radius: var(--pos-radius-pill);
+  background: #fff3cd;
+  color: #856404;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
 .cart-item-amount {
   font-size: var(--pos-fs-sm);
   font-weight: 700;

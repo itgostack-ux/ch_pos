@@ -320,7 +320,11 @@ def get_item_detail_for_pos(item_code, warehouse=None, price_list=None):
     # Warranty plans
     warranty_plans = frappe.db.get_all(
         "CH Warranty Plan",
-        filters={"status": "Active", "brand": item.brand},
+        filters={
+            "status": "Active",
+            "brand": item.brand,
+            "plan_type": ["in", ["Own Warranty", "Extended Warranty"]],
+        },
         fields=["name", "plan_name", "price", "duration_months"],
     )
 

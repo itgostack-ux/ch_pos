@@ -593,6 +593,9 @@ export class CartPanel {
 		const serial_tag = item.serial_no
 			? `<span class="cart-serial-tag">${frappe.utils.escape_html(item.serial_no)}</span>`
 			: "";
+		const margin_tag = (item.ch_item_type === "Refurbished" || item.ch_item_type === "Pre-Owned")
+			? `<span class="cart-margin-tag">${frappe.utils.escape_html(item.ch_item_type)}</span>`
+			: "";
 		const special = item.is_warranty ? " is-warranty-line" : item.is_vas ? " is-vas-line" : "";
 
 		return `
@@ -600,7 +603,7 @@ export class CartPanel {
 				<div class="cart-line-top">
 					<span class="cart-item-name">
 						${frappe.utils.escape_html(item.item_name)}
-						${offer_tag}${serial_tag}
+						${offer_tag}${serial_tag}${margin_tag}
 					</span>
 					<span class="cart-item-amount">₹${format_number(amount)}</span>
 				</div>
