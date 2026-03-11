@@ -18,9 +18,9 @@ import { PosState, EventBus } from "../state.js";
  */
 const COMPANY_MODE_MAP = {
 	// Retail company modes (GoGizmo or any retail company)
-	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "model_compare"],
+	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "model_compare", "claims"],
 	// Service company modes (GoFix or any service company)
-	service: ["sell", "returns", "buyback", "repair", "service"],
+	service: ["sell", "returns", "buyback", "repair", "service", "claims"],
 };
 
 /** Heuristic: does this company name indicate a service company? */
@@ -44,6 +44,7 @@ const MODE_SECTIONS = [
 			{ key: "buyback", icon: "fa-exchange",  label: __("Buyback") },
 			{ key: "repair",  icon: "fa-wrench",    label: __("Repair") },
 			{ key: "service", icon: "fa-cogs",      label: __("Service") },
+			{ key: "claims",  icon: "fa-shield",    label: __("Claims") },
 		],
 	},
 	{
