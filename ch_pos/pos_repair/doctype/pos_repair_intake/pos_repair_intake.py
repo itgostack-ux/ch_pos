@@ -6,6 +6,26 @@ class POSRepairIntake(Document):
     def on_submit(self):
         self._create_service_request()
 
+    def on_cancel(self):
+        """Handle cancellation — cancel linked Service Request if still in Draft."""
+        if self.service_request:
+            sr_status = frappe.db.get_value("Service Request", self.service_request, "docstatus")
+            if sr_status == 0:
+                # Draft — can delete
+                frappe.delete_doc("Service Request", self.service_request, ignore_permissions=True)
+            elif sr_status == 1:
+                # Submitted — try to cancel
+                try:
+                    sr_doc = frappe.get_doc("Service Request", self.service_request)
+                    sr_doc.cancel()
+                except Exception:
+                    frappe.log_error(
+                        f"Could not auto-cancel Service Request {self.service_request} "
+                        f"when cancelling POS Repair Intake {self.name}",
+                        "POS Repair Intake Cancel",
+                    )
+        self.db_set("status", "Cancelled")
+
     def _create_service_request(self):
         """Auto-create a gofix Service Request from the intake data."""
         if self.service_request:

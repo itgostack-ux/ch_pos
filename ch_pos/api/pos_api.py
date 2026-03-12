@@ -230,7 +230,11 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
 
 
 def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price):
-    """Create a CH Sold Plan when a warranty is sold via POS."""
+    """Create a CH Sold Plan when a warranty is sold via POS.
+
+    Uses the standard Frappe document lifecycle (insert → submit) so that
+    the CH Sold Plan controller's validate/on_submit hooks run properly.
+    """
     plan_doc = frappe.get_cached_doc("CH Warranty Plan", warranty_plan)
     today = nowdate()
     sp = frappe.new_doc("CH Sold Plan")
@@ -246,8 +250,7 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
     sp.max_claims = plan_doc.max_claims or 1
     sp.deductible_amount = flt(plan_doc.deductible_amount)
     sp.sold_by = frappe.session.user
-    sp.flags.ignore_permissions = True
-    sp.save()
+    sp.insert(ignore_permissions=True)
     sp.submit()
     return sp
 
@@ -708,8 +711,11 @@ def check_serial_returnable(serial_no, original_invoice=None):
 @frappe.whitelist()
 def create_repair_job_from_pos(service_request):
     """Accept a Service Request and create Job Assignment in one step from POS."""
-    from gofix.gofix_services.doctype.service_request.service_request import accept_service_request
-    from gofix.gofix_services.doctype.job_assignment.job_assignment import create_job_sheet_from_service_order
+    try:
+        from gofix.gofix_services.doctype.service_request.service_request import accept_service_request
+        from gofix.gofix_services.doctype.job_assignment.job_assignment import create_job_sheet_from_service_order
+    except ImportError:
+        frappe.throw(frappe._("GoFix app is not installed — cannot create repair jobs from POS."))
 
     # Step 1: Accept SR → creates Service Order
     service_order = accept_service_request(service_request)
@@ -772,7 +778,7 @@ def get_store_repairs(pos_profile):
 # ── Buyback Valuation ────────────────────────────────────────
 @frappe.whitelist()
 def calculate_buyback_valuation(item_code, condition_checks):
-    """Calculate buyback valuation based on device condition checks.
+    """Calculate buyback valuation using ch_erp_buyback's centralized pricing engine.
 
     condition_checks: dict with keys like screen, body, buttons, charging,
     camera, speaker_mic — each True (pass) or False (fail).
@@ -781,60 +787,90 @@ def calculate_buyback_valuation(item_code, condition_checks):
     if isinstance(condition_checks, str):
         condition_checks = frappe.parse_json(condition_checks)
 
-    # Get base buyback price from CH Item Price
+    # Auto-grade from condition checks
+    check_labels = {
+        "screen": "Screen", "body": "Body", "buttons": "Buttons",
+        "charging": "Charging", "camera": "Camera", "speaker_mic": "Speaker/Mic",
+    }
+    fail_count = sum(1 for v in condition_checks.values() if not v)
+    fail_pct = (fail_count / max(len(condition_checks), 1)) * 100
+
+    if fail_count == 0:
+        grade = "A"
+    elif fail_count <= 1 and fail_pct <= 20:
+        grade = "B"
+    elif fail_count <= 2 and fail_pct <= 40:
+        grade = "C"
+    elif fail_pct <= 60:
+        grade = "D"
+    else:
+        grade = "F"
+
+    # Build diagnostic test format for pricing engine
+    diagnostic_tests = []
+    for key, label in check_labels.items():
+        passed = condition_checks.get(key, True)
+        diagnostic_tests.append({
+            "test_code": key,
+            "result": "Pass" if passed else "Fail",
+        })
+
+    # Get item metadata for the pricing engine
+    brand = frappe.db.get_value("Item", item_code, "brand")
+    item_group = frappe.db.get_value("Item", item_code, "item_group")
+
+    try:
+        from ch_erp_buyback.buyback.buyback.pricing.engine import calculate_estimated_price
+
+        result = calculate_estimated_price(
+            item_code=item_code,
+            grade=grade,
+            diagnostic_tests=diagnostic_tests,
+            brand=brand,
+            item_group=item_group,
+        )
+        return {
+            "base_price": flt(result.get("base_price", 0)),
+            "deductions": result.get("deductions", []),
+            "total_deduction": flt(result.get("total_deductions", 0)),
+            "final_price": flt(result.get("estimated_price", 0)),
+            "grade": grade,
+        }
+    except ImportError:
+        frappe.log_error(
+            "ch_erp_buyback not installed — using fallback buyback pricing",
+            "POS Buyback Fallback",
+        )
+        return _fallback_buyback_valuation(item_code, grade, condition_checks)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "POS Buyback Pricing Error")
+        return _fallback_buyback_valuation(item_code, grade, condition_checks)
+
+
+def _fallback_buyback_valuation(item_code, grade, condition_checks):
+    """Fallback when ch_erp_buyback pricing engine is unavailable."""
     base_price = flt(frappe.db.get_value(
         "CH Item Price",
         {"item_code": item_code, "channel": "Buyback", "status": "Active"},
         "selling_price",
     ))
     if not base_price:
-        # Fallback: use a percentage of selling price
         selling = flt(frappe.db.get_value(
             "CH Item Price",
             {"item_code": item_code, "channel": "POS", "status": "Active"},
             "selling_price",
         ))
-        base_price = flt(selling * 0.4)  # 40% of selling price as base
+        base_price = flt(selling * 0.4)
 
-    # Calculate deductions based on condition
-    deduction_rules = {
-        "screen": {"label": "Screen Damage", "pct": 25},
-        "body": {"label": "Body Damage", "pct": 10},
-        "buttons": {"label": "Button Issues", "pct": 5},
-        "charging": {"label": "Charging Port Issue", "pct": 15},
-        "camera": {"label": "Camera Defect", "pct": 10},
-        "speaker_mic": {"label": "Speaker/Mic Issue", "pct": 10},
-    }
-
-    deductions = []
-    total_deduction_pct = 0
-    fail_count = 0
-    for key, rule in deduction_rules.items():
-        passed = condition_checks.get(key, True)
-        if not passed:
-            amt = flt(base_price * rule["pct"] / 100)
-            deductions.append({"check": key, "label": rule["label"], "pct": rule["pct"], "amount": amt})
-            total_deduction_pct += rule["pct"]
-            fail_count += 1
-
-    total_deduction = flt(base_price * total_deduction_pct / 100)
+    # Simple grade-based deduction as fallback
+    grade_pct = {"A": 0, "B": 10, "C": 25, "D": 40, "F": 70}
+    deduction_pct = grade_pct.get(grade, 50)
+    total_deduction = flt(base_price * deduction_pct / 100)
     final_price = max(0, flt(base_price - total_deduction))
-
-    # Auto-grade
-    if fail_count == 0:
-        grade = "A"
-    elif fail_count <= 1 and total_deduction_pct <= 10:
-        grade = "B"
-    elif fail_count <= 2 and total_deduction_pct <= 25:
-        grade = "C"
-    elif total_deduction_pct <= 50:
-        grade = "D"
-    else:
-        grade = "F"
 
     return {
         "base_price": base_price,
-        "deductions": deductions,
+        "deductions": [{"label": f"Grade {grade} adjustment", "pct": deduction_pct, "amount": total_deduction}],
         "total_deduction": total_deduction,
         "final_price": final_price,
         "grade": grade,
@@ -1939,15 +1975,21 @@ def create_quick_job_card(customer, contact_number, device_item,
     sr.submit()
 
     # 2. Accept → creates Service Order
-    from gofix.gofix_services.doctype.service_request.service_request import (
-        accept_service_request,
-    )
+    try:
+        from gofix.gofix_services.doctype.service_request.service_request import (
+            accept_service_request,
+        )
+    except ImportError:
+        frappe.throw(frappe._("GoFix app is not installed — cannot create repair jobs from POS."))
     service_order = accept_service_request(sr.name)
 
     # 3. Create Job Assignment
-    from gofix.gofix_services.doctype.job_assignment.job_assignment import (
-        create_job_sheet_from_service_order,
-    )
+    try:
+        from gofix.gofix_services.doctype.job_assignment.job_assignment import (
+            create_job_sheet_from_service_order,
+        )
+    except ImportError:
+        frappe.throw(frappe._("GoFix app is not installed — cannot create job assignments from POS."))
     job_name = create_job_sheet_from_service_order(
         service_order,
         job_type="Repair",

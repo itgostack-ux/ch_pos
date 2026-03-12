@@ -9,6 +9,11 @@ class POSKioskToken(Document):
             self.expires_at = add_to_date(now_datetime(), minutes=30)
         self._calculate_total()
 
+    def on_cancel(self):
+        """Handle token cancellation — expire the token."""
+        if self.status == "Active":
+            self.db_set("status", "Expired")
+
     def _calculate_total(self):
         self.total_estimate = sum(row.amount or 0 for row in self.items)
 

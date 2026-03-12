@@ -111,9 +111,10 @@ def _enrich_item(row, warehouse, profile_doc, nearby_warehouses=None):
         order_by="idx",
     )
 
-    # Derive item condition type and grade from item_name keywords
-    name_lower = (row.item_name or "").lower()
+    # Use the ch_item_type field from Item master (set by ch_item_master)
+    # Only fall back to name-based heuristic if the field is not set
     if not row.get("ch_item_type"):
+        name_lower = (row.item_name or "").lower()
         if "refurb" in name_lower or "renewed" in name_lower:
             row.ch_item_type = "Refurbished"
         elif "display" in name_lower or "demo" in name_lower:
@@ -121,13 +122,20 @@ def _enrich_item(row, warehouse, profile_doc, nearby_warehouses=None):
         elif "pre-owned" in name_lower or "preowned" in name_lower or "used" in name_lower:
             row.ch_item_type = "Pre-Owned"
 
-    # Derive grade from item_name for refurb items
+    # Condition grade — prefer ch_item_master's condition_grade field if available
     row.condition_grade = ""
     if row.get("ch_item_type") in ("Refurbished", "Pre-Owned"):
-        for grade in ["Superb", "Good", "Fair", "Excellent"]:
-            if grade.lower() in name_lower:
-                row.condition_grade = grade
-                break
+        # Try to get grade from CH Model or Item if available
+        condition_grade = frappe.db.get_value("Item", row.item_code, "condition_grade")
+        if condition_grade:
+            row.condition_grade = condition_grade
+        else:
+            # Fallback to name-based detection
+            name_lower = (row.item_name or "").lower()
+            for grade in ["Superb", "Good", "Fair", "Excellent"]:
+                if grade.lower() in name_lower:
+                    row.condition_grade = grade
+                    break
 
     # CH Item Price (POS channel)
     ch_price = frappe.db.get_value(

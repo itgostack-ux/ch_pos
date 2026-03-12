@@ -3,6 +3,29 @@ from frappe.utils import flt, cint
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import POSInvoice
 
 
+def _update_serial_status(serial_no, new_status, company=None, warehouse=None, remarks=None, **kwargs):
+    """Call the centralized CH Serial Lifecycle API for status transitions."""
+    from ch_item_master.ch_item_master.doctype.ch_serial_lifecycle.ch_serial_lifecycle import (
+        update_lifecycle_status,
+    )
+    return update_lifecycle_status(
+        serial_no=serial_no,
+        new_status=new_status,
+        company=company,
+        warehouse=warehouse,
+        remarks=remarks,
+        **kwargs,
+    )
+
+
+def _create_or_update_device(serial_no, customer, **kwargs):
+    """Call the centralized CH Customer Device API for device registration."""
+    from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import (
+        CHCustomerDevice,
+    )
+    return CHCustomerDevice.create_or_update_for_serial(serial_no, customer, **kwargs)
+
+
 class CustomPOSInvoice(POSInvoice):
     """Extends POS Invoice for margin scheme GST on selling side."""
 
@@ -65,7 +88,11 @@ def validate_margin_scheme(doc, method=None):
 
 
 def create_customer_device_records(doc, method=None):
-    """Hook: on_submit — register sold devices under customer's account."""
+    """Hook: on_submit — register sold devices under customer's account.
+
+    Delegates to ch_item_master's CHCustomerDevice.create_or_update_for_serial()
+    which handles deduplication, warranty syncing, and field population.
+    """
     for item in doc.items:
         serial_nos = (item.serial_no or "").strip()
         if not serial_nos:
@@ -76,37 +103,38 @@ def create_customer_device_records(doc, method=None):
             if not sn:
                 continue
 
-            # Check if customer device already exists
-            if frappe.db.exists("CH Customer Device", {"serial_no": sn, "customer": doc.customer}):
-                continue
-
-            device = frappe.new_doc("CH Customer Device")
-            device.customer = doc.customer
-            device.company = doc.company
-            device.serial_no = sn
-            device.item_code = item.item_code
-            device.item_name = item.item_name
-            device.brand = item.brand or frappe.db.get_value("Item", item.item_code, "brand")
-            device.purchase_date = doc.posting_date
-            device.purchase_invoice = doc.name
-            device.purchase_price = flt(item.rate)
-            device.purchase_store = doc.pos_profile
-            device.current_status = "Active"
+            device_kwargs = {
+                "company": doc.company,
+                "item_code": item.item_code,
+                "item_name": item.item_name,
+                "brand": item.brand or frappe.db.get_value("Item", item.item_code, "brand"),
+                "purchase_date": doc.posting_date,
+                "purchase_invoice": doc.name,
+                "purchase_price": flt(item.rate),
+                "purchase_store": doc.pos_profile,
+                "current_status": "Active",
+            }
 
             # Attach warranty plan if selected
             if item.get("custom_warranty_plan"):
                 plan = frappe.get_cached_doc("CH Warranty Plan", item.custom_warranty_plan)
-                device.active_warranty_plan = plan.name
-                device.warranty_plan_name = plan.plan_name
-                device.warranty_months = plan.duration_months
-                device.warranty_expiry = frappe.utils.add_months(doc.posting_date, plan.duration_months)
-                device.warranty_status = "Active"
+                device_kwargs.update({
+                    "active_warranty_plan": plan.name,
+                    "warranty_plan_name": plan.plan_name,
+                    "warranty_months": plan.duration_months,
+                    "warranty_expiry": frappe.utils.add_months(doc.posting_date, plan.duration_months),
+                    "warranty_status": "Active",
+                })
 
-            device.insert(ignore_permissions=True)
+            _create_or_update_device(sn, doc.customer, **device_kwargs)
 
 
 def update_serial_lifecycle(doc, method=None):
-    """Hook: on_submit — update CH Serial Lifecycle status to 'Sold'."""
+    """Hook: on_submit — update CH Serial Lifecycle status to 'Sold'.
+
+    Delegates to ch_item_master's update_lifecycle_status() which enforces
+    valid state transitions and writes audit log entries.
+    """
     for item in doc.items:
         serial_nos = (item.serial_no or "").strip()
         if not serial_nos:
@@ -117,20 +145,29 @@ def update_serial_lifecycle(doc, method=None):
             if not sn:
                 continue
 
-            lifecycle = frappe.db.get_value("CH Serial Lifecycle", {"serial_no": sn})
-            if lifecycle:
-                frappe.db.set_value("CH Serial Lifecycle", lifecycle, {
-                    "lifecycle_status": "Sold",
-                    "sale_date": doc.posting_date,
-                    "sale_document": doc.name,
-                    "sale_rate": flt(item.rate),
-                    "customer": doc.customer,
-                    "customer_name": doc.customer_name,
-                })
+            if not frappe.db.exists("CH Serial Lifecycle", sn):
+                continue
+
+            _update_serial_status(
+                serial_no=sn,
+                new_status="Sold",
+                company=doc.company,
+                warehouse=doc.get("set_warehouse") or doc.items[0].warehouse if doc.items else None,
+                remarks=f"Sold via POS Invoice {doc.name}",
+                sale_date=doc.posting_date,
+                sale_document=doc.name,
+                sale_rate=flt(item.rate),
+                customer=doc.customer,
+                customer_name=doc.customer_name,
+            )
 
 
 def reverse_serial_lifecycle(doc, method=None):
-    """Hook: on_cancel — revert serial lifecycle status to 'In Stock'."""
+    """Hook: on_cancel — revert serial lifecycle status.
+
+    Uses 'Returned' status since that is the valid transition from 'Sold'
+    in ch_item_master's VALID_TRANSITIONS dict.
+    """
     for item in doc.items:
         serial_nos = (item.serial_no or "").strip()
         if not serial_nos:
@@ -141,16 +178,31 @@ def reverse_serial_lifecycle(doc, method=None):
             if not sn:
                 continue
 
-            lifecycle = frappe.db.get_value("CH Serial Lifecycle", {"serial_no": sn})
-            if lifecycle:
-                frappe.db.set_value("CH Serial Lifecycle", lifecycle, {
-                    "lifecycle_status": "In Stock",
-                    "sale_date": None,
-                    "sale_document": None,
-                    "sale_rate": 0,
-                    "customer": None,
-                    "customer_name": None,
-                })
+            if not frappe.db.exists("CH Serial Lifecycle", sn):
+                continue
+
+            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            # Sold → Returned is a valid transition; then Returned → In Stock
+            if current_status == "Sold":
+                _update_serial_status(
+                    serial_no=sn,
+                    new_status="Returned",
+                    company=doc.company,
+                    remarks=f"POS Invoice {doc.name} cancelled",
+                    sale_date=None,
+                    sale_document=None,
+                    sale_rate=0,
+                    customer=None,
+                    customer_name=None,
+                )
+                # Returned → In Stock
+                _update_serial_status(
+                    serial_no=sn,
+                    new_status="In Stock",
+                    company=doc.company,
+                    warehouse=item.warehouse,
+                    remarks=f"Returned to stock — POS Invoice {doc.name} cancelled",
+                )
 
 
 def update_kiosk_token_status(doc, method=None):
@@ -160,6 +212,41 @@ def update_kiosk_token_status(doc, method=None):
         frappe.db.set_value("POS Kiosk Token", token, {
             "status": "Converted",
             "converted_invoice": doc.name,
+        })
+
+
+def deactivate_customer_devices(doc, method=None):
+    """Hook: on_cancel — deactivate customer device records created by this invoice."""
+    for item in doc.items:
+        serial_nos = (item.serial_no or "").strip()
+        if not serial_nos:
+            continue
+
+        for sn in serial_nos.split("\n"):
+            sn = sn.strip()
+            if not sn:
+                continue
+
+            device = frappe.db.get_value(
+                "CH Customer Device",
+                {"serial_no": sn, "customer": doc.customer, "purchase_invoice": doc.name},
+                "name",
+            )
+            if device:
+                frappe.db.set_value("CH Customer Device", device, "current_status", "Inactive")
+
+
+def revert_kiosk_token_status(doc, method=None):
+    """Hook: on_cancel — revert kiosk token from Converted back to Expired.
+
+    We set 'Expired' rather than 'Active' since the token has likely passed its
+    expiry time by now. If the user needs to re-use it, they should create a new token.
+    """
+    token = doc.get("custom_kiosk_token")
+    if token:
+        frappe.db.set_value("POS Kiosk Token", token, {
+            "status": "Expired",
+            "converted_invoice": None,
         })
 
 

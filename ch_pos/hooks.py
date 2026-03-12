@@ -43,6 +43,8 @@ doc_events = {
         ],
         "on_cancel": [
             "ch_pos.overrides.pos_invoice.reverse_serial_lifecycle",
+            "ch_pos.overrides.pos_invoice.deactivate_customer_devices",
+            "ch_pos.overrides.pos_invoice.revert_kiosk_token_status",
         ],
     },
 }
