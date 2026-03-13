@@ -2291,3 +2291,284 @@
   padding: 4px 10px;
   border-radius: var(--pos-radius-sm);
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Buyback Workspace — Stage-aware Flow Styles
+   Added for full POS buyback flow (ASSESS → INSPECT → APPROVE → SETTLE)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Split layout */
+.ch-bb-split {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.ch-bb-results-col {
+  width: 340px;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+.ch-bb-detail-col {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Result cards — Mobile App badge */
+.ch-bb-card {
+  border: 1.5px solid var(--pos-border, #e2e8f0);
+  border-radius: var(--pos-radius, 8px);
+  padding: 12px 14px;
+  cursor: pointer;
+  margin-bottom: 8px;
+  background: var(--pos-surface, #fff);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.ch-bb-card:hover { border-color: var(--pos-primary, #6366f1); }
+.ch-bb-card.selected {
+  border-color: var(--pos-primary, #6366f1);
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.12);
+  background: var(--pos-primary-light, #eef2ff);
+}
+
+/* Stage progress bar */
+.ch-bb-progress {
+  display: flex;
+  align-items: center;
+  padding: 16px 20px 8px;
+}
+.ch-bb-progress-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.ch-bb-progress-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--pos-border, #e2e8f0);
+  color: var(--pos-text-muted, #94a3b8);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--pos-border, #e2e8f0);
+}
+.ch-bb-progress-step.active .ch-bb-progress-dot {
+  background: var(--pos-primary, #6366f1);
+  border-color: var(--pos-primary, #6366f1);
+  color: #fff;
+}
+.ch-bb-progress-step.done .ch-bb-progress-dot {
+  background: var(--pos-success, #10b981);
+  border-color: var(--pos-success, #10b981);
+  color: #fff;
+}
+.ch-bb-progress-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--pos-text-muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.ch-bb-progress-step.active .ch-bb-progress-label { color: var(--pos-primary, #6366f1); }
+.ch-bb-progress-step.done .ch-bb-progress-label { color: var(--pos-success, #10b981); }
+.ch-bb-progress-line {
+  flex: 1;
+  height: 2px;
+  background: var(--pos-border, #e2e8f0);
+  margin: 0 4px;
+  margin-bottom: 18px;
+}
+.ch-bb-progress-line.done { background: var(--pos-success, #10b981); }
+
+/* Detail card layout */
+.ch-bb-detail-card {
+  background: var(--pos-surface, #fff);
+  border: 1.5px solid var(--pos-border, #e2e8f0);
+  border-radius: var(--pos-radius, 8px);
+  overflow: hidden;
+}
+.ch-bb-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--pos-border, #e2e8f0);
+  background: var(--pos-bg-alt, #f8f9fb);
+}
+.ch-bb-device-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  border-bottom: 1px solid var(--pos-border, #e2e8f0);
+}
+.ch-bb-device-strip > div {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px;
+  border-right: 1px solid var(--pos-border, #e2e8f0);
+}
+.ch-bb-device-strip > div:last-child { border-right: none; }
+.ch-bb-strip-label {
+  font-size: 10px;
+  color: var(--pos-text-muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+.ch-bb-strip-val {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pos-text, #1e293b);
+  margin-top: 2px;
+}
+.ch-bb-stage-body { padding: 16px 18px; }
+
+/* Valuation banner */
+.ch-bb-valuation-banner {
+  background: var(--pos-primary-light, #eef2ff);
+  border: 1.5px solid var(--pos-primary, #6366f1);
+  border-radius: var(--pos-radius, 8px);
+  padding: 16px 20px;
+  text-align: center;
+}
+.ch-bb-val-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--pos-primary, #6366f1);
+  font-weight: 700;
+}
+.ch-bb-val-amount {
+  font-size: 36px;
+  font-weight: 800;
+  color: var(--pos-primary, #6366f1);
+  margin: 4px 0 2px;
+  line-height: 1;
+}
+.ch-bb-val-sub {
+  font-size: 12px;
+  color: var(--pos-text-muted, #94a3b8);
+}
+
+/* Section label */
+.ch-bb-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--pos-text-muted, #94a3b8);
+  margin-bottom: 8px;
+}
+
+/* Actions row */
+.ch-bb-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* Field label */
+.ch-bb-field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pos-text-muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+/* Diagnostic grid */
+.ch-bb-diag-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+.ch-bb-diag-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--pos-radius-sm, 6px);
+  font-size: 13px;
+  background: var(--pos-bg-alt, #f8f9fb);
+  border: 1px solid var(--pos-border, #e2e8f0);
+}
+.ch-bb-diag-item.pass { border-left: 3px solid var(--pos-success, #10b981); }
+.ch-bb-diag-item.pass i { color: var(--pos-success, #10b981); }
+.ch-bb-diag-item.fail { border-left: 3px solid var(--pos-danger, #ef4444); }
+.ch-bb-diag-item.fail i { color: var(--pos-danger, #ef4444); }
+.ch-bb-diag-result {
+  margin-left: auto;
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+/* Empty note */
+.ch-bb-empty-note {
+  color: var(--pos-text-muted, #94a3b8);
+  font-size: 13px;
+  text-align: center;
+  padding: 12px;
+  background: var(--pos-bg-alt, #f8f9fb);
+  border-radius: var(--pos-radius, 8px);
+  margin-top: 10px;
+}
+
+/* Approval cards (side-by-side) */
+.ch-bb-approval-card {
+  border: 1.5px solid var(--pos-border, #e2e8f0);
+  border-radius: var(--pos-radius, 8px);
+  padding: 16px;
+  text-align: center;
+  background: var(--pos-surface, #fff);
+}
+.ch-bb-approval-icon { margin-bottom: 8px; color: var(--pos-primary, #6366f1); }
+.ch-bb-approval-title {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+.ch-bb-approval-desc {
+  font-size: 12px;
+  color: var(--pos-text-muted, #94a3b8);
+  line-height: 1.4;
+}
+
+/* Settlement cards */
+.ch-bb-settle-card {
+  border: 1.5px solid var(--pos-border, #e2e8f0);
+  border-radius: var(--pos-radius, 8px);
+  padding: 16px;
+  background: var(--pos-surface, #fff);
+}
+.ch-bb-settle-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 10px;
+}
+.ch-bb-settle-title {
+  font-weight: 700;
+  font-size: 15px;
+  text-align: center;
+  margin-bottom: 6px;
+}
+.ch-bb-settle-desc {
+  font-size: 12px;
+  color: var(--pos-text-muted, #94a3b8);
+  text-align: center;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}

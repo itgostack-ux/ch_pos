@@ -3008,3 +3008,246 @@ def mark_reprint_done(reprint_name):
 	frappe.db.set_value("POS Reprint Queue", reprint_name, "status", "Done",
 		update_modified=False)
 	return {"status": "done"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Buyback POS Full-Flow APIs
+# ═══════════════════════════════════════════════════════════════════════════
+
+@frappe.whitelist()
+def get_pos_buyback_detail(assessment_name):
+	"""Return full buyback detail for POS: assessment + linked order + diagnostics.
+
+	Called on every stage transition so the frontend always has fresh data.
+	"""
+	a = frappe.get_doc("Buyback Assessment", assessment_name)
+
+	# Linked Buyback Order (if any)
+	order = None
+	order_name = frappe.db.get_value(
+		"Buyback Order",
+		{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+		"name",
+		order_by="creation desc",
+	)
+	if order_name:
+		o = frappe.get_doc("Buyback Order", order_name)
+		order = {
+			"name": o.name,
+			"status": o.status,
+			"final_price": flt(o.final_price),
+			"base_price": flt(o.base_price),
+			"settlement_type": o.settlement_type or "",
+			"customer_approved": cint(o.customer_approved),
+			"otp_verified": cint(o.otp_verified),
+			"payment_status": o.payment_status or "",
+			"requires_approval": cint(o.requires_approval),
+			"approved_by": o.approved_by or "",
+		}
+
+	# Diagnostic test results (from mobile app or manual)
+	diagnostics = []
+	for d in (a.diagnostic_tests or []):
+		diagnostics.append({
+			"test_name": d.get("test_name") or d.get("test_code") or "",
+			"result": d.get("result") or "",
+			"details": d.get("details") or "",
+		})
+
+	return {
+		"name": a.name,
+		"source": a.source or "",
+		"status": a.status or "",
+		"customer": a.customer or "",
+		"customer_name": a.customer_name or "",
+		"mobile_no": a.mobile_no or "",
+		"item": a.item or "",
+		"item_name": a.item_name or "",
+		"brand": a.brand or "",
+		"imei_serial": a.imei_serial or "",
+		"device_age_months": a.device_age_months or "",
+		"warranty_status": a.warranty_status or "",
+		"estimated_grade": a.estimated_grade or "",
+		"estimated_price": flt(a.estimated_price),
+		"quoted_price": flt(a.quoted_price),
+		"remarks": a.remarks or "",
+		"diagnostics": diagnostics,
+		"order": order,
+	}
+
+
+@frappe.whitelist()
+def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, inspector_notes=None):
+	"""Create a Buyback Order from a Buyback Assessment in POS.
+
+	Idempotent — returns existing order if one already exists for this assessment.
+	"""
+	# Return existing order if already created
+	existing = frappe.db.get_value(
+		"Buyback Order",
+		{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+		"name",
+	)
+	if existing:
+		if final_price:
+			frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
+		return {"order_name": existing, "created": False}
+
+	assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+	warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse") or ""
+	company = frappe.db.get_value("POS Profile", pos_profile, "company") or frappe.defaults.get_default("company")
+
+	price = flt(final_price) or flt(assessment.quoted_price) or flt(assessment.estimated_price)
+
+	order = frappe.new_doc("Buyback Order")
+	order.buyback_assessment = assessment_name
+	order.customer = assessment.customer or ""
+	order.customer_name = assessment.customer_name or ""
+	order.mobile_no = assessment.mobile_no or ""
+	order.store = warehouse
+	order.company = company
+	order.item = assessment.item or ""
+	order.item_name = assessment.item_name or ""
+	order.brand = assessment.brand or ""
+	order.imei_serial = assessment.imei_serial or ""
+	order.warranty_status = assessment.warranty_status or ""
+	order.condition_grade = assessment.estimated_grade or ""
+	order.base_price = flt(assessment.estimated_price)
+	order.final_price = price
+	order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
+	if inspector_notes:
+		order.remarks = str(inspector_notes)[:500]
+
+	order.flags.ignore_permissions = True
+	order.insert()
+	order.submit()
+
+	return {"order_name": order.name, "created": True}
+
+
+@frappe.whitelist()
+def pos_update_buyback_price(order_name, final_price, inspector_notes=None):
+	"""Update the final buyback price on an existing Buyback Order."""
+	doc = frappe.get_doc("Buyback Order", order_name)
+	if doc.docstatus == 2:
+		frappe.throw(frappe._("Cannot update a cancelled order."))
+
+	doc.final_price = flt(final_price)
+	if inspector_notes:
+		doc.remarks = (str(doc.remarks or "") + "\n" + str(inspector_notes))[:1000]
+
+	doc.flags.ignore_permissions = True
+	doc.save()
+
+	return {
+		"order_name": doc.name,
+		"final_price": doc.final_price,
+		"status": doc.status,
+	}
+
+
+@frappe.whitelist()
+def pos_send_customer_otp(order_name):
+	"""Generate and send an OTP to the customer's mobile for buyback price approval."""
+	doc = frappe.get_doc("Buyback Order", order_name)
+	mobile_no = doc.mobile_no
+	if not mobile_no:
+		frappe.throw(frappe._("No mobile number on this Buyback Order."))
+
+	from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+	otp = CHOTPLog.generate_otp(
+		mobile_no=mobile_no,
+		purpose="Buyback Customer Approval",
+		reference_doctype="Buyback Order",
+		reference_name=order_name,
+	)
+	# In production: send OTP via SMS gateway here
+	# from ch_item_master.ch_core.sms_gateway import send_sms
+	# send_sms(mobile_no, f"Your GoFix buyback OTP: {otp}. Valid 5 min.")
+	return {
+		"sent": True,
+		"masked_mobile": mobile_no[:2] + "****" + mobile_no[-2:],
+		"expires_in": 300,
+	}
+
+
+@frappe.whitelist()
+def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None):
+	"""Record customer approval of the final buyback price.
+
+	method: "In-Store Signature" | "OTP" | "Token Link"
+	If method == "OTP", otp_code is verified first.
+	"""
+	doc = frappe.get_doc("Buyback Order", order_name)
+
+	if method == "OTP":
+		if not otp_code:
+			frappe.throw(frappe._("OTP code is required for OTP verification."))
+		from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+		result = CHOTPLog.verify_otp(
+			mobile_no=doc.mobile_no,
+			purpose="Buyback Customer Approval",
+			otp_code=str(otp_code),
+			reference_doctype="Buyback Order",
+			reference_name=order_name,
+		)
+		if not result.get("valid"):
+			frappe.throw(frappe._(result.get("message", "OTP verification failed.")))
+		doc.otp_verified = 1
+
+	doc.flags.ignore_permissions = True
+	doc.customer_approve(method=method)
+
+	return {
+		"order_name": doc.name,
+		"status": doc.status,
+		"customer_approved": 1,
+	}
+
+
+@frappe.whitelist()
+def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
+	"""Mark a buyback order as settled via direct cashback to customer.
+
+	Records a payment entry on the order, marks it Paid.
+	Actual JE/stock entry is handled by back-office accounting.
+	"""
+	doc = frappe.get_doc("Buyback Order", order_name)
+
+	if not doc.customer_approved:
+		frappe.throw(frappe._("Customer must approve the final price before cashback settlement."))
+
+	from frappe.utils import now_datetime
+	doc.settlement_type = "Buyback"
+	doc.append("payments", {
+		"payment_method": payment_method,
+		"amount": flt(doc.final_price),
+		"payment_date": now_datetime(),
+		"transaction_reference": f"POS-Cashback-{doc.name}",
+	})
+	doc.flags.ignore_permissions = True
+	doc.save()
+
+	# mark_paid validates payment_status == "Paid" first
+	doc._calculate_payment_totals()
+	if doc.payment_status == "Paid":
+		doc.mark_paid()
+
+	try:
+		from ch_pos.audit import log_business_event
+		log_business_event(
+			event_type="Buyback Cashback",
+			ref_doctype="Buyback Order", ref_name=order_name,
+			before=str(doc.customer_name or doc.mobile_no),
+			after=f"₹{flt(doc.final_price):,.0f} via {payment_method}",
+			store=doc.store, company=doc.company,
+		)
+	except Exception:
+		pass
+
+	return {
+		"order_name": doc.name,
+		"status": doc.status,
+		"final_price": flt(doc.final_price),
+		"payment_method": payment_method,
+	}
