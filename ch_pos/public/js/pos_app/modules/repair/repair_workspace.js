@@ -53,7 +53,37 @@ export class RepairWorkspace {
 					</div>
 				</div>
 
-				<!-- Section 2: Issue Details -->
+				<!-- Section 2: Condition & Accessories -->
+				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
+					<div class="section-header"><i class="fa fa-clipboard"></i> ${__("Condition & Accessories")}</div>
+					<div class="section-body">
+						<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md)">
+							<div class="ch-pos-field-group">
+								<label>${__("Device Condition")} <span style="color:var(--pos-danger)">*</span></label>
+								<select class="form-control ch-rep-condition">
+									<option value="">${__("Select condition")}</option>
+									<option value="Good">${__("Good")}</option>
+									<option value="Minor Scratches">${__("Minor Scratches")}</option>
+									<option value="Cracked Screen">${__("Cracked Screen")}</option>
+									<option value="Damaged">${__("Damaged")}</option>
+									<option value="Water Damage">${__("Water Damage")}</option>
+								</select>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Accessories Received")}</label>
+								<input type="text" class="form-control ch-rep-accessories" placeholder="${__("Charger, case, earphones...")}">
+							</div>
+						</div>
+						<div class="ch-pos-field-group" style="margin-top:var(--pos-space-sm)">
+							<label style="display:flex;align-items:center;gap:6px;font-weight:normal">
+								<input type="checkbox" class="ch-rep-data-disclaimer">
+								${__("Customer acknowledges data may be lost during repair")}
+							</label>
+						</div>
+					</div>
+				</div>
+
+				<!-- Section 3: Issue Details -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header"><i class="fa fa-exclamation-circle"></i> ${__("Issue Details")}</div>
 					<div class="section-body">
@@ -158,6 +188,9 @@ export class RepairWorkspace {
 			const phone = panel.find(".ch-rep-phone").val().trim();
 			const issue_desc = panel.find(".ch-rep-issue").val().trim();
 			const priority = panel.find(".ch-rep-priority").val() || "Medium";
+			const device_condition = panel.find(".ch-rep-condition").val() || "";
+			const accessories = panel.find(".ch-rep-accessories").val().trim();
+			const data_disclaimer = panel.find(".ch-rep-data-disclaimer").is(":checked") ? 1 : 0;
 
 			if (!customer || !phone || !device_item || !issue_desc) {
 				frappe.show_alert({ message: __("Customer, phone, device, and issue description are required"), indicator: "orange" });
@@ -174,6 +207,9 @@ export class RepairWorkspace {
 					issue_category: issue_cat_field.get_value() || "",
 					issue_description: issue_desc,
 					warranty_status: panel.find(".ch-rep-warranty").val() || "",
+					device_condition: device_condition,
+					accessories_received: accessories,
+					data_backup_disclaimer: data_disclaimer,
 					mode_of_service: "Walk-in",
 					company: PosState.company || "",
 					source_warehouse: PosState.warehouse || "",
@@ -245,6 +281,7 @@ export class RepairWorkspace {
 
 		panel.on("click", ".ch-rep-clear", () => {
 			panel.find("input, select, textarea").val("");
+			panel.find(".ch-rep-data-disclaimer").prop("checked", false);
 			panel.find(".ch-rep-result-area").empty();
 			cust_field.set_value("");
 			device_field.set_value("");
@@ -260,6 +297,9 @@ export class RepairWorkspace {
 			const issue_desc = panel.find(".ch-rep-issue").val().trim();
 			const priority = panel.find(".ch-rep-priority").val() || "Medium";
 			const est_hours = parseFloat(panel.find(".ch-rep-est-hours").val()) || undefined;
+			const device_condition = panel.find(".ch-rep-condition").val() || undefined;
+			const accessories = panel.find(".ch-rep-accessories").val().trim() || undefined;
+			const data_disclaimer = panel.find(".ch-rep-data-disclaimer").is(":checked") ? 1 : 0;
 
 			if (!customer || !phone || !device_item || !issue_desc) {
 				frappe.show_alert({ message: __("Customer, phone, device, and issue description are required"), indicator: "orange" });
@@ -279,6 +319,9 @@ export class RepairWorkspace {
 				warranty_status: panel.find(".ch-rep-warranty").val() || undefined,
 				priority,
 				estimated_hours: est_hours,
+				device_condition,
+				accessories_received: accessories,
+				data_backup_disclaimer: data_disclaimer,
 			}).then((result) => {
 				btn.prop("disabled", false).html(`<i class="fa fa-bolt"></i> ${__("Quick Job Card")}`);
 				frappe.show_alert({

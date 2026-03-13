@@ -176,6 +176,71 @@ export class Customer360Workspace {
 			}},
 		]);
 
+		html += section_table(__("Warranty & AMC Plans"), "shield", d.warranties, [
+			{ label: __("Plan"), render: (r) => `<a class="ch-c360-link" data-doctype="CH Sold Plan" data-name="${r.name}">${frappe.utils.escape_html(r.plan_name || r.name)}</a>` },
+			{ label: __("Type"), render: (r) => frappe.utils.escape_html(r.plan_type || "") },
+			{ label: __("Item"), render: (r) => frappe.utils.escape_html(r.item_name || "") },
+			{ label: __("Valid To"), render: (r) => r.end_date ? frappe.datetime.str_to_user(r.end_date) : "—" },
+			{ label: __("Status"), render: (r) => {
+				const cls = r.status === "Active" ? "success" : r.status === "Expired" ? "danger" : "info";
+				return `<span class="ch-pos-badge badge-${cls}">${r.status || "—"}</span>`;
+			}},
+		]);
+
+		html += section_table(__("Warranty Claims"), "gavel", d.warranty_claims, [
+			{ label: __("ID"), render: (r) => `<a class="ch-c360-link" data-doctype="CH Warranty Claim" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.claim_date) },
+			{ label: __("Item"), render: (r) => frappe.utils.escape_html(r.item_name || "") },
+			{ label: __("Issue"), render: (r) => frappe.utils.escape_html(r.issue_category || "") },
+			{ label: __("Status"), render: (r) => {
+				const cls = r.claim_status === "Approved" ? "success" : r.claim_status === "Rejected" ? "danger" : "warning";
+				return `<span class="ch-pos-badge badge-${cls}">${r.claim_status || "—"}</span>`;
+			}},
+		]);
+
+		html += section_table(__("Vouchers"), "ticket", d.vouchers, [
+			{ label: __("Code"), render: (r) => `<a class="ch-c360-link" data-doctype="CH Voucher" data-name="${r.name}">${frappe.utils.escape_html(r.voucher_code || r.name)}</a>` },
+			{ label: __("Type"), render: (r) => frappe.utils.escape_html(r.voucher_type || "") },
+			{ label: __("Amount"), render: (r) => `₹${format_number(r.original_amount || 0)}` },
+			{ label: __("Balance"), render: (r) => `₹${format_number(r.balance || 0)}` },
+			{ label: __("Status"), render: (r) => {
+				const cls = r.status === "Active" ? "success" : r.status === "Redeemed" ? "muted" : "warning";
+				return `<span class="ch-pos-badge badge-${cls}">${r.status || "—"}</span>`;
+			}},
+		]);
+
+		html += section_table(__("Refunds / Returns"), "undo", d.refunds, [
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
+			{ label: __("Against"), render: (r) => r.return_against || "—" },
+			{ label: __("Amount"), render: (r) => `₹${format_number(Math.abs(r.grand_total || 0))}` },
+		]);
+
+		html += section_table(__("Swap / Exchange"), "retweet", d.swap_invoices, [
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
+			{ label: __("Type"), render: (r) => frappe.utils.escape_html(r.custom_ch_sale_type || "") },
+			{ label: __("Total"), render: (r) => `₹${format_number(r.grand_total || 0)}` },
+		]);
+
+		html += section_table(__("Coupon Usage"), "tag", d.coupon_usage, [
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
+			{ label: __("Coupon"), render: (r) => frappe.utils.escape_html(r.coupon_code || "") },
+			{ label: __("Total"), render: (r) => `₹${format_number(r.grand_total || 0)}` },
+		]);
+
+		html += section_table(__("Escalations / Exceptions"), "exclamation-triangle", d.exceptions, [
+			{ label: __("ID"), render: (r) => `<a class="ch-c360-link" data-doctype="CH Exception Request" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.creation) },
+			{ label: __("Type"), render: (r) => frappe.utils.escape_html(r.exception_type || "") },
+			{ label: __("Ref"), render: (r) => r.reference_name || "—" },
+			{ label: __("Status"), render: (r) => {
+				const cls = r.status === "Approved" ? "success" : r.status === "Rejected" ? "danger" : "warning";
+				return `<span class="ch-pos-badge badge-${cls}">${r.status || "—"}</span>`;
+			}},
+		]);
+
 		html += `</div>`;
 		el.html(html);
 

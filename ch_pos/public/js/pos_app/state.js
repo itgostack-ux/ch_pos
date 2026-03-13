@@ -32,8 +32,13 @@ export const PosState = {
 	// ── Discount State ──────────────────────────────────
 	additional_discount_pct: 0,
 	additional_discount_amt: 0,
+	discount_reason: "",
 	coupon_code: null,
 	coupon_discount: 0,
+	voucher_code: null,
+	voucher_amount: 0,
+	voucher_name: null,
+	voucher_balance: 0,
 
 	// ── Exchange State ──────────────────────────────────
 	exchange_assessment: null,
@@ -77,8 +82,13 @@ export const PosState = {
 		this.customer_info = null;
 		this.additional_discount_pct = 0;
 		this.additional_discount_amt = 0;
+		this.discount_reason = "";
 		this.coupon_code = null;
 		this.coupon_discount = 0;
+		this.voucher_code = null;
+		this.voucher_amount = 0;
+		this.voucher_name = null;
+		this.voucher_balance = 0;
 		this.sale_type = null;
 		this.sale_sub_type = null;
 		this.sale_reference = null;

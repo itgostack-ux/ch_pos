@@ -65,6 +65,7 @@ export class CartService {
 		EventBus.on("exchange:open", () => this._show_exchange_dialog());
 		EventBus.on("vas:open", () => this._show_vas_dialog());
 		EventBus.on("product_exchange:open", () => this._show_product_exchange_dialog());
+		EventBus.on("manager:request_approval", (opts) => this._show_manager_approval_dialog(opts));
 	}
 
 	// ── Add to Cart ─────────────────────────────────────
@@ -331,8 +332,9 @@ export class CartService {
 		dialog.show();
 	}
 
-	// ── Coupon ──────────────────────────────────────────
+	// ── Coupon / Voucher ────────────────────────────────
 	_apply_coupon(code) {
+		// Try coupon first, then voucher
 		frappe.call({
 			method: "ch_pos.api.pos_api.validate_coupon",
 			args: {
@@ -344,10 +346,46 @@ export class CartService {
 				if (r.message && r.message.valid) {
 					PosState.coupon_code = code;
 					PosState.coupon_discount = flt(r.message.discount_amount);
+					PosState.voucher_code = null;
+					PosState.voucher_amount = 0;
 					EventBus.emit("cart:updated");
 					EventBus.emit("coupon:applied", { code, amount: PosState.coupon_discount });
 				} else {
-					EventBus.emit("coupon:invalid", r.message?.error || __("Invalid coupon"));
+					// Not a valid coupon — try as voucher
+					this._try_voucher(code);
+				}
+			},
+		});
+	}
+
+	_try_voucher(code) {
+		const cart_total = this._get_subtotal();
+		frappe.call({
+			method: "ch_item_master.ch_item_master.voucher_api.validate_voucher",
+			args: {
+				voucher_code: code,
+				cart_total: cart_total,
+				customer: PosState.customer,
+				channel: null,
+			},
+			callback: (r) => {
+				if (r.message && r.message.valid) {
+					PosState.voucher_code = r.message.voucher_code;
+					PosState.voucher_amount = flt(r.message.applicable_amount);
+					PosState.voucher_name = r.message.voucher_name;
+					PosState.voucher_balance = flt(r.message.balance);
+					PosState.coupon_code = null;
+					PosState.coupon_discount = 0;
+					EventBus.emit("cart:updated");
+					EventBus.emit("coupon:applied", {
+						code,
+						amount: PosState.voucher_amount,
+						is_voucher: true,
+						balance: PosState.voucher_balance,
+					});
+				} else {
+					EventBus.emit("coupon:invalid",
+						r.message?.reason || __("Invalid coupon or voucher code"));
 				}
 			},
 		});
@@ -847,6 +885,127 @@ export class CartService {
 		localStorage.setItem(key, JSON.stringify(data));
 		frappe.show_alert({ message: __("Invoice held"), indicator: "blue" });
 		PosState.reset_transaction();
+	}
+
+	// ── Manager Approval Dialog ─────────────────────────
+
+	_show_manager_approval_dialog(opts = {}) {
+		/**
+		 * Show OTP-based manager approval dialog.
+		 * opts: { cart_idx, purpose, reason, on_approved }
+		 *   cart_idx  — index in PosState.cart to stamp approval on
+		 *   purpose   — OTP purpose string (e.g. "Discount Override")
+		 *   reason    — pre-filled reason text
+		 *   on_approved — callback after successful verification
+		 */
+		let otp_sent = false;
+
+		const dlg = new frappe.ui.Dialog({
+			title: __("Manager Approval Required"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "info_html",
+					options: `<p class="text-muted">${frappe.utils.escape_html(opts.reason || __("This action requires manager approval."))}</p>`,
+				},
+				{ fieldtype: "Section Break", label: __("Manager Verification") },
+				{
+					fieldname: "manager_mobile",
+					fieldtype: "Data",
+					label: __("Manager Mobile"),
+					reqd: 1,
+					description: __("Enter the store manager's registered mobile number"),
+				},
+				{
+					fieldname: "send_otp_btn",
+					fieldtype: "Button",
+					label: __("Send OTP"),
+				},
+				{ fieldtype: "Column Break" },
+				{
+					fieldname: "otp_code",
+					fieldtype: "Data",
+					label: __("OTP Code"),
+					description: __("Enter the 6-digit code sent to the manager"),
+					maxlength: 6,
+				},
+				{ fieldtype: "Section Break" },
+				{
+					fieldname: "override_reason",
+					fieldtype: "Small Text",
+					label: __("Override Reason"),
+					reqd: 1,
+					default: opts.reason || "",
+				},
+			],
+			size: "small",
+			primary_action_label: __("Verify & Approve"),
+			primary_action: (values) => {
+				if (!otp_sent) {
+					frappe.show_alert({ message: __("Please send OTP first"), indicator: "orange" });
+					return;
+				}
+				if (!values.otp_code || values.otp_code.length < 4) {
+					frappe.show_alert({ message: __("Enter the OTP code"), indicator: "orange" });
+					return;
+				}
+
+				dlg.disable_primary_action();
+
+				frappe.xcall("ch_pos.api.pos_api.verify_manager_approval", {
+					mobile_no: values.manager_mobile,
+					purpose: opts.purpose || "Manager Override",
+					otp_code: values.otp_code,
+				}).then((result) => {
+					if (result && result.valid) {
+						// Stamp approval on the cart item
+						if (opts.cart_idx !== undefined && PosState.cart[opts.cart_idx]) {
+							PosState.cart[opts.cart_idx].manager_approved = true;
+							PosState.cart[opts.cart_idx].manager_user = values.manager_mobile;
+							PosState.cart[opts.cart_idx].override_reason = values.override_reason;
+						}
+						frappe.show_alert({ message: __("Manager approval granted"), indicator: "green" });
+						EventBus.emit("cart:updated");
+						dlg.hide();
+						if (opts.on_approved) opts.on_approved(values);
+					} else {
+						frappe.show_alert({
+							message: result.message || __("Invalid OTP"),
+							indicator: "red",
+						});
+						dlg.enable_primary_action();
+					}
+				}).catch(() => {
+					frappe.show_alert({ message: __("Verification failed"), indicator: "red" });
+					dlg.enable_primary_action();
+				});
+			},
+		});
+
+		// Bind Send OTP button
+		dlg.fields_dict.send_otp_btn.input.onclick = () => {
+			const mobile = dlg.get_value("manager_mobile");
+			if (!mobile || mobile.length < 10) {
+				frappe.show_alert({ message: __("Enter a valid mobile number"), indicator: "orange" });
+				return;
+			}
+			frappe.xcall("ch_pos.api.pos_api.request_manager_approval", {
+				mobile_no: mobile,
+				purpose: opts.purpose || "Manager Override",
+			}).then((r) => {
+				if (r && r.sent) {
+					otp_sent = true;
+					frappe.show_alert({
+						message: __("OTP sent to {0}", [r.mobile]),
+						indicator: "green",
+					});
+				}
+			}).catch(() => {
+				frappe.show_alert({ message: __("Failed to send OTP"), indicator: "red" });
+			});
+		};
+
+		dlg.show();
 	}
 
 	// ── Helpers ─────────────────────────────────────────

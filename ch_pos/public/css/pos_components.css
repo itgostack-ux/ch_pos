@@ -505,34 +505,36 @@
 
 /* Customer Header */
 .ch-pos-customer-bar {
-  padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--pos-border-light);
+  padding: 20px 20px 14px;
 }
 .ch-pos-customer-bar .ch-pos-customer-select .frappe-control {
   margin-bottom: 0;
 }
 .ch-pos-customer-bar .ch-pos-customer-select input {
-  height: var(--pos-touch-comfortable) !important;
+  height: 50px !important;
   border-radius: var(--pos-radius) !important;
   border: 2px solid var(--pos-border) !important;
   font-size: var(--pos-fs-md) !important;
   font-weight: 500;
-  padding-left: 14px !important;
+  padding-left: 16px !important;
   background: var(--pos-surface-sunken) !important;
+  transition: all var(--pos-transition);
 }
 .ch-pos-customer-bar .ch-pos-customer-select input:focus {
   border-color: var(--pos-primary) !important;
   background: var(--pos-surface) !important;
+  box-shadow: 0 0 0 3px rgba(79,110,247,0.1) !important;
 }
 .ch-pos-customer-tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 6px;
-  padding: 3px 10px;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 4px 12px;
   border-radius: var(--pos-radius-pill);
   font-size: var(--pos-fs-2xs);
   font-weight: 700;
+  letter-spacing: 0.2px;
 }
 .ch-pos-customer-tag.walk-in { background: var(--pos-surface-sunken); color: var(--pos-text-muted); }
 .ch-pos-customer-tag.loyalty { background: #fef3c7; color: #92400e; }
@@ -540,8 +542,7 @@
 
 /* Customer Info Badges */
 .ch-pos-customer-info {
-  padding: 6px 16px 8px;
-  border-bottom: 1px solid var(--pos-border-light);
+  padding: 6px 20px 10px;
 }
 .ch-pos-cust-badges {
   display: flex;
@@ -564,7 +565,7 @@
 
 /* Credit Warning */
 .ch-pos-credit-warning {
-  padding: 0 16px 6px;
+  padding: 0 20px 8px;
 }
 .ch-pos-credit-warning .alert {
   margin: 0;
@@ -608,27 +609,27 @@
 /* Quick Actions */
 .ch-pos-quick-actions {
   display: flex;
-  gap: 6px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--pos-border-light);
+  gap: 8px;
+  padding: 12px 20px 14px;
   flex-wrap: wrap;
 }
 .ch-pos-quick-actions .btn {
   flex: 1;
   min-width: 0;
-  padding: 6px 8px;
-  font-size: var(--pos-fs-2xs);
+  padding: 8px 10px;
+  font-size: var(--pos-fs-xs);
   font-weight: 700;
   border-radius: var(--pos-radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  min-height: 36px;
+  gap: 5px;
+  min-height: 38px;
   transition: all var(--pos-transition);
   white-space: nowrap;
+  letter-spacing: 0.2px;
 }
-.ch-pos-quick-actions .btn i { font-size: 11px; }
+.ch-pos-quick-actions .btn i { font-size: 12px; }
 
 /* Exchange/product exchange banners */
 .ch-pos-exchange-banner,
@@ -653,25 +654,35 @@
   color: #1e40af;
 }
 
+/* ── Section Divider ────────────────────── */
+.ch-pos-quick-actions + .ch-pos-cart-header,
+.ch-pos-sale-type-bar + .ch-pos-quick-actions,
+.ch-pos-customer-info + .ch-pos-sale-type-bar,
+.ch-pos-customer-bar + .ch-pos-sale-type-bar,
+.ch-pos-customer-bar + .ch-pos-quick-actions {
+  border-top: 1px solid var(--pos-border-light);
+}
+
 /* Cart Header */
 .ch-pos-cart-header {
   display: grid;
   grid-template-columns: 1fr 60px 70px 70px;
   gap: 4px;
-  padding: 8px 16px;
+  padding: 10px 20px;
   font-size: var(--pos-fs-2xs);
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
   color: var(--pos-text-muted);
   border-bottom: 1px solid var(--pos-border-light);
+  background: var(--pos-surface-sunken);
 }
 
 /* Cart Items — scrollable */
 .ch-pos-cart-items {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 0;
 }
 
 /* Empty Cart */
@@ -680,36 +691,36 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 48px 24px;
+  padding: 56px 24px;
   text-align: center;
-  gap: 8px;
+  gap: 10px;
 }
 .ch-pos-cart-empty .empty-cart-icon {
-  width: 64px;
-  height: 64px;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
   background: var(--pos-surface-sunken);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 24px;
+  font-size: 28px;
   color: var(--pos-text-muted);
-  opacity: 0.5;
-  margin-bottom: 4px;
+  opacity: 0.4;
+  margin-bottom: 6px;
 }
 .ch-pos-cart-empty span:first-of-type {
-  font-size: var(--pos-fs-md);
+  font-size: var(--pos-fs-lg);
   font-weight: 600;
   color: var(--pos-text-secondary);
 }
 .ch-pos-cart-empty .text-muted {
-  font-size: var(--pos-fs-xs);
+  font-size: var(--pos-fs-sm);
   color: var(--pos-text-muted);
 }
 
 /* Cart Line Items */
 .ch-pos-cart-line {
-  padding: 10px 16px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--pos-border-light);
   transition: background var(--pos-transition);
 }
@@ -833,81 +844,100 @@
 }
 .ch-pos-cart-line:hover .ch-pos-cart-remove { opacity: 1; }
 
-/* Discount / Coupon Block */
+/* ── Discount / Coupon Block ─────────────── */
 .ch-pos-discount-bar {
-  padding: 10px 16px;
+  padding: 14px 20px 12px;
   border-top: 1px solid var(--pos-border-light);
-  background: var(--pos-surface-sunken);
+  background: var(--pos-surface);
 }
 .ch-pos-discount-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 .ch-pos-discount-row:last-child { margin-bottom: 0; }
 .ch-pos-coupon-input {
   flex: 1;
-  height: 36px !important;
+  height: 40px !important;
   border-radius: var(--pos-radius-sm) !important;
   border: 1.5px solid var(--pos-border) !important;
   font-size: var(--pos-fs-sm) !important;
-  padding: 0 10px !important;
+  padding: 0 14px !important;
+  background: var(--pos-surface-sunken) !important;
+  transition: all var(--pos-transition);
+}
+.ch-pos-coupon-input:focus {
+  border-color: var(--pos-primary) !important;
+  background: var(--pos-surface) !important;
+  box-shadow: 0 0 0 3px rgba(79,110,247,0.08) !important;
 }
 .ch-pos-coupon-apply {
-  height: 36px;
-  padding: 0 14px;
+  height: 40px;
+  padding: 0 18px;
   border-radius: var(--pos-radius-sm) !important;
   font-weight: 700;
-  font-size: var(--pos-fs-xs) !important;
+  font-size: var(--pos-fs-sm) !important;
+  letter-spacing: 0.3px;
 }
 .ch-pos-discount-label {
-  font-size: var(--pos-fs-2xs);
+  font-size: var(--pos-fs-xs);
   font-weight: 700;
   color: var(--pos-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   white-space: nowrap;
+  min-width: 64px;
 }
-.ch-pos-discount-inputs { gap: 6px; }
+.ch-pos-discount-inputs { gap: 8px; }
 .ch-pos-disc-pct, .ch-pos-disc-amt {
-  height: 32px !important;
-  width: 64px !important;
+  height: 36px !important;
+  width: 72px !important;
   border-radius: var(--pos-radius-sm) !important;
   border: 1.5px solid var(--pos-border) !important;
   font-size: var(--pos-fs-sm) !important;
   text-align: center;
-  padding: 0 6px !important;
+  padding: 0 8px !important;
+  background: var(--pos-surface-sunken) !important;
+  transition: all var(--pos-transition);
+}
+.ch-pos-disc-pct:focus, .ch-pos-disc-amt:focus {
+  border-color: var(--pos-primary) !important;
+  background: var(--pos-surface) !important;
 }
 .ch-pos-disc-or {
-  font-size: var(--pos-fs-2xs);
+  font-size: var(--pos-fs-xs);
+  color: var(--pos-text-muted);
+  font-weight: 500;
 }
 .ch-pos-coupon-msg {
   font-size: var(--pos-fs-xs);
-  padding-top: 4px;
+  padding-top: 6px;
+  line-height: 1.4;
 }
 
 /* Cart Summary — Totals */
 .ch-pos-cart-summary {
-  padding: 12px 16px;
-  border-top: 2px solid var(--pos-border);
-  background: var(--pos-surface);
+  padding: 14px 20px 10px;
+  border-top: 1px solid var(--pos-border);
+  background: var(--pos-surface-sunken);
 }
 .summary-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 3px 0;
+  padding: 4px 0;
   font-size: var(--pos-fs-sm);
   color: var(--pos-text-secondary);
 }
 .summary-row .value {
   font-weight: 600;
   color: var(--pos-text);
+  font-variant-numeric: tabular-nums;
 }
 .summary-row.grand-total {
-  padding: 10px 0 4px;
-  margin-top: 6px;
+  padding: 12px 0 6px;
+  margin-top: 8px;
   border-top: 2px solid var(--pos-text);
   font-size: var(--pos-fs-xl);
   font-weight: 800;
@@ -916,7 +946,9 @@
 .summary-row.grand-total .value {
   font-size: var(--pos-fs-2xl);
   font-weight: 800;
+  font-variant-numeric: tabular-nums;
 }
+.summary-row.voucher-disc .value,
 .summary-row.exchange-credit .value,
 .summary-row.product-exchange-credit .value {
   color: var(--pos-success);
@@ -925,8 +957,8 @@
 /* Cart Action Buttons */
 .ch-pos-cart-actions {
   display: flex;
-  gap: 8px;
-  padding: 12px 16px;
+  gap: 10px;
+  padding: 14px 20px;
   border-top: 1px solid var(--pos-border-light);
   background: var(--pos-surface);
 }
@@ -2215,45 +2247,47 @@
 
 /* ── Sale Type Bar ──────────────────────────────────── */
 .ch-pos-sale-type-bar {
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--pos-border-light, #e5e7eb);
+  padding: 10px 20px;
 }
 .ch-pos-sale-type-pills {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 .ch-pos-saletype-btn {
-  padding: 3px 10px;
+  padding: 5px 14px;
   font-size: 11px;
-  font-weight: 600;
-  border: 1.5px solid var(--pos-border-light, #d1d5db);
-  border-radius: 20px;
-  background: var(--pos-card-bg, #fff);
+  font-weight: 700;
+  border: 1.5px solid var(--pos-border, #d1d5db);
+  border-radius: var(--pos-radius-pill);
+  background: var(--pos-surface);
   color: var(--pos-text-muted, #6b7280);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--pos-transition);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 .ch-pos-saletype-btn:hover {
-  border-color: var(--primary);
-  color: var(--primary);
+  border-color: var(--pos-primary);
+  color: var(--pos-primary);
+  background: var(--pos-primary-light);
 }
 .ch-pos-saletype-btn.active {
-  background: var(--primary);
-  border-color: var(--primary);
+  background: var(--pos-primary);
+  border-color: var(--pos-primary);
   color: #fff;
+  box-shadow: 0 2px 6px rgba(79,110,247,0.25);
 }
 .ch-pos-sale-sub-type-row {
   display: flex;
-  gap: 6px;
-  margin-top: 6px;
+  gap: 8px;
+  margin-top: 8px;
   align-items: center;
 }
 .ch-pos-sale-sub-type-row select,
 .ch-pos-sale-sub-type-row input {
   font-size: 12px;
-  height: 28px;
-  padding: 2px 8px;
+  height: 32px;
+  padding: 4px 10px;
+  border-radius: var(--pos-radius-sm);
 }

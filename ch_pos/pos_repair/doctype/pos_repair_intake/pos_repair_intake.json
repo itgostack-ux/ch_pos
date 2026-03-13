@@ -27,6 +27,11 @@
   "column_break_issue",
   "mode_of_service",
   "password_pattern",
+  "condition_section",
+  "device_condition",
+  "accessories_received",
+  "column_break_condition",
+  "data_backup_disclaimer",
   "links_section",
   "service_request",
   "amended_from"
@@ -86,7 +91,9 @@
    "fieldname": "customer_phone",
    "fieldtype": "Data",
    "label": "Customer Phone",
-   "options": "Phone"
+   "options": "Phone",
+   "fetch_from": "customer.mobile_no",
+   "fetch_if_empty": 1
   },
   {
    "fieldname": "device_section",
@@ -159,6 +166,32 @@
    "label": "Password / Pattern"
   },
   {
+   "fieldname": "condition_section",
+   "fieldtype": "Section Break",
+   "label": "Condition & Accessories"
+  },
+  {
+   "fieldname": "device_condition",
+   "fieldtype": "Select",
+   "label": "Device Condition",
+   "options": "\nGood\nMinor Scratches\nCracked Screen\nDamaged\nWater Damage"
+  },
+  {
+   "fieldname": "accessories_received",
+   "fieldtype": "Small Text",
+   "label": "Accessories Received"
+  },
+  {
+   "fieldname": "column_break_condition",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "data_backup_disclaimer",
+   "fieldtype": "Check",
+   "label": "Customer Acknowledges Data May Be Lost"
+  },
+  {
    "fieldname": "links_section",
    "fieldtype": "Section Break",
    "label": "Linked Documents"
@@ -182,7 +215,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-03-08 10:00:00.000000",
+ "modified": "2026-03-13 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Repair",
  "name": "POS Repair Intake",

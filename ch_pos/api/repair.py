@@ -14,6 +14,8 @@ def create_repair_intake(data):
         "serial_no", "imei_number",
         "issue_category", "issue_description",
         "mode_of_service", "password_pattern",
+        "device_condition", "accessories_received",
+        "data_backup_disclaimer",
     ):
         if data.get(field):
             doc.set(field, data[field])

@@ -367,26 +367,52 @@ export class BuybackWorkspace {
 				condition_keys.forEach(k => { condition_checks[k] = values[`cond_${k}`] ? true : false; });
 
 				dlg.disable_primary_action();
-				frappe.xcall("ch_pos.api.pos_api.create_buyback_assessment_with_grading", {
-					mobile_no: values.mobile_no,
-					item_code: values.item,
-					imei_serial: values.imei_serial || "",
-					customer: values.customer || "",
-					condition_checks: condition_checks,
-					kyc_id_type: values.kyc_id_type || "",
-					kyc_id_number: values.kyc_id_number || "",
-					kyc_name: values.kyc_name || "",
-				}).then((doc) => {
-					dlg.hide();
-					frappe.show_alert({
-						message: `${__("Assessment")} <b>${doc.name}</b> ${__("created · Grade")} ${doc.estimated_grade} · ₹${format_number(doc.estimated_price)}`,
-						indicator: "green",
+
+				// Pre-check IMEI blacklist before creating assessment
+				const _proceed = () => {
+					frappe.xcall("ch_pos.api.pos_api.create_buyback_assessment_with_grading", {
+						mobile_no: values.mobile_no,
+						item_code: values.item,
+						imei_serial: values.imei_serial || "",
+						customer: values.customer || "",
+						condition_checks: condition_checks,
+						kyc_id_type: values.kyc_id_type || "",
+						kyc_id_number: values.kyc_id_number || "",
+						kyc_name: values.kyc_name || "",
+					}).then((doc) => {
+						dlg.hide();
+						frappe.show_alert({
+							message: `${__("Assessment")} <b>${doc.name}</b> ${__("created · Grade")} ${doc.estimated_grade} · ₹${format_number(doc.estimated_price)}`,
+							indicator: "green",
+						});
+						panel.find(".ch-bb-search").val(doc.name);
+						panel.find(".ch-bb-lookup").click();
+					}).catch(() => {
+						dlg.enable_primary_action();
 					});
-					panel.find(".ch-bb-search").val(doc.name);
-					panel.find(".ch-bb-lookup").click();
-				}).catch(() => {
-					dlg.enable_primary_action();
-				});
+				};
+
+				if (values.imei_serial) {
+					frappe.xcall("ch_pos.api.pos_api.check_imei_blacklist", {
+						imei: values.imei_serial,
+					}).then((res) => {
+						if (res && res.blacklisted) {
+							dlg.enable_primary_action();
+							frappe.msgprint({
+								title: __("Blacklisted Device"),
+								message: __("This IMEI is blacklisted — Reason: {0}.{1}<br><br>Cannot proceed with buyback.", [
+									`<b>${res.reason}</b>`,
+									res.reference ? ` Ref: ${res.reference}` : "",
+								]),
+								indicator: "red",
+							});
+						} else {
+							_proceed();
+						}
+					}).catch(() => _proceed());
+				} else {
+					_proceed();
+				}
 			},
 		});
 

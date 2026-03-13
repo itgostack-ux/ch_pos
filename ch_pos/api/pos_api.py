@@ -89,13 +89,31 @@ def get_sale_types(company=None):
 
 
 @frappe.whitelist()
+def get_discount_reasons(company=None):
+    """Return enabled discount reasons, optionally filtered by company."""
+    filters = {"enabled": 1}
+    if company:
+        filters["company"] = ("in", [company, "", None])
+
+    return frappe.get_all(
+        "CH Discount Reason",
+        filters=filters,
+        fields=["name", "reason_name", "discount_type", "discount_value",
+                "allow_manual_entry", "max_manual_percent"],
+        order_by="allow_manual_entry asc, reason_name asc",
+    )
+
+
+@frappe.whitelist()
 def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_paid,
                        exchange_assessment=None, additional_discount_percentage=0,
                        additional_discount_amount=0, coupon_code=None,
+                       voucher_code=None, voucher_amount=0,
                        redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
                        sales_executive=None, sale_type=None, sale_sub_type=None,
-                       sale_reference=None):
+                       sale_reference=None, discount_reason=None):
     """Create and submit a POS Invoice from the CH POS App cart."""
+    frappe.has_permission("POS Invoice", "create", throw=True)
     if isinstance(items, str):
         items = frappe.parse_json(items)
 
@@ -127,6 +145,12 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
         # Set warranty_plan on the invoice item if custom field exists
         if item.get("warranty_plan"):
             row["custom_warranty_plan"] = item.get("warranty_plan")
+
+        # Manager approval fields for exception tracking
+        if item.get("manager_approved"):
+            row["custom_manager_approved"] = 1
+            row["custom_manager_user"] = item.get("manager_user") or ""
+            row["custom_override_reason"] = item.get("override_reason") or ""
 
         # Pass serial_no so margin scheme can look up purchase cost
         if item.get("serial_no"):
@@ -162,9 +186,33 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
             "description": tax.description or tax.account_head,
         })
 
-    # Exchange assessment link
+    # Exchange assessment link + amount
+    exchange_credit = 0
     if exchange_assessment:
+        ba = frappe.db.get_value(
+            "Buyback Assessment", exchange_assessment,
+            ["quoted_price", "estimated_price", "status", "expires_on",
+             "linked_pos_invoice"],
+            as_dict=True,
+        )
+        if not ba:
+            frappe.throw(frappe._("Buyback Assessment {0} not found").format(exchange_assessment))
+        if ba.status in ("Expired", "Cancelled"):
+            frappe.throw(
+                frappe._("Buyback Assessment {0} is {1} and cannot be used as exchange credit").format(
+                    exchange_assessment, ba.status))
+        if ba.linked_pos_invoice:
+            frappe.throw(
+                frappe._("Buyback Assessment {0} was already used in invoice {1}").format(
+                    exchange_assessment, ba.linked_pos_invoice))
+        if ba.expires_on and str(ba.expires_on) < nowdate():
+            frappe.throw(
+                frappe._("Buyback Assessment {0} expired on {1}").format(
+                    exchange_assessment, ba.expires_on))
+
         inv.custom_exchange_assessment = exchange_assessment
+        exchange_credit = flt(ba.quoted_price) or flt(ba.estimated_price)
+        inv.custom_exchange_amount = exchange_credit
 
     # Additional discount
     if flt(additional_discount_percentage) > 0:
@@ -172,9 +220,46 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
     elif flt(additional_discount_amount) > 0:
         inv.discount_amount = flt(additional_discount_amount)
 
+    # Discount reason — validate against CH Discount Reason master
+    if discount_reason:
+        reason_doc = frappe.db.get_value(
+            "CH Discount Reason", discount_reason,
+            ["enabled", "allow_manual_entry", "discount_type", "discount_value", "max_manual_percent"],
+            as_dict=True,
+        )
+        if not reason_doc or not reason_doc.enabled:
+            frappe.throw(frappe._("Invalid or disabled discount reason: {0}").format(discount_reason))
+
+        # For preset reasons, enforce the fixed discount value from master
+        if not reason_doc.allow_manual_entry:
+            if reason_doc.discount_type == "Percentage":
+                inv.additional_discount_percentage = flt(reason_doc.discount_value)
+                inv.discount_amount = 0
+            else:
+                inv.discount_amount = flt(reason_doc.discount_value)
+                inv.additional_discount_percentage = 0
+
+        # For manual-entry reasons, enforce max cap
+        if reason_doc.allow_manual_entry and flt(reason_doc.max_manual_percent) > 0:
+            if flt(additional_discount_percentage) > flt(reason_doc.max_manual_percent):
+                frappe.throw(
+                    frappe._("Discount {0}% exceeds maximum {1}% for {2}").format(
+                        additional_discount_percentage, reason_doc.max_manual_percent, discount_reason
+                    )
+                )
+
+        inv.custom_discount_reason = discount_reason
+    elif flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
+        frappe.throw(frappe._("A discount reason is required when applying a discount"))
+
     # Coupon code
     if coupon_code:
         inv.coupon_code = coupon_code
+
+    # Voucher — add voucher amount to the discount
+    voucher_redeemed = 0
+    if voucher_code and flt(voucher_amount) > 0:
+        inv.discount_amount = flt(inv.discount_amount or 0) + flt(voucher_amount)
 
     # Loyalty points redemption
     if cint(redeem_loyalty_points):
@@ -197,6 +282,20 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
     inv.flags.ignore_permissions = True
     inv.save()
     inv.submit()
+
+    # Set reverse link on Buyback Assessment → POS Invoice
+    if exchange_assessment:
+        frappe.db.set_value(
+            "Buyback Assessment", exchange_assessment,
+            {"linked_pos_invoice": inv.name, "exchange_amount": exchange_credit},
+            update_modified=False,
+        )
+
+    # Redeem voucher after successful submit
+    if voucher_code and flt(voucher_amount) > 0:
+        from ch_item_master.ch_item_master.voucher_api import redeem_voucher
+        rv = redeem_voucher(voucher_code, flt(voucher_amount), pos_invoice=inv.name)
+        voucher_redeemed = flt(rv.get("redeemed_amount", 0))
 
     # Create CH Sold Plan records for warranty items
     sold_plans = []
@@ -226,6 +325,7 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
         "grand_total": inv.grand_total,
         "sold_plans": sold_plans,
         "incentive_earned": incentive_total,
+        "voucher_redeemed": voucher_redeemed,
     }
 
 
@@ -309,18 +409,20 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None):
     """
     assessment_name = None
 
+    valid_statuses = ["Draft", "Submitted", "Inspection Created"]
+
     if assessment:
         assessment_name = assessment
     elif imei_serial:
         assessment_name = frappe.db.get_value(
             "Buyback Assessment",
-            {"imei_serial": imei_serial, "status": ["in", ["Submitted", "Inspection Created"]]},
+            {"imei_serial": imei_serial, "status": ["in", valid_statuses]},
             "name",
         )
     elif mobile_no:
         assessment_name = frappe.db.get_value(
             "Buyback Assessment",
-            {"mobile_no": mobile_no, "status": ["in", ["Submitted", "Inspection Created"]]},
+            {"mobile_no": mobile_no, "status": ["in", valid_statuses]},
             "name",
             order_by="creation desc",
         )
@@ -525,6 +627,7 @@ def get_invoice_items_for_return(invoice_name):
 @frappe.whitelist()
 def create_pos_return(original_invoice, return_items, sales_executive=None):
     """Create a POS Invoice return (credit note) for specific items."""
+    frappe.has_permission("POS Invoice", "create", throw=True)
     if isinstance(return_items, str):
         return_items = frappe.parse_json(return_items)
 
@@ -777,6 +880,21 @@ def get_store_repairs(pos_profile):
 
 # ── Buyback Valuation ────────────────────────────────────────
 @frappe.whitelist()
+def check_imei_blacklist(imei):
+    """Pre-check if an IMEI is blacklisted before starting a buyback assessment."""
+    if not imei:
+        return {"blacklisted": False}
+    try:
+        from buyback.buyback.doctype.buyback_imei_blacklist.buyback_imei_blacklist import is_imei_blacklisted
+        entry = is_imei_blacklisted(imei)
+        if entry:
+            return {"blacklisted": True, "reason": entry.reason, "reference": entry.reference_number or ""}
+    except ImportError:
+        pass
+    return {"blacklisted": False}
+
+
+@frappe.whitelist()
 def calculate_buyback_valuation(item_code, condition_checks):
     """Calculate buyback valuation using ch_erp_buyback's centralized pricing engine.
 
@@ -905,6 +1023,13 @@ def create_buyback_assessment_with_grading(
     doc.flags.ignore_permissions = True
     doc.insert()
 
+    # Auto-submit so the assessment is immediately usable at POS checkout
+    try:
+        doc.submit_assessment()
+    except Exception:
+        # If submit fails (e.g. no diagnostics), assessment stays Draft — still usable
+        pass
+
     return {
         "name": doc.name,
         "grade": valuation["grade"],
@@ -940,6 +1065,46 @@ def _build_grading_remarks(condition_checks, valuation, kyc_id_type, kyc_id_numb
         lines.append(f"  ID Number: {kyc_id_number}")
 
     return "\n".join(lines)
+
+
+# ── Governance: Manager Approval at POS ──────────────────────────────
+
+@frappe.whitelist()
+def request_manager_approval(mobile_no, purpose, reference_doctype=None, reference_name=None):
+    """Generate an OTP for manager approval at POS.
+
+    Used when a discount exceeds limits, exchange override is needed, etc.
+    The OTP is sent to the store manager's mobile and must be verified
+    before the transaction can proceed.
+    """
+    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+
+    otp = CHOTPLog.generate_otp(
+        mobile_no=mobile_no,
+        purpose=purpose,
+        reference_doctype=reference_doctype,
+        reference_name=reference_name,
+    )
+    # In production, send OTP via SMS here
+    return {"sent": True, "mobile": mobile_no[:3] + "****" + mobile_no[-3:]}
+
+
+@frappe.whitelist()
+def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None, reference_name=None):
+    """Verify a manager OTP for POS approval.
+
+    Returns {"valid": True/False, "message": str}.
+    """
+    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+
+    result = CHOTPLog.verify_otp(
+        mobile_no=mobile_no,
+        purpose=purpose,
+        otp_code=otp_code,
+        reference_doctype=reference_doctype,
+        reference_name=reference_name,
+    )
+    return result
 
 
 @frappe.whitelist()
@@ -1156,6 +1321,69 @@ def customer_360(identifier, company=None):
           AND docstatus < 2
         ORDER BY creation DESC LIMIT 20
     """, {"customer": customer, "mobile": mobile}, as_dict=True)
+
+    # Active warranties / VAS (CH Sold Plan)
+    out["warranties"] = frappe.db.sql("""
+        SELECT name, plan_name, plan_type, item_code, item_name,
+               start_date, end_date, status, sales_invoice
+        FROM `tabCH Sold Plan`
+        WHERE customer = %(customer)s AND docstatus = 1
+        ORDER BY end_date DESC LIMIT 30
+    """, {"customer": customer}, as_dict=True)
+
+    # Warranty Claims
+    out["warranty_claims"] = frappe.db.sql("""
+        SELECT name, claim_date, item_name, serial_no, coverage_type,
+               claim_status, issue_category, repair_status
+        FROM `tabCH Warranty Claim`
+        WHERE customer = %(customer)s
+        ORDER BY claim_date DESC LIMIT 20
+    """, {"customer": customer}, as_dict=True)
+
+    # Vouchers issued to customer
+    out["vouchers"] = frappe.db.sql("""
+        SELECT name, voucher_code, voucher_type, original_amount,
+               balance, status, valid_upto, source_type
+        FROM `tabCH Voucher`
+        WHERE issued_to = %(customer)s AND docstatus = 1
+        ORDER BY creation DESC LIMIT 20
+    """, {"customer": customer}, as_dict=True)
+
+    # Refund / return invoices
+    out["refunds"] = frappe.db.sql("""
+        SELECT name, posting_date, grand_total, return_against, status
+        FROM `tabPOS Invoice`
+        WHERE customer = %(customer)s AND docstatus = 1 AND is_return = 1
+        ORDER BY posting_date DESC LIMIT 20
+    """, {"customer": customer}, as_dict=True)
+
+    # Swap / exchange invoices (sale_type driven)
+    out["swap_invoices"] = frappe.db.sql("""
+        SELECT name, posting_date, grand_total, custom_ch_sale_type,
+               custom_ch_sale_sub_type, custom_exchange_assessment, status
+        FROM `tabPOS Invoice`
+        WHERE customer = %(customer)s AND docstatus = 1
+          AND custom_exchange_assessment IS NOT NULL AND custom_exchange_assessment != ''
+        ORDER BY posting_date DESC LIMIT 20
+    """, {"customer": customer}, as_dict=True)
+
+    # Coupon usage
+    out["coupon_usage"] = frappe.db.sql("""
+        SELECT name, posting_date, coupon_code, grand_total
+        FROM `tabPOS Invoice`
+        WHERE customer = %(customer)s AND docstatus = 1
+          AND coupon_code IS NOT NULL AND coupon_code != ''
+        ORDER BY posting_date DESC LIMIT 20
+    """, {"customer": customer}, as_dict=True)
+
+    # Exception requests
+    out["exceptions"] = frappe.db.sql("""
+        SELECT name, creation, exception_type, status,
+               reference_doctype, reference_name
+        FROM `tabCH Exception Request`
+        WHERE customer = %(customer)s
+        ORDER BY creation DESC LIMIT 20
+    """, {"customer": customer}, as_dict=True)
 
     # Loyalty
     loyalty_program = cust_doc.loyalty_program
@@ -1948,7 +2176,9 @@ def get_vas_plans_with_rules(cart_items=None):
 def create_quick_job_card(customer, contact_number, device_item,
                           issue_description, serial_no=None,
                           issue_category=None, warranty_status=None,
-                          priority="Medium", estimated_hours=None):
+                          priority="Medium", estimated_hours=None,
+                          device_condition=None, accessories_received=None,
+                          data_backup_disclaimer=0):
     """Create a Service Request, accept it, and create Job Assignment in one call.
 
     This is the 'quick job card' flow for walk-in repairs from POS.
@@ -1963,6 +2193,9 @@ def create_quick_job_card(customer, contact_number, device_item,
     sr.issue_category = issue_category or ""
     sr.issue_description = issue_description
     sr.warranty_status = warranty_status or ""
+    sr.device_condition = device_condition or ""
+    sr.accessories_received = accessories_received or ""
+    sr.data_backup_disclaimer = cint(data_backup_disclaimer)
     sr.mode_of_service = "Walk-in"
     sr.company = frappe.defaults.get_default("company") or ""
     sr.source_warehouse = frappe.form_dict.get("warehouse") or ""

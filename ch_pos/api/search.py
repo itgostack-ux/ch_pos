@@ -122,20 +122,14 @@ def _enrich_item(row, warehouse, profile_doc, nearby_warehouses=None):
         elif "pre-owned" in name_lower or "preowned" in name_lower or "used" in name_lower:
             row.ch_item_type = "Pre-Owned"
 
-    # Condition grade — prefer ch_item_master's condition_grade field if available
+    # Condition grade — detect from item name for Refurbished / Pre-Owned items
     row.condition_grade = ""
     if row.get("ch_item_type") in ("Refurbished", "Pre-Owned"):
-        # Try to get grade from CH Model or Item if available
-        condition_grade = frappe.db.get_value("Item", row.item_code, "condition_grade")
-        if condition_grade:
-            row.condition_grade = condition_grade
-        else:
-            # Fallback to name-based detection
-            name_lower = (row.item_name or "").lower()
-            for grade in ["Superb", "Good", "Fair", "Excellent"]:
-                if grade.lower() in name_lower:
-                    row.condition_grade = grade
-                    break
+        name_lower = (row.item_name or "").lower()
+        for grade in ["Superb", "Good", "Fair", "Excellent"]:
+            if grade.lower() in name_lower:
+                row.condition_grade = grade
+                break
 
     # CH Item Price (POS channel)
     ch_price = frappe.db.get_value(
@@ -307,7 +301,7 @@ def get_item_detail_for_pos(item_code, warehouse=None, price_list=None):
 
     # Specs from CH Model
     specs = {}
-    model_name = frappe.db.get_value("Item", item_code, "custom_ch_model")
+    model_name = frappe.db.get_value("Item", item_code, "ch_model")
     if model_name:
         model_doc = frappe.get_cached_doc("CH Model", model_name)
         specs = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}

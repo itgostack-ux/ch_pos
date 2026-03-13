@@ -137,9 +137,49 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Sale Type",
+   "link_count": 0,
+   "link_to": "CH Sale Type",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Executive",
+   "link_count": 0,
+   "link_to": "POS Executive",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Incentive Ledger",
+   "link_count": 0,
+   "link_to": "POS Incentive Ledger",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Incentive Slab",
+   "link_count": 0,
+   "link_to": "POS Incentive Slab",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
   }
  ],
- "modified": "2026-03-09 10:18:14.629674",
+ "modified": "2026-03-13 00:11:11.737838",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "POS",

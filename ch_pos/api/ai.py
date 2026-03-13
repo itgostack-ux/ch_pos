@@ -196,7 +196,7 @@ def _ai_compare(item_codes, preferences, settings):
     for code in item_codes:
         item = frappe.get_cached_doc("Item", code)
         specs = {}
-        model_name = frappe.db.get_value("Item", code, "custom_ch_model")
+        model_name = frappe.db.get_value("Item", code, "ch_model")
         if model_name:
             model_doc = frappe.get_cached_doc("CH Model", model_name)
             specs = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}
@@ -253,7 +253,7 @@ def _static_compare(item_codes, preferences):
     for code in item_codes:
         item = frappe.get_cached_doc("Item", code)
         specs = {}
-        model_name = frappe.db.get_value("Item", code, "custom_ch_model")
+        model_name = frappe.db.get_value("Item", code, "ch_model")
         if model_name:
             model_doc = frappe.get_cached_doc("CH Model", model_name)
             specs = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}

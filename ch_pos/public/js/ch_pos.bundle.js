@@ -34,6 +34,7 @@ import { MaterialRequestWorkspace } from "./pos_app/modules/material_request/mat
 import { StockTransferWorkspace } from "./pos_app/modules/stock_transfer/stock_transfer_workspace.js";
 import { ModelCompareWorkspace } from "./pos_app/modules/model_compare/model_compare_workspace.js";
 import { ClaimsWorkspace } from "./pos_app/modules/claims/claims_workspace.js";
+import { ExceptionWorkspace } from "./pos_app/modules/exceptions/exception_workspace.js";
 
 // Shared
 import { PaymentDialog } from "./pos_app/shared/payment_dialog.js";
@@ -84,6 +85,7 @@ ch_pos.PosApp = class PosApp {
 		this.stock_transfer_workspace = new StockTransferWorkspace();
 		this.model_compare_workspace = new ModelCompareWorkspace();
 		this.claims_workspace = new ClaimsWorkspace();
+		this.exception_workspace = new ExceptionWorkspace();
 	}
 
 	// ── Profile Selection ───────────────────────────────

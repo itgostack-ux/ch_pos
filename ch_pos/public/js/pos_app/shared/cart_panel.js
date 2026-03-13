@@ -91,10 +91,17 @@ export class CartPanel {
 			<div class="ch-pos-discount-bar">
 				<div class="ch-pos-discount-row">
 					<input type="text" class="form-control ch-pos-coupon-input"
-						placeholder="${__("Coupon code...")}">
+						placeholder="${__("Coupon / Voucher code...")}">
 					<button class="btn btn-sm btn-outline-primary ch-pos-coupon-apply">${__("Apply")}</button>
 				</div>
-				<div class="ch-pos-discount-row">
+				<div class="ch-pos-coupon-msg"></div>
+				<div class="ch-pos-discount-row" style="margin-top:4px">
+					<span class="ch-pos-discount-label">${__("Reason")}</span>
+					<select class="form-control ch-pos-disc-reason" style="flex:1;font-size:12px">
+						<option value="">${__("Select reason...")}</option>
+					</select>
+				</div>
+				<div class="ch-pos-discount-row ch-pos-manual-disc" style="margin-top:4px;display:none">
 					<span class="ch-pos-discount-label">${__("Discount")}</span>
 					<div class="ch-pos-discount-inputs d-flex align-items-center">
 						<input type="number" class="form-control ch-pos-disc-pct"
@@ -104,7 +111,7 @@ export class CartPanel {
 							placeholder="₹" min="0" step="1">
 					</div>
 				</div>
-				<div class="ch-pos-coupon-msg"></div>
+				<div class="ch-pos-disc-info text-muted" style="font-size:11px;padding:2px 4px;display:none"></div>
 			</div>
 
 			<!-- E. Totals -->
@@ -124,6 +131,10 @@ export class CartPanel {
 				<div class="summary-row coupon-disc" style="display:none">
 					<span>🏷️ ${__("Coupon")}</span>
 					<span class="value">₹0</span>
+				</div>
+				<div class="summary-row voucher-disc" style="display:none">
+					<span>🎟️ ${__("Voucher")}</span>
+					<span class="value">-₹0</span>
 				</div>
 				<div class="summary-row exchange-credit" style="display:none">
 					<span><i class="fa fa-exchange"></i> ${__("Exchange Credit")}</span>
@@ -482,13 +493,26 @@ export class CartPanel {
 			EventBus.emit("cart:remove", $(this).data("idx"));
 		});
 
-		// Coupon
+		// Coupon / Voucher
 		w.on("click", ".ch-pos-coupon-apply", () => {
 			const code = w.find(".ch-pos-coupon-input").val().trim();
 			if (code) EventBus.emit("coupon:apply", code);
 		});
 
-		// Manual discount — enforced by executive permissions
+		EventBus.on("coupon:applied", (data) => {
+			const msg_el = w.find(".ch-pos-coupon-msg");
+			if (data.is_voucher) {
+				msg_el.html(`<span style="color:var(--pos-success,green)">🎟️ ${__("Voucher applied")} — ₹${format_number(data.amount)} ${__("off")} (${__("Bal")}: ₹${format_number(data.balance)})</span>`).show();
+			} else {
+				msg_el.html(`<span style="color:var(--pos-success,green)">🏷️ ${__("Coupon applied")} — ₹${format_number(data.amount)} ${__("off")}</span>`).show();
+			}
+		});
+		EventBus.on("coupon:invalid", (reason) => {
+			w.find(".ch-pos-coupon-msg")
+				.html(`<span style="color:var(--pos-danger,red)">${frappe.utils.escape_html(reason)}</span>`).show();
+		});
+
+		// Manual discount — enforced by executive permissions (only for manual-entry reasons)
 		w.on("change", ".ch-pos-disc-pct", function () {
 			const pct = parseFloat($(this).val()) || 0;
 			if (!_check_discount_permission(pct)) {
@@ -512,6 +536,61 @@ export class CartPanel {
 			EventBus.emit("discount:changed");
 		});
 
+		// Discount reason selection — drives the whole discount flow
+		w.on("change", ".ch-pos-disc-reason", function () {
+			const reason_name = $(this).val() || "";
+			PosState.discount_reason = reason_name;
+
+			if (!reason_name) {
+				// Cleared — reset discount
+				PosState.additional_discount_pct = 0;
+				PosState.additional_discount_amt = 0;
+				w.find(".ch-pos-manual-disc").hide();
+				w.find(".ch-pos-disc-info").hide();
+				w.find(".ch-pos-disc-pct, .ch-pos-disc-amt").val("");
+				EventBus.emit("discount:changed");
+				return;
+			}
+
+			const reason = (PosState._discount_reasons || []).find((r) => r.name === reason_name);
+			if (!reason) return;
+
+			if (reason.allow_manual_entry) {
+				// Manual entry mode — show inputs, clear preset
+				w.find(".ch-pos-manual-disc").show();
+				w.find(".ch-pos-disc-info").text(
+					reason.max_manual_percent
+						? __("Enter discount (max {0}%)", [reason.max_manual_percent])
+						: __("Enter discount within your role limits")
+				).show();
+				w.find(".ch-pos-disc-pct, .ch-pos-disc-amt").val("");
+				PosState.additional_discount_pct = 0;
+				PosState.additional_discount_amt = 0;
+				EventBus.emit("discount:changed");
+			} else {
+				// Preset — auto-apply the fixed value
+				w.find(".ch-pos-manual-disc").hide();
+				if (reason.discount_type === "Percentage") {
+					PosState.additional_discount_pct = flt(reason.discount_value);
+					PosState.additional_discount_amt = 0;
+					w.find(".ch-pos-disc-info").text(
+						__("{0}: {1}% discount applied", [reason.reason_name, reason.discount_value])
+					).show();
+				} else {
+					PosState.additional_discount_amt = flt(reason.discount_value);
+					PosState.additional_discount_pct = 0;
+					w.find(".ch-pos-disc-info").text(
+						__("{0}: ₹{1} discount applied", [reason.reason_name, reason.discount_value])
+					).show();
+				}
+				w.find(".ch-pos-disc-pct, .ch-pos-disc-amt").val("");
+				EventBus.emit("discount:changed");
+			}
+		});
+
+		// Load discount reasons from server
+		this._load_discount_reasons(w);
+
 		// Refresh on cart update
 		EventBus.on("cart:updated", () => this.refresh());
 		EventBus.on("exchange:applied", () => this.refresh());
@@ -533,10 +612,32 @@ export class CartPanel {
 			this.wrapper.find(".ch-pos-credit-warning").hide();
 			// Reset sale type to default
 			this._render_sale_type_bar();
+			// Reset discount controls
+			this.wrapper.find(".ch-pos-disc-reason").val("");
+			this.wrapper.find(".ch-pos-disc-pct, .ch-pos-disc-amt").val("");
+			this.wrapper.find(".ch-pos-manual-disc").hide();
+			this.wrapper.find(".ch-pos-disc-info").hide();
 		});
 
 		// Re-render executive bar when access data arrives
 		EventBus.on("executive_access:loaded", () => this._render_executive_bar());
+	}
+
+	_load_discount_reasons(w) {
+		PosState._discount_reasons = [];
+		frappe.xcall("ch_pos.api.pos_api.get_discount_reasons", {
+			company: PosState.company,
+		}).then((reasons) => {
+			PosState._discount_reasons = reasons || [];
+			const sel = w.find(".ch-pos-disc-reason");
+			sel.find("option:not(:first)").remove();
+			(reasons || []).forEach((r) => {
+				const label = r.allow_manual_entry
+					? r.reason_name
+					: `${r.reason_name} (${r.discount_type === "Percentage" ? r.discount_value + "%" : "₹" + r.discount_value})`;
+				sel.append(`<option value="${frappe.utils.escape_html(r.name)}">${frappe.utils.escape_html(label)}</option>`);
+			});
+		});
 	}
 
 	refresh() {
@@ -693,9 +794,10 @@ export class CartPanel {
 		}
 
 		const coupon_disc = flt(PosState.coupon_discount);
+		const voucher_disc = flt(PosState.voucher_amount);
 		const exchange_credit = flt(PosState.exchange_amount);
 		const pe_credit = flt(PosState.product_exchange_credit);
-		const grand_total = Math.max(0, subtotal - discount_total - add_disc - coupon_disc - exchange_credit - pe_credit);
+		const grand_total = Math.max(0, subtotal - discount_total - add_disc - coupon_disc - voucher_disc - exchange_credit - pe_credit);
 
 		s.find(".total-qty .value").text(total_qty);
 		s.find(".discount-total .value").text(`₹${format_number(discount_total)}`);
@@ -705,6 +807,9 @@ export class CartPanel {
 
 		const coupon_row = s.find(".coupon-disc");
 		coupon_disc > 0 ? coupon_row.show().find(".value").text(`-₹${format_number(coupon_disc)}`) : coupon_row.hide();
+
+		const voucher_row = s.find(".voucher-disc");
+		voucher_disc > 0 ? voucher_row.show().find(".value").text(`-₹${format_number(voucher_disc)}`) : voucher_row.hide();
 
 		const ex_row = s.find(".exchange-credit");
 		exchange_credit > 0 ? ex_row.show().find(".value").text(`-₹${format_number(exchange_credit)}`) : ex_row.hide();

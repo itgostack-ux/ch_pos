@@ -141,6 +141,10 @@ export class PaymentDialog {
 			for_item_code: c.for_item_code || null,
 			is_warranty: c.is_warranty || false,
 			is_vas: c.is_vas || false,
+			manager_approved: c.manager_approved || false,
+			manager_user: c.manager_user || null,
+			override_reason: c.override_reason || null,
+			serial_no: c.serial_no || null,
 		}));
 
 		const invoice_data = {
@@ -153,6 +157,8 @@ export class PaymentDialog {
 			additional_discount_percentage: PosState.additional_discount_pct || 0,
 			additional_discount_amount: PosState.additional_discount_amt || PosState.coupon_discount || 0,
 			coupon_code: PosState.coupon_code || null,
+			voucher_code: PosState.voucher_code || null,
+			voucher_amount: PosState.voucher_amount || 0,
 			redeem_loyalty_points: payment_values.redeem_loyalty ? 1 : 0,
 			loyalty_points: payment_values.redeem_loyalty
 				? cint(flt(payment_values.loyalty_amount) / (PosState.conversion_factor || 1))
@@ -164,6 +170,7 @@ export class PaymentDialog {
 			sale_type: PosState.sale_type || null,
 			sale_sub_type: PosState.sale_sub_type || null,
 			sale_reference: PosState.sale_reference || null,
+			discount_reason: PosState.discount_reason || null,
 		};
 
 		// Offline queue
@@ -255,6 +262,7 @@ export class PaymentDialog {
 		}
 
 		net -= flt(PosState.coupon_discount);
+		net -= flt(PosState.voucher_amount);
 		net -= flt(PosState.exchange_amount);
 		net -= flt(PosState.product_exchange_credit);
 
@@ -281,6 +289,7 @@ export class PaymentDialog {
 		}
 
 		const coupon_disc = flt(PosState.coupon_discount);
+		const voucher_disc = flt(PosState.voucher_amount);
 		const exchange_credit = flt(PosState.exchange_amount);
 		const pe_credit = flt(PosState.product_exchange_credit);
 
@@ -321,6 +330,9 @@ export class PaymentDialog {
 		}
 		if (coupon_disc > 0) {
 			deductions += `<tr class="ch-pay-deduction"><td colspan="2">🏷️ ${__("Coupon")} (${PosState.coupon_code})</td><td style="text-align:right">-₹${format_number(coupon_disc)}</td></tr>`;
+		}
+		if (voucher_disc > 0) {
+			deductions += `<tr class="ch-pay-deduction"><td colspan="2">🎟️ ${__("Voucher")} (${PosState.voucher_code})</td><td style="text-align:right">-₹${format_number(voucher_disc)}</td></tr>`;
 		}
 		if (exchange_credit > 0) {
 			deductions += `<tr class="ch-pay-deduction"><td colspan="2"><i class="fa fa-exchange"></i> ${__("Exchange Credit")}</td><td style="text-align:right;color:var(--pos-success)">-₹${format_number(exchange_credit)}</td></tr>`;
