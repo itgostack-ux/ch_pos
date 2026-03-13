@@ -1,0 +1,60 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-03-13 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "pos_invoice",
+  "reason",
+  "column_break_1",
+  "requested_at",
+  "status"
+ ],
+ "fields": [
+  {
+   "fieldname": "pos_invoice",
+   "fieldtype": "Link",
+   "label": "POS Invoice",
+   "options": "POS Invoice",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Reason",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "requested_at",
+   "fieldtype": "Datetime",
+   "label": "Requested At",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Pending\nDone\nCancelled",
+   "default": "Pending",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-03-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS Reprint Queue",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "requested_at",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

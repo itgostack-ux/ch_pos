@@ -22,7 +22,9 @@
   "comparisons_made",
   "column_break_stats",
   "tokens_generated",
-  "guided_sessions"
+  "guided_sessions",
+  "reprint_section",
+  "reprint_queue"
  ],
  "fields": [
   {
@@ -136,6 +138,18 @@
    "fieldname": "guided_sessions",
    "fieldtype": "Int",
    "label": "Guided Sessions"
+  },
+  {
+   "fieldname": "reprint_section",
+   "fieldtype": "Section Break",
+   "label": "Reprint Queue",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "reprint_queue",
+   "fieldtype": "Table",
+   "label": "Reprint Queue",
+   "options": "POS Reprint Queue"
   }
  ],
  "index_web_pages_for_search": 0,

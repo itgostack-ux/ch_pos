@@ -14,6 +14,19 @@ class POSKioskToken(Document):
         if self.status == "Active":
             self.db_set("status", "Expired")
 
+        try:
+            from ch_pos.audit import log_business_event
+            log_business_event(
+                event_type="Token Expiry",
+                ref_doctype="POS Kiosk Token", ref_name=self.name,
+                before="Active",
+                after="Expired",
+                remarks=f"Token cancelled for customer {self.get('customer', '')}",
+                company=self.get("company", ""),
+            )
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Audit log failed for token {self.name}")
+
     def _calculate_total(self):
         self.total_estimate = sum(row.amount or 0 for row in self.items)
 

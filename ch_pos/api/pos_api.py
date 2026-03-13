@@ -113,15 +113,35 @@ def create_pos_invoice(pos_profile, customer, items,
                        voucher_code=None, voucher_amount=0,
                        redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
                        sales_executive=None, sale_type=None, sale_sub_type=None,
-                       sale_reference=None, discount_reason=None):
+                       sale_reference=None, discount_reason=None,
+                       client_request_id=None):
     """Create and submit a POS Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
       Legacy:  mode_of_payment + amount_paid
       Split:   payments = [{mode_of_payment, amount, upi_transaction_id?,
                              card_reference?, card_last_four?}, ...]
+
+    Idempotency:
+      Pass a unique client_request_id (UUID) per attempt. Retries with the
+      same ID within 10 minutes return the existing invoice without
+      creating a duplicate.
     """
     frappe.has_permission("POS Invoice", "create", throw=True)
+
+    # ── Duplicate-submit guard ────────────────────────────────────────────────
+    if client_request_id:
+        _crid = frappe.db.escape(str(client_request_id)[:140])
+        existing = frappe.db.sql(
+            f"""SELECT name FROM `tabPOS Invoice`
+                WHERE custom_client_request_id = {_crid}
+                  AND docstatus != 2
+                  AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+                LIMIT 1""",
+            as_dict=True,
+        )
+        if existing:
+            return {"name": existing[0].name, "status": "duplicate_prevented"}
     if isinstance(items, str):
         items = frappe.parse_json(items)
 
@@ -307,6 +327,10 @@ def create_pos_invoice(pos_profile, customer, items,
     if sale_reference:
         inv.custom_ch_sale_reference = sale_reference
 
+    # Store client request ID for idempotency
+    if client_request_id:
+        inv.custom_client_request_id = str(client_request_id)[:140]
+
     inv.flags.ignore_permissions = True
     inv.save()
     inv.submit()
@@ -347,6 +371,45 @@ def create_pos_invoice(pos_profile, customer, items,
             pos_executive=sales_executive,
             transaction_type="Sale",
         )
+
+    # ── Audit logging (best-effort, never blocks sale) ────────────────────────
+    try:
+        from ch_pos.audit import log_business_event
+        _store = frappe.get_cached_value("POS Profile", pos_profile, "warehouse")
+        _company = inv.company
+
+        # Discount override audit
+        if flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
+            log_business_event(
+                event_type="Discount Override",
+                ref_doctype="POS Invoice", ref_name=inv.name,
+                before="0",
+                after=f"{additional_discount_percentage}% / ₹{additional_discount_amount}",
+                remarks=f"Reason: {discount_reason or 'N/A'}",
+                store=_store, company=_company,
+            )
+
+        # Exchange conversion audit
+        if exchange_assessment:
+            log_business_event(
+                event_type="Exchange Conversion",
+                ref_doctype="POS Invoice", ref_name=inv.name,
+                before=exchange_assessment,
+                after=f"Credit: ₹{exchange_credit}",
+                store=_store, company=_company,
+            )
+
+        # Voucher redemption audit
+        if voucher_code and flt(voucher_redeemed) > 0:
+            log_business_event(
+                event_type="Voucher Redemption",
+                ref_doctype="POS Invoice", ref_name=inv.name,
+                before=voucher_code,
+                after=f"₹{voucher_redeemed} redeemed",
+                store=_store, company=_company,
+            )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Audit log failed for POS Invoice {inv.name}")
 
     return {
         "name": inv.name,
@@ -734,6 +797,19 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     if sales_executive:
         incentive_clawback = _create_return_incentive_entries(ret, sales_executive)
 
+    # Audit
+    try:
+        from ch_pos.audit import log_business_event
+        log_business_event(
+            event_type="Return Approved",
+            ref_doctype="POS Invoice", ref_name=ret.name,
+            before=original_invoice,
+            after=f"Return ₹{total_return_amount}",
+            company=orig.company,
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Return audit log failed")
+
     return {
         "name": ret.name,
         "grand_total": ret.grand_total,
@@ -741,9 +817,6 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
         "customer_name": ret.customer_name,
         "incentive_clawback": incentive_clawback,
     }
-
-
-# ── Serial / IMEI Validation ────────────────────────────────
 @frappe.whitelist()
 def validate_serial_for_sale(serial_no, item_code, warehouse):
     """Validate a serial number can be sold from this warehouse."""
@@ -2859,3 +2932,79 @@ def submit_closing_entry(closing_entry, counted_amounts_json, counted_cash=0, re
             for r in doc.payment_details
         ],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 2C — Session Crash Recovery
+# ═══════════════════════════════════════════════════════════════════════════
+
+@frappe.whitelist()
+def get_open_session(pos_profile):
+	"""Return the last unclosed POS Session Log for this profile/terminal.
+
+	Frontend calls this on startup. If a session is returned, the UI should
+	offer "Resume session {name}?" before creating a new one.
+	"""
+	row = frappe.db.sql("""
+		SELECT name, opening_date, opening_time, sales_executive
+		FROM `tabPOS Session Log`
+		WHERE pos_profile = %(pos)s
+		  AND docstatus = 1
+		  AND status != 'Closed'
+		ORDER BY creation DESC
+		LIMIT 1
+	""", {"pos": pos_profile}, as_dict=True)
+	return row[0] if row else None
+
+
+@frappe.whitelist()
+def flag_reprint_needed(pos_invoice, reason="Print failed"):
+	"""Mark an invoice as needing reprint.
+
+	Frontend calls this when the receipt printer is offline or errors.
+	Store managers can see pending reprints in the CH Store Operations workspace.
+	"""
+	if not frappe.db.exists("POS Invoice", pos_invoice):
+		frappe.throw(frappe._("POS Invoice {0} not found").format(pos_invoice))
+
+	# Append to session log reprint queue if session log linked
+	session_log = frappe.db.get_value("POS Session Log", {"pos_profile": frappe.db.get_value("POS Invoice", pos_invoice, "pos_profile"), "status": ["!=", "Closed"], "docstatus": 1}, "name")
+
+	frappe.db.sql("""
+		INSERT INTO `tabPOS Reprint Queue`
+		  (name, parent, parenttype, parentfield, pos_invoice, reason, requested_at, status)
+		VALUES (%(n)s, %(p)s, 'POS Session Log', 'reprint_queue',
+		        %(inv)s, %(reason)s, NOW(), 'Pending')
+	""", {
+		"n": frappe.generate_hash(length=10),
+		"p": session_log or "",
+		"inv": pos_invoice,
+		"reason": (reason or "Print failed")[:200],
+	})
+	frappe.db.commit()
+	return {"status": "queued", "pos_invoice": pos_invoice}
+
+
+@frappe.whitelist()
+def get_pending_reprints(pos_profile, limit=20):
+	"""Return pending reprint queue items for a POS profile.
+
+	Used by the store manager workspace shortcut.
+	"""
+	return frappe.db.sql("""
+		SELECT rq.name, rq.pos_invoice, rq.reason, rq.requested_at, rq.status
+		FROM `tabPOS Reprint Queue` rq
+		JOIN `tabPOS Session Log` sl ON sl.name = rq.parent
+		WHERE sl.pos_profile = %(pos)s
+		  AND rq.status = 'Pending'
+		ORDER BY rq.requested_at DESC
+		LIMIT %(limit)s
+	""", {"pos": pos_profile, "limit": int(limit)}, as_dict=True)
+
+
+@frappe.whitelist()
+def mark_reprint_done(reprint_name):
+	"""Mark a reprint queue item as completed."""
+	frappe.db.set_value("POS Reprint Queue", reprint_name, "status", "Done",
+		update_modified=False)
+	return {"status": "done"}

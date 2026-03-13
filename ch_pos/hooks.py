@@ -60,10 +60,14 @@ scheduler_events = {
     ],
 }
 
-# Fixtures (install custom fields)
+# Fixtures (install custom fields and workspaces)
 fixtures = [
     {
         "dt": "Custom Field",
         "filters": [["module", "=", "POS Core"]],
+    },
+    {
+        "dt": "Workspace",
+        "filters": [["name", "in", ["CH Store Operations", "CH Finance & Compliance"]]],
     },
 ]

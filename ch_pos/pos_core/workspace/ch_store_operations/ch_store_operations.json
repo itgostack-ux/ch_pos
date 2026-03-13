@@ -1,0 +1,191 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"hdr_daily\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Daily Operations</b></span>\",\"col\":12}},{\"id\":\"sc_pos\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Open POS\",\"col\":4}},{\"id\":\"sc_session_log\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Session Logs\",\"col\":4}},{\"id\":\"sc_incentive\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Incentive Ledger\",\"col\":4}},{\"id\":\"spacer_1\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"hdr_customer\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Customer Experience</b></span>\",\"col\":12}},{\"id\":\"card_kiosk\",\"type\":\"card\",\"data\":{\"card_name\":\"Kiosk & Tokens\",\"col\":4}},{\"id\":\"card_repair\",\"type\":\"card\",\"data\":{\"card_name\":\"Repair\",\"col\":4}},{\"id\":\"card_buyback\",\"type\":\"card\",\"data\":{\"card_name\":\"Buyback\",\"col\":4}},{\"id\":\"spacer_2\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"hdr_reports\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Reports</b></span>\",\"col\":12}},{\"id\":\"card_reports\",\"type\":\"card\",\"data\":{\"card_name\":\"Store Reports\",\"col\":6}}]",
+ "creation": "2026-06-01 00:00:00",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "shop",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "CH Store Operations",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Kiosk & Tokens",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Kiosk Token",
+   "link_count": 0,
+   "link_to": "POS Kiosk Token",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Guided Session",
+   "link_count": 0,
+   "link_to": "POS Guided Session",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Session Log",
+   "link_count": 0,
+   "link_to": "POS Session Log",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Incentive Ledger",
+   "link_count": 0,
+   "link_to": "POS Incentive Ledger",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Repair",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Repair Intake",
+   "link_count": 0,
+   "link_to": "POS Repair Intake",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback Assessment",
+   "link_count": 0,
+   "link_to": "Buyback Assessment",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Store Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "POS Exchange Reconciliation",
+   "link_count": 0,
+   "link_to": "POS Exchange Reconciliation",
+   "link_type": "Report",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "POS Margin Leakage",
+   "link_count": 0,
+   "link_to": "POS Margin Leakage",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "POS Tax Summary",
+   "link_count": 0,
+   "link_to": "POS Tax Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Executive Summary",
+   "link_count": 0,
+   "link_to": "Executive Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-06-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH Store Operations",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "Store Manager"
+  },
+  {
+   "role": "Store Executive"
+  }
+ ],
+ "sequence_id": 6.0,
+ "shortcuts": [
+  {
+   "doc_view": "",
+   "label": "Open POS",
+   "link_to": "/point-of-sale",
+   "type": "URL"
+  },
+  {
+   "doc_view": "List",
+   "label": "Session Logs",
+   "link_to": "POS Session Log",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "List",
+   "label": "Incentive Ledger",
+   "link_to": "POS Incentive Ledger",
+   "type": "DocType"
+  }
+ ],
+ "title": "CH Store Operations"
+}

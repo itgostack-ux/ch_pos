@@ -168,6 +168,27 @@ def reverse_serial_lifecycle(doc, method=None):
     Uses 'Returned' status since that is the valid transition from 'Sold'
     in ch_item_master's VALID_TRANSITIONS dict.
     """
+    # Require a cancellation reason from non-system users
+    if frappe.session.user != "Administrator":
+        if not (doc.get("custom_cancel_reason") or "").strip():
+            frappe.throw(
+                frappe._("A cancellation reason is required to cancel POS Invoice {0}").format(doc.name)
+            )
+
+    # Emit audit log for the cancellation
+    try:
+        from ch_pos.audit import log_business_event
+        log_business_event(
+            event_type="POS Invoice Cancelled",
+            ref_doctype="POS Invoice",
+            ref_name=doc.name,
+            before="Submitted",
+            after="Cancelled",
+            remarks=doc.get("custom_cancel_reason") or "",
+            company=doc.company,
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Audit log failed on POS Invoice cancel")
     for item in doc.items:
         serial_nos = (item.serial_no or "").strip()
         if not serial_nos:

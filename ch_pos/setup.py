@@ -119,6 +119,24 @@ CUSTOM_FIELDS = {
             "depends_on": "eval:doc.additional_discount_percentage || doc.discount_amount",
             "module": "POS Core",
         },
+        {
+            "fieldname": "custom_client_request_id",
+            "fieldtype": "Data",
+            "label": "Client Request ID",
+            "insert_after": "custom_discount_reason",
+            "read_only": 1,
+            "no_copy": 1,
+            "hidden": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_cancel_reason",
+            "fieldtype": "Small Text",
+            "label": "Cancellation Reason",
+            "insert_after": "custom_client_request_id",
+            "no_copy": 1,
+            "module": "POS Core",
+        },
     ],
     "POS Invoice Item": [
         {
