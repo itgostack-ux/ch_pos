@@ -1,0 +1,199 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-03-13 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "company",
+  "store",
+  "column_break_info",
+  "settlement_date",
+  "terminal_id",
+  "bank_name",
+  "status",
+  "section_summary",
+  "total_transactions",
+  "total_amount",
+  "matched_amount",
+  "column_break_summary",
+  "unmatched_amount",
+  "match_rate",
+  "variance",
+  "section_transactions",
+  "transactions",
+  "section_remarks",
+  "remarks"
+ ],
+ "fields": [
+  {
+   "default": "EDC-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "EDC-.YYYY.-.#####",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Store",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "column_break_info",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Today",
+   "fieldname": "settlement_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Settlement Date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "terminal_id",
+   "fieldtype": "Data",
+   "label": "Terminal ID / EDC Machine ID",
+   "description": "EDC machine identifier from bank"
+  },
+  {
+   "fieldname": "bank_name",
+   "fieldtype": "Data",
+   "label": "Bank / Acquirer"
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Draft\nMatched\nDiscrepancy",
+   "read_only": 1
+  },
+  {
+   "collapsible": 0,
+   "fieldname": "section_summary",
+   "fieldtype": "Section Break",
+   "label": "Settlement Summary"
+  },
+  {
+   "default": "0",
+   "fieldname": "total_transactions",
+   "fieldtype": "Int",
+   "label": "Total Transactions",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "label": "Total Amount (from EDC)",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "matched_amount",
+   "fieldtype": "Currency",
+   "label": "Matched Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_summary",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "unmatched_amount",
+   "fieldtype": "Currency",
+   "label": "Unmatched Amount",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "match_rate",
+   "fieldtype": "Percent",
+   "label": "Match Rate %",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "variance",
+   "fieldtype": "Currency",
+   "label": "Net Variance",
+   "read_only": 1,
+   "description": "Total EDC Amount - Matched POS Invoice Card Amount"
+  },
+  {
+   "fieldname": "section_transactions",
+   "fieldtype": "Section Break",
+   "label": "EDC Transactions"
+  },
+  {
+   "fieldname": "transactions",
+   "fieldtype": "Table",
+   "label": "Transactions",
+   "options": "POS EDC Transaction"
+  },
+  {
+   "fieldname": "section_remarks",
+   "fieldtype": "Section Break",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-03-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS EDC Settlement",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "submit": 1,
+   "cancel": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Accounts Manager",
+   "submit": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "settlement_date",
+ "sort_order": "DESC",
+ "states": [
+  {"color": "Gray", "title": "Draft"},
+  {"color": "Green", "title": "Matched"},
+  {"color": "Red", "title": "Discrepancy"}
+ ],
+ "title_field": "bank_name",
+ "track_changes": 1
+}

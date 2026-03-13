@@ -105,14 +105,22 @@ def get_discount_reasons(company=None):
 
 
 @frappe.whitelist()
-def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_paid,
+def create_pos_invoice(pos_profile, customer, items,
+                       mode_of_payment=None, amount_paid=0,
+                       payments=None,
                        exchange_assessment=None, additional_discount_percentage=0,
                        additional_discount_amount=0, coupon_code=None,
                        voucher_code=None, voucher_amount=0,
                        redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
                        sales_executive=None, sale_type=None, sale_sub_type=None,
                        sale_reference=None, discount_reason=None):
-    """Create and submit a POS Invoice from the CH POS App cart."""
+    """Create and submit a POS Invoice from the CH POS App cart.
+
+    Supports both legacy single-payment and new multi-payment (split) modes:
+      Legacy:  mode_of_payment + amount_paid
+      Split:   payments = [{mode_of_payment, amount, upi_transaction_id?,
+                             card_reference?, card_last_four?}, ...]
+    """
     frappe.has_permission("POS Invoice", "create", throw=True)
     if isinstance(items, str):
         items = frappe.parse_json(items)
@@ -171,11 +179,31 @@ def create_pos_invoice(pos_profile, customer, items, mode_of_payment, amount_pai
                 "price": flt(item.get("rate")),
             })
 
-    # Payment
-    inv.append("payments", {
-        "mode_of_payment": mode_of_payment,
-        "amount": flt(amount_paid),
-    })
+    # Payment — supports split payments (new) and single mode (legacy)
+    if payments:
+        if isinstance(payments, str):
+            payments = frappe.parse_json(payments)
+        if not payments:
+            frappe.throw(frappe._("At least one payment mode is required"))
+        for p in payments:
+            row = {
+                "mode_of_payment": p.get("mode_of_payment"),
+                "amount": flt(p.get("amount", 0)),
+            }
+            if p.get("upi_transaction_id"):
+                row["custom_upi_transaction_id"] = p["upi_transaction_id"]
+            if p.get("card_reference"):
+                row["custom_card_reference"] = p["card_reference"]
+            if p.get("card_last_four"):
+                row["custom_card_last_four"] = p["card_last_four"]
+            inv.append("payments", row)
+    elif mode_of_payment:
+        inv.append("payments", {
+            "mode_of_payment": mode_of_payment,
+            "amount": flt(amount_paid),
+        })
+    else:
+        frappe.throw(frappe._("Payment mode is required"))
 
     # Taxes from POS Profile
     for tax in profile.get("taxes", []):
@@ -2645,3 +2673,189 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         contact.save()
 
     return cust.name
+
+
+# ── POS Closing Entry APIs ───────────────────────────────────────
+
+@frappe.whitelist()
+def get_session_payment_summary(pos_profile, from_date, to_date=None):
+    """Return expected payment totals for a POS profile + date range.
+
+    Used to pre-fill the POS Closing Entry payment breakdown.
+
+    Args:
+        pos_profile: POS Profile name
+        from_date:   Start posting date (inclusive)
+        to_date:     End posting date (inclusive, default = from_date)
+
+    Returns:
+        {
+          payment_modes: [{mode_of_payment, expected_amount}],
+          totals: {total_invoices, gross_sales, total_returns, return_amount,
+                   net_sales, total_tax, total_margin_gst}
+        }
+    """
+    from_date = from_date or frappe.utils.nowdate()
+    to_date = to_date or from_date
+
+    # Payment mode breakdown
+    payment_rows = frappe.db.sql("""
+        SELECT
+            sip.mode_of_payment,
+            SUM(sip.amount) AS expected_amount
+        FROM `tabPOS Invoice` pi
+        JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
+        WHERE pi.pos_profile = %(pos_profile)s
+          AND pi.docstatus = 1
+          AND pi.is_consolidated = 0
+          AND pi.posting_date BETWEEN %(from_date)s AND %(to_date)s
+        GROUP BY sip.mode_of_payment
+        ORDER BY expected_amount DESC
+    """, {"pos_profile": pos_profile, "from_date": from_date, "to_date": to_date}, as_dict=True)
+
+    # Invoice totals
+    invoices = frappe.get_all(
+        "POS Invoice",
+        filters={
+            "pos_profile": pos_profile,
+            "docstatus": 1,
+            "is_consolidated": 0,
+            "posting_date": ["between", [from_date, to_date]],
+        },
+        fields=["grand_total", "is_return", "total_taxes_and_charges", "custom_margin_gst"],
+    )
+
+    total_invoices = 0
+    gross_sales = 0.0
+    total_returns = 0
+    return_amount = 0.0
+    total_tax = 0.0
+    total_margin_gst = 0.0
+
+    for inv in invoices:
+        amt = flt(inv.grand_total)
+        if inv.is_return:
+            total_returns += 1
+            return_amount += abs(amt)
+        else:
+            total_invoices += 1
+            gross_sales += amt
+            total_tax += flt(inv.total_taxes_and_charges)
+            total_margin_gst += flt(inv.custom_margin_gst)
+
+    return {
+        "payment_modes": [{"mode_of_payment": r.mode_of_payment, "expected_amount": flt(r.expected_amount)} for r in payment_rows],
+        "totals": {
+            "total_invoices": total_invoices,
+            "gross_sales": gross_sales,
+            "total_returns": total_returns,
+            "return_amount": return_amount,
+            "net_sales": gross_sales - return_amount,
+            "total_tax": total_tax,
+            "total_margin_gst": total_margin_gst,
+            "total_regular_gst": total_tax - total_margin_gst,
+        },
+    }
+
+
+@frappe.whitelist()
+def open_closing_entry(pos_profile, from_date, to_date=None, opening_cash=0,
+                       session_log=None):
+    """Create a Draft POS Closing Entry pre-filled with expected amounts.
+
+    Args:
+        pos_profile:  POS Profile
+        from_date:    Period start
+        to_date:      Period end (default = from_date)
+        opening_cash: Starting cash float in drawer
+        session_log:  Optional POS Session Log to link
+
+    Returns:
+        name of the created POS Closing Entry
+    """
+    from_date = from_date or frappe.utils.nowdate()
+    to_date = to_date or from_date
+
+    # Prevent duplicate open/draft entries for same profile+date
+    existing = frappe.db.get_value(
+        "POS Closing Entry",
+        {
+            "pos_profile": pos_profile,
+            "from_date": from_date,
+            "to_date": to_date,
+            "docstatus": 0,
+        },
+        "name",
+    )
+    if existing:
+        return existing
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+
+    entry = frappe.new_doc("POS Closing Entry")
+    entry.company = profile.company
+    entry.pos_profile = pos_profile
+    entry.session_log = session_log
+    entry.from_date = from_date
+    entry.to_date = to_date
+    entry.closing_date = frappe.utils.nowdate()
+    entry.opening_cash = flt(opening_cash)
+
+    entry.flags.ignore_permissions = True
+    entry.save()
+
+    return entry.name
+
+
+@frappe.whitelist()
+def submit_closing_entry(closing_entry, counted_amounts_json, counted_cash=0, remarks=None):
+    """Record actual counted amounts per payment mode and submit the closing entry.
+
+    Args:
+        closing_entry:       POS Closing Entry name
+        counted_amounts_json: JSON list [{mode_of_payment, counted_amount, notes?}]
+        counted_cash:        Physical cash counted in drawer
+        remarks:             Optional remarks from cashier
+
+    Returns:
+        {name, status, cash_variance, payment_variances: [...]}
+    """
+    if isinstance(counted_amounts_json, str):
+        counted_amounts_json = frappe.parse_json(counted_amounts_json)
+
+    doc = frappe.get_doc("POS Closing Entry", closing_entry)
+    if doc.docstatus != 0:
+        frappe.throw(frappe._("Closing Entry {0} is already submitted").format(closing_entry))
+
+    # Map counted amounts by mode_of_payment
+    counts = {row["mode_of_payment"]: row for row in (counted_amounts_json or [])}
+
+    for row in doc.payment_details:
+        if row.mode_of_payment in counts:
+            c = counts[row.mode_of_payment]
+            row.counted_amount = flt(c.get("counted_amount", 0))
+            row.notes = c.get("notes", "")
+            row.variance = row.counted_amount - flt(row.expected_amount)
+
+    doc.counted_cash = flt(counted_cash)
+    if remarks:
+        doc.remarks = remarks
+
+    doc.flags.ignore_permissions = True
+    doc.save()
+    doc.submit()
+
+    return {
+        "name": doc.name,
+        "status": doc.status,
+        "cash_variance": doc.cash_variance,
+        "payment_variances": [
+            {
+                "mode_of_payment": r.mode_of_payment,
+                "expected": r.expected_amount,
+                "counted": r.counted_amount,
+                "variance": r.variance,
+            }
+            for r in doc.payment_details
+        ],
+    }

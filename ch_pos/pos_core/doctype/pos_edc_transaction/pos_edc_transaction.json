@@ -1,0 +1,88 @@
+{
+ "actions": [],
+ "creation": "2026-03-13 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "rrn",
+  "card_last_four",
+  "card_network",
+  "transaction_date",
+  "transaction_time",
+  "amount",
+  "column_break_match",
+  "match_status",
+  "matched_pos_invoice"
+ ],
+ "fields": [
+  {
+   "fieldname": "rrn",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "RRN (Retrieval Reference No.)",
+   "description": "Unique reference from the bank's EDC batch"
+  },
+  {
+   "fieldname": "card_last_four",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Card Last 4 Digits"
+  },
+  {
+   "fieldname": "card_network",
+   "fieldtype": "Select",
+   "label": "Card Network",
+   "options": "\nVisa\nMastercard\nRuPay\nAmex\nDiners\nOther"
+  },
+  {
+   "fieldname": "transaction_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Transaction Date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "transaction_time",
+   "fieldtype": "Time",
+   "label": "Transaction Time"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_match",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Unmatched",
+   "fieldname": "match_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Match Status",
+   "options": "Unmatched\nMatched\nDisputed"
+  },
+  {
+   "fieldname": "matched_pos_invoice",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Matched POS Invoice",
+   "options": "POS Invoice"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-03-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS EDC Transaction",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "idx",
+ "sort_order": "ASC",
+ "states": []
+}

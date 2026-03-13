@@ -216,6 +216,45 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
     ],
+    # Payment row custom fields — capture UPI TxID and card reference per payment line
+    "Sales Invoice Payment": [
+        {
+            "fieldname": "custom_upi_transaction_id",
+            "fieldtype": "Data",
+            "label": "UPI Transaction ID",
+            "insert_after": "amount",
+            "depends_on": "eval:doc.mode_of_payment && doc.mode_of_payment.toLowerCase().includes('upi')",
+            "description": "UPI Transaction ID / UTR from the UPI app",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_card_reference",
+            "fieldtype": "Data",
+            "label": "Card Reference / RRN",
+            "insert_after": "custom_upi_transaction_id",
+            "description": "EDC retrieval reference number for card transactions",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_card_last_four",
+            "fieldtype": "Data",
+            "label": "Card Last 4 Digits",
+            "insert_after": "custom_card_reference",
+            "module": "POS Core",
+        },
+    ],
+    # Company — gift card liability account for GL posting
+    "Company": [
+        {
+            "fieldname": "custom_gift_card_account",
+            "fieldtype": "Link",
+            "label": "Gift Card Liability Account",
+            "options": "Account",
+            "insert_after": "default_income_account",
+            "description": "Liability account for unredeemed gift card / store credit balances. Required for GL entry on voucher redemption.",
+            "module": "POS Core",
+        },
+    ],
 }
 
 

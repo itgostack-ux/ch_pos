@@ -1,0 +1,277 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-03-13 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "company",
+  "pos_profile",
+  "session_log",
+  "column_break_info",
+  "from_date",
+  "to_date",
+  "closing_date",
+  "status",
+  "section_cash",
+  "opening_cash",
+  "expected_cash",
+  "counted_cash",
+  "cash_variance",
+  "section_payments",
+  "payment_details",
+  "section_invoices",
+  "total_invoices",
+  "total_amount",
+  "total_returns",
+  "total_return_amount",
+  "column_break_invoices",
+  "net_sales",
+  "total_tax",
+  "total_margin_gst",
+  "total_regular_gst",
+  "section_remarks",
+  "remarks",
+  "closed_by"
+ ],
+ "fields": [
+  {
+   "default": "POSCLOSE-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "POSCLOSE-.YYYY.-.#####",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "POS Profile",
+   "options": "POS Profile",
+   "reqd": 1
+  },
+  {
+   "fieldname": "session_log",
+   "fieldtype": "Link",
+   "label": "Session Log",
+   "options": "POS Session Log"
+  },
+  {
+   "fieldname": "column_break_info",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Today",
+   "fieldname": "from_date",
+   "fieldtype": "Date",
+   "label": "From Date",
+   "reqd": 1
+  },
+  {
+   "default": "Today",
+   "fieldname": "to_date",
+   "fieldtype": "Date",
+   "label": "To Date",
+   "reqd": 1
+  },
+  {
+   "default": "Today",
+   "fieldname": "closing_date",
+   "fieldtype": "Date",
+   "label": "Closing Date",
+   "reqd": 1
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Draft\nSubmitted\nDiscrepancy",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_cash",
+   "fieldtype": "Section Break",
+   "label": "Cash Reconciliation"
+  },
+  {
+   "default": "0",
+   "fieldname": "opening_cash",
+   "fieldtype": "Currency",
+   "label": "Opening Cash (Float)"
+  },
+  {
+   "default": "0",
+   "fieldname": "expected_cash",
+   "fieldtype": "Currency",
+   "label": "Expected Cash",
+   "read_only": 1,
+   "description": "Auto-computed from submitted POS Invoices (Cash payments)"
+  },
+  {
+   "default": "0",
+   "fieldname": "counted_cash",
+   "fieldtype": "Currency",
+   "label": "Actual Counted Cash"
+  },
+  {
+   "default": "0",
+   "fieldname": "cash_variance",
+   "fieldtype": "Currency",
+   "label": "Cash Variance",
+   "read_only": 1,
+   "description": "Counted Cash - Expected Cash. Negative = Short, Positive = Over."
+  },
+  {
+   "fieldname": "section_payments",
+   "fieldtype": "Section Break",
+   "label": "Payment Mode Breakdown"
+  },
+  {
+   "fieldname": "payment_details",
+   "fieldtype": "Table",
+   "label": "Payment Details",
+   "options": "POS Closing Payment Detail"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_invoices",
+   "fieldtype": "Section Break",
+   "label": "Invoice Summary"
+  },
+  {
+   "default": "0",
+   "fieldname": "total_invoices",
+   "fieldtype": "Int",
+   "label": "Total Invoices",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "label": "Gross Sales",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_returns",
+   "fieldtype": "Int",
+   "label": "Return Invoices",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_return_amount",
+   "fieldtype": "Currency",
+   "label": "Return Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_invoices",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "net_sales",
+   "fieldtype": "Currency",
+   "label": "Net Sales",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_tax",
+   "fieldtype": "Currency",
+   "label": "Total Tax Collected",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_margin_gst",
+   "fieldtype": "Currency",
+   "label": "GST on Margin Scheme",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_regular_gst",
+   "fieldtype": "Currency",
+   "label": "GST on Regular Sales",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_remarks",
+   "fieldtype": "Section Break",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "closed_by",
+   "fieldtype": "Link",
+   "label": "Closed By",
+   "options": "User",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-03-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "POS Closing Entry",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "submit": 1,
+   "cancel": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Accounts Manager",
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "POS Manager",
+   "submit": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "closing_date",
+ "sort_order": "DESC",
+ "states": [
+  {"color": "Gray", "title": "Draft"},
+  {"color": "Green", "title": "Submitted"},
+  {"color": "Red", "title": "Discrepancy"}
+ ],
+ "title_field": "pos_profile",
+ "track_changes": 1
+}
