@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import flt, cint, nowdate, add_months
+from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money
 
 
 @frappe.whitelist()
@@ -1177,6 +1177,261 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     return {"invoice": inv.name, "grand_total": inv.grand_total}
 
 
+@frappe.whitelist()
+def get_repair_closure_data(service_request):
+    """Return all data needed by the Repair Closure Dialog:
+    technician, spare parts, estimated cost, customer, SO/JA names.
+    """
+    sr = frappe.get_doc("Service Request", service_request)
+
+    eng_users = frappe.db.sql("""
+        SELECT DISTINCT u.name, u.full_name FROM `tabUser` u
+        JOIN `tabHas Role` hr ON hr.parent = u.name
+        WHERE hr.role IN ('Service Engineer','Service Manager','Technician') AND u.enabled=1
+        ORDER BY u.full_name
+    """, as_dict=True)
+
+    spare_parts = frappe.db.get_all(
+        "Service Request Spare Part",
+        filters={"parent": service_request, "parenttype": "Service Request"},
+        fields=["spare_part_item", "item_name", "qty", "uom", "rate", "amount"],
+        order_by="idx",
+    )
+
+    ja = None
+    so_qc_status = "Pending"
+    if sr.service_order:
+        ja = frappe.db.get_value(
+            "Job Assignment",
+            {"service_order": sr.service_order},
+            ["name", "service_engineer", "assignment_status"],
+            as_dict=True,
+        )
+        so_qc_status = frappe.db.get_value("Sales Order", sr.service_order, "qc_status") or "Pending"
+
+    return {
+        "sr_name": sr.name,
+        "customer": sr.customer,
+        "customer_name": sr.customer_name or sr.customer,
+        "device_item": sr.device_item,
+        "serial_no": sr.serial_no or "",
+        "estimated_cost": flt(sr.estimated_cost),
+        "service_order": sr.service_order or "",
+        "job_assignment": ja.name if ja else "",
+        "current_technician": (ja.service_engineer if ja else "") or "",
+        "qc_status": so_qc_status,
+        "spare_parts": spare_parts,
+        "technicians": eng_users,
+    }
+
+
+@frappe.whitelist()
+def close_repair_order(service_request, pos_profile, payments, qc_result,
+                       qc_remarks="", delivery_ack=0, delivery_note="",
+                       technician="", spare_parts=None, service_charge=0):
+    """Complete the repair closure flow in one atomic call.
+
+    Steps:
+    1. Assign technician to Job Assignment (if provided)
+    2. Save spare parts onto Service Request (replace child rows)
+    3. Set QC status on the linked Sales Order
+    4. Create POS Invoice with service charge line + one line per spare part
+    5. Create Material Issue Stock Entry for spare parts
+    6. Mark SR as delivered / closed
+
+    payments: list of {mode_of_payment, amount, reference_no}
+    spare_parts: list of {spare_part_item, item_name, qty, uom, rate}
+    qc_result: "Pass" | "Fail" | "Not Repairable" | "Customer Cancelled"
+    """
+    frappe.has_permission("POS Invoice", "create", throw=True)
+
+    if isinstance(payments, str):
+        payments = frappe.parse_json(payments)
+    if isinstance(spare_parts, str):
+        spare_parts = frappe.parse_json(spare_parts) or []
+
+    payments = payments or []
+    spare_parts = spare_parts or []
+    service_charge = flt(service_charge)
+
+    total_parts = sum(flt(p.get("qty", 1)) * flt(p.get("rate", 0)) for p in spare_parts)
+    grand_total = service_charge + total_parts
+    payment_total = sum(flt(p.get("amount", 0)) for p in payments)
+
+    if grand_total <= 0:
+        frappe.throw(frappe._("Total charge must be greater than zero"))
+    if abs(payment_total - grand_total) > 0.01:
+        frappe.throw(frappe._("Payment total {0} does not match invoice total {1}").format(
+            fmt_money(payment_total), fmt_money(grand_total)))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    sr = frappe.get_doc("Service Request", service_request)
+
+    # Guard: don't double-bill
+    if frappe.db.get_value("Service Request", service_request, "service_invoice"):
+        frappe.throw(frappe._("Service Request {0} is already billed").format(service_request))
+
+    # 1 — Assign technician
+    if technician and sr.service_order:
+        ja = frappe.db.get_value("Job Assignment", {"service_order": sr.service_order}, "name")
+        if ja:
+            frappe.db.set_value("Job Assignment", ja, "service_engineer", technician, update_modified=False)
+
+    # 2 — Update spare parts on Service Request
+    if spare_parts:
+        frappe.db.delete("Service Request Spare Part", {
+            "parent": service_request, "parenttype": "Service Request"
+        })
+        for idx, part in enumerate(spare_parts, start=1):
+            qty = flt(part.get("qty", 1))
+            rate = flt(part.get("rate", 0))
+            frappe.get_doc({
+                "doctype": "Service Request Spare Part",
+                "parent": service_request,
+                "parentfield": "spare_parts",
+                "parenttype": "Service Request",
+                "idx": idx,
+                "spare_part_item": part.get("spare_part_item"),
+                "item_name": (part.get("item_name")
+                              or frappe.db.get_value("Item", part.get("spare_part_item"), "item_name")),
+                "qty": qty,
+                "uom": part.get("uom") or "Nos",
+                "rate": rate,
+                "amount": qty * rate,
+            }).db_insert()
+
+    # 3 — Update QC on Sales Order
+    qc_wf_map = {
+        "Pass": ("Pass", "QC Pass"),
+        "Fail": ("Fail", "QC Fail"),
+        "Not Repairable": ("Not Repairable", "Not Repairable"),
+        "Customer Cancelled": ("Customer Cancelled", "Customer Cancelled"),
+    }
+    if sr.service_order and qc_result in qc_wf_map:
+        qc_status, wf_state = qc_wf_map[qc_result]
+        frappe.db.set_value("Sales Order", sr.service_order, {
+            "qc_status": qc_status,
+            "qc_remarks": qc_remarks,
+            "qc_checked_by": frappe.session.user,
+            "qc_datetime": now_datetime(),
+            "workflow_state": wf_state,
+        }, update_modified=False)
+
+    # 4 — Build and submit POS Invoice
+    # Resolve spare part item codes (user may have typed a name instead of a code)
+    for part in spare_parts:
+        code = part.get("spare_part_item", "")
+        if code and not frappe.db.exists("Item", code):
+            # Try resolving by item_name
+            resolved = frappe.db.get_value("Item", {"item_name": code, "disabled": 0}, "name")
+            if resolved:
+                part["spare_part_item"] = resolved
+            else:
+                frappe.throw(frappe._("Spare part item '{0}' not found. Please use a valid item code or name.").format(code))
+
+    repair_item = frappe.db.get_value("Item", {"item_name": "Repair Service", "disabled": 0}, "name")
+    if not repair_item:
+        # Try "Repair Services" item group (actual group in this system)
+        repair_item = frappe.db.get_value("Item",
+            {"item_group": "Repair Services", "disabled": 0, "is_stock_item": 0}, "name")
+    if not repair_item:
+        repair_item = frappe.db.get_value("Item",
+            {"item_group": "Services", "disabled": 0, "is_stock_item": 0}, "name")
+    if not repair_item:
+        frappe.throw(frappe._("No service item found. Create a non-stock item in the 'Repair Services' group."))
+
+    inv = frappe.new_doc("POS Invoice")
+    inv.pos_profile = pos_profile
+    inv.customer = sr.customer
+    inv.company = profile.company
+    inv.selling_price_list = profile.selling_price_list
+    inv.currency = (profile.currency
+                    or frappe.get_cached_value("Company", profile.company, "default_currency"))
+    inv.warehouse = profile.warehouse
+    inv.posting_date = nowdate()
+    inv.is_pos = 1
+    inv.update_stock = 0  # spare parts handled via Stock Entry below
+
+    if service_charge > 0:
+        inv.append("items", {
+            "item_code": repair_item,
+            "qty": 1,
+            "rate": service_charge,
+            "uom": "Nos",
+            "description": f"Repair Service — {service_request}",
+        })
+
+    for part in spare_parts:
+        qty = flt(part.get("qty", 1))
+        rate = flt(part.get("rate", 0))
+        if qty and rate:
+            inv.append("items", {
+                "item_code": part.get("spare_part_item"),
+                "qty": qty,
+                "rate": rate,
+                "uom": part.get("uom") or "Nos",
+                "description": f"Part — {service_request}",
+            })
+
+    for p in payments:
+        pay_row = {"mode_of_payment": p["mode_of_payment"], "amount": flt(p["amount"])}
+        if p.get("reference_no"):
+            pay_row["custom_upi_transaction_id"] = p["reference_no"]
+        inv.append("payments", pay_row)
+
+    # Apply tax template from POS Profile if set
+    if getattr(profile, "taxes_and_charges", None):
+        inv.taxes_and_charges = profile.taxes_and_charges
+
+    inv.insert(ignore_permissions=True)
+    inv.submit()
+
+    # 5 — Stock Entry for spare parts consumption
+    stock_entry_name = None
+    if spare_parts and profile.warehouse:
+        try:
+            se = frappe.new_doc("Stock Entry")
+            se.stock_entry_type = "Material Issue"
+            se.company = profile.company
+            se.posting_date = nowdate()
+            se.remarks = f"Spare parts consumed for {service_request}"
+            for part in spare_parts:
+                if not flt(part.get("qty", 0)):
+                    continue
+                se.append("items", {
+                    "item_code": part["spare_part_item"],
+                    "qty": flt(part.get("qty", 1)),
+                    "uom": part.get("uom") or "Nos",
+                    "s_warehouse": profile.warehouse,
+                    "basic_rate": flt(part.get("rate", 0)),
+                })
+            se.insert(ignore_permissions=True)
+            se.submit()
+            stock_entry_name = se.name
+        except Exception as e:
+            frappe.log_error(
+                f"Repair closure stock entry failed for {service_request}: {e}",
+                "Repair Closure",
+            )
+
+    # 6 — Mark SR closed
+    sr_updates = {"service_invoice": inv.name, "status": "Completed"}
+    if int(delivery_ack):
+        sr_updates["delivery_mode"] = "Walk-in"
+    if delivery_note:
+        sr_updates["customer_remarks"] = delivery_note
+    frappe.db.set_value("Service Request", service_request, sr_updates, update_modified=False)
+
+    if qc_result == "Pass" and sr.service_order:
+        frappe.db.set_value("Sales Order", sr.service_order, "workflow_state", "Closed",
+                            update_modified=False)
+
+    frappe.db.commit()
+    return {
+        "invoice": inv.name,
+        "grand_total": inv.grand_total,
+        "stock_entry": stock_entry_name,
+    }
 
 
 
