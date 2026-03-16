@@ -5,9 +5,13 @@
 
 /* ── Full Screen Reset ───────────────────────────────────── */
 body.ch-pos-fullscreen {
-  overflow: hidden !important;
+  /* overflow stays auto so desk forms opened from POS can still scroll */
   margin: 0 !important;
   padding: 0 !important;
+}
+/* Contain overflow at the POS page level, not the body */
+body.ch-pos-fullscreen .ch-pos-page {
+  overflow: hidden !important;
 }
 body.ch-pos-fullscreen header.navbar,
 body.ch-pos-fullscreen footer,
@@ -155,6 +159,36 @@ body.ch-pos-fullscreen .container { max-width: 100% !important; padding: 0 !impo
   margin-top: auto;
   padding: 16px;
   border-top: 1px solid var(--sidebar-divider);
+}
+/* Walk-in Log Button */
+.ch-pos-walkin-btn-wrap {
+  margin-bottom: 10px;
+}
+.ch-pos-walkin-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  border-radius: var(--pos-radius-sm, 6px);
+  background: rgba(99, 102, 241, 0.25);
+  color: rgba(255,255,255,0.9);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.ch-pos-walkin-btn:hover {
+  background: rgba(99, 102, 241, 0.5);
+}
+.ch-pos-walkin-btn .fa {
+  font-size: 15px;
+  width: 18px;
+  text-align: center;
+}
+.ch-pos-sidebar.collapsed .ch-pos-walkin-btn .sidebar-label {
+  display: none;
 }
 .ch-pos-sidebar-bottom .store-info {
   display: flex;

@@ -38,7 +38,55 @@ export class ReportsWorkspace {
 				</div>
 
 				<div class="ch-rpt-content" style="display:none;">
-					<div class="ch-rpt-kpi-row">
+					<div class="ch-rpt-kpi-row" style="margin-bottom:var(--pos-space-md)" id="ch-rpt-footfall-row">
+					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #4f46e5">
+						<div class="section-body" style="display:flex;gap:12px;align-items:center">
+							<div class="ch-rpt-kpi-icon" style="background:#e0e7ff;color:#4f46e5;"><i class="fa fa-sign-in"></i></div>
+							<div>
+								<div class="ch-rpt-kpi-value ch-rpt-walkins">0</div>
+								<div class="ch-rpt-kpi-label">${__("Walk-ins")}</div>
+							</div>
+						</div>
+					</div>
+					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #7c3aed">
+						<div class="section-body" style="display:flex;gap:12px;align-items:center">
+							<div class="ch-rpt-kpi-icon" style="background:#f3e8ff;color:#7c3aed;"><i class="fa fa-tablet"></i></div>
+							<div>
+								<div class="ch-rpt-kpi-value ch-rpt-kiosk">0</div>
+								<div class="ch-rpt-kpi-label">${__("Kiosk")}</div>
+							</div>
+						</div>
+					</div>
+					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #16a34a">
+						<div class="section-body" style="display:flex;gap:12px;align-items:center">
+							<div class="ch-rpt-kpi-icon" style="background:#dcfce7;color:#16a34a;"><i class="fa fa-percent"></i></div>
+							<div>
+								<div class="ch-rpt-kpi-value ch-rpt-conversion">0%</div>
+								<div class="ch-rpt-kpi-label">${__("Conversion")}</div>
+							</div>
+						</div>
+					</div>
+					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #d97706">
+						<div class="section-body" style="display:flex;gap:12px;align-items:center">
+							<div class="ch-rpt-kpi-icon" style="background:#fef3c7;color:#d97706;"><i class="fa fa-wrench"></i></div>
+							<div>
+								<div class="ch-rpt-kpi-value ch-rpt-repairs">0</div>
+								<div class="ch-rpt-kpi-label">${__("Repairs")}</div>
+							</div>
+						</div>
+					</div>
+					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #dc2626">
+						<div class="section-body" style="display:flex;gap:12px;align-items:center">
+							<div class="ch-rpt-kpi-icon" style="background:#fef2f2;color:#dc2626;"><i class="fa fa-exchange"></i></div>
+							<div>
+								<div class="ch-rpt-kpi-value ch-rpt-buybacks">0</div>
+								<div class="ch-rpt-kpi-label">${__("Buybacks")}</div>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<div class="ch-rpt-kpi-row">
 						<div class="ch-rpt-kpi ch-pos-section-card">
 							<div class="section-body" style="display:flex;gap:12px;align-items:center">
 								<div class="ch-rpt-kpi-icon" style="background:#dbeafe;color:#2563eb;"><i class="fa fa-inr"></i></div>
@@ -164,9 +212,28 @@ export class ReportsWorkspace {
 			panel.find(".ch-rpt-loading").show();
 			this._load_data(panel);
 		});
+		// Update footfall row when walk-in is logged from sidebar
+		EventBus.on("walkin:logged", (d) => {
+			panel.find(".ch-rpt-walkins").text(d.walkin_count || 0);
+			panel.find(".ch-rpt-kiosk").text(d.kiosk_count || 0);
+		});
 	}
 
 	_load_data(panel) {
+		// Load footfall separately (fast, always visible)
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_today_footfall",
+			args: { pos_profile: PosState.pos_profile },
+			callback: (r) => {
+				const f = r.message || {};
+				panel.find(".ch-rpt-walkins").text(f.walkin_count || 0);
+				panel.find(".ch-rpt-kiosk").text(f.kiosk_count || 0);
+				panel.find(".ch-rpt-conversion").text((f.conversion_pct || 0) + "%");
+				panel.find(".ch-rpt-repairs").text(f.repair_intake_count || 0);
+				panel.find(".ch-rpt-buybacks").text(f.buyback_count || 0);
+			},
+		});
+
 		frappe.call({
 			method: "ch_pos.api.pos_api.store_dashboard",
 			args: { pos_profile: PosState.pos_profile },

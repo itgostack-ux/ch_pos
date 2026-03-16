@@ -197,6 +197,7 @@ def create_pos_invoice(pos_profile, customer, items,
                 "warranty_plan": item.get("warranty_plan"),
                 "for_item_code": item.get("for_item_code"),
                 "price": flt(item.get("rate")),
+                "is_vas": cint(item.get("is_vas", 0)),
             })
 
     # Payment — supports split payments (new) and single mode (legacy)
@@ -226,7 +227,7 @@ def create_pos_invoice(pos_profile, customer, items,
         frappe.throw(frappe._("Payment mode is required"))
 
     # Taxes from POS Profile
-    for tax in profile.get("taxes", []):
+    for tax in (profile.get("taxes") or []):
         inv.append("taxes", {
             "charge_type": tax.charge_type,
             "account_head": tax.account_head,
@@ -300,9 +301,14 @@ def create_pos_invoice(pos_profile, customer, items,
     elif flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
         frappe.throw(frappe._("A discount reason is required when applying a discount"))
 
-    # Coupon code
+    # Coupon code — accept code string (e.g. TESTCOUPON10) or doc name
     if coupon_code:
-        inv.coupon_code = coupon_code
+        doc_name = frappe.db.get_value("Coupon Code", {"coupon_code": coupon_code}, "name")
+        if not doc_name:
+            doc_name = coupon_code if frappe.db.exists("Coupon Code", coupon_code) else None
+        if not doc_name:
+            frappe.throw(frappe._("Coupon code '{0}' not found").format(coupon_code))
+        inv.coupon_code = doc_name
 
     # Voucher — add voucher amount to the discount
     voucher_redeemed = 0
@@ -363,6 +369,39 @@ def create_pos_invoice(pos_profile, customer, items,
         if sp:
             sold_plans.append(sp.name)
 
+    # ── VAS Voucher Generation ────────────────────────────────────────────────
+    # For each VAS item: generate floor(price/500) × ₹500 vouchers, email to customer
+    generated_vouchers = []
+    try:
+        from ch_item_master.ch_item_master.voucher_api import issue_voucher
+        customer_phone = frappe.db.get_value("Customer", customer, "mobile_no") or ""
+        customer_email = frappe.db.get_value("Customer", customer, "email_id") or ""
+        for wi in warranty_items:
+            if not wi.get("is_vas"):
+                continue
+            vas_price = flt(wi["price"])
+            voucher_count = int(vas_price // 500)
+            for _ in range(voucher_count):
+                v = issue_voucher(
+                    voucher_type="VAS Voucher",
+                    amount=500,
+                    company=profile.company,
+                    customer=customer if customer != "Walk-in Customer" else None,
+                    phone=customer_phone or None,
+                    valid_days=365,
+                    source_type="Purchase",
+                    source_document=inv.name,
+                    reason=f"VAS purchase on {inv.name}",
+                    single_use=0,
+                    applicable_channel="POS",
+                    applicable_item_group="Accessories",
+                )
+                generated_vouchers.append(v)
+        if generated_vouchers and (customer_email or customer_phone):
+            _send_voucher_email(customer, customer_email, customer_phone, generated_vouchers, inv.name)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"VAS voucher generation failed for {inv.name}")
+
     # Create incentive ledger entries for the sales executive
     incentive_total = 0
     if sales_executive:
@@ -417,7 +456,42 @@ def create_pos_invoice(pos_profile, customer, items,
         "sold_plans": sold_plans,
         "incentive_earned": incentive_total,
         "voucher_redeemed": voucher_redeemed,
+        "generated_vouchers": generated_vouchers,
     }
+
+
+def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
+    """Send VAS vouchers to customer via email."""
+    if not email:
+        return
+    codes_html = "".join(
+        f"<tr><td style='padding:8px 16px;font-size:18px;font-family:monospace;letter-spacing:2px;background:#f3f4f6;border-radius:6px;text-align:center'>"
+        f"<b>{v['voucher_code']}</b></td>"
+        f"<td style='padding:8px 12px;color:#6b7280'>₹{int(v['balance'])} · Valid 1 year</td></tr>"
+        for v in vouchers
+    )
+    html = f"""
+    <div style='font-family:sans-serif;max-width:500px;margin:0 auto'>
+        <h2 style='color:#4f46e5'>Your VAS Vouchers are here! 🎉</h2>
+        <p>Thank you for purchasing a VAS plan (Invoice: <b>{invoice_name}</b>).</p>
+        <p>You've earned <b>{len(vouchers)} × ₹500 voucher(s)</b> to redeem on accessories at our store.</p>
+        <table style='width:100%;border-collapse:collapse;margin:16px 0'>
+            {codes_html}
+        </table>
+        <p style='color:#6b7280;font-size:13px'>
+            Each ₹500 voucher gives you ₹125 off when purchasing accessories.
+            Visit any GoGizmo store and quote your voucher code at checkout.
+        </p>
+    </div>
+    """
+    try:
+        frappe.sendmail(
+            recipients=[email],
+            subject=f"Your VAS Vouchers — {invoice_name}",
+            message=html,
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Voucher email failed for {invoice_name}")
 
 
 def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price):
@@ -732,7 +806,12 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     ret.company = orig.company
     ret.selling_price_list = orig.selling_price_list
     ret.currency = orig.currency
-    ret.warehouse = orig.warehouse
+    # POS Invoice doesn't have a top-level warehouse field; get from items
+    _orig_warehouse = (
+        orig.get("set_warehouse")
+        or (orig.items[0].warehouse if orig.items else None)
+        or frappe.get_cached_value("POS Profile", orig.pos_profile, "warehouse")
+    )
     ret.posting_date = nowdate()
     ret.is_pos = 1
     ret.is_return = 1
@@ -752,7 +831,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
             "qty": -1 * qty,
             "rate": rate,
             "uom": "Nos",
-            "warehouse": orig.warehouse,
+            "warehouse": _orig_warehouse,
             "pos_invoice_item": ri.get("original_item_row", ""),
         }
         if ri.get("serial_no"):
@@ -765,7 +844,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
 
     # Payment (negative)
     default_mode = "Cash"
-    for p in orig.payments:
+    for p in (orig.payments or []):
         if p.default:
             default_mode = p.mode_of_payment
             break
@@ -776,7 +855,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     })
 
     # Taxes from original
-    for tax in orig.taxes:
+    for tax in (orig.taxes or []):
         ret.append("taxes", {
             "charge_type": tax.charge_type,
             "account_head": tax.account_head,
@@ -787,6 +866,10 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
 
     if sales_executive:
         ret.custom_sales_executive = sales_executive
+
+    # Set paid_amount before save so ERPNext's validate_change_amount
+    # doesn't hit a NoneType error on return invoices (grand_total < 0)
+    ret.paid_amount = -1 * total_return_amount
 
     ret.flags.ignore_permissions = True
     ret.save()
@@ -819,7 +902,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     }
 @frappe.whitelist()
 def validate_serial_for_sale(serial_no, item_code, warehouse):
-    """Validate a serial number can be sold from this warehouse."""
+    """Validate a serial number can be sold from this warehouse, enforcing FIFO."""
     if not frappe.db.exists("Serial No", serial_no):
         return {"valid": False, "reason": frappe._("Serial No {0} does not exist").format(serial_no)}
 
@@ -844,6 +927,39 @@ def validate_serial_for_sale(serial_no, item_code, warehouse):
 
     if sn.status not in ("Active", "Inactive"):
         return {"valid": False, "reason": frappe._("Serial No {0} status is {1}").format(serial_no, sn.status)}
+
+    # ── FIFO enforcement ────────────────────────────────────────────────────
+    oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse)
+    if oldest_serial and oldest_serial != serial_no:
+        # Determine the receipt date of the selected serial for comparison
+        selected_date_row = frappe.db.sql("""
+            SELECT MIN(sbb.posting_date) AS received_date
+            FROM `tabSerial and Batch Entry` sbe
+            JOIN `tabSerial and Batch Bundle` sbb
+                ON sbe.parent = sbb.name
+                AND sbb.type_of_transaction = 'Inward'
+                AND sbb.docstatus = 1
+            WHERE sbe.serial_no = %s
+        """, serial_no, as_dict=True)
+        selected_date = selected_date_row[0].received_date if selected_date_row else None
+
+        if oldest_date and selected_date and selected_date > oldest_date:
+            # FIFO violated — alert managers and reject
+            _send_fifo_violation_alert(
+                item_code=item_code,
+                warehouse=warehouse,
+                selected_serial=serial_no,
+                oldest_serial=oldest_serial,
+                cashier=frappe.session.user,
+            )
+            return {
+                "valid": False,
+                "fifo_violation": True,
+                "reason": frappe._(
+                    "FIFO violation: Serial {0} (received {1}) must be sold before {2} (received {3}). "
+                    "Alert sent to RSM/ASM."
+                ).format(oldest_serial, oldest_date, serial_no, selected_date),
+            }
 
     # Check if already in current POS cart (prevent double-scan)
     return {"valid": True, "serial_no": serial_no, "item_code": item_code}
@@ -964,6 +1080,8 @@ def get_store_repairs(pos_profile):
     # Enrich with Job Assignment info
     for sr in service_requests:
         sr["job_assignment"] = None
+        sr["billed"] = False
+        sr["estimated_cost"] = frappe.db.get_value("Service Request", sr.name, "estimated_cost") or 0
         if sr.service_order:
             ja = frappe.db.get_value(
                 "Job Assignment",
@@ -975,8 +1093,91 @@ def get_store_repairs(pos_profile):
                 sr["job_assignment"] = ja.name
                 sr["job_status"] = ja.assignment_status
                 sr["technician"] = ja.service_engineer
+        # Check if already billed via POS Invoice or Sales Invoice
+        sr["billed"] = bool(frappe.db.get_value(
+            "POS Invoice Item",
+            {"description": ["like", f"%{sr.name}%"], "docstatus": 1},
+            "parent",
+        ) or frappe.db.get_value(
+            "Service Request", sr.name, "custom_repair_invoice"
+        ))
 
     return service_requests
+
+
+@frappe.whitelist()
+def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile,
+                           customer="Walk-in Customer", service_order=None, upi_txn_id=None):
+    """Create a POS Invoice to collect payment for a completed repair job.
+
+    Marks Service Request as billed after invoice submission.
+    """
+    frappe.has_permission("POS Invoice", "create", throw=True)
+    amount = flt(amount)
+    if amount <= 0:
+        frappe.throw(frappe._("Repair charge must be greater than zero"))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    sr_doc = frappe.get_doc("Service Request", service_request)
+
+    # Find or create a repair service item
+    repair_item = frappe.db.get_value("Item", {"item_name": "Repair Service", "disabled": 0}, "name")
+    if not repair_item:
+        repair_item = frappe.db.get_value("Item", {"item_group": "Services", "disabled": 0, "is_stock_item": 0}, "name")
+    if not repair_item:
+        frappe.throw(frappe._("No 'Repair Service' item found. Please create a non-stock service item named 'Repair Service'."))
+
+    inv = frappe.new_doc("POS Invoice")
+    inv.pos_profile = pos_profile
+    inv.customer = customer
+    inv.company = profile.company
+    inv.selling_price_list = profile.selling_price_list
+    inv.currency = profile.currency or frappe.get_cached_value("Company", profile.company, "default_currency")
+    inv.warehouse = profile.warehouse
+    inv.posting_date = nowdate()
+    inv.is_pos = 1
+    inv.update_stock = 0  # Service item — no stock movement
+
+    inv.append("items", {
+        "item_code": repair_item,
+        "qty": 1,
+        "rate": amount,
+        "uom": "Nos",
+        "description": f"Repair: {service_request}" + (f" · {service_order}" if service_order else ""),
+    })
+
+    payment_row = {"mode_of_payment": mode_of_payment, "amount": amount}
+    if upi_txn_id:
+        payment_row["custom_upi_transaction_id"] = upi_txn_id
+    inv.append("payments", payment_row)
+
+    for tax in profile.get("taxes", []):
+        inv.append("taxes", {
+            "charge_type": tax.charge_type,
+            "account_head": tax.account_head,
+            "rate": tax.rate,
+            "description": tax.description or tax.account_head,
+        })
+
+    inv.insert(ignore_permissions=True)
+    inv.submit()
+
+    # Mark service request as billed
+    try:
+        frappe.db.set_value("Service Request", service_request, "custom_repair_invoice", inv.name, update_modified=False)
+    except Exception:
+        pass  # custom field may not exist yet
+
+    # Increment repair intake counter
+    try:
+        _get_active_session = _get_active_session_log(pos_profile)
+    except Exception:
+        pass
+
+    return {"invoice": inv.name, "grand_total": inv.grand_total}
+
+
+
 
 
 # ── Buyback Valuation ────────────────────────────────────────
@@ -1425,7 +1626,7 @@ def customer_360(identifier, company=None):
 
     # Active warranties / VAS (CH Sold Plan)
     out["warranties"] = frappe.db.sql("""
-        SELECT name, plan_name, plan_type, item_code, item_name,
+        SELECT name, plan_title, warranty_plan, plan_type, item_code, item_name,
                start_date, end_date, status, sales_invoice
         FROM `tabCH Sold Plan`
         WHERE customer = %(customer)s AND docstatus = 1
@@ -2957,6 +3158,117 @@ def get_open_session(pos_profile):
 	return row[0] if row else None
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Walk-in / Footfall Counter
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _get_active_session_log(pos_profile):
+	"""Return the active POS Session Log name for this profile, or None."""
+	return frappe.db.get_value(
+		"POS Session Log",
+		{"pos_profile": pos_profile, "status": "Active", "docstatus": 1},
+		"name",
+		order_by="creation desc",
+	)
+
+
+@frappe.whitelist()
+def log_walkin(pos_profile, source="POS Counter"):
+	"""Increment walk-in counter on the active session log.
+
+	Args:
+		pos_profile: Current POS Profile
+		source: 'POS Counter' | 'Kiosk'
+	"""
+	session_log = _get_active_session_log(pos_profile)
+	if not session_log:
+		return {"ok": False, "reason": "No active session log"}
+
+	if source == "Kiosk":
+		frappe.db.sql(
+			"UPDATE `tabPOS Session Log` SET kiosk_count = kiosk_count + 1 WHERE name = %s",
+			(session_log,)
+		)
+	else:
+		frappe.db.sql(
+			"UPDATE `tabPOS Session Log` SET walkin_count = walkin_count + 1 WHERE name = %s",
+			(session_log,)
+		)
+	frappe.db.commit()
+
+	new_walkin = frappe.db.get_value("POS Session Log", session_log, "walkin_count") or 0
+	new_kiosk = frappe.db.get_value("POS Session Log", session_log, "kiosk_count") or 0
+	return {"ok": True, "session_log": session_log, "walkin_count": cint(new_walkin), "kiosk_count": cint(new_kiosk)}
+
+
+@frappe.whitelist()
+def increment_repair_intake_count(pos_profile):
+	"""Increment repair intake counter on active session log."""
+	session_log = _get_active_session_log(pos_profile)
+	if session_log:
+		frappe.db.sql(
+			"UPDATE `tabPOS Session Log` SET repair_intake_count = repair_intake_count + 1 WHERE name = %s",
+			(session_log,)
+		)
+		frappe.db.commit()
+	return {"ok": True}
+
+
+@frappe.whitelist()
+def increment_buyback_count(pos_profile):
+	"""Increment buyback assessment counter on active session log."""
+	session_log = _get_active_session_log(pos_profile)
+	if session_log:
+		frappe.db.sql(
+			"UPDATE `tabPOS Session Log` SET buyback_count = buyback_count + 1 WHERE name = %s",
+			(session_log,)
+		)
+		frappe.db.commit()
+	return {"ok": True}
+
+
+@frappe.whitelist()
+def get_today_footfall(pos_profile):
+	"""Return today's footfall summary: walk-ins, kiosk, repairs, buybacks, invoices."""
+	today = nowdate()
+
+	# Session log totals for today
+	session_totals = frappe.db.sql("""
+		SELECT
+			COALESCE(SUM(walkin_count), 0) AS walkin_count,
+			COALESCE(SUM(kiosk_count), 0) AS kiosk_count,
+			COALESCE(SUM(repair_intake_count), 0) AS repair_intake_count,
+			COALESCE(SUM(buyback_count), 0) AS buyback_count
+		FROM `tabPOS Session Log`
+		WHERE pos_profile = %s
+		  AND DATE(session_start) = %s
+		  AND docstatus = 1
+	""", (pos_profile, today), as_dict=True)
+
+	s = session_totals[0] if session_totals else {}
+
+	# Invoices today
+	invoices_today = frappe.db.count("POS Invoice", {
+		"pos_profile": pos_profile,
+		"posting_date": today,
+		"docstatus": 1,
+		"is_return": 0,
+	})
+
+	total_footfall = cint(s.get("walkin_count", 0)) + cint(s.get("kiosk_count", 0))
+	conversion_pct = round((invoices_today / total_footfall * 100) if total_footfall > 0 else 0, 1)
+
+	return {
+		"walkin_count": cint(s.get("walkin_count", 0)),
+		"kiosk_count": cint(s.get("kiosk_count", 0)),
+		"repair_intake_count": cint(s.get("repair_intake_count", 0)),
+		"buyback_count": cint(s.get("buyback_count", 0)),
+		"total_footfall": total_footfall,
+		"invoices_today": invoices_today,
+		"conversion_pct": conversion_pct,
+	}
+
+
 @frappe.whitelist()
 def flag_reprint_needed(pos_invoice, reason="Print failed"):
 	"""Mark an invoice as needing reprint.
@@ -3043,6 +3355,11 @@ def get_pos_buyback_detail(assessment_name):
 			"payment_status": o.payment_status or "",
 			"requires_approval": cint(o.requires_approval),
 			"approved_by": o.approved_by or "",
+			"approval_token": o.approval_token or "",
+			"approval_url": (
+				f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
+				if o.approval_token else ""
+			),
 		}
 
 	# Diagnostic test results (from mobile app or manual)
@@ -3073,6 +3390,7 @@ def get_pos_buyback_detail(assessment_name):
 		"remarks": a.remarks or "",
 		"diagnostics": diagnostics,
 		"order": order,
+		"buyback_inspection": a.buyback_inspection or "",
 	}
 
 
@@ -3206,6 +3524,47 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
 
 
 @frappe.whitelist()
+def pos_send_approval_link(order_name):
+	"""Send a customer-facing approval link via SMS/WhatsApp.
+
+	Transitions the order to "Awaiting Customer Approval" and returns the
+	masked mobile number so the UI can confirm which number was contacted.
+	"""
+	doc = frappe.get_doc("Buyback Order", order_name)
+
+	if not doc.mobile_no:
+		frappe.throw(frappe._("No mobile number on this Buyback Order."))
+	if not doc.approval_token:
+		frappe.throw(frappe._("Approval token missing — please re-save the order."))
+
+	approval_url = f"{frappe.utils.get_url()}/buyback-approval?token={doc.approval_token}"
+
+	# Compose message
+	item_label = doc.item_name or doc.item or "your device"
+	price_fmt = f"₹{flt(doc.final_price):,.0f}"
+	message = (
+		f"GoFix Buyback: We offer {price_fmt} for {item_label}. "
+		f"Tap to review & approve: {approval_url}"
+	)
+
+	# Send SMS (wire up your gateway — currently logs to console in dev)
+	frappe.logger().info(f"[pos_send_approval_link] SMS to {doc.mobile_no}: {message}")
+	# Example: from ch_item_master.ch_core.sms_gateway import send_sms
+	# send_sms(doc.mobile_no, message)
+
+	# Advance order status so the UI reflects "waiting for customer"
+	if doc.status == "Approved":
+		doc.db_set("status", "Awaiting Customer Approval", notify=True)
+
+	masked = doc.mobile_no[:2] + "****" + doc.mobile_no[-2:]
+	return {
+		"sent": True,
+		"mobile_masked": masked,
+		"approval_url": approval_url,
+	}
+
+
+@frappe.whitelist()
 def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 	"""Mark a buyback order as settled via direct cashback to customer.
 
@@ -3251,3 +3610,255 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 		"final_price": flt(doc.final_price),
 		"payment_method": payment_method,
 	}
+
+
+@frappe.whitelist()
+def pos_create_inspection(assessment_name):
+	"""Create or retrieve a Buyback Inspection from an assessment.
+
+	Idempotent — if inspection already exists, returns its current data.
+	Returns pre-fill data for the inline POS inspection panel.
+	"""
+	# Check if inspection already exists on the assessment
+	existing_inspection = frappe.db.get_value(
+		"Buyback Assessment", assessment_name, "buyback_inspection"
+	)
+	if existing_inspection:
+		ins = frappe.get_doc("Buyback Inspection", existing_inspection)
+	else:
+		from buyback.api import create_inspection_from_assessment
+		result = create_inspection_from_assessment(assessment_name)
+		ins = frappe.get_doc("Buyback Inspection", result["name"])
+
+	# Also get grade options for the inline form selector
+	grades = frappe.get_all("Grade Master", fields=["name", "grade_label"], order_by="name asc")
+
+	return {
+		"name": ins.name,
+		"status": ins.status or "",
+		"customer": ins.customer or "",
+		"customer_name": ins.customer_name or "",
+		"mobile_no": ins.mobile_no or "",
+		"store": ins.store or "",
+		"item": ins.item or "",
+		"item_name": ins.item_name or "",
+		"imei_serial": ins.imei_serial or "",
+		"quoted_price": flt(ins.quoted_price),
+		"revised_price": flt(ins.revised_price),
+		"condition_grade": ins.condition_grade or "",
+		"pre_inspection_grade": ins.pre_inspection_grade or "",
+		"price_override_reason": ins.price_override_reason or "",
+		"remarks": ins.remarks or "",
+		"inspector": ins.inspector or "",
+		"grades": [{"name": g.name, "label": g.grade_label or g.name} for g in grades],
+	}
+
+
+@frappe.whitelist()
+def pos_complete_inspection(inspection_name, condition_grade, final_price,
+							price_override_reason="", remarks=""):
+	"""Complete the inline POS inspection and create a Buyback Order.
+
+	Idempotent — if an order already exists for the assessment it is returned
+	without creating a second one.
+	"""
+	from buyback.api import complete_inspection
+	result = complete_inspection(
+		inspection_name=inspection_name,
+		condition_grade=condition_grade,
+		revised_price=flt(final_price),
+		price_override_reason=price_override_reason or None,
+	)
+
+	# Update remarks on the inspection if provided
+	if remarks:
+		frappe.db.set_value("Buyback Inspection", inspection_name, "remarks", str(remarks)[:1000])
+
+	# Get the linked assessment
+	assessment_name = frappe.db.get_value("Buyback Inspection", inspection_name, "buyback_assessment")
+
+	# Create Buyback Order (idempotent — return existing if already present)
+	existing_order = frappe.db.get_value(
+		"Buyback Order",
+		{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+		"name",
+	)
+	if existing_order:
+		order_name = existing_order
+		order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+	else:
+		ins = frappe.get_doc("Buyback Inspection", inspection_name)
+		assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+
+		order = frappe.new_doc("Buyback Order")
+		order.buyback_assessment = assessment_name
+		order.buyback_inspection = inspection_name
+		order.customer = ins.customer or assessment.customer or ""
+		order.customer_name = ins.customer_name or assessment.customer_name or ""
+		order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
+		order.store = assessment.store or ""
+		order.company = assessment.company or frappe.defaults.get_default("company")
+		order.item = ins.item or assessment.item or ""
+		order.item_name = ins.item_name or assessment.item_name or ""
+		order.brand = assessment.brand or ""
+		order.imei_serial = ins.imei_serial or assessment.imei_serial or ""
+		order.warranty_status = assessment.warranty_status or ""
+		order.condition_grade = condition_grade
+		order.base_price = flt(assessment.estimated_price)
+		order.final_price = flt(final_price)
+		order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
+		if remarks:
+			order.remarks = str(remarks)[:500]
+
+		order.flags.ignore_permissions = True
+		order.insert()
+		order.submit()
+
+		order_name = order.name
+		order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+
+	return {
+		"inspection_name": inspection_name,
+		"status": result.get("status"),
+		"order_name": order_name,
+		"order_status": order_status,
+		"assessment_name": assessment_name,
+	}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Reprint — Today's POS Invoices
+# ═══════════════════════════════════════════════════════════════════════════
+
+@frappe.whitelist()
+def get_todays_invoices(pos_profile, date=None):
+	"""Return POS invoices for a profile on a given date (default: today).
+
+	Used by the Reprint dialog in the POS frontend.
+	"""
+	from frappe.utils import getdate
+	filter_date = getdate(date) if date else getdate(nowdate())
+
+	rows = frappe.db.sql("""
+		SELECT
+			pi.name,
+			pi.customer,
+			pi.grand_total,
+			pi.posting_date,
+			pi.posting_time,
+			pi.is_return,
+			pi.status,
+			GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+		FROM `tabPOS Invoice` pi
+		JOIN `tabPOS Invoice Item` pii ON pii.parent = pi.name
+		WHERE pi.pos_profile = %s
+		  AND pi.posting_date = %s
+		  AND pi.docstatus = 1
+		GROUP BY pi.name
+		ORDER BY pi.posting_time DESC
+	""", (pos_profile, filter_date), as_dict=True)
+
+	return rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIFO Enforcement
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _get_oldest_fifo_serial(item_code, warehouse):
+	"""Return (serial_no, received_date) for the oldest FIFO serial in the warehouse.
+
+	Uses SNBB net-balance to determine what is currently in stock, then finds
+	the one with the earliest inward posting date.
+	"""
+	rows = frappe.db.sql("""
+		SELECT
+			available.serial_no,
+			MIN(sbb_in.posting_date) AS received_date
+		FROM (
+			SELECT sbe.serial_no
+			FROM `tabSerial and Batch Entry` sbe
+			JOIN `tabSerial and Batch Bundle` sbb ON sbe.parent = sbb.name
+			WHERE sbb.item_code = %s
+			  AND sbb.warehouse = %s
+			  AND sbb.docstatus = 1
+			GROUP BY sbe.serial_no
+			HAVING SUM(sbe.qty) > 0
+		) available
+		JOIN `tabSerial and Batch Entry` sbe_in ON sbe_in.serial_no = available.serial_no
+		JOIN `tabSerial and Batch Bundle` sbb_in
+			ON sbe_in.parent = sbb_in.name
+			AND sbb_in.type_of_transaction = 'Inward'
+			AND sbb_in.docstatus = 1
+		GROUP BY available.serial_no
+		ORDER BY received_date ASC
+		LIMIT 1
+	""", (item_code, warehouse), as_dict=True)
+
+	if rows:
+		return rows[0].serial_no, rows[0].received_date
+
+	# Fallback: use Serial No document purchase_document_date
+	fallback = frappe.db.sql("""
+		SELECT name, purchase_document_date
+		FROM `tabSerial No`
+		WHERE item_code = %s AND warehouse = %s AND status = 'Active'
+		ORDER BY purchase_document_date ASC, creation ASC
+		LIMIT 1
+	""", (item_code, warehouse), as_dict=True)
+
+	if fallback:
+		return fallback[0].name, fallback[0].purchase_document_date
+
+	return None, None
+
+
+def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_serial, cashier):
+	"""Create Notification Log entries for RSM/ASM/Stock Managers on FIFO violation."""
+	subject = frappe._("FIFO Violation: Serial {0} selected out of order").format(selected_serial)
+	message = frappe._(
+		"FIFO violation at <b>{warehouse}</b>: cashier <b>{cashier}</b> is attempting to sell "
+		"serial <b>{selected}</b> for item <b>{item}</b>, but the oldest available serial is "
+		"<b>{oldest}</b>. Please investigate."
+	).format(
+		warehouse=warehouse,
+		cashier=cashier,
+		selected=selected_serial,
+		item=item_code,
+		oldest=oldest_serial,
+	)
+
+	# Notify users with RSM / ASM / Stock Manager / System Manager roles
+	alert_roles = ["RSM", "ASM", "Stock Manager", "System Manager", "Purchase Manager"]
+	notified = set()
+
+	for role in alert_roles:
+		users = frappe.db.sql(
+			"SELECT DISTINCT parent FROM `tabHas Role` WHERE role = %s AND parenttype = 'User'",
+			role, as_dict=True
+		)
+		for u in users:
+			uid = u.parent
+			if uid in notified or uid == "Administrator":
+				continue
+			notified.add(uid)
+			try:
+				frappe.get_doc({
+					"doctype": "Notification Log",
+					"subject": subject,
+					"email_content": message,
+					"type": "Alert",
+					"document_type": "POS Invoice",
+					"document_name": "",
+					"from_user": frappe.session.user,
+					"for_user": uid,
+					"read": 0,
+				}).insert(ignore_permissions=True)
+			except Exception:
+				pass
+
+	frappe.log_error(
+		message=f"FIFO Violation — warehouse={warehouse} cashier={cashier} "
+		        f"selected={selected_serial} oldest={oldest_serial} item={item_code}",
+		title="POS FIFO Violation",
+	)

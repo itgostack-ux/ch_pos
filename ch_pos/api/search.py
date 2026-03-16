@@ -269,14 +269,25 @@ def get_available_serials(item_code, warehouse):
 
 
 @frappe.whitelist()
-def load_kiosk_token(token):
-    """Load a POS Kiosk Token and return its items for cart population."""
+def load_kiosk_token(token, pos_profile=None):
+    """Load a POS Kiosk Token and return its items for cart population.
+    
+    Also increments the kiosk walk-in counter on the active session log.
+    """
     doc = frappe.get_doc("POS Kiosk Token", token)
     if doc.status != "Active":
         frappe.throw(f"Token {token} is {doc.status}.")
     if doc.expires_at and frappe.utils.now_datetime() > doc.expires_at:
         doc.db_set("status", "Expired")
         frappe.throw(f"Token {token} has expired.")
+
+    # Increment kiosk walk-in counter on active session log
+    if pos_profile:
+        try:
+            from ch_pos.api.pos_api import log_walkin
+            log_walkin(pos_profile, source="Kiosk")
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Kiosk walk-in counter failed")
 
     return {
         "items": [
@@ -291,6 +302,8 @@ def load_kiosk_token(token):
             for d in doc.items
         ],
         "total_estimate": doc.total_estimate,
+        "customer_name": doc.customer_name,
+        "customer_phone": doc.customer_phone,
     }
 
 

@@ -27,7 +27,8 @@
         frappe.prompt(
             { fieldname: "token", fieldtype: "Link", options: "POS Kiosk Token", label: "Kiosk Token" },
             (values) => {
-                ch_pos_call("search.load_kiosk_token", { token: values.token }).then((r) => {
+                const pos_profile = frappe.pages["point-of-sale"]?.pos?.pos_profile_data?.name || "";
+                ch_pos_call("search.load_kiosk_token", { token: values.token, pos_profile }).then((r) => {
                     if (r && r.message) {
                         frappe.show_alert({
                             message: __("Token loaded with {0} items", [r.message.items.length]),

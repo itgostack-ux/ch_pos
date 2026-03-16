@@ -165,6 +165,12 @@ export class Sidebar {
 
 		html += `
 			<div class="ch-pos-sidebar-bottom">
+				<div class="ch-pos-walkin-btn-wrap">
+					<button class="ch-pos-walkin-btn" title="${__("Log Walk-in")}">
+						<i class="fa fa-sign-in"></i>
+						<span class="sidebar-label">${__("Log Walk-in")}</span>
+					</button>
+				</div>
 				<div class="store-info">
 					<div class="store-avatar">${frappe.utils.escape_html(initials)}</div>
 					<div class="store-detail">
@@ -191,6 +197,26 @@ export class Sidebar {
 
 	bind() {
 		const sidebar = this.wrapper;
+
+		// Walk-in Log button
+		sidebar.on("click", ".ch-pos-walkin-btn", () => {
+			frappe.call({
+				method: "ch_pos.api.pos_api.log_walkin",
+				args: { pos_profile: PosState.pos_profile, source: "POS Counter" },
+				callback: (r) => {
+					const d = r.message || {};
+					if (d.ok) {
+						frappe.show_alert({
+							message: __("Walk-in logged. Today: {0} walk-ins, {1} kiosk", [d.walkin_count, d.kiosk_count]),
+							indicator: "green",
+						});
+						EventBus.emit("walkin:logged", d);
+					} else {
+						frappe.show_alert({ message: __("Could not log walk-in: {0}", [d.reason || "No active session"]), indicator: "orange" });
+					}
+				},
+			});
+		});
 
 		// Collapse toggle
 		sidebar.on("click", ".ch-pos-sidebar-toggle", () => {

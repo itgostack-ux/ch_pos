@@ -33,6 +33,9 @@ export class ContextualToolbar {
 						<i class="fa fa-check-circle" style="font-size:11px"></i>
 						<span>${__("In Stock")}</span>
 					</label>
+					<button class="btn btn-xs btn-default ch-pos-btn-reprint" title="${__("Reprint today\'s invoices")}">
+						<i class="fa fa-print"></i> ${__("Reprint")}
+					</button>
 					<div class="btn-group ch-pos-view-toggle">
 						<button class="btn btn-xs ch-pos-view-card
 							${PosState.view_mode === "card" ? "btn-primary active" : "btn-default"}">
@@ -94,6 +97,9 @@ export class ContextualToolbar {
 			PosState.item_page = 0;
 			EventBus.emit("items:reload");
 		});
+
+		// Reprint button
+		panel.on("click", ".ch-pos-btn-reprint", () => EventBus.emit("reprint:open"));
 
 		// View toggle
 		panel.on("click", ".ch-pos-view-card", function () {

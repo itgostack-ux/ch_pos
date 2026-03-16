@@ -151,6 +151,15 @@ export class CartPanel {
 			</div>
 
 			<!-- F. Action Buttons -->
+			<div class="ch-pos-cart-quick-links">
+				<button class="btn btn-xs btn-default ch-pos-btn-held-bills">
+					<i class="fa fa-pause-circle"></i> ${__("Held Bills")}
+					<span class="ch-held-count" style="display:none"></span>
+				</button>
+				<button class="btn btn-xs btn-default ch-pos-btn-reprint-cart" title="${__("Reprint today\'s invoices")}">
+					<i class="fa fa-print"></i> ${__("Reprint")}
+				</button>
+			</div>
 			<div class="ch-pos-cart-actions">
 				<button class="btn btn-outline-danger ch-pos-btn-cancel">${__("Cancel")}</button>
 				<button class="btn btn-outline-secondary ch-pos-btn-hold">
@@ -477,6 +486,16 @@ export class CartPanel {
 		w.on("click", ".ch-pos-btn-hold", () => EventBus.emit("cart:hold"));
 		w.on("click", ".ch-pos-btn-pay", () => EventBus.emit("cart:pay"));
 
+		// Quick-link: held bills + reprint (in cart panel)
+		w.on("click", ".ch-pos-btn-held-bills", () => EventBus.emit("held_bills:open"));
+		w.on("click", ".ch-pos-btn-reprint-cart", () => EventBus.emit("reprint:open"));
+
+		// Keep held-bills badge current whenever any held bill changes
+		EventBus.on("held_bills:updated", () => this._refresh_held_count(w));
+
+		// Initial badge count
+		this._refresh_held_count(w);
+
 		// Quick actions
 		w.on("click", ".ch-pos-btn-exchange", () => EventBus.emit("exchange:open"));
 		w.on("click", ".ch-pos-btn-vas", () => EventBus.emit("vas:open"));
@@ -512,24 +531,44 @@ export class CartPanel {
 				.html(`<span style="color:var(--pos-danger,red)">${frappe.utils.escape_html(reason)}</span>`).show();
 		});
 
-		// Manual discount — enforced by executive permissions (only for manual-entry reasons)
-		w.on("change", ".ch-pos-disc-pct", function () {
+		// Manual discount — real-time validation on every keystroke
+		w.on("input", ".ch-pos-disc-pct", function () {
 			const pct = parseFloat($(this).val()) || 0;
-			if (!_check_discount_permission(pct)) {
+			if ($(this).val() === "") { _show_discount_error(w, null); return; }
+			const err = _validate_discount_input(pct, null, w);
+			_show_discount_error(w, err);
+		});
+		w.on("change blur", ".ch-pos-disc-pct", function () {
+			const pct = parseFloat($(this).val()) || 0;
+			if (!$(this).val()) { _show_discount_error(w, null); return; }
+			const err = _validate_discount_input(pct, null, w);
+			if (err) {
 				$(this).val("");
+				_show_discount_error(w, err);
 				return;
 			}
+			_show_discount_error(w, null);
 			PosState.additional_discount_pct = pct;
 			PosState.additional_discount_amt = 0;
 			w.find(".ch-pos-disc-amt").val("");
 			EventBus.emit("discount:changed");
 		});
-		w.on("change", ".ch-pos-disc-amt", function () {
+		w.on("input", ".ch-pos-disc-amt", function () {
 			const amt = parseFloat($(this).val()) || 0;
-			if (!_check_discount_permission(null, amt)) {
+			if ($(this).val() === "") { _show_discount_error(w, null); return; }
+			const err = _validate_discount_input(null, amt, w);
+			_show_discount_error(w, err);
+		});
+		w.on("change blur", ".ch-pos-disc-amt", function () {
+			const amt = parseFloat($(this).val()) || 0;
+			if (!$(this).val()) { _show_discount_error(w, null); return; }
+			const err = _validate_discount_input(null, amt, w);
+			if (err) {
 				$(this).val("");
+				_show_discount_error(w, err);
 				return;
 			}
+			_show_discount_error(w, null);
 			PosState.additional_discount_amt = amt;
 			PosState.additional_discount_pct = 0;
 			w.find(".ch-pos-disc-pct").val("");
@@ -786,6 +825,9 @@ export class CartPanel {
 			discount_total += flt(item.discount_amount || 0) * flt(item.qty);
 		});
 
+		// Keep subtotal available for discount % → ₹ cap calculations
+		PosState._cart_total_for_disc = subtotal;
+
 		let add_disc = 0;
 		if (PosState.additional_discount_pct) {
 			add_disc = subtotal * PosState.additional_discount_pct / 100;
@@ -818,6 +860,19 @@ export class CartPanel {
 		pe_credit > 0 ? pe_row.show().find(".value").text(`-₹${format_number(pe_credit)}`) : pe_row.hide();
 
 		s.find(".grand-total .value").text(`₹${format_number(grand_total)}`);
+	}
+
+	_refresh_held_count(w) {
+		let count = 0;
+		for (let i = 0; i < localStorage.length; i++) {
+			if (localStorage.key(i).startsWith("ch_pos_held_")) count++;
+		}
+		const badge = (w || this.wrapper).find(".ch-held-count");
+		if (count > 0) {
+			badge.text(count).show();
+		} else {
+			badge.hide();
+		}
 	}
 }
 
@@ -852,4 +907,90 @@ function _check_discount_permission(pct = null, amt = null) {
 	}
 
 	return true;
+}
+
+/**
+ * Validate a discount value against:
+ *   1. The selected reason's max_manual_percent cap
+ *   2. The executive role's max_discount_pct cap
+ * Returns an error string if invalid, null if OK.
+ */
+function _validate_discount_input(pct, amt, wrapper) {
+	const reason_name = PosState.discount_reason;
+	const reason = (PosState._discount_reasons || []).find((r) => r.name === reason_name);
+
+	// ── Reason-level percentage cap ──────────────────────────────────────────
+	if (pct !== null && pct > 0 && reason && reason.max_manual_percent > 0) {
+		if (pct > reason.max_manual_percent) {
+			return __("Max discount for \"{0}\" is {1}%", [reason.reason_name, reason.max_manual_percent]);
+		}
+	}
+
+	// ── Amount cap — convert to implied % using cart subtotal ─────────────────
+	if (amt !== null && amt > 0 && reason && reason.max_manual_percent > 0) {
+		const cart_total = PosState._cart_total_for_disc || 0;
+		if (cart_total > 0) {
+			const implied_pct = (amt / cart_total) * 100;
+			if (implied_pct > reason.max_manual_percent) {
+				const max_amt = (cart_total * reason.max_manual_percent / 100).toFixed(0);
+				return __(
+					"₹{0} exceeds max {1}% (₹{2}) for \"{3}\"",
+					[amt, reason.max_manual_percent, max_amt, reason.reason_name]
+				);
+			}
+		}
+	}
+
+	// ── Executive role cap ───────────────────────────────────────────────────
+	const access = PosState.executive_access;
+	if (access && access.own_executive) {
+		const company = PosState.active_company;
+		const execs = (access.store_executives || {})[company] || [];
+		const exec = execs.find((e) => e.name === PosState.sales_executive);
+		if (exec) {
+			if (!exec.can_give_discount) {
+				return __("You don't have permission to give discounts");
+			}
+			if (pct !== null && exec.max_discount_pct > 0 && pct > exec.max_discount_pct) {
+				return __("Your role allows max {0}% discount", [exec.max_discount_pct]);
+			}
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Show or clear an inline discount error below the discount inputs.
+ * A rate-limited toast fires only after the user pauses typing.
+ */
+let _disc_error_toast_timer = null;
+function _show_discount_error(wrapper, msg) {
+	const info = wrapper.find(".ch-pos-disc-info");
+	if (!msg) {
+		// Restore normal hint
+		const reason_name = PosState.discount_reason;
+		const reason = (PosState._discount_reasons || []).find((r) => r.name === reason_name);
+		if (reason && reason.allow_manual_entry) {
+			info.removeClass("disc-error-hint")
+				.text(reason.max_manual_percent
+					? __("Enter discount (max {0}%)", [reason.max_manual_percent])
+					: __("Enter discount within your role limits"))
+				.show();
+		} else {
+			info.removeClass("disc-error-hint").hide();
+		}
+		wrapper.find(".ch-pos-disc-pct, .ch-pos-disc-amt").removeClass("disc-input-error");
+		return;
+	}
+
+	// Inline error
+	info.addClass("disc-error-hint").text("⚠ " + msg).show();
+	wrapper.find(".ch-pos-disc-pct, .ch-pos-disc-amt").addClass("disc-input-error");
+
+	// Debounced toast — fires 400 ms after the user stops typing
+	clearTimeout(_disc_error_toast_timer);
+	_disc_error_toast_timer = setTimeout(() => {
+		frappe.show_alert({ message: msg, indicator: "red" }, 4);
+	}, 400);
 }

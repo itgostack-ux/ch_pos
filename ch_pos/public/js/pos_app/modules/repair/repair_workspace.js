@@ -245,6 +245,11 @@ export class RepairWorkspace {
 				device_field.set_value("");
 				serial_field.set_value("");
 				issue_cat_field.set_value("");
+				// Increment walk-in + repair intake counter
+				if (PosState.pos_profile) {
+					frappe.call({ method: "ch_pos.api.pos_api.log_walkin", args: { pos_profile: PosState.pos_profile, source: "POS Counter" } });
+					frappe.call({ method: "ch_pos.api.pos_api.increment_repair_intake_count", args: { pos_profile: PosState.pos_profile } });
+				}
 			});
 		});
 
@@ -278,6 +283,38 @@ export class RepairWorkspace {
 
 		// Refresh pipeline
 		panel.on("click", ".ch-rep-refresh-pipeline", () => this._load_pipeline(panel));
+
+		// Collect Payment for completed repairs
+		panel.on("click", ".ch-rep-collect-payment", (e) => {
+			const btn = $(e.currentTarget);
+			const sr_name = btn.data("name");
+			const service_order = btn.data("service");
+			const estimated_cost = parseFloat(btn.data("cost")) || 0;
+
+			frappe.prompt([
+				{ fieldtype: "Currency", fieldname: "amount", label: __("Repair Charge (₹)"), default: estimated_cost, reqd: 1 },
+				{ fieldtype: "Select", fieldname: "mode_of_payment", label: __("Payment Mode"),
+					options: PosState.payment_modes.map(m => m.mode_of_payment).join("\n") || "Cash\nUPI\nCredit Card",
+					default: "Cash", reqd: 1 },
+				{ fieldtype: "Data", fieldname: "upi_txn_id", label: __("UPI/Ref No (optional)") },
+			], (values) => {
+				btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i>`);
+				frappe.xcall("ch_pos.api.pos_api.collect_repair_payment", {
+					service_request: sr_name,
+					service_order,
+					amount: values.amount,
+					mode_of_payment: values.mode_of_payment,
+					upi_txn_id: values.upi_txn_id || "",
+					pos_profile: PosState.pos_profile,
+					customer: PosState.customer || "Walk-in Customer",
+				}).then((r) => {
+					frappe.show_alert({ message: __("Payment collected — Invoice {0}", [r.invoice]), indicator: "green" });
+					this._load_pipeline(panel);
+				}).catch(() => {
+					btn.prop("disabled", false).html(`<i class="fa fa-inr"></i> ${__("Collect")}`);
+				});
+			}, __("Collect Repair Payment"), __("Collect"));
+		});
 
 		panel.on("click", ".ch-rep-clear", () => {
 			panel.find("input, select, textarea").val("");
@@ -380,12 +417,22 @@ export class RepairWorkspace {
 					: r.service_order
 						? `<span class="ch-pos-badge badge-warning">${__("SO")}: ${r.service_order}</span>`
 						: `<span class="ch-pos-badge badge-muted">${__("Pending")}</span>`;
+				const collect_btn = r.job_status === "Completed" && !r.billed
+					? `<button class="btn btn-xs btn-success ch-rep-collect-payment"
+						data-name="${r.name}" data-service="${r.service_order || ""}" data-cost="${r.estimated_cost || 0}"
+						style="border-radius:var(--pos-radius-sm);white-space:nowrap;font-weight:700">
+						<i class="fa fa-inr"></i> ${__("Collect")}
+					</button>`
+					: r.billed
+						? `<span class="ch-pos-badge badge-success"><i class="fa fa-check"></i> ${__("Paid")}</span>`
+						: "";
 				return `
 					<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--pos-border-light,#eee)">
 						<div style="flex:1;min-width:0">
 							<div style="font-weight:600;font-size:13px">${frappe.utils.escape_html(r.name)}</div>
 							<div class="text-muted" style="font-size:12px">
 								${frappe.utils.escape_html(r.customer || "")} · ${frappe.utils.escape_html(r.device_item || "")}
+								${r.estimated_cost ? ` · ₹${r.estimated_cost}` : ""}
 							</div>
 						</div>
 						<div style="display:flex;gap:4px;align-items:center">
@@ -397,6 +444,7 @@ export class RepairWorkspace {
 								style="border-radius:var(--pos-radius-sm);white-space:nowrap">
 								<i class="fa fa-cog"></i> ${__("Create Job")}
 							</button>` : ""}
+						${collect_btn}
 					</div>`;
 			}).join("");
 			el.html(rows);

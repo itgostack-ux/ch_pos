@@ -30,6 +30,12 @@ class CustomPOSInvoice(POSInvoice):
     """Extends POS Invoice for margin scheme GST on selling side."""
 
     def validate(self):
+        # When loyalty points are redeemed, paid_amount must include loyalty_amount
+        # so ERPNext's validate_full_payment (paid_amount >= invoice_total) passes.
+        # ERPNext's set_paid_amount() only sums payment rows, not loyalty — we fix that here.
+        if self.redeem_loyalty_points and flt(self.loyalty_amount) > 0:
+            payments_sum = sum(flt(p.amount) for p in self.get("payments", []))
+            self.paid_amount = payments_sum + flt(self.loyalty_amount)
         super().validate()
         _apply_margin_scheme(self)
 
@@ -109,11 +115,25 @@ def create_customer_device_records(doc, method=None):
                 "item_name": item.item_name,
                 "brand": item.brand or frappe.db.get_value("Item", item.item_code, "brand"),
                 "purchase_date": doc.posting_date,
-                "purchase_invoice": doc.name,
+                # purchase_invoice links to Sales Invoice — POS Invoice is a separate flow
+                # Store the POS Invoice name in a custom field if available, else skip
                 "purchase_price": flt(item.rate),
-                "purchase_store": doc.pos_profile,
-                "current_status": "Active",
+                # purchase_store is a Link to Warehouse; use item.warehouse (already validated)
+                "purchase_store": item.warehouse or frappe.db.get_value(
+                    "POS Profile", doc.pos_profile, "warehouse"),
+                "current_status": "Owned",
             }
+            # Only set purchase_invoice if CH Customer Device has a pos_invoice field
+            # (to avoid Link validation errors against tabSales Invoice)
+            from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import CHCustomerDevice
+            cd_meta_fields = {f.fieldname for f in frappe.get_meta("CH Customer Device").fields}
+            if "pos_invoice" in cd_meta_fields:
+                device_kwargs["pos_invoice"] = doc.name
+            elif "purchase_invoice" in cd_meta_fields:
+                # Only set if the Link points to POS Invoice (not Sales Invoice)
+                pf = frappe.get_meta("CH Customer Device").get_field("purchase_invoice")
+                if pf and pf.options == "POS Invoice":
+                    device_kwargs["purchase_invoice"] = doc.name
 
             # Attach warranty plan if selected
             if item.get("custom_warranty_plan"):

@@ -27,9 +27,9 @@ function _order_stage(order) {
 	if (!order) return STAGE.ASSESS;
 	const s = order.status || "";
 	if (["Paid", "Closed"].includes(s)) return STAGE.DONE;
-	if (s === "Customer Approved") return STAGE.SETTLE;
-	if (["Ready to Pay", "Approved", "Awaiting Approval",
-		"Draft", "Awaiting Customer Approval"].includes(s)) return STAGE.INSPECT;
+	if (["Customer Approved", "Ready to Pay"].includes(s)) return STAGE.SETTLE;
+	if (["Approved", "Awaiting Customer Approval", "Awaiting OTP", "OTP Verified"].includes(s)) return STAGE.APPROVE;
+	if (["Draft", "Awaiting Approval"].includes(s)) return STAGE.INSPECT;
 	return STAGE.ASSESS;
 }
 
@@ -127,7 +127,15 @@ export class BuybackWorkspace {
 			$(e.currentTarget).addClass("selected");
 			this._load_detail(panel, $(e.currentTarget).data("name"));
 		});
-		panel.on("click", ".ch-bb-new-btn", () => this._new_assessment_dialog(panel));
+		panel.on("click", ".ch-bb-new-btn", () => {
+			// Pass store (warehouse) and pos_profile so the form can auto-fill & lock the field
+			frappe.route_options = {
+				source: "Store Manual",
+				store: PosState.warehouse || "",
+				_from_pos: "1",
+			};
+			frappe.new_doc("Buyback Assessment");
+		});
 	}
 
 	// ─────────────────────────────── search ──
@@ -291,6 +299,70 @@ export class BuybackWorkspace {
 			   </div>`
 			: `<div class="ch-bb-empty-note">${__("No automated diagnostics — manual condition check used for grading.")}</div>`;
 
+		const status = data.status;
+		let action_btn = "";
+
+		// Assessment status field options: Draft | Submitted | Inspection Created | Expired | Cancelled
+		// source: "Mobile App" → full physical inspection inline before order creation
+		// source: "Store Manual" / other → walk-in: set price and create order directly
+		// "Quote Generated" is set by the mobile app diagnostic pipeline (same as Submitted for our purposes)
+		const is_mobile_app = (data.source || "") === "Mobile App";
+		const can_start = status === "Submitted" || status === "Quote Generated";
+		const inspection_in_progress = status === "Inspection Created" && !!data.buyback_inspection;
+
+		if (status === "Draft") {
+			action_btn = `
+				<div class="ch-bb-info-note">
+					<i class="fa fa-info-circle"></i>
+					${__("Assessment is in Draft. Open the form to review and submit it before starting inspection.")}
+				</div>
+				<button class="btn btn-outline-primary btn-lg ch-bb-act ch-bb-open-assessment"
+					data-name="${data.name}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700">
+					<i class="fa fa-external-link"></i> ${__("Open Assessment Form")}
+				</button>`;
+
+		} else if (can_start && is_mobile_app) {
+			// Mobile App: customer self-assessed remotely → store inspects device physically
+			action_btn = `
+				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-start-inspection"
+					data-name="${data.name}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700">
+					<i class="fa fa-search-plus"></i> ${__("Inspect Device")}
+				</button>`;
+
+		} else if (can_start && !is_mobile_app) {
+			// Store walk-in: assess + inspect happen together → set price and create order directly
+			action_btn = `
+				<div class="ch-bb-info-note">
+					<i class="fa fa-info-circle"></i>
+					${__("Store walk-in: set final buyback price and create order for customer approval.")}
+				</div>
+				<div style="margin-bottom:10px">
+					<label class="ch-bb-field-label">${__("Final Buyback Price (₹)")}</label>
+					<input type="number" class="form-control ch-bb-walkin-price"
+						value="${data.quoted_price || data.estimated_price}" min="0" step="1"
+						style="font-size:20px;font-weight:700;text-align:right;padding:10px;border-radius:var(--pos-radius,8px)">
+				</div>
+				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-create-walkin-order"
+					data-name="${data.name}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
+					<i class="fa fa-check-circle"></i> ${__("Create Order & Send for Approval")}
+				</button>`;
+
+		} else if (inspection_in_progress) {
+			action_btn = `
+				<div class="ch-bb-info-note">
+					<i class="fa fa-info-circle"></i>
+					${__("Inspection created. Click below to continue the evaluation.")}
+				</div>
+				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-start-inspection"
+					data-name="${data.name}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700">
+					<i class="fa fa-search-plus"></i> ${__("Continue Inspection")}
+				</button>`;
+		}
+
 		return `
 			<div class="ch-bb-valuation-banner">
 				<div class="ch-bb-val-label">${__("Assessed Value")}</div>
@@ -301,10 +373,89 @@ export class BuybackWorkspace {
 				</div>
 			</div>
 			${diag_html}
-			<div class="ch-bb-actions" style="margin-top:16px">
-				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-start-inspect"
-					style="flex:1;border-radius:var(--pos-radius,8px);font-weight:700">
-					<i class="fa fa-search-plus"></i> ${__("Start Inspection & Set Price")}
+			<div class="ch-bb-actions" style="margin-top:16px;display:block">
+				${action_btn}
+			</div>`;
+	}
+
+	// ─────────────────────────────── stage: INSPECT (inline form) ──
+	_html_inspect_inline(ins) {
+		// ins = data returned by pos_create_inspection API
+		const grade_options = (ins.grades || []).map(g =>
+			`<option value="${frappe.utils.escape_html(g.name)}"
+				${ins.condition_grade === g.name ? "selected" : ""}>
+				${frappe.utils.escape_html(g.label)}
+			</option>`
+		).join("");
+
+		const revised = ins.revised_price || ins.quoted_price || 0;
+
+		return `
+			<!-- Pre-filled device info (read-only) -->
+			<div class="ch-bb-valuation-banner" style="margin-bottom:14px">
+				<div class="ch-bb-val-label">${__("Quoted Value (Assessment)")}</div>
+				<div class="ch-bb-val-amount">₹${format_number(ins.quoted_price)}</div>
+			</div>
+			<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;margin-bottom:14px;font-size:13px">
+				<div><span class="ch-bb-strip-label">${__("Customer")}</span>
+					<span class="ch-bb-strip-val">${frappe.utils.escape_html(ins.customer_name || ins.customer || "—")}</span></div>
+				<div><span class="ch-bb-strip-label">${__("Mobile")}</span>
+					<span class="ch-bb-strip-val">${frappe.utils.escape_html(ins.mobile_no || "—")}</span></div>
+				<div><span class="ch-bb-strip-label">${__("Device")}</span>
+					<span class="ch-bb-strip-val">${frappe.utils.escape_html(ins.item_name || ins.item || "—")}</span></div>
+				<div><span class="ch-bb-strip-label">${__("IMEI")}</span>
+					<span class="ch-bb-strip-val" style="font-family:monospace">${frappe.utils.escape_html(ins.imei_serial || "—")}</span></div>
+			</div>
+
+			<div class="ch-bb-section-label">${__("Inspection Evaluation")}</div>
+
+			<!-- Condition Grade (mandatory) -->
+			<div style="margin-bottom:10px">
+				<label class="ch-bb-field-label">
+					${__("Condition Grade")} <span style="color:var(--red,#e53e3e)">*</span>
+				</label>
+				<select class="form-control ch-bb-ins-grade"
+					style="border-radius:var(--pos-radius,8px);font-weight:600">
+					<option value="">${__("-- Select Grade --")}</option>
+					${grade_options}
+				</select>
+			</div>
+
+			<!-- Final Price -->
+			<div style="margin-bottom:10px">
+				<label class="ch-bb-field-label">${__("Final Buyback Price (₹)")}</label>
+				<input type="number" class="form-control ch-bb-ins-price"
+					value="${revised}" min="0" step="1"
+					style="font-size:20px;font-weight:700;text-align:right;padding:10px;border-radius:var(--pos-radius,8px)">
+			</div>
+
+			<!-- Price Override Reason (shows when price differs from quoted) -->
+			<div style="margin-bottom:10px">
+				<label class="ch-bb-field-label">${__("Reason for Price Change (if any)")}</label>
+				<input type="text" class="form-control ch-bb-ins-override-reason"
+					value="${frappe.utils.escape_html(ins.price_override_reason || "")}"
+					placeholder="${__("e.g., screen crack, battery issue, missing accessories...")}"
+					style="border-radius:var(--pos-radius,8px)">
+			</div>
+
+			<!-- Remarks -->
+			<div style="margin-bottom:14px">
+				<label class="ch-bb-field-label">${__("Inspection Remarks")}</label>
+				<textarea class="form-control ch-bb-ins-remarks" rows="2"
+					style="border-radius:var(--pos-radius,8px)"
+					placeholder="${__("Additional notes for the inspector...")}">${frappe.utils.escape_html(ins.remarks || "")}</textarea>
+			</div>
+
+			<div class="ch-bb-actions" style="gap:8px;display:flex;flex-direction:column">
+				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-complete-inspection"
+					data-inspection="${frappe.utils.escape_html(ins.name)}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
+					<i class="fa fa-check-circle"></i> ${__("Complete Inspection & Create Order")}
+				</button>
+				<button class="btn btn-outline-secondary ch-bb-act ch-bb-inspection-to-desk"
+					data-inspection="${frappe.utils.escape_html(ins.name)}"
+					style="width:100%;border-radius:var(--pos-radius,8px)">
+					<i class="fa fa-external-link"></i> ${__("Open in Desk")}
 				</button>
 			</div>`;
 	}
@@ -312,35 +463,30 @@ export class BuybackWorkspace {
 	// ─────────────────────────────── stage: INSPECT ──
 	_html_inspect(data) {
 		const order = data.order;
-		const final_price = order ? order.final_price : (data.quoted_price || data.estimated_price);
-		const status_note = order
-			? `<span class="ch-pos-badge badge-${this._status_cls(order.status)}">${__(order.status)}</span>` : "";
+		const price = order ? order.final_price : (data.quoted_price || data.estimated_price);
+		const order_name = order ? frappe.utils.escape_html(order.name) : "";
 
+		// INSPECT stage is reached only when order.status === "Awaiting Approval":
+		// a manager must approve in Desk before the flow can proceed to APPROVE.
 		return `
-			<div class="ch-bb-valuation-banner">
-				<div class="ch-bb-val-label">${__("Assessed Value")}</div>
-				<div class="ch-bb-val-amount">₹${format_number(data.quoted_price || data.estimated_price)}</div>
+			<div class="ch-bb-valuation-banner"
+				style="background:#fef3c7;border-color:#f59e0b">
+				<div class="ch-bb-val-label" style="color:#92400e">
+					<i class="fa fa-clock-o"></i> ${__("Awaiting Manager Approval")}
+				</div>
+				<div class="ch-bb-val-amount" style="color:#92400e">₹${format_number(price)}</div>
+				<div class="ch-bb-val-sub" style="color:#92400e">
+					${__("Order {0} — a manager must approve before handing to the customer.", [order_name])}
+				</div>
 			</div>
-			<div class="ch-bb-section-label" style="margin-top:14px">
-				${__("Inspector — Set Final Price")} ${status_note}
+			<div class="ch-bb-info-note" style="margin-top:12px">
+				<i class="fa fa-info-circle"></i>
+				${__("The manager will review and approve this order in Desk. Refresh to check status.")}
 			</div>
-			<div style="margin-bottom:8px">
-				<label class="ch-bb-field-label">${__("Final Buyback Price (₹)")}</label>
-				<input type="number" class="form-control ch-bb-final-price"
-					value="${final_price}" min="0" step="1"
-					style="font-size:22px;font-weight:700;text-align:right;padding:10px;border-radius:var(--pos-radius,8px)">
-			</div>
-			<div style="margin-bottom:10px">
-				<label class="ch-bb-field-label">${__("Inspector Notes")}</label>
-				<textarea class="form-control ch-bb-inspector-notes" rows="2"
-					placeholder="${__("Optional: reason for price change, condition notes...")}"
-					style="border-radius:var(--pos-radius,8px)"
-					>${(order && order.inspector_notes) || ""}</textarea>
-			</div>
-			<div class="ch-bb-actions">
-				<button class="btn btn-primary ch-bb-act ch-bb-confirm-price"
-					style="flex:1;border-radius:var(--pos-radius,8px);font-weight:700;min-height:44px">
-					<i class="fa fa-check"></i> ${__("Confirm Price & Proceed to Approval")}
+			<div class="ch-bb-actions" style="margin-top:12px">
+				<button class="btn btn-outline-secondary ch-bb-act ch-bb-refresh-stage"
+					style="width:100%;border-radius:var(--pos-radius,8px)">
+					<i class="fa fa-refresh"></i> ${__("Refresh Status")}
 				</button>
 			</div>`;
 	}
@@ -350,53 +496,73 @@ export class BuybackWorkspace {
 		const order = data.order;
 		const price = order ? order.final_price : (data.quoted_price || data.estimated_price);
 		const mobile = data.mobile_no || "";
+		const masked = mobile ? mobile.slice(0, 2) + "****" + mobile.slice(-2) : "—";
+		const order_status = order ? order.status : "";
+		const is_waiting = order_status === "Awaiting Customer Approval";
+		const approval_url = order ? (order.approval_url || "") : "";
 
-		return `
+		const price_banner = `
 			<div class="ch-bb-valuation-banner"
 				style="background:var(--pos-success-light,#d1fae5);border-color:var(--pos-success,#10b981)">
-				<div class="ch-bb-val-label" style="color:var(--pos-success,#10b981)">
-					${__("Final Buyback Price — Awaiting Customer Approval")}
+				<div class="ch-bb-val-label" style="color:var(--pos-success-dark,#065f46)">
+					${is_waiting
+						? `<i class="fa fa-clock-o"></i> ${__("Awaiting Customer Approval")}`
+						: __("Inspection Complete — Get Customer Approval")}
 				</div>
-				<div class="ch-bb-val-amount" style="color:var(--pos-success,#10b981)">₹${format_number(price)}</div>
-				<div class="ch-bb-val-sub">
-					${__("Customer:")} ${frappe.utils.escape_html(data.customer_name || data.mobile_no || "—")}
+				<div class="ch-bb-val-amount" style="color:var(--pos-success-dark,#065f46)">
+					₹${format_number(price)}
 				</div>
+				${is_waiting
+					? `<div class="ch-bb-val-sub">${__("Link sent to")} <b>${masked}</b></div>`
+					: `<div class="ch-bb-val-sub">${__("Customer:")} ${frappe.utils.escape_html(data.customer_name || mobile || "—")}</div>`}
+			</div>`;
+
+		if (is_waiting) {
+			// Link already sent — show "waiting" state with resend + in-store fallback
+			return `${price_banner}
+				<div class="ch-bb-info-note" style="margin-top:12px;background:#fef9c3;border-color:#facc15;color:#713f12">
+					<i class="fa fa-hourglass-half"></i>
+					${__("The approval link has been sent. Waiting for the customer to tap and approve.")}
+					${approval_url
+						? `<br><small style="word-break:break-all;opacity:0.7">${frappe.utils.escape_html(approval_url)}</small>`
+						: ""}
+				</div>
+				<div class="ch-bb-actions" style="margin-top:14px;flex-direction:column;gap:8px">
+					<button class="btn btn-outline-primary ch-bb-act ch-bb-resend-link"
+						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:600">
+						<i class="fa fa-paper-plane"></i> ${__("Resend Link")}
+					</button>
+					<button class="btn btn-outline-secondary ch-bb-act ch-bb-approve-instor"
+						style="width:100%;border-radius:var(--pos-radius,8px)">
+						<i class="fa fa-pencil"></i> ${__("Approve In-Store Instead")}
+					</button>
+					<button class="btn btn-link ch-bb-act ch-bb-refresh-stage"
+						style="font-size:12px;margin-top:4px">
+						<i class="fa fa-refresh"></i> ${__("Refresh Status")}
+					</button>
+				</div>`;
+		}
+
+		// Default: not yet sent — primary CTA is "Send Approval Link"
+		return `${price_banner}
+			<div class="ch-bb-info-note" style="margin-top:12px">
+				<i class="fa fa-info-circle"></i>
+				${__("Share the approval link with the customer. They tap it, review the price, and approve — no app needed.")}
 			</div>
-			<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px">
-				<!-- In-Store Signature -->
-				<div class="ch-bb-approval-card">
-					<div class="ch-bb-approval-icon"><i class="fa fa-pencil fa-2x"></i></div>
-					<div class="ch-bb-approval-title">${__("In-Store Signature")}</div>
-					<div class="ch-bb-approval-desc">
-						${__("Customer physically signs off on the price at the counter.")}
+			<div class="ch-bb-actions" style="margin-top:14px;flex-direction:column;gap:10px">
+				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-send-link"
+					data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:56px;font-size:15px">
+					<i class="fa fa-whatsapp" style="font-size:20px;margin-right:6px"></i>
+					${__("Send Approval Link")}
+					<div style="font-size:11px;font-weight:400;opacity:0.85;margin-top:2px">
+						${__("WhatsApp / SMS to")} ${masked}
 					</div>
-					<button class="btn btn-primary ch-bb-act ch-bb-approve-instor"
-						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;margin-top:8px">
-						<i class="fa fa-check"></i> ${__("Confirm (Signature)")}
-					</button>
-				</div>
-				<!-- OTP -->
-				<div class="ch-bb-approval-card">
-					<div class="ch-bb-approval-icon"><i class="fa fa-mobile fa-2x"></i></div>
-					<div class="ch-bb-approval-title">${__("OTP Verification")}</div>
-					<div class="ch-bb-approval-desc">
-						${__("Send OTP to customer's mobile")}
-						${mobile ? `<b>${mobile.slice(0, 2)}****${mobile.slice(-2)}</b>` : ""}
-					</div>
-					<button class="btn btn-outline-primary ch-bb-act ch-bb-send-otp"
-						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;margin-top:8px">
-						<i class="fa fa-paper-plane"></i> ${__("Send OTP")}
-					</button>
-					<div class="ch-bb-otp-row" style="display:none;margin-top:8px">
-						<input type="text" class="form-control ch-bb-otp-input" maxlength="6"
-							placeholder="${__("Enter 6-digit OTP")}"
-							style="text-align:center;letter-spacing:6px;font-size:18px;font-weight:700;border-radius:var(--pos-radius,8px)">
-						<button class="btn btn-success ch-bb-act ch-bb-verify-otp w-100"
-							style="border-radius:var(--pos-radius,8px);font-weight:700;margin-top:6px">
-							<i class="fa fa-check"></i> ${__("Verify OTP")}
-						</button>
-					</div>
-				</div>
+				</button>
+				<button class="btn btn-outline-secondary ch-bb-act ch-bb-approve-instor"
+					style="width:100%;border-radius:var(--pos-radius,8px)">
+					<i class="fa fa-pencil"></i> ${__("Approve In-Store (Customer Present)")}
+				</button>
 			</div>`;
 	}
 
@@ -490,50 +656,118 @@ export class BuybackWorkspace {
 
 	// ─────────────────────────────── stage action wiring ──
 	_bind_stage_actions(el, data, stage) {
-		// ── ASSESS: Start Inspection ────────────────────
-		el.on("click", ".ch-bb-start-inspect", () => {
-			const btn = el.find(".ch-bb-start-inspect");
-			btn.prop("disabled", true)
-				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Starting...")}`);
-			frappe.xcall("ch_pos.api.pos_api.pos_start_buyback_order", {
+		// ── ASSESS: Open assessment in desk ────────────
+		el.on("click", ".ch-bb-open-assessment", (e) => {
+			frappe.set_route("Form", "Buyback Assessment", $(e.currentTarget).data("name"));
+		});
+
+		// ── ASSESS: Start/continue inspection inline ────
+		el.on("click", ".ch-bb-start-inspection", (e) => {
+			const btn = $(e.currentTarget);
+			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}`);
+			frappe.xcall("ch_pos.api.pos_api.pos_create_inspection", {
 				assessment_name: data.name,
-				pos_profile: PosState.pos_profile || "",
-				final_price: data.quoted_price || data.estimated_price,
-			}).then(() => {
-				frappe.show_alert({ message: __("Inspection started"), indicator: "green" });
-				this._reload();
+			}).then((ins) => {
+				// Render inline inspection form in the stage body
+				el.find(".ch-bb-stage-body").html(this._html_inspect_inline(ins));
+				btn.prop("disabled", false)
+					.html(`<i class="fa fa-search-plus"></i> ${__("Start Inspection")}`);
 			}).catch(() => {
 				btn.prop("disabled", false)
-					.html(`<i class="fa fa-search-plus"></i> ${__("Start Inspection & Set Price")}`);
+					.html(`<i class="fa fa-search-plus"></i> ${__("Start Inspection")}`);
 			});
 		});
 
-		// ── INSPECT: Confirm Price ──────────────────────
-		el.on("click", ".ch-bb-confirm-price", () => {
-			const price = parseFloat(el.find(".ch-bb-final-price").val()) || 0;
-			if (price <= 0) {
-				frappe.show_alert({ message: __("Enter a valid price"), indicator: "orange" });
+		// ── INSPECT INLINE: Complete inspection ─────────
+		el.on("click", ".ch-bb-complete-inspection", (e) => {
+			const inspection_name = $(e.currentTarget).data("inspection");
+			const grade = el.find(".ch-bb-ins-grade").val();
+			if (!grade) {
+				frappe.show_alert({ message: __("Please select a Condition Grade"), indicator: "orange" });
 				return;
 			}
-			const notes = el.find(".ch-bb-inspector-notes").val();
-			const btn = el.find(".ch-bb-confirm-price");
-			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i>`);
+			const price = parseFloat(el.find(".ch-bb-ins-price").val()) || 0;
+			if (price <= 0) {
+				frappe.show_alert({ message: __("Enter a valid Final Price"), indicator: "orange" });
+				return;
+			}
+			const override_reason = el.find(".ch-bb-ins-override-reason").val() || "";
+			const remarks = el.find(".ch-bb-ins-remarks").val() || "";
 
-			const order_name = data.order && data.order.name;
-			const call = order_name
-				? frappe.xcall("ch_pos.api.pos_api.pos_update_buyback_price", {
-					order_name, final_price: price, inspector_notes: notes,
-				})
-				: frappe.xcall("ch_pos.api.pos_api.pos_start_buyback_order", {
-					assessment_name: data.name,
-					pos_profile: PosState.pos_profile || "",
-					final_price: price, inspector_notes: notes,
-				});
+			const btn = $(e.currentTarget);
+			btn.prop("disabled", true)
+				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Completing...")}`);
 
-			call.then(() => {
-				frappe.show_alert({ message: __("Price confirmed"), indicator: "green" });
+			frappe.xcall("ch_pos.api.pos_api.pos_complete_inspection", {
+				inspection_name,
+				condition_grade: grade,
+				final_price: price,
+				price_override_reason: override_reason,
+				remarks,
+			}).then(() => {
+				frappe.show_alert({ message: __("Inspection complete — Order created"), indicator: "green" });
 				this._reload();
-			}).catch(() => btn.prop("disabled", false));
+			}).catch(() => {
+				btn.prop("disabled", false)
+					.html(`<i class="fa fa-check-circle"></i> ${__("Complete Inspection & Create Order")}`);
+			});
+		});
+
+		// ── INSPECT INLINE: Open inspection in desk ─────
+		el.on("click", ".ch-bb-inspection-to-desk", (e) => {
+			frappe.set_route("Form", "Buyback Inspection", $(e.currentTarget).data("inspection"));
+		});
+
+		// ── ASSESS: Walk-in — create order directly ─────
+		el.on("click", ".ch-bb-create-walkin-order", (e) => {
+			const btn = $(e.currentTarget);
+			const price = parseFloat(el.find(".ch-bb-walkin-price").val()) || 0;
+			if (price <= 0) {
+				frappe.show_alert({ message: __("Enter a valid buyback price"), indicator: "orange" });
+				return;
+			}
+			btn.prop("disabled", true)
+				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating Order...")}`);
+			frappe.xcall("ch_pos.api.pos_api.pos_start_buyback_order", {
+				assessment_name: data.name,
+				pos_profile: PosState.pos_profile || "",
+				final_price: price,
+			}).then(() => {
+				frappe.show_alert({ message: __("Order created"), indicator: "green" });
+				this._reload();
+			}).catch(() => {
+				btn.prop("disabled", false)
+					.html(`<i class="fa fa-check-circle"></i> ${__("Create Order & Send for Approval")}`);
+			});
+		});
+
+		// ── INSPECT: Refresh status ──────────────────────
+		el.on("click", ".ch-bb-refresh-stage", () => {
+			this._reload();
+		});
+
+		// ── APPROVE: Send approval link (primary Cashify-style flow) ──
+		el.on("click", ".ch-bb-send-link, .ch-bb-resend-link", (e) => {
+			const btn = $(e.currentTarget);
+			btn.prop("disabled", true)
+				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Sending...")}`);
+			frappe.xcall("ch_pos.api.pos_api.pos_send_approval_link", {
+				order_name: data.order.name,
+			}).then((res) => {
+				frappe.show_alert({
+					message: __("Approval link sent to {0}", [res.mobile_masked]),
+					indicator: "green",
+				});
+				this._reload();
+			}).catch(() => {
+				btn.prop("disabled", false)
+					.html(`<i class="fa fa-paper-plane"></i> ${__("Send Approval Link")}`);
+			});
+		});
+
+		// ── APPROVE: Refresh status ──────────────────────
+		el.on("click", ".ch-bb-refresh-stage", () => {
+			this._reload();
 		});
 
 		// ── APPROVE: In-Store Signature ─────────────────
@@ -545,45 +779,6 @@ export class BuybackWorkspace {
 				method: "In-Store Signature",
 			}).then(() => {
 				frappe.show_alert({ message: __("Customer approved (in-store)"), indicator: "green" });
-				this._reload();
-			}).catch(() => btn.prop("disabled", false));
-		});
-
-		// ── APPROVE: Send OTP ───────────────────────────
-		el.on("click", ".ch-bb-send-otp", () => {
-			const btn = el.find(".ch-bb-send-otp");
-			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i>`);
-			frappe.xcall("ch_pos.api.pos_api.pos_send_customer_otp", {
-				order_name: data.order.name,
-			}).then((res) => {
-				btn.prop("disabled", false)
-					.html(`<i class="fa fa-redo"></i> ${__("Resend")}`);
-				el.find(".ch-bb-otp-row").show();
-				frappe.show_alert({
-					message: __("OTP sent to {0}", [res.masked_mobile]),
-					indicator: "green",
-				});
-			}).catch(() => {
-				btn.prop("disabled", false)
-					.html(`<i class="fa fa-paper-plane"></i> ${__("Send OTP")}`);
-			});
-		});
-
-		// ── APPROVE: Verify OTP ─────────────────────────
-		el.on("click", ".ch-bb-verify-otp", () => {
-			const otp = el.find(".ch-bb-otp-input").val().trim();
-			if (otp.length !== 6) {
-				frappe.show_alert({ message: __("Enter the 6-digit OTP"), indicator: "orange" });
-				return;
-			}
-			const btn = el.find(".ch-bb-verify-otp");
-			btn.prop("disabled", true);
-			frappe.xcall("ch_pos.api.pos_api.pos_approve_customer_buyback", {
-				order_name: data.order.name,
-				method: "OTP",
-				otp_code: otp,
-			}).then(() => {
-				frappe.show_alert({ message: __("OTP verified! Customer approved."), indicator: "green" });
 				this._reload();
 			}).catch(() => btn.prop("disabled", false));
 		});
@@ -713,6 +908,10 @@ export class BuybackWorkspace {
 							message: `${__("Assessment")} <b>${doc.name}</b> ${__("created")} · ${__("Grade")} ${doc.estimated_grade} · ₹${format_number(doc.estimated_price)}`,
 							indicator: "green",
 						});
+						// Increment buyback walk-in counter
+						if (PosState.pos_profile) {
+							frappe.call({ method: "ch_pos.api.pos_api.increment_buyback_count", args: { pos_profile: PosState.pos_profile } });
+						}
 						panel.find(".ch-bb-search").val(doc.name);
 						panel.find(".ch-bb-lookup").click();
 					}).catch(() => dlg.enable_primary_action());

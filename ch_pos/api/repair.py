@@ -2,7 +2,7 @@ import frappe
 
 
 @frappe.whitelist()
-def create_repair_intake(data):
+def create_repair_intake(data, pos_profile=None):
     """Create POS Repair Intake and auto-generate Service Request on submit."""
     if isinstance(data, str):
         data = frappe.parse_json(data)
@@ -22,6 +22,15 @@ def create_repair_intake(data):
 
     doc.insert()
     doc.submit()
+
+    # Increment walk-in + repair intake counter on session log
+    if pos_profile:
+        try:
+            from ch_pos.api.pos_api import log_walkin, increment_repair_intake_count
+            log_walkin(pos_profile, source="POS Counter")
+            increment_repair_intake_count(pos_profile)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Repair walk-in counter failed")
 
     return {
         "intake_name": doc.name,

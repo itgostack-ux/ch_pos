@@ -59,6 +59,9 @@ export class CartService {
 			EventBus.emit("payment:open");
 		});
 
+		EventBus.on("held_bills:open", () => this._show_held_bills_dialog());
+		EventBus.on("reprint:open", () => this._show_reprint_dialog());
+
 		EventBus.on("coupon:apply", (code) => this._apply_coupon(code));
 		EventBus.on("discount:changed", () => EventBus.emit("cart:updated"));
 
@@ -76,6 +79,18 @@ export class CartService {
 				indicator: "red",
 			});
 			return;
+		}
+
+		// Voucher restriction: if a voucher is active, only Accessories allowed
+		if (PosState.voucher_code && !item_data.is_warranty && !item_data.is_vas) {
+			const item_group = (item_data.item_group || "").toLowerCase();
+			if (item_group !== "accessories") {
+				frappe.show_alert({
+					message: __("A voucher is active. Only Accessories can be added to this cart."),
+					indicator: "orange",
+				}, 5);
+				return;
+			}
 		}
 
 		// Serial/IMEI items: force scan before adding
@@ -876,15 +891,245 @@ export class CartService {
 	// ── Hold Invoice ────────────────────────────────────
 	hold_invoice() {
 		if (!PosState.cart.length) return;
-		const key = `ch_pos_held_${frappe.datetime.now_datetime()}`;
-		const data = {
-			customer: PosState.customer,
-			cart: PosState.cart,
-			timestamp: frappe.datetime.now_datetime(),
-		};
-		localStorage.setItem(key, JSON.stringify(data));
-		frappe.show_alert({ message: __("Invoice held"), indicator: "blue" });
+
+		const dlg = new frappe.ui.Dialog({
+			title: __("Hold Invoice"),
+			fields: [
+				{
+					fieldname: "hold_note",
+					fieldtype: "Data",
+					label: __("Note / Customer Name (optional)"),
+					placeholder: __("e.g. Waiting for customer, table 3..."),
+				},
+			],
+			size: "small",
+			primary_action_label: __("Hold"),
+			primary_action: (values) => {
+				const note = (values.hold_note || "").trim();
+				const key = `ch_pos_held_${Date.now()}`;
+				const data = {
+					note: note || (PosState.customer || __("Held Bill")),
+					customer: PosState.customer,
+					cart: JSON.parse(JSON.stringify(PosState.cart)),
+					additional_discount_pct: PosState.additional_discount_pct,
+					additional_discount_amt: PosState.additional_discount_amt,
+					discount_reason: PosState.discount_reason,
+					coupon_code: PosState.coupon_code,
+					coupon_discount: PosState.coupon_discount,
+					voucher_code: PosState.voucher_code,
+					voucher_amount: PosState.voucher_amount,
+					exchange_assessment: PosState.exchange_assessment,
+					exchange_amount: PosState.exchange_amount,
+					sale_type: PosState.sale_type,
+					timestamp: frappe.datetime.now_datetime(),
+				};
+				localStorage.setItem(key, JSON.stringify(data));
+				dlg.hide();
+				frappe.show_alert({ message: __("Invoice held: {0}", [data.note]), indicator: "blue" });
+				PosState.reset_transaction();
+				EventBus.emit("held_bills:updated");
+			},
+			secondary_action_label: __("Cancel"),
+			secondary_action: () => dlg.hide(),
+		});
+		dlg.show();
+		setTimeout(() => dlg.fields_dict.hold_note.$input.focus(), 50);
+	}
+
+	// ── Held Bills Dialog ───────────────────────────────
+	_show_held_bills_dialog() {
+		// Collect all held bills from localStorage
+		const bills = [];
+		for (let i = 0; i < localStorage.length; i++) {
+			const k = localStorage.key(i);
+			if (!k.startsWith("ch_pos_held_")) continue;
+			try {
+				const d = JSON.parse(localStorage.getItem(k));
+				bills.push({ key: k, ...d });
+			} catch (_) { /* skip corrupt entries */ }
+		}
+
+		// Sort by timestamp descending (newest first)
+		bills.sort((a, b) => (b.timestamp > a.timestamp ? 1 : -1));
+
+		if (!bills.length) {
+			frappe.show_alert({ message: __("No held bills"), indicator: "blue" });
+			return;
+		}
+
+		const rows_html = bills.map((b, idx) => {
+			const items_count = (b.cart || []).length;
+			const total = (b.cart || []).reduce((s, c) => s + flt(c.qty) * flt(c.rate), 0);
+			const time_str = b.timestamp ? b.timestamp.split(" ")[1]?.substring(0, 5) : "";
+			return `
+			<div class="ch-held-row" data-idx="${idx}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-color);cursor:pointer;transition:background .15s">
+				<div style="flex:1">
+					<div style="font-weight:600">${frappe.utils.escape_html(b.note || b.customer || __("Held Bill"))}</div>
+					<div class="text-muted" style="font-size:12px">${items_count} ${__("item(s)")} · ₹${format_number(total)} · ${frappe.utils.escape_html(time_str)}</div>
+				</div>
+				<button class="btn btn-xs btn-success ch-held-retrieve" data-idx="${idx}">
+					<i class="fa fa-play-circle"></i> ${__("Retrieve")}
+				</button>
+				<button class="btn btn-xs btn-default ch-held-discard" data-idx="${idx}" title="${__("Discard")}">
+					<i class="fa fa-trash"></i>
+				</button>
+			</div>`;
+		}).join("");
+
+		const dlg = new frappe.ui.Dialog({
+			title: __("Held Bills ({0})", [bills.length]),
+			fields: [
+				{
+					fieldname: "bills_html",
+					fieldtype: "HTML",
+					options: `<div class="ch-held-list" style="max-height:360px;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${rows_html}</div>`,
+				},
+			],
+			size: "large",
+		});
+
+		dlg.show();
+
+		dlg.$wrapper.on("click", ".ch-held-retrieve", (e) => {
+			e.stopPropagation();
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			const bill = bills[idx];
+			if (!bill) return;
+
+			if (PosState.cart.length) {
+				frappe.confirm(
+					__("Current cart has items. Discard them and load held bill?"),
+					() => this._restore_held_bill(bill, dlg)
+				);
+			} else {
+				this._restore_held_bill(bill, dlg);
+			}
+		});
+
+		dlg.$wrapper.on("click", ".ch-held-discard", (e) => {
+			e.stopPropagation();
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			const bill = bills[idx];
+			if (!bill) return;
+			frappe.confirm(__("Discard held bill \"{0}\"?", [bill.note || __("Held Bill")]), () => {
+				localStorage.removeItem(bill.key);
+				bills.splice(idx, 1);
+				EventBus.emit("held_bills:updated");
+				dlg.hide();
+				if (bills.length) this._show_held_bills_dialog();
+				else frappe.show_alert({ message: __("All held bills cleared"), indicator: "blue" });
+			});
+		});
+
+		dlg.$wrapper.on("click", ".ch-held-row", (e) => {
+			if ($(e.target).closest("button").length) return;
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			$(e.currentTarget).closest(".ch-held-list").find(".ch-held-row").css("background", "");
+			$(e.currentTarget).css("background", "var(--control-bg)");
+		});
+	}
+
+	_restore_held_bill(bill, dlg) {
+		dlg.hide();
 		PosState.reset_transaction();
+
+		// Restore cart items
+		PosState.cart = bill.cart || [];
+		PosState.customer = bill.customer || null;
+		PosState.additional_discount_pct = bill.additional_discount_pct || 0;
+		PosState.additional_discount_amt = bill.additional_discount_amt || 0;
+		PosState.discount_reason = bill.discount_reason || "";
+		PosState.coupon_code = bill.coupon_code || null;
+		PosState.coupon_discount = bill.coupon_discount || 0;
+		PosState.voucher_code = bill.voucher_code || null;
+		PosState.voucher_amount = bill.voucher_amount || 0;
+		PosState.exchange_assessment = bill.exchange_assessment || null;
+		PosState.exchange_amount = bill.exchange_amount || 0;
+		PosState.sale_type = bill.sale_type || null;
+
+		// Remove from storage
+		localStorage.removeItem(bill.key);
+		EventBus.emit("held_bills:updated");
+
+		// Notify UI to refresh
+		if (PosState.customer) EventBus.emit("customer:changed", PosState.customer);
+		EventBus.emit("cart:updated");
+		frappe.show_alert({ message: __("Held bill restored: {0}", [bill.note || __("Bill")]), indicator: "green" });
+	}
+
+	// ── Reprint Dialog ──────────────────────────────────
+	_show_reprint_dialog() {
+		// Use input date; default today
+		const today = frappe.datetime.get_today();
+
+		const build_invoice_list = (date, container) => {
+			container.html(`<div class="text-center text-muted" style="padding:20px">
+				<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}
+			</div>`);
+			frappe.xcall("ch_pos.api.pos_api.get_todays_invoices", {
+				pos_profile: PosState.pos_profile,
+				date,
+			}).then((invoices) => {
+				if (!invoices || !invoices.length) {
+					container.html(`<div class="text-center text-muted" style="padding:20px">${__("No invoices for this date")}</div>`);
+					return;
+				}
+				const rows = invoices.map(inv => {
+					const is_ret = inv.is_return ? `<span class="badge badge-warning">${__("Return")}</span>` : "";
+					const sign = inv.is_return ? "-" : "";
+					return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
+						<div style="flex:1">
+							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${is_ret}</div>
+							<div class="text-muted" style="font-size:12px">${frappe.utils.escape_html(inv.customer || "")} · ${sign}₹${format_number(flt(inv.grand_total))} · ${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
+							${inv.items_summary ? `<div class="text-muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">${frappe.utils.escape_html(inv.items_summary)}</div>` : ""}
+						</div>
+						<button class="btn btn-xs btn-default ch-reprint-btn" data-name="${frappe.utils.escape_html(inv.name)}">
+							<i class="fa fa-print"></i> ${__("Print")}
+						</button>
+					</div>`;
+				}).join("");
+				container.html(`<div class="ch-reprint-list" style="max-height:380px;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${rows}</div>`);
+			}).catch(() => {
+				container.html(`<div class="text-danger text-center" style="padding:12px">${__("Failed to load invoices")}</div>`);
+			});
+		};
+
+		const dlg = new frappe.ui.Dialog({
+			title: __("Reprint Invoice"),
+			fields: [
+				{
+					fieldname: "date",
+					fieldtype: "Date",
+					label: __("Date"),
+					default: today,
+				},
+				{
+					fieldname: "invoices_html",
+					fieldtype: "HTML",
+					options: `<div class="ch-reprint-container"></div>`,
+				},
+			],
+			size: "large",
+		});
+
+		dlg.show();
+
+		// Initial load
+		const container = dlg.$wrapper.find(".ch-reprint-container");
+		build_invoice_list(today, container);
+
+		// Reload when date changes
+		dlg.fields_dict.date.$input.on("change", () => {
+			const d = dlg.get_value("date");
+			if (d) build_invoice_list(d, container);
+		});
+
+		// Print button
+		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
+			const name = $(e.currentTarget).data("name");
+			const url = `/printview?doctype=POS%20Invoice&name=${encodeURIComponent(name)}&format=POS%20Invoice&no_letterhead=1`;
+			window.open(url, "_blank");
+		});
 	}
 
 	// ── Manager Approval Dialog ─────────────────────────
