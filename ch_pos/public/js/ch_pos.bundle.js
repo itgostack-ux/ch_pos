@@ -95,32 +95,58 @@ ch_pos.PosApp = class PosApp {
 			args: { user: frappe.session.user },
 			callback: (r) => {
 				const entries = r.message || [];
-				if (entries.length) {
-					// Already have an open POS session
-					this._load_profile(entries[0]);
-				} else {
-					this._show_profile_selector();
-				}
+				// Always show the profile selector so the user can choose
+				// between multiple POS profiles or resume an existing session
+				this._show_profile_selector(entries);
 			},
 		});
 	}
 
-	_show_profile_selector() {
+	_show_profile_selector(open_entries) {
+		open_entries = open_entries || [];
+
+		// Build a hint showing any already-open sessions
+		const open_map = {}; // pos_profile → opening entry name
+		open_entries.forEach((e) => { open_map[e.pos_profile] = e; });
+
+		const fields = [
+			{
+				fieldname: "pos_profile",
+				fieldtype: "Link",
+				label: __("POS Profile"),
+				options: "POS Profile",
+				reqd: 1,
+			},
+		];
+
+		if (open_entries.length) {
+			const names = open_entries.map((e) => `<b>${e.pos_profile}</b>`).join(", ");
+			fields.unshift({
+				fieldname: "open_info",
+				fieldtype: "HTML",
+				options: `<div class="alert alert-info" style="margin-bottom:10px">
+					${__('Open sessions')}: ${names}.
+					${__('Selecting one of them will resume that session.')}
+				</div>`,
+			});
+			// Pre-fill with the first open profile
+			fields[1].default = open_entries[0].pos_profile;
+		}
+
 		const dlg = new frappe.ui.Dialog({
 			title: __("Select POS Profile"),
-			fields: [
-				{
-					fieldname: "pos_profile",
-					fieldtype: "Link",
-					label: __("POS Profile"),
-					options: "POS Profile",
-					reqd: 1,
-				},
-			],
+			fields,
 			primary_action_label: __("Open POS"),
 			primary_action: (values) => {
 				dlg.hide();
-				this._create_opening_entry(values.pos_profile);
+				const selected = values.pos_profile;
+				if (open_map[selected]) {
+					// Resume existing open session
+					this._load_profile(open_map[selected]);
+				} else {
+					// No open session for this profile — create one
+					this._create_opening_entry(selected);
+				}
 			},
 		});
 		dlg.show();

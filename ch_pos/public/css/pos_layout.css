@@ -14,8 +14,9 @@ body.ch-pos-fullscreen .ch-pos-page {
   overflow: hidden !important;
 }
 body.ch-pos-fullscreen header.navbar,
-body.ch-pos-fullscreen footer,
-body.ch-pos-fullscreen .page-head { display: none !important; }
+body.ch-pos-fullscreen footer { display: none !important; }
+/* Hide page-head ONLY inside the POS page itself, not in Frappe forms opened from POS */
+body.ch-pos-fullscreen .ch-pos-page .page-head { display: none !important; }
 body.ch-pos-fullscreen .layout-side-section { display: none !important; }
 body.ch-pos-fullscreen #body,
 body.ch-pos-fullscreen #body_div {
