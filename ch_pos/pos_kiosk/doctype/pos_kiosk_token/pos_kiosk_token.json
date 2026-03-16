@@ -7,12 +7,27 @@
  "is_submittable": 1,
  "field_order": [
   "naming_series",
+  "token_display",
+  "pos_profile",
+  "company",
   "store",
   "status",
   "column_break_hdr",
   "customer_name",
   "customer_phone",
   "expires_at",
+  "device_section",
+  "device_type",
+  "device_brand",
+  "device_model",
+  "issue_section",
+  "issue_category",
+  "issue_description",
+  "service_section",
+  "technician",
+  "assigned_at",
+  "started_at",
+  "completed_at",
   "items_section",
   "items",
   "totals_section",
@@ -32,20 +47,42 @@
    "print_hide": 1
   },
   {
+   "fieldname": "token_display",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Token Number",
+   "read_only": 1,
+   "bold": 1
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "POS Profile",
+   "options": "POS Profile"
+  },
+  {
+   "fetch_from": "pos_profile.company",
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
    "fieldname": "store",
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Store",
-   "options": "Warehouse",
-   "reqd": 1
+   "options": "Warehouse"
   },
   {
-   "default": "Active",
+   "default": "Waiting",
    "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Active\nConverted\nExpired",
+   "options": "Waiting\nIn Progress\nCompleted\nCancelled\nConverted\nExpired",
    "read_only": 1
   },
   {
@@ -55,18 +92,85 @@
   {
    "fieldname": "customer_name",
    "fieldtype": "Data",
-   "label": "Customer Name"
+   "label": "Customer Name",
+   "reqd": 1
   },
   {
    "fieldname": "customer_phone",
    "fieldtype": "Data",
    "label": "Customer Phone",
-   "options": "Phone"
+   "options": "Phone",
+   "reqd": 1
   },
   {
    "fieldname": "expires_at",
    "fieldtype": "Datetime",
    "label": "Expires At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "device_section",
+   "fieldtype": "Section Break",
+   "label": "Device Details"
+  },
+  {
+   "fieldname": "device_type",
+   "fieldtype": "Select",
+   "label": "Device Type",
+   "options": "\nMobile\nTablet\nLaptop\nSmart Watch\nOther"
+  },
+  {
+   "fieldname": "device_brand",
+   "fieldtype": "Data",
+   "label": "Brand"
+  },
+  {
+   "fieldname": "device_model",
+   "fieldtype": "Data",
+   "label": "Model"
+  },
+  {
+   "fieldname": "issue_section",
+   "fieldtype": "Section Break",
+   "label": "Issue Details"
+  },
+  {
+   "fieldname": "issue_category",
+   "fieldtype": "Data",
+   "label": "Issue Category"
+  },
+  {
+   "fieldname": "issue_description",
+   "fieldtype": "Text",
+   "label": "Issue Description"
+  },
+  {
+   "fieldname": "service_section",
+   "fieldtype": "Section Break",
+   "label": "Service Details"
+  },
+  {
+   "fieldname": "technician",
+   "fieldtype": "Link",
+   "label": "Assigned Technician",
+   "options": "User"
+  },
+  {
+   "fieldname": "assigned_at",
+   "fieldtype": "Datetime",
+   "label": "Assigned At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Service Started At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "completed_at",
+   "fieldtype": "Datetime",
+   "label": "Completed At",
    "read_only": 1
   },
   {
@@ -78,8 +182,7 @@
    "fieldname": "items",
    "fieldtype": "Table",
    "label": "Items",
-   "options": "POS Kiosk Token Item",
-   "reqd": 1
+   "options": "POS Kiosk Token Item"
   },
   {
    "fieldname": "totals_section",

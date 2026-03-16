@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CH Queue — Management</title>
+<style>
+/* ── Reset & Base ──────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0d1117;
+  --surface:  #161b22;
+  --card:     #1f2937;
+  --border:   #30363d;
+  --accent:   #e91e8c;
+  --accent2:  #ff4db8;
+  --text:     #e6edf3;
+  --muted:    #8b949e;
+  --success:  #3fb950;
+  --warning:  #d29922;
+  --danger:   #f85149;
+  --info:     #388bfd;
+  --radius:   12px;
+  --sidebar-w: 220px;
+  --trans:    0.2s ease;
+}
+
+html, body { height: 100%; background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+
+a { color: inherit; text-decoration: none; }
+button { cursor: pointer; font-family: inherit; }
+
+/* ── Layout ────────────────────────────────────────────────────────── */
+#mgmt-app { display: flex; height: 100vh; overflow: hidden; }
+
+/* Sidebar */
+.sidebar {
+  width: var(--sidebar-w);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  padding: 20px 20px 0;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.sidebar-brand span { color: var(--accent); }
+
+.sidebar-store {
+  padding: 0 20px 16px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-store strong { color: var(--text); display: block; font-size: 0.82rem; }
+
+.sidebar-section {
+  padding: 16px 12px 0;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  margin: 2px 8px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--trans);
+  border: none;
+  background: none;
+  width: calc(100% - 16px);
+  text-align: left;
+}
+.nav-item:hover { background: var(--card); color: var(--text); }
+.nav-item.active { background: rgba(233,30,140,0.12); color: var(--accent2); }
+.nav-item .nav-icon { font-size: 1.1rem; width: 20px; text-align: center; flex-shrink: 0; }
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.sidebar-footer strong { display: block; color: var(--text); margin-bottom: 4px; }
+
+/* Main content */
+.main-area {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.topbar-title { font-size: 1.05rem; font-weight: 700; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; }
+
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+.live-label { font-size: 0.78rem; color: var(--success); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+
+.content { padding: 24px 28px; flex: 1; }
+
+/* ── Store Selector Bar ─────────────────────────────────────────────── */
+.store-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.store-bar select {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 14px;
+  font-size: 0.88rem;
+  outline: none;
+  font-family: inherit;
+}
+.store-bar select:focus { border-color: var(--accent); }
+
+.date-filter {
+  display: flex;
+  gap: 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+}
+.date-btn {
+  padding: 5px 12px;
+  border-radius: 5px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  transition: var(--trans);
+}
+.date-btn.active { background: var(--accent); color: #fff; }
+.date-btn:hover:not(.active) { background: var(--border); color: var(--text); }
+
+.refresh-btn {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 8px 14px;
+  font-size: 0.82rem;
+  transition: var(--trans);
+  display: flex; align-items: center; gap: 6px;
+}
+.refresh-btn:hover { color: var(--text); border-color: var(--border); }
+
+/* ── Stats Cards ────────────────────────────────────────────────────── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+  margin-bottom: 28px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  transition: var(--trans);
+}
+.stat-card:hover { border-color: var(--border); transform: translateY(-1px); }
+.stat-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 8px; }
+.stat-value { font-size: 2rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.stat-value.c-waiting { color: var(--warning); }
+.stat-value.c-progress { color: var(--info); }
+.stat-value.c-done { color: var(--success); }
+.stat-value.c-total { color: var(--text); }
+.stat-value.c-rate { color: var(--accent); }
+.stat-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+
+/* ── Sections & Panels ──────────────────────────────────────────────── */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.panel-header {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.panel-title { font-size: 0.9rem; font-weight: 700; }
+.panel-actions { display: flex; gap: 8px; }
+
+/* ── Tabs ────────────────────────────────────────────────────────────── */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tab-btn {
+  padding: 12px 16px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: var(--trans);
+}
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-btn:hover:not(.active) { color: var(--text); }
+
+.tab-content { display: none; padding: 0; }
+.tab-content.active { display: block; }
+
+/* ── Table ──────────────────────────────────────────────────────────── */
+.data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.data-table th {
+  background: var(--card);
+  padding: 10px 16px;
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+.token-num { font-weight: 800; font-family: monospace; color: var(--accent2); }
+.customer-info .name { font-weight: 600; }
+.customer-info .phone { color: var(--muted); font-size: 0.8rem; }
+
+/* Status badges */
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.badge-waiting  { background: rgba(210,153,34,0.15);  color: #d29922; }
+.badge-progress { background: rgba(56,139,253,0.15);  color: #388bfd; }
+.badge-done     { background: rgba(63,185,80,0.15);   color: #3fb950; }
+.badge-cancel   { background: rgba(248,81,73,0.15);   color: #f85149; }
+
+/* Action buttons */
+.action-btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  transition: var(--trans);
+}
+.action-btn:hover { border-color: var(--accent); color: var(--accent); }
+.action-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.action-btn.primary:hover { background: var(--accent2); }
+
+/* ── Assign Dialog ──────────────────────────────────────────────────── */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  width: 380px;
+  max-width: 95vw;
+  animation: modalIn 0.2s ease;
+}
+@keyframes modalIn { from { opacity:0; transform:scale(0.95) } to { opacity:1; transform:scale(1) } }
+.modal h3 { margin-bottom: 16px; font-size: 1.05rem; }
+.modal label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.modal select, .modal input {
+  width: 100%;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 14px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  outline: none;
+  margin-bottom: 16px;
+}
+.modal select:focus { border-color: var(--accent); }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* ── Reports ────────────────────────────────────────────────────────── */
+.reports-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 720px) { .reports-grid { grid-template-columns: 1fr; } }
+
+/* ── Empty state ────────────────────────────────────────────────────── */
+.empty-state {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--muted);
+}
+.empty-state .empty-icon { font-size: 2.5rem; display: block; margin-bottom: 12px; }
+.empty-state .empty-title { font-size: 1rem; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+
+/* ── Spinner ────────────────────────────────────────────────────────── */
+.inline-spinner {
+  display: inline-block;
+  width: 16px; height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Responsive ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .sidebar { width: 60px; }
+  .sidebar-brand, .sidebar-store, .sidebar-section, .nav-item span { display: none; }
+  .nav-item { justify-content: center; }
+  .content { padding: 16px; }
+  .topbar { padding: 12px 16px; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+<div id="mgmt-app">
+
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-brand">CH<span>·</span>Queue</div>
+    <div class="sidebar-store">
+      <strong id="sb-store">Loading…</strong>
+      <span id="sb-company"></span>
+    </div>
+
+    <div class="sidebar-section">Queue</div>
+    <button class="nav-item active" id="nav-dashboard" onclick="switchView('dashboard')">
+      <span class="nav-icon">📊</span><span>Dashboard</span>
+    </button>
+    <button class="nav-item" id="nav-queue" onclick="switchView('queue')">
+      <span class="nav-icon">🎫</span><span>Queue</span>
+    </button>
+    <button class="nav-item" id="nav-mytokens" onclick="switchView('mytokens')">
+      <span class="nav-icon">👤</span><span>My Tokens</span>
+    </button>
+
+    <div class="sidebar-section">Analysis</div>
+    <button class="nav-item" id="nav-reports" onclick="switchView('reports')">
+      <span class="nav-icon">📈</span><span>Reports</span>
+    </button>
+
+    <div class="sidebar-footer">
+      <strong id="sb-user">{{ user_name }}</strong>
+      <a href="/app" style="color:var(--accent);font-size:0.78rem;">← Back to ERPNext</a>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div class="main-area">
+    <div class="topbar">
+      <div class="topbar-title" id="topbar-title">Dashboard</div>
+      <div class="topbar-actions">
+        <div class="live-label"><div class="live-dot"></div> Live</div>
+        <a href="/queue" target="_blank" style="background:rgba(233,30,140,0.12);border:1px solid rgba(233,30,140,0.3);color:var(--accent2);padding:6px 14px;border-radius:8px;font-size:0.8rem;font-weight:600;">
+          Open Kiosk ↗
+        </a>
+      </div>
+    </div>
+
+    <div class="content">
+
+      <!-- Store/Date filter bar -->
+      <div class="store-bar">
+        <select id="store-selector" onchange="onStoreChange()">
+          <option value="">All Stores</option>
+        </select>
+        <div class="date-filter">
+          <button class="date-btn active" data-filter="today" onclick="setDateFilter(this, 'today')">Today</button>
+          <button class="date-btn" data-filter="yesterday" onclick="setDateFilter(this, 'yesterday')">Yesterday</button>
+          <button class="date-btn" data-filter="this_week" onclick="setDateFilter(this, 'this_week')">This Week</button>
+          <button class="date-btn" data-filter="all" onclick="setDateFilter(this, 'all')">All</button>
+        </div>
+        <button class="refresh-btn" onclick="refreshAll()">
+          <span id="refresh-icon">↻</span> Refresh
+        </button>
+      </div>
+
+      <!-- ── Dashboard View ── -->
+      <div id="view-dashboard">
+        <!-- Stats -->
+        <div class="stats-grid" id="stats-grid">
+          <div class="stat-card"><div class="stat-label">Total Tokens</div><div class="stat-value c-total" id="s-total">—</div></div>
+          <div class="stat-card"><div class="stat-label">Waiting</div><div class="stat-value c-waiting" id="s-waiting">—</div></div>
+          <div class="stat-card"><div class="stat-label">In Progress</div><div class="stat-value c-progress" id="s-progress">—</div></div>
+          <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value c-done" id="s-done">—</div></div>
+          <div class="stat-card"><div class="stat-label">Completion Rate</div><div class="stat-value c-rate" id="s-rate">—</div><div class="stat-sub" id="s-avgwait"></div></div>
+          <div class="stat-card"><div class="stat-label">Cancelled</div><div class="stat-value" style="color:var(--danger)" id="s-cancelled">—</div></div>
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Recent Activity</div>
+            <button class="action-btn" onclick="switchView('queue')">View All →</button>
+          </div>
+          <div style="overflow-x:auto;">
+            <table class="data-table" id="recent-table">
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th>Customer</th>
+                  <th>Device</th>
+                  <th>Issue</th>
+                  <th>Status</th>
+                  <th>Technician</th>
+                </tr>
+              </thead>
+              <tbody id="recent-tbody">
+                <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Store Breakdown (admin) -->
+        <div class="panel" id="store-breakdown-panel">
+          <div class="panel-header"><div class="panel-title">Store Breakdown</div></div>
+          <div style="overflow-x:auto;">
+            <table class="data-table" id="store-table">
+              <thead><tr><th>Store</th><th>Total</th><th>Waiting</th><th>In Progress</th><th>Completed</th></tr></thead>
+              <tbody id="store-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Queue View ── -->
+      <div id="view-queue" style="display:none">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Token Queue</div>
+            <div class="panel-actions">
+              <!-- Status filter -->
+              <div class="date-filter">
+                <button class="date-btn active" onclick="setQueueStatus(this, 'All')">All</button>
+                <button class="date-btn" onclick="setQueueStatus(this, 'Waiting')">Waiting</button>
+                <button class="date-btn" onclick="setQueueStatus(this, 'In Progress')">In Progress</button>
+                <button class="date-btn" onclick="setQueueStatus(this, 'Completed')">Completed</button>
+              </div>
+            </div>
+          </div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Token #</th>
+                  <th>Time</th>
+                  <th>Customer</th>
+                  <th>Device</th>
+                  <th>Issue</th>
+                  <th>Status</th>
+                  <th>Technician</th>
+                  <th>Wait</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="queue-tbody">
+                <tr><td colspan="9" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── My Tokens View ── -->
+      <div id="view-mytokens" style="display:none">
+        <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px;">
+          <div class="stat-card"><div class="stat-label">Assigned</div><div class="stat-value c-total" id="my-total">—</div></div>
+          <div class="stat-card"><div class="stat-label">In Progress</div><div class="stat-value c-progress" id="my-progress">—</div></div>
+          <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value c-done" id="my-done">—</div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title">My Tokens — Today</div></div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Token #</th>
+                  <th>Time</th>
+                  <th>Customer</th>
+                  <th>Device</th>
+                  <th>Issue</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="my-tbody">
+                <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Reports View ── -->
+      <div id="view-reports" style="display:none">
+        <div class="stats-grid" style="margin-bottom:24px;">
+          <div class="stat-card"><div class="stat-label">Total Created</div><div class="stat-value c-total" id="r-total">—</div></div>
+          <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value c-done" id="r-done">—</div></div>
+          <div class="stat-card"><div class="stat-label">Completion Rate</div><div class="stat-value c-rate" id="r-rate">—</div></div>
+          <div class="stat-card"><div class="stat-label">Avg Wait (min)</div><div class="stat-value c-progress" id="r-avg">—</div></div>
+        </div>
+        <div class="reports-grid">
+          <div class="panel">
+            <div class="panel-header"><div class="panel-title">Daily Breakdown</div></div>
+            <div style="overflow-x:auto;">
+              <table class="data-table">
+                <thead><tr><th>Date</th><th>Created</th><th>Completed</th><th>Cancelled</th><th>Avg Wait</th></tr></thead>
+                <tbody id="daily-tbody"><tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted)">Loading…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header"><div class="panel-title">Technician Performance</div></div>
+            <div style="overflow-x:auto;">
+              <table class="data-table">
+                <thead><tr><th>Technician</th><th>Handled</th><th>Completed</th><th>Avg Time</th></tr></thead>
+                <tbody id="tech-tbody"><tr><td colspan="4" style="text-align:center;padding:24px;color:var(--muted)">Loading…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main-area -->
+</div><!-- /mgmt-app -->
+
+<!-- Assign Modal -->
+<div class="modal-overlay" id="assign-modal">
+  <div class="modal">
+    <h3>Assign Technician</h3>
+    <input type="hidden" id="assign-token-name">
+    <label>Technician (User Email / Name)</label>
+    <input type="text" id="assign-tech-input" placeholder="e.g. tech@company.com" autocomplete="off">
+    <div class="modal-actions">
+      <button class="action-btn" onclick="closeAssignModal()">Cancel</button>
+      <button class="action-btn primary" onclick="confirmAssign()">Assign</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const mgmt = {
+  currentView: 'dashboard',
+  posProfile: '',
+  dateFilter: 'today',
+  queueStatus: 'All',
+  refreshTimer: null,
+  technicians: [], // cached
+};
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  // Pick store from URL if provided
+  const params = new URLSearchParams(window.location.search);
+  mgmt.posProfile = params.get('store') || '';
+
+  // Load stores, then dashboard
+  loadStoreDropdown().then(() => {
+    if (mgmt.posProfile) {
+      document.getElementById('store-selector').value = mgmt.posProfile;
+    }
+    fetchAndRenderStats();
+    fetchAndRenderQueue();
+    fetchAndRenderMyTokens();
+    fetchAndRenderReports();
+  });
+
+  // Auto-refresh every 30s
+  mgmt.refreshTimer = setInterval(refreshAll, 30000);
+});
+
+// ── API ────────────────────────────────────────────────────────────────────
+function api(method, args) {
+  const qs = new URLSearchParams(args || {}).toString();
+  const url = '/api/method/ch_pos.api.token_api.' + method + (qs ? '?' + qs : '');
+  return fetch(url, {
+    headers: { 'X-Frappe-CSRF-Token': getCsrf(), 'Accept': 'application/json' }
+  }).then(r => r.json()).then(d => {
+    if (d.exc) throw new Error(d._server_messages || d.exc);
+    return d.message;
+  });
+}
+
+function apiPost(method, body) {
+  return fetch('/api/method/ch_pos.api.token_api.' + method, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Frappe-CSRF-Token': getCsrf(),
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(body),
+  }).then(r => r.json()).then(d => {
+    if (d.exc) throw new Error(d._server_messages || d.exc);
+    return d.message;
+  });
+}
+
+function getCsrf() {
+  return document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('csrf_token='))?.split('=')[1] || '';
+}
+
+// ── Store Dropdown ─────────────────────────────────────────────────────────
+function loadStoreDropdown() {
+  return api('get_pos_profiles').then(profiles => {
+    const sel = document.getElementById('store-selector');
+    profiles.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    });
+    // Update sidebar store info
+    const active = profiles.find(p => p.name === mgmt.posProfile) || profiles[0];
+    if (active) {
+      document.getElementById('sb-store').textContent = active.name;
+      document.getElementById('sb-company').textContent = active.company || '';
+    } else {
+      document.getElementById('sb-store').textContent = 'All Stores';
+    }
+  });
+}
+
+function onStoreChange() {
+  mgmt.posProfile = document.getElementById('store-selector').value;
+  const sel = document.getElementById('store-selector');
+  const opt = sel.options[sel.selectedIndex];
+  document.getElementById('sb-store').textContent = opt.text || 'All Stores';
+  refreshAll();
+}
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function switchView(view) {
+  mgmt.currentView = view;
+  const views = ['dashboard','queue','mytokens','reports'];
+  views.forEach(v => {
+    document.getElementById('view-' + v).style.display = v === view ? 'block' : 'none';
+    document.getElementById('nav-' + v)?.classList.toggle('active', v === view);
+  });
+  const titles = { dashboard: 'Dashboard', queue: 'Token Queue', mytokens: 'My Tokens', reports: 'Reports' };
+  document.getElementById('topbar-title').textContent = titles[view] || view;
+
+  // Lazy-fetch when switching
+  if (view === 'queue') fetchAndRenderQueue();
+  if (view === 'mytokens') fetchAndRenderMyTokens();
+  if (view === 'reports') fetchAndRenderReports();
+}
+
+// ── Filters ────────────────────────────────────────────────────────────────
+function setDateFilter(btn, filter) {
+  mgmt.dateFilter = filter;
+  btn.closest('.date-filter')?.querySelectorAll('.date-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  refreshAll();
+}
+
+function setQueueStatus(btn, status) {
+  mgmt.queueStatus = status;
+  btn.closest('.date-filter')?.querySelectorAll('.date-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  fetchAndRenderQueue();
+}
+
+// ── Refresh ────────────────────────────────────────────────────────────────
+function refreshAll() {
+  fetchAndRenderStats();
+  if (mgmt.currentView === 'queue') fetchAndRenderQueue();
+  if (mgmt.currentView === 'mytokens') fetchAndRenderMyTokens();
+  if (mgmt.currentView === 'reports') fetchAndRenderReports();
+  const icon = document.getElementById('refresh-icon');
+  icon.style.transform = 'rotate(360deg)';
+  icon.style.transition = 'transform 0.4s ease';
+  setTimeout(() => { icon.style.transform = ''; icon.style.transition = ''; }, 500);
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+function fetchAndRenderStats() {
+  const args = { date_filter: mgmt.dateFilter };
+  if (mgmt.posProfile) args.pos_profile = mgmt.posProfile;
+  api('get_dashboard_stats', args).then(d => {
+    document.getElementById('s-total').textContent  = d.total ?? '—';
+    document.getElementById('s-waiting').textContent = d.waiting ?? '—';
+    document.getElementById('s-progress').textContent = d.in_progress ?? '—';
+    document.getElementById('s-done').textContent   = d.completed ?? '—';
+    document.getElementById('s-cancelled').textContent = d.cancelled ?? '—';
+    document.getElementById('s-rate').textContent   = (d.completion_rate ?? '—') + '%';
+    document.getElementById('s-avgwait').textContent = d.avg_wait_minutes
+      ? `Avg wait: ${d.avg_wait_minutes} min` : '';
+
+    // Store breakdown
+    const breakdownPanel = document.getElementById('store-breakdown-panel');
+    if (!mgmt.posProfile && d.store_breakdown?.length > 1) {
+      breakdownPanel.style.display = '';
+      const tbody = document.getElementById('store-tbody');
+      tbody.innerHTML = d.store_breakdown.map(s => `
+        <tr>
+          <td><strong>${esc(s.store)}</strong></td>
+          <td>${s.total}</td>
+          <td style="color:var(--warning)">${s.waiting}</td>
+          <td style="color:var(--info)">${s.in_progress}</td>
+          <td style="color:var(--success)">${s.completed}</td>
+        </tr>`).join('');
+    } else {
+      breakdownPanel.style.display = 'none';
+    }
+
+    // Run recent activity from queue data
+    fetchRecentActivity();
+  });
+}
+
+function fetchRecentActivity() {
+  const args = { date_filter: mgmt.dateFilter };
+  if (mgmt.posProfile) args.pos_profile = mgmt.posProfile;
+  api('get_queue', args).then(tokens => {
+    const tbody = document.getElementById('recent-tbody');
+    const recent = tokens.slice(0, 10);
+    if (!recent.length) {
+      tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><span class="empty-icon">🎫</span><div class="empty-title">No tokens yet</div></div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = recent.map(t => `
+      <tr>
+        <td class="token-num">${esc(t.token_display || t.name)}</td>
+        <td style="color:var(--muted);font-size:0.8rem">${fmtTime(t.creation)}</td>
+        <td>
+          <div class="customer-info">
+            <div class="name">${esc(t.customer_name)}</div>
+            <div class="phone">${esc(t.customer_phone)}</div>
+          </div>
+        </td>
+        <td>${esc(t.device || '')}</td>
+        <td>${esc(t.issue_category || '')}</td>
+        <td>${statusBadge(t.status)}</td>
+      </tr>`).join('');
+  });
+}
+
+// ── Queue ──────────────────────────────────────────────────────────────────
+function fetchAndRenderQueue() {
+  const args = { date_filter: mgmt.dateFilter };
+  if (mgmt.posProfile) args.pos_profile = mgmt.posProfile;
+  if (mgmt.queueStatus !== 'All') args.status = mgmt.queueStatus;
+  const tbody = document.getElementById('queue-tbody');
+  tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:32px;"><div class="inline-spinner"></div></td></tr>';
+
+  api('get_queue', args).then(tokens => {
+    if (!tokens.length) {
+      tbody.innerHTML = '<tr><td colspan="9"><div class="empty-state"><span class="empty-icon">✅</span><div class="empty-title">Queue is clear</div></div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = tokens.map(t => {
+      const actions = buildQueueActions(t);
+      return `<tr>
+        <td class="token-num">${esc(t.token_display || t.name)}</td>
+        <td style="color:var(--muted);font-size:0.8rem;white-space:nowrap">${fmtTime(t.creation)}</td>
+        <td>
+          <div class="customer-info">
+            <div class="name">${esc(t.customer_name)}</div>
+            <div class="phone">${esc(t.customer_phone)}</div>
+          </div>
+        </td>
+        <td>${esc(t.device_type || '')} ${esc(t.device || '')}</td>
+        <td>${esc(t.issue_category || '')}</td>
+        <td>${statusBadge(t.status)}</td>
+        <td style="color:var(--muted);font-size:0.82rem">${esc(t.technician_name || '—')}</td>
+        <td style="font-size:0.82rem">${t.wait_minutes != null ? t.wait_minutes + ' min' : '—'}</td>
+        <td><div style="display:flex;gap:6px;flex-wrap:wrap">${actions}</div></td>
+      </tr>`;
+    }).join('');
+  });
+}
+
+function buildQueueActions(t) {
+  let html = '';
+  if (t.status === 'Waiting') {
+    html += `<button class="action-btn primary" onclick="openAssign('${esc(t.name)}')">Assign</button>`;
+    html += `<button class="action-btn" onclick="doStart('${esc(t.name)}')">Start</button>`;
+  } else if (t.status === 'In Progress') {
+    html += `<button class="action-btn primary" onclick="doComplete('${esc(t.name)}')">Complete ✓</button>`;
+    html += `<button class="action-btn" onclick="openAssign('${esc(t.name)}')">Re‑Assign</button>`;
+  } else if (t.status === 'Completed' || t.status === 'Cancelled') {
+    html += `<span style="color:var(--muted);font-size:0.8rem">${t.status}</span>`;
+  }
+  return html || '—';
+}
+
+// ── My Tokens ──────────────────────────────────────────────────────────────
+function fetchAndRenderMyTokens() {
+  const tbody = document.getElementById('my-tbody');
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;"><div class="inline-spinner"></div></td></tr>';
+
+  api('get_technician_tokens', {}).then(tokens => {
+    const total     = tokens.length;
+    const inProg    = tokens.filter(t => t.status === 'In Progress').length;
+    const completed = tokens.filter(t => t.status === 'Completed').length;
+    document.getElementById('my-total').textContent    = total;
+    document.getElementById('my-progress').textContent = inProg;
+    document.getElementById('my-done').textContent     = completed;
+
+    if (!tokens.length) {
+      tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><span class="empty-icon">👤</span><div class="empty-title">No tokens assigned to you today</div></div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = tokens.map(t => `
+      <tr>
+        <td class="token-num">${esc(t.token_display || t.name)}</td>
+        <td style="color:var(--muted);font-size:0.8rem">${fmtTime(t.creation)}</td>
+        <td>
+          <div class="customer-info">
+            <div class="name">${esc(t.customer_name)}</div>
+            <div class="phone">${esc(t.customer_phone || '')}</div>
+          </div>
+        </td>
+        <td>${esc(t.device || '')}</td>
+        <td>${esc(t.issue_category || '')}</td>
+        <td>${statusBadge(t.status)}</td>
+        <td><div style="display:flex;gap:6px;">
+          ${t.status === 'Waiting' || t.status === 'In Progress'
+            ? `<button class="action-btn primary" onclick="doStart('${esc(t.name)}')">Start Attending</button>
+               <button class="action-btn" onclick="doComplete('${esc(t.name)}')">Complete</button>`
+            : `<span style="color:var(--muted);font-size:0.8rem">${esc(t.status)}</span>`}
+        </div></td>
+      </tr>`).join('');
+  });
+}
+
+// ── Reports ────────────────────────────────────────────────────────────────
+function fetchAndRenderReports() {
+  const daysMap = { today: 1, yesterday: 2, this_week: 7, all: 365 };
+  const args = { days: daysMap[mgmt.dateFilter] || 7 };
+  if (mgmt.posProfile) args.pos_profile = mgmt.posProfile;
+
+  // Also update report summary from stats
+  const statsArgs = { date_filter: mgmt.dateFilter };
+  if (mgmt.posProfile) statsArgs.pos_profile = mgmt.posProfile;
+  api('get_dashboard_stats', statsArgs).then(d => {
+    document.getElementById('r-total').textContent = d.total ?? '—';
+    document.getElementById('r-done').textContent  = d.completed ?? '—';
+    document.getElementById('r-rate').textContent  = (d.completion_rate ?? '—') + '%';
+    document.getElementById('r-avg').textContent   = d.avg_wait_minutes ?? '—';
+  });
+
+  api('get_reports', args).then(data => {
+    // Daily
+    const dtbody = document.getElementById('daily-tbody');
+    if (!data.daily_breakdown.length) {
+      dtbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted)">No data</td></tr>';
+    } else {
+      dtbody.innerHTML = data.daily_breakdown.map(d => `
+        <tr>
+          <td>${esc(d.date)}</td>
+          <td>${d.created}</td>
+          <td style="color:var(--success)">${d.completed}</td>
+          <td style="color:var(--danger)">${d.cancelled}</td>
+          <td>${d.avg_wait ? d.avg_wait + ' min' : '—'}</td>
+        </tr>`).join('');
+    }
+
+    // Tech
+    const ttbody = document.getElementById('tech-tbody');
+    if (!data.tech_performance.length) {
+      ttbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--muted)">No technician data</td></tr>';
+    } else {
+      ttbody.innerHTML = data.tech_performance.map(t => `
+        <tr>
+          <td><strong>${esc(t.name)}</strong><div style="font-size:0.75rem;color:var(--muted)">${esc(t.technician)}</div></td>
+          <td>${t.total}</td>
+          <td style="color:var(--success)">${t.completed}</td>
+          <td>${t.avg_time ? t.avg_time + ' min' : '—'}</td>
+        </tr>`).join('');
+    }
+  });
+}
+
+// ── Token Actions ──────────────────────────────────────────────────────────
+function openAssign(tokenName) {
+  document.getElementById('assign-token-name').value = tokenName;
+  document.getElementById('assign-tech-input').value = '';
+  document.getElementById('assign-modal').classList.add('open');
+  setTimeout(() => document.getElementById('assign-tech-input').focus(), 100);
+}
+function closeAssignModal() { document.getElementById('assign-modal').classList.remove('open'); }
+
+function confirmAssign() {
+  const tokenName = document.getElementById('assign-token-name').value;
+  const tech      = document.getElementById('assign-tech-input').value.trim();
+  if (!tech) { alert('Please enter a technician.'); return; }
+  apiPost('assign_token', { token_name: tokenName, technician: tech }).then(() => {
+    closeAssignModal();
+    refreshAll();
+  }).catch(err => alert('Error: ' + err.message));
+}
+
+function doStart(tokenName) {
+  apiPost('start_token', { token_name: tokenName }).then(() => refreshAll()).catch(err => alert('Error: ' + err.message));
+}
+
+function doComplete(tokenName) {
+  if (!confirm('Mark this token as completed?')) return;
+  apiPost('complete_token', { token_name: tokenName }).then(() => refreshAll()).catch(err => alert('Error: ' + err.message));
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+function statusBadge(status) {
+  const map = {
+    'Waiting': 'badge-waiting',
+    'In Progress': 'badge-progress',
+    'Completed': 'badge-done',
+    'Cancelled': 'badge-cancel',
+    'Expired': 'badge-cancel',
+    'Converted': 'badge-done',
+  };
+  return `<span class="badge ${map[status] || ''}">${esc(status || '—')}</span>`;
+}
+
+function fmtTime(dt) {
+  if (!dt) return '—';
+  const d = new Date(dt);
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const time = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+  if (sameDay) return time;
+  const date = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return `${date}, ${time}`;
+}
+
+function esc(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>CH Queue — Self Check-In</title>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d1117;
+    --surface:  #161b22;
+    --card:     #1f2937;
+    --border:   #30363d;
+    --accent:   #e91e8c;
+    --accent2:  #ff4db8;
+    --text:     #e6edf3;
+    --muted:    #8b949e;
+    --success:  #3fb950;
+    --radius:   16px;
+    --radius-sm:8px;
+    --shadow:   0 8px 32px rgba(0,0,0,0.4);
+    --trans:    0.25s ease;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Layout ───────────────────────────────────────────────────── */
+  #app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .kiosk-header {
+    width: 100%;
+    padding: 16px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .kiosk-brand {
+    font-size: 1.2rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--text);
+  }
+  .kiosk-brand span { color: var(--accent); }
+
+  .store-pill {
+    background: rgba(233,30,140,0.12);
+    color: var(--accent2);
+    border: 1px solid rgba(233,30,140,0.3);
+    padding: 4px 14px;
+    border-radius: 99px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wizard-container {
+    width: 100%;
+    max-width: 540px;
+    padding: 28px 20px 40px;
+    flex: 1;
+  }
+
+  /* ── Progress Bar ─────────────────────────────────────────────── */
+  .progress-track {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 32px;
+  }
+
+  .step-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: var(--trans);
+    flex-shrink: 0;
+  }
+  .step-dot.active { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .step-dot.done   { background: var(--success); }
+
+  .step-line {
+    flex: 1;
+    height: 2px;
+    background: var(--border);
+    transition: var(--trans);
+  }
+  .step-line.done { background: var(--success); }
+
+  .progress-label {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-bottom: 24px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .progress-label strong { color: var(--accent); }
+
+  /* ── Cards ────────────────────────────────────────────────────── */
+  .step-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px 24px;
+    animation: slideIn 0.3s ease;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .step-title {
+    font-size: 1.35rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  .step-title .step-num {
+    color: var(--accent);
+    font-size: 0.85rem;
+    font-weight: 600;
+    display: block;
+    margin-bottom: 2px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .step-sub {
+    color: var(--muted);
+    font-size: 0.88rem;
+    margin-bottom: 24px;
+  }
+
+  /* ── Form Elements ────────────────────────────────────────────── */
+  .form-group { margin-bottom: 18px; }
+
+  .form-label {
+    display: block;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+  }
+
+  .form-input, .form-select, .form-textarea {
+    width: 100%;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 1rem;
+    padding: 12px 16px;
+    outline: none;
+    transition: var(--trans);
+    font-family: inherit;
+  }
+  .form-input:focus, .form-select:focus, .form-textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(233,30,140,0.15);
+  }
+  .form-select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238b949e' d='M1 1l5 5 5-5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; padding-right: 36px; cursor: pointer; }
+  .form-select option { background: var(--card); }
+  .form-textarea { resize: vertical; min-height: 90px; }
+
+  /* ── Device type tiles ────────────────────────────────────────── */
+  .tile-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .device-tile {
+    background: var(--card);
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 10px;
+    text-align: center;
+    cursor: pointer;
+    transition: var(--trans);
+    user-select: none;
+  }
+  .device-tile:hover { border-color: rgba(233,30,140,0.5); }
+  .device-tile.selected {
+    border-color: var(--accent);
+    background: rgba(233,30,140,0.08);
+  }
+  .device-tile .tile-icon { font-size: 2rem; display: block; margin-bottom: 8px; }
+  .device-tile .tile-label { font-size: 0.82rem; font-weight: 600; color: var(--muted); }
+  .device-tile.selected .tile-label { color: var(--accent2); }
+
+  /* ── Issue grid ────────────────────────────────────────────────── */
+  .issue-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .issue-card {
+    background: var(--card);
+    border: 2px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    transition: var(--trans);
+    user-select: none;
+  }
+  .issue-card:hover { border-color: rgba(233,30,140,0.4); }
+  .issue-card.selected {
+    border-color: var(--accent);
+    background: rgba(233,30,140,0.08);
+  }
+  .issue-card .issue-icon { font-size: 1.4rem; flex-shrink: 0; }
+  .issue-card .issue-name { font-size: 0.85rem; font-weight: 600; line-height: 1.2; }
+  .issue-card.selected .issue-name { color: var(--accent2); }
+
+  /* ── Review section ────────────────────────────────────────────── */
+  .review-block {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+
+  .review-block-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+
+  .review-block-title {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+
+  .edit-link {
+    color: var(--accent);
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    background: none;
+    border: none;
+    padding: 0;
+  }
+  .edit-link:hover { color: var(--accent2); }
+
+  .review-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.88rem;
+    padding: 3px 0;
+  }
+  .review-row .label { color: var(--muted); }
+  .review-row .value { font-weight: 600; }
+
+  /* ── Buttons ──────────────────────────────────────────────────── */
+  .btn-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+  }
+
+  .btn {
+    flex: 1;
+    padding: 14px 20px;
+    border-radius: var(--radius-sm);
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    border: none;
+    transition: var(--trans);
+    letter-spacing: 0.02em;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--accent2); transform: translateY(-1px); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-secondary {
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { background: var(--border); }
+
+  /* ── Success Screen ────────────────────────────────────────────── */
+  #step-success {
+    text-align: center;
+    padding: 12px 0;
+  }
+
+  .success-icon {
+    width: 72px;
+    height: 72px;
+    background: rgba(63,185,80,0.1);
+    border: 2px solid var(--success);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 24px;
+    font-size: 2rem;
+    animation: popIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  @keyframes popIn {
+    from { transform: scale(0); opacity: 0; }
+    to   { transform: scale(1); opacity: 1; }
+  }
+
+  .token-badge {
+    background: linear-gradient(135deg, #1a0a12, #2d0f1f);
+    border: 2px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 24px 32px;
+    margin: 24px 0;
+    animation: glowPulse 2s ease-in-out infinite;
+  }
+
+  @keyframes glowPulse {
+    0%, 100% { box-shadow: 0 0 12px rgba(233,30,140,0.3); }
+    50%       { box-shadow: 0 0 28px rgba(233,30,140,0.6); }
+  }
+
+  .token-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+
+  .token-number {
+    font-size: 2.4rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    font-family: 'SF Mono', 'Fira Mono', monospace;
+    color: var(--text);
+  }
+
+  .token-details {
+    margin-top: 20px;
+    text-align: left;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .token-detail-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+  }
+  .token-detail-row:last-child { border-bottom: none; }
+  .token-detail-row .icon { font-size: 1.1rem; width: 24px; text-align: center; flex-shrink: 0; }
+  .token-detail-row .info .sub { color: var(--muted); font-size: 0.75rem; }
+  .token-detail-row .info .main { font-weight: 600; }
+
+  .countdown-bar {
+    background: rgba(233,30,140,0.12);
+    border: 1px solid rgba(233,30,140,0.2);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    margin-top: 20px;
+    color: var(--muted);
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+  .countdown-bar #countdown-num {
+    color: var(--accent);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Loader ───────────────────────────────────────────────────── */
+  .spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loading-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(13,17,23,0.85);
+    z-index: 999;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .loading-overlay.active { display: flex; }
+
+  /* ── Error ────────────────────────────────────────────────────── */
+  .error-msg {
+    display: none;
+    background: rgba(248,81,73,0.12);
+    border: 1px solid rgba(248,81,73,0.3);
+    border-radius: var(--radius-sm);
+    color: #f85149;
+    padding: 12px 16px;
+    font-size: 0.88rem;
+    margin-top: 12px;
+  }
+  .error-msg.visible { display: block; }
+
+  /* ── Store selector (landing if no ?store param) ────────────────── */
+  #store-selector {
+    display: none;
+  }
+
+  .store-btn {
+    display: block;
+    width: 100%;
+    background: var(--card);
+    border: 2px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 16px 20px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+    transition: var(--trans);
+    margin-bottom: 10px;
+    font-family: inherit;
+  }
+  .store-btn:hover { border-color: var(--accent); background: rgba(233,30,140,0.05); }
+  .store-btn .store-company { font-size: 0.78rem; color: var(--muted); font-weight: 400; display: block; margin-top: 2px; }
+
+  /* ── Responsive ───────────────────────────────────────────────── */
+  @media (max-width: 380px) {
+    .tile-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .device-tile { padding: 14px 6px; }
+    .device-tile .tile-icon { font-size: 1.6rem; }
+    .issue-grid { gap: 8px; }
+    .token-number { font-size: 2rem; }
+    .btn { font-size: 0.92rem; padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Header -->
+  <header class="kiosk-header">
+    <div class="kiosk-brand">CH<span>·</span>Queue</div>
+    <div class="store-pill" id="store-name-pill">Loading…</div>
+  </header>
+
+  <!-- Loading overlay -->
+  <div class="loading-overlay" id="loader">
+    <div class="spinner"></div>
+    <span>Please wait…</span>
+  </div>
+
+  <div class="wizard-container">
+
+    <!-- Store selector (shown when no ?store= param) -->
+    <div id="store-selector">
+      <div class="step-card">
+        <div class="step-title">
+          <span class="step-num">Select Store</span>
+          Choose your location
+        </div>
+        <p class="step-sub">Which store are you visiting today?</p>
+        <div id="store-list"></div>
+      </div>
+    </div>
+
+    <!-- Step progress -->
+    <div id="wizard-ui" style="display:none;">
+      <div class="progress-track" id="progress-track"></div>
+      <div class="progress-label" id="progress-label"></div>
+
+      <!-- Step 1: Your Info -->
+      <div id="step-1" class="step-card" style="display:none;">
+        <div class="step-title">
+          <span class="step-num">Step 1 of 5</span>
+          Your Information
+        </div>
+        <p class="step-sub">We'll use this to track your service request.</p>
+        <div class="form-group">
+          <label class="form-label" for="inp-name">Full Name</label>
+          <input class="form-input" id="inp-name" type="text" placeholder="e.g. Rahul Sharma" autocomplete="name">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="inp-phone">Mobile Number</label>
+          <input class="form-input" id="inp-phone" type="tel" placeholder="e.g. 9876543210" autocomplete="tel" maxlength="15">
+        </div>
+        <div class="error-msg" id="err-1"></div>
+        <div class="btn-row">
+          <button class="btn btn-primary" onclick="goStep(2)">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Device Details -->
+      <div id="step-2" class="step-card" style="display:none;">
+        <div class="step-title">
+          <span class="step-num">Step 2 of 5</span>
+          Device Details
+        </div>
+        <p class="step-sub">Tell us about your device.</p>
+
+        <div class="form-group">
+          <label class="form-label">Device Type</label>
+          <div class="tile-grid" id="device-tiles"></div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="inp-brand">Brand</label>
+          <select class="form-select" id="inp-brand">
+            <option value="">Select brand…</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="inp-model">Model</label>
+          <input class="form-input" id="inp-model" type="text" placeholder="e.g. iPhone 14, Galaxy S23…">
+        </div>
+        <div class="error-msg" id="err-2"></div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="goStep(1)">← Back</button>
+          <button class="btn btn-primary" onclick="goStep(3)">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 3: Issue Details -->
+      <div id="step-3" class="step-card" style="display:none;">
+        <div class="step-title">
+          <span class="step-num">Step 3 of 5</span>
+          What's the Issue?
+        </div>
+        <p class="step-sub">Select the primary problem with your device.</p>
+        <div class="issue-grid" id="issue-grid"></div>
+        <div class="form-group">
+          <label class="form-label" for="inp-desc">Additional Details <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+          <textarea class="form-textarea" id="inp-desc" placeholder="Describe the issue in more detail…"></textarea>
+        </div>
+        <div class="error-msg" id="err-3"></div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="goStep(2)">← Back</button>
+          <button class="btn btn-primary" onclick="goStep(4)">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 4: Review -->
+      <div id="step-4" class="step-card" style="display:none;">
+        <div class="step-title">
+          <span class="step-num">Step 4 of 5</span>
+          Review &amp; Confirm
+        </div>
+        <p class="step-sub">Check your details before checking in.</p>
+        <div id="review-content"></div>
+        <div class="error-msg" id="err-4"></div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="goStep(3)">← Back</button>
+          <button class="btn btn-primary" id="btn-submit" onclick="submitToken()">Check In ✓</button>
+        </div>
+      </div>
+
+      <!-- Step 5: Success -->
+      <div id="step-5" class="step-card" style="display:none;">
+        <div id="step-success">
+          <div class="success-icon">✓</div>
+          <div class="step-title" style="text-align:center;">Check-In Complete!</div>
+          <p class="step-sub" style="text-align:center;">Your place in the queue is confirmed. Please wait for your number to be called.</p>
+
+          <div class="token-badge">
+            <div class="token-label">Your Token</div>
+            <div class="token-number" id="result-token">—</div>
+          </div>
+
+          <div class="token-details">
+            <div class="token-detail-row">
+              <div class="icon">👤</div>
+              <div class="info">
+                <div class="sub">Customer</div>
+                <div class="main" id="result-name">—</div>
+              </div>
+            </div>
+            <div class="token-detail-row">
+              <div class="icon">📱</div>
+              <div class="info">
+                <div class="sub">Device</div>
+                <div class="main" id="result-device">—</div>
+              </div>
+            </div>
+            <div class="token-detail-row">
+              <div class="icon">🔧</div>
+              <div class="info">
+                <div class="sub">Issue</div>
+                <div class="main" id="result-issue">—</div>
+              </div>
+            </div>
+            <div class="token-detail-row">
+              <div class="icon">🏪</div>
+              <div class="info">
+                <div class="sub">Store</div>
+                <div class="main" id="result-store">—</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="countdown-bar">
+            🔄 Auto-restart in <span id="countdown-num">30</span>s
+          </div>
+
+          <div class="btn-row" style="margin-top: 20px;">
+            <button class="btn btn-primary" onclick="resetWizard()">+ New Check-In</button>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /wizard-ui -->
+
+  </div><!-- /wizard-container -->
+</div><!-- /app -->
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const state = {
+  currentStep: 1,
+  posProfile: null,
+  storeName: null,
+  storeConfig: null,
+  form: {
+    customer_name: '',
+    customer_phone: '',
+    device_type: '',
+    device_brand: '',
+    device_model: '',
+    issue_category: '',
+    issue_description: '',
+  },
+  countdownTimer: null,
+};
+
+const STEPS = [
+  { id: 1, label: 'Your Info' },
+  { id: 2, label: 'Device' },
+  { id: 3, label: 'Issue' },
+  { id: 4, label: 'Review' },
+  { id: 5, label: 'Done' },
+];
+
+const DEVICE_TYPES = [
+  { key: 'Mobile',  icon: '📱' },
+  { key: 'Tablet',  icon: '⬜' },
+  { key: 'Laptop',  icon: '💻' },
+  { key: 'Smart Watch', icon: '⌚' },
+  { key: 'Other',   icon: '🔧' },
+];
+
+// ── Init ───────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(window.location.search);
+  const store = params.get('store');
+  if (store) {
+    state.posProfile = store;
+    loadStoreConfig(store);
+  } else {
+    loadStoreList();
+  }
+});
+
+// ── API helpers ────────────────────────────────────────────────────────────
+function apiCall(method, args) {
+  const url = '/api/method/ch_pos.api.token_api.' + method;
+  const params = new URLSearchParams(args);
+  return fetch(url + '?' + params.toString(), {
+    headers: { 'X-Frappe-CSRF-Token': 'fetch', 'Accept': 'application/json' },
+  }).then(r => r.json()).then(data => {
+    if (data.exc) throw new Error(data._server_messages || data.exc);
+    return data.message;
+  });
+}
+
+function apiPost(method, body) {
+  const url = '/api/method/ch_pos.api.token_api.' + method;
+  return fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Frappe-CSRF-Token': getCsrfToken(),
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(body),
+  }).then(r => r.json()).then(data => {
+    if (data.exc) throw new Error(data._server_messages || data.exc);
+    return data.message;
+  });
+}
+
+function getCsrfToken() {
+  return document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('csrf_token='))?.split('=')[1] || '';
+}
+
+// ── Store List ─────────────────────────────────────────────────────────────
+function loadStoreList() {
+  showLoader(true);
+  apiCall('get_pos_profiles', {}).then(profiles => {
+    showLoader(false);
+    document.getElementById('store-selector').style.display = 'block';
+    const list = document.getElementById('store-list');
+    if (!profiles || !profiles.length) {
+      list.innerHTML = '<p style="color:var(--muted)">No stores available.</p>';
+      return;
+    }
+    list.innerHTML = profiles.map(p => `
+      <button class="store-btn" onclick="selectStore('${esc(p.name)}')">
+        ${esc(p.name)}
+        <span class="store-company">${esc(p.company || '')}</span>
+      </button>`).join('');
+  }).catch(err => {
+    showLoader(false);
+    document.getElementById('store-selector').style.display = 'block';
+    document.getElementById('store-list').innerHTML = '<p style="color:#f85149">Unable to load stores. Please try again.</p>';
+  });
+}
+
+function selectStore(profile) {
+  state.posProfile = profile;
+  document.getElementById('store-selector').style.display = 'none';
+  loadStoreConfig(profile);
+}
+
+// ── Store Config ───────────────────────────────────────────────────────────
+function loadStoreConfig(profile) {
+  showLoader(true);
+  apiCall('get_store_config', { pos_profile: profile }).then(config => {
+    showLoader(false);
+    state.storeConfig = config;
+    state.storeName = config.store_name;
+    document.getElementById('store-name-pill').textContent = config.store_name;
+    document.getElementById('wizard-ui').style.display = 'block';
+    buildProgressTrack();
+    buildDeviceTiles();
+    buildBrandSelect(config.brands);
+    buildIssueGrid(config.issues);
+    showStep(1);
+  }).catch(err => {
+    showLoader(false);
+    alert('Could not load store configuration. Please check the URL.');
+    loadStoreList();
+  });
+}
+
+// ── Progress Track ─────────────────────────────────────────────────────────
+function buildProgressTrack() {
+  const track = document.getElementById('progress-track');
+  let html = '';
+  STEPS.forEach((s, i) => {
+    html += `<div class="step-dot" id="dot-${s.id}"></div>`;
+    if (i < STEPS.length - 1) html += `<div class="step-line" id="line-${s.id}"></div>`;
+  });
+  track.innerHTML = html;
+}
+
+function updateProgress(step) {
+  document.getElementById('progress-label').innerHTML =
+    `<strong>${STEPS[step - 1]?.label || ''}</strong> — Step ${step} of ${STEPS.length}`;
+  STEPS.forEach((s, i) => {
+    const dot = document.getElementById('dot-' + s.id);
+    const line = document.getElementById('line-' + s.id);
+    dot.classList.toggle('active', s.id === step);
+    dot.classList.toggle('done', s.id < step);
+    if (line) line.classList.toggle('done', s.id < step);
+  });
+}
+
+// ── Step Navigation ────────────────────────────────────────────────────────
+function showStep(n) {
+  STEPS.forEach(s => {
+    const el = document.getElementById('step-' + s.id);
+    if (el) el.style.display = s.id === n ? 'block' : 'none';
+  });
+  state.currentStep = n;
+  updateProgress(n);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function goStep(n) {
+  clearErr();
+  if (!validateStep(state.currentStep)) return;
+  showStep(n);
+  if (n === 4) buildReview();
+}
+
+// ── Validation ─────────────────────────────────────────────────────────────
+function validateStep(s) {
+  if (s === 1) {
+    const name = document.getElementById('inp-name').value.trim();
+    const phone = document.getElementById('inp-phone').value.trim();
+    if (!name) { showErr(1, 'Please enter your full name.'); return false; }
+    if (!phone || phone.length < 8) { showErr(1, 'Please enter a valid phone number.'); return false; }
+    state.form.customer_name = name;
+    state.form.customer_phone = phone;
+  }
+  if (s === 2) {
+    const brand = document.getElementById('inp-brand').value;
+    const model = document.getElementById('inp-model').value.trim();
+    if (!state.form.device_type) { showErr(2, 'Please select a device type.'); return false; }
+    if (!brand) { showErr(2, 'Please select a brand.'); return false; }
+    state.form.device_brand = brand;
+    state.form.device_model = model;
+  }
+  if (s === 3) {
+    if (!state.form.issue_category) { showErr(3, 'Please select the issue type.'); return false; }
+    state.form.issue_description = document.getElementById('inp-desc').value.trim();
+  }
+  return true;
+}
+
+function showErr(step, msg) {
+  const el = document.getElementById('err-' + step);
+  if (el) { el.textContent = msg; el.classList.add('visible'); }
+}
+function clearErr() {
+  document.querySelectorAll('.error-msg').forEach(e => {
+    e.textContent = '';
+    e.classList.remove('visible');
+  });
+}
+
+// ── Utilities: slug for DOM ids (no spaces/special chars) ─────────────────
+function slug(str) { return str.replace(/[^a-z0-9]/gi, '_').toLowerCase(); }
+
+// ── Device Tiles ───────────────────────────────────────────────────────────
+function buildDeviceTiles() {
+  const container = document.getElementById('device-tiles');
+  container.innerHTML = DEVICE_TYPES.map(d => `
+    <div class="device-tile" id="tile-${slug(d.key)}" onclick="selectDeviceType('${d.key}')">
+      <span class="tile-icon">${d.icon}</span>
+      <div class="tile-label">${d.key}</div>
+    </div>`).join('');
+}
+
+function selectDeviceType(type) {
+  state.form.device_type = type;
+  document.querySelectorAll('.device-tile').forEach(t => t.classList.remove('selected'));
+  document.getElementById('tile-' + slug(type))?.classList.add('selected');
+}
+
+// ── Brand Select ───────────────────────────────────────────────────────────
+function buildBrandSelect(brands) {
+  const sel = document.getElementById('inp-brand');
+  brands.forEach(b => {
+    const opt = document.createElement('option');
+    opt.value = b;
+    opt.textContent = b;
+    sel.appendChild(opt);
+  });
+}
+
+// ── Issue Grid ─────────────────────────────────────────────────────────────
+function buildIssueGrid(issues) {
+  const grid = document.getElementById('issue-grid');
+  grid.innerHTML = issues.map(i => `
+    <div class="issue-card" id="issue-${slug(i.key)}" onclick="selectIssue('${i.key}')">
+      <span class="issue-icon">${i.icon}</span>
+      <span class="issue-name">${i.key}</span>
+    </div>`).join('');
+}
+
+function selectIssue(key) {
+  state.form.issue_category = key;
+  document.querySelectorAll('.issue-card').forEach(c => c.classList.remove('selected'));
+  document.getElementById('issue-' + slug(key))?.classList.add('selected');
+}
+
+// ── Review ─────────────────────────────────────────────────────────────────
+function buildReview() {
+  const f = state.form;
+  document.getElementById('review-content').innerHTML = `
+    <div class="review-block">
+      <div class="review-block-header">
+        <div class="review-block-title">Your Info</div>
+        <button class="edit-link" onclick="goStep(1)">Edit</button>
+      </div>
+      <div class="review-row"><span class="label">Name</span><span class="value">${esc(f.customer_name)}</span></div>
+      <div class="review-row"><span class="label">Phone</span><span class="value">${esc(f.customer_phone)}</span></div>
+    </div>
+    <div class="review-block">
+      <div class="review-block-header">
+        <div class="review-block-title">Device</div>
+        <button class="edit-link" onclick="goStep(2)">Edit</button>
+      </div>
+      <div class="review-row"><span class="label">Type</span><span class="value">${esc(f.device_type)}</span></div>
+      <div class="review-row"><span class="label">Brand</span><span class="value">${esc(f.device_brand)}</span></div>
+      <div class="review-row"><span class="label">Model</span><span class="value">${esc(f.device_model || '—')}</span></div>
+    </div>
+    <div class="review-block">
+      <div class="review-block-header">
+        <div class="review-block-title">Issue</div>
+        <button class="edit-link" onclick="goStep(3)">Edit</button>
+      </div>
+      <div class="review-row"><span class="label">Category</span><span class="value">${esc(f.issue_category)}</span></div>
+      ${f.issue_description ? `<div class="review-row"><span class="label">Details</span><span class="value" style="max-width:60%;text-align:right;word-break:break-word">${esc(f.issue_description)}</span></div>` : ''}
+    </div>
+    <div class="review-block">
+      <div class="review-block-header">
+        <div class="review-block-title">Store</div>
+      </div>
+      <div class="review-row"><span class="label">Location</span><span class="value">${esc(state.storeName)}</span></div>
+    </div>`;
+}
+
+// ── Submit ─────────────────────────────────────────────────────────────────
+function submitToken() {
+  clearErr();
+  const btn = document.getElementById('btn-submit');
+  btn.disabled = true;
+  showLoader(true);
+
+  const f = state.form;
+  apiPost('create_token', {
+    pos_profile: state.posProfile,
+    customer_name: f.customer_name,
+    customer_phone: f.customer_phone,
+    device_type: f.device_type,
+    device_brand: f.device_brand,
+    device_model: f.device_model || '',
+    issue_category: f.issue_category,
+    issue_description: f.issue_description || '',
+  }).then(result => {
+    showLoader(false);
+    btn.disabled = false;
+    // Populate success screen
+    document.getElementById('result-token').textContent = result.token;
+    document.getElementById('result-name').textContent = result.customer_name;
+    document.getElementById('result-device').textContent = result.device || (f.device_brand + ' ' + (f.device_model || '')).trim();
+    document.getElementById('result-issue').textContent = result.issue;
+    document.getElementById('result-store').textContent = result.store;
+    showStep(5);
+    startCountdown(30);
+  }).catch(err => {
+    showLoader(false);
+    btn.disabled = false;
+    const msg = extractMsg(err);
+    showErr(4, 'Error: ' + msg + '. Please try again.');
+  });
+}
+
+// ── Countdown ──────────────────────────────────────────────────────────────
+function startCountdown(sec) {
+  clearInterval(state.countdownTimer);
+  let remaining = sec;
+  document.getElementById('countdown-num').textContent = remaining;
+  state.countdownTimer = setInterval(() => {
+    remaining--;
+    document.getElementById('countdown-num').textContent = remaining;
+    if (remaining <= 0) {
+      clearInterval(state.countdownTimer);
+      resetWizard();
+    }
+  }, 1000);
+}
+
+// ── Reset ──────────────────────────────────────────────────────────────────
+function resetWizard() {
+  clearInterval(state.countdownTimer);
+  state.form = {
+    customer_name: '', customer_phone: '',
+    device_type: '', device_brand: '', device_model: '',
+    issue_category: '', issue_description: '',
+  };
+  // Reset inputs
+  ['inp-name','inp-phone','inp-model','inp-desc'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  document.getElementById('inp-brand').value = '';
+  document.querySelectorAll('.device-tile').forEach(t => t.classList.remove('selected'));
+  document.querySelectorAll('.issue-card').forEach(c => c.classList.remove('selected'));
+  clearErr();
+  showStep(1);
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+function showLoader(on) {
+  document.getElementById('loader').classList.toggle('active', on);
+}
+
+function esc(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function extractMsg(err) {
+  try {
+    const msgs = JSON.parse(err.message);
+    if (Array.isArray(msgs)) return msgs.map(m => m.message || m).join(' ');
+  } catch (_) {}
+  return err.message || 'Unknown error';
+}
+</script>
+</body>
+</html>
