@@ -15,3 +15,9 @@ def get_context(context):
     context.title = "CH Queue — Management"
     context.user = frappe.session.user
     context.user_name = frappe.db.get_value("User", frappe.session.user, "full_name") or frappe.session.user
+    # Inject CSRF token so JS can make authenticated POST requests
+    try:
+        from frappe.sessions import get_csrf_token
+        context.csrf_token = get_csrf_token()
+    except Exception:
+        context.csrf_token = ""

@@ -16,6 +16,9 @@
   "customer_name",
   "customer_phone",
   "expires_at",
+  "visit_section",
+  "visit_source",
+  "visit_purpose",
   "device_section",
   "device_type",
   "device_brand",
@@ -34,7 +37,12 @@
   "total_estimate",
   "column_break_totals",
   "comparison_request",
-  "converted_invoice"
+  "links_section",
+  "linked_customer",
+  "linked_service_request",
+  "column_break_links",
+  "converted_invoice",
+  "linked_buyback"
  ],
  "fields": [
   {
@@ -77,12 +85,13 @@
    "options": "Warehouse"
   },
   {
+   "allow_on_submit": 1,
    "default": "Waiting",
    "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Waiting\nIn Progress\nCompleted\nCancelled\nConverted\nExpired",
+   "options": "Waiting\nIn Progress\nCompleted\nCancelled\nConverted\nDropped\nExpired",
    "read_only": 1
   },
   {
@@ -92,21 +101,40 @@
   {
    "fieldname": "customer_name",
    "fieldtype": "Data",
-   "label": "Customer Name",
-   "reqd": 1
+   "label": "Customer Name"
   },
   {
    "fieldname": "customer_phone",
    "fieldtype": "Data",
    "label": "Customer Phone",
-   "options": "Phone",
-   "reqd": 1
+   "options": "Phone"
   },
   {
    "fieldname": "expires_at",
    "fieldtype": "Datetime",
    "label": "Expires At",
    "read_only": 1
+  },
+  {
+   "fieldname": "visit_section",
+   "fieldtype": "Section Break",
+   "label": "Visit Details"
+  },
+  {
+   "default": "Kiosk",
+   "fieldname": "visit_source",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Source",
+   "options": "Kiosk\nCounter\nAppointment\nWeb\nWhatsApp\nOther"
+  },
+  {
+   "default": "Repair",
+   "fieldname": "visit_purpose",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Purpose",
+   "options": "Repair\nSales\nBuyback\nEnquiry\nOther"
   },
   {
    "fieldname": "device_section",
@@ -150,24 +178,28 @@
    "label": "Service Details"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "technician",
    "fieldtype": "Link",
    "label": "Assigned Technician",
    "options": "User"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "assigned_at",
    "fieldtype": "Datetime",
    "label": "Assigned At",
    "read_only": 1
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "started_at",
    "fieldtype": "Datetime",
    "label": "Service Started At",
    "read_only": 1
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "completed_at",
    "fieldtype": "Datetime",
    "label": "Completed At",
@@ -206,16 +238,47 @@
    "options": "POS Comparison Request"
   },
   {
+   "fieldname": "links_section",
+   "fieldtype": "Section Break",
+   "label": "Linked Documents"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "linked_customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "linked_service_request",
+   "fieldtype": "Dynamic Link",
+   "label": "Service Request",
+   "options": "Service Request"
+  },
+  {
+   "fieldname": "column_break_links",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
    "fieldname": "converted_invoice",
    "fieldtype": "Link",
    "label": "Converted Invoice",
    "options": "POS Invoice",
    "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "linked_buyback",
+   "fieldtype": "Link",
+   "label": "Buyback Assessment",
+   "options": "Buyback Assessment"
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-03-08 10:00:00.000000",
+ "modified": "2026-03-16 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Kiosk",
  "name": "POS Kiosk Token",

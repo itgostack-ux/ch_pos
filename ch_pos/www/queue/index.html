@@ -243,8 +243,17 @@
     background: rgba(233,30,140,0.08);
   }
   .issue-card .issue-icon { font-size: 1.4rem; flex-shrink: 0; }
-  .issue-card .issue-name { font-size: 0.85rem; font-weight: 600; line-height: 1.2; }
+  .issue-card .issue-name { font-size: 0.85rem; font-weight: 600; line-height: 1.2; flex: 1; }
   .issue-card.selected .issue-name { color: var(--accent2); }
+  .issue-card .issue-check {
+    width: 18px; height: 18px; border-radius: 50%;
+    border: 2px solid var(--border); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem; transition: var(--trans);
+  }
+  .issue-card.selected .issue-check {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
 
   /* ── Review section ────────────────────────────────────────────── */
   .review-block {
@@ -543,7 +552,7 @@
         </div>
         <div class="form-group">
           <label class="form-label" for="inp-phone">Mobile Number</label>
-          <input class="form-input" id="inp-phone" type="tel" placeholder="e.g. 9876543210" autocomplete="tel" maxlength="15">
+          <input class="form-input" id="inp-phone" type="tel" placeholder="e.g. 9876543210 or +91 98765 43210" autocomplete="tel" maxlength="15">
         </div>
         <div class="error-msg" id="err-1"></div>
         <div class="btn-row">
@@ -570,8 +579,10 @@
           </select>
         </div>
         <div class="form-group">
-          <label class="form-label" for="inp-model">Model</label>
-          <input class="form-input" id="inp-model" type="text" placeholder="e.g. iPhone 14, Galaxy S23…">
+          <label class="form-label" for="inp-model">Model <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+          <input class="form-input" id="inp-model" type="text" placeholder="e.g. iPhone 14, Galaxy S23…" list="model-options" autocomplete="off">
+          <datalist id="model-options"></datalist>
+          <div id="model-loading" style="display:none;color:var(--muted);font-size:.8rem;margin-top:.25rem">Loading models…</div>
         </div>
         <div class="error-msg" id="err-2"></div>
         <div class="btn-row">
@@ -586,7 +597,7 @@
           <span class="step-num">Step 3 of 5</span>
           What's the Issue?
         </div>
-        <p class="step-sub">Select the primary problem with your device.</p>
+        <p class="step-sub">Select all issues with your device. You can pick multiple.</p>
         <div class="issue-grid" id="issue-grid"></div>
         <div class="form-group">
           <label class="form-label" for="inp-desc">Additional Details <span style="color:var(--muted);font-weight:400">(optional)</span></label>
@@ -685,7 +696,7 @@ const state = {
     device_type: '',
     device_brand: '',
     device_model: '',
-    issue_category: '',
+    issue_categories: [],   // multi-select array
     issue_description: '',
   },
   countdownTimer: null,
@@ -748,7 +759,29 @@ function apiPost(method, body) {
 }
 
 function getCsrfToken() {
-  return document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('csrf_token='))?.split('=')[1] || '';
+  // Use the server-injected CSRF token (works for both guest and logged-in sessions)
+  return '{{ csrf_token or "fetch" }}';
+}
+
+// ── Indian Phone Validation ────────────────────────────────────────────────
+function normalizePhone(raw) {
+  // Strip spaces, dashes, dots
+  let s = raw.replace(/[\s\-().]/g, '');
+  // Remove +91 or 0091 prefix
+  if (s.startsWith('+91')) s = s.slice(3);
+  else if (s.startsWith('0091')) s = s.slice(4);
+  // Remove leading 0
+  else if (s.startsWith('0') && s.length === 11) s = s.slice(1);
+  return s;
+}
+
+function validateIndianPhone(raw) {
+  if (!raw) return 'Please enter your mobile number.';
+  const digits = normalizePhone(raw);
+  if (!/^[6-9]\d{9}$/.test(digits)) {
+    return 'Please enter a valid 10-digit Indian mobile number (starting with 6–9).';
+  }
+  return null; // valid
 }
 
 // ── Store List ─────────────────────────────────────────────────────────────
@@ -848,9 +881,10 @@ function validateStep(s) {
     const name = document.getElementById('inp-name').value.trim();
     const phone = document.getElementById('inp-phone').value.trim();
     if (!name) { showErr(1, 'Please enter your full name.'); return false; }
-    if (!phone || phone.length < 8) { showErr(1, 'Please enter a valid phone number.'); return false; }
+    const phoneErr = validateIndianPhone(phone);
+    if (phoneErr) { showErr(1, phoneErr); return false; }
     state.form.customer_name = name;
-    state.form.customer_phone = phone;
+    state.form.customer_phone = normalizePhone(phone);
   }
   if (s === 2) {
     const brand = document.getElementById('inp-brand').value;
@@ -861,7 +895,7 @@ function validateStep(s) {
     state.form.device_model = model;
   }
   if (s === 3) {
-    if (!state.form.issue_category) { showErr(3, 'Please select the issue type.'); return false; }
+    if (!state.form.issue_categories.length) { showErr(3, 'Please select at least one issue type.'); return false; }
     state.form.issue_description = document.getElementById('inp-desc').value.trim();
   }
   return true;
@@ -906,6 +940,28 @@ function buildBrandSelect(brands) {
     opt.textContent = b;
     sel.appendChild(opt);
   });
+  sel.addEventListener('change', () => loadModelSuggestions(sel.value));
+}
+
+function loadModelSuggestions(brand) {
+  const dl = document.getElementById('model-options');
+  const loading = document.getElementById('model-loading');
+  const inp = document.getElementById('inp-model');
+  dl.innerHTML = '';
+  inp.value = '';
+  if (!brand || brand === 'Other') return;
+  loading.style.display = 'block';
+  apiCall('get_brand_models', { brand })
+    .then(models => {
+      loading.style.display = 'none';
+      models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        dl.appendChild(opt);
+      });
+      // Always allow typing anything not in the list
+    })
+    .catch(() => { loading.style.display = 'none'; });
 }
 
 // ── Issue Grid ─────────────────────────────────────────────────────────────
@@ -915,13 +971,20 @@ function buildIssueGrid(issues) {
     <div class="issue-card" id="issue-${slug(i.key)}" onclick="selectIssue('${i.key}')">
       <span class="issue-icon">${i.icon}</span>
       <span class="issue-name">${i.key}</span>
+      <span class="issue-check">✓</span>
     </div>`).join('');
 }
 
 function selectIssue(key) {
-  state.form.issue_category = key;
-  document.querySelectorAll('.issue-card').forEach(c => c.classList.remove('selected'));
-  document.getElementById('issue-' + slug(key))?.classList.add('selected');
+  const cats = state.form.issue_categories;
+  const idx = cats.indexOf(key);
+  if (idx === -1) {
+    cats.push(key);
+    document.getElementById('issue-' + slug(key))?.classList.add('selected');
+  } else {
+    cats.splice(idx, 1);
+    document.getElementById('issue-' + slug(key))?.classList.remove('selected');
+  }
 }
 
 // ── Review ─────────────────────────────────────────────────────────────────
@@ -950,7 +1013,7 @@ function buildReview() {
         <div class="review-block-title">Issue</div>
         <button class="edit-link" onclick="goStep(3)">Edit</button>
       </div>
-      <div class="review-row"><span class="label">Category</span><span class="value">${esc(f.issue_category)}</span></div>
+      <div class="review-row"><span class="label">Issues</span><span class="value" style="text-align:right">${f.issue_categories.map(c => esc(c)).join('<br>')}</span></div>
       ${f.issue_description ? `<div class="review-row"><span class="label">Details</span><span class="value" style="max-width:60%;text-align:right;word-break:break-word">${esc(f.issue_description)}</span></div>` : ''}
     </div>
     <div class="review-block">
@@ -976,7 +1039,7 @@ function submitToken() {
     device_type: f.device_type,
     device_brand: f.device_brand,
     device_model: f.device_model || '',
-    issue_category: f.issue_category,
+    issue_category: f.issue_categories.join(', '),
     issue_description: f.issue_description || '',
   }).then(result => {
     showLoader(false);
@@ -985,7 +1048,7 @@ function submitToken() {
     document.getElementById('result-token').textContent = result.token;
     document.getElementById('result-name').textContent = result.customer_name;
     document.getElementById('result-device').textContent = result.device || (f.device_brand + ' ' + (f.device_model || '')).trim();
-    document.getElementById('result-issue').textContent = result.issue;
+    document.getElementById('result-issue').textContent = f.issue_categories.join(', ') || result.issue;
     document.getElementById('result-store').textContent = result.store;
     showStep(5);
     startCountdown(30);
@@ -1018,7 +1081,7 @@ function resetWizard() {
   state.form = {
     customer_name: '', customer_phone: '',
     device_type: '', device_brand: '', device_model: '',
-    issue_category: '', issue_description: '',
+    issue_categories: [], issue_description: '',
   };
   // Reset inputs
   ['inp-name','inp-phone','inp-model','inp-desc'].forEach(id => {
@@ -1026,6 +1089,7 @@ function resetWizard() {
     if (el) el.value = '';
   });
   document.getElementById('inp-brand').value = '';
+  document.getElementById('model-options').innerHTML = '';
   document.querySelectorAll('.device-tile').forEach(t => t.classList.remove('selected'));
   document.querySelectorAll('.issue-card').forEach(c => c.classList.remove('selected'));
   clearErr();

@@ -3,6 +3,8 @@ CH Queue — Token System API
 All public-facing endpoints for the kiosk and management dashboard.
 """
 
+import re
+
 import frappe
 from frappe import _
 from frappe.utils import now_datetime, add_days, get_datetime, time_diff_in_hours
@@ -11,6 +13,38 @@ from frappe.utils import now_datetime, add_days, get_datetime, time_diff_in_hour
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_INDIAN_PHONE_RE = re.compile(r"^[6-9]\d{9}$")
+
+def _normalize_phone(raw: str) -> str:
+    """Strip formatting and country-code prefix, return bare 10-digit string."""
+    s = re.sub(r"[\s\-().]", "", raw or "")
+    if s.startswith("+91"):
+        s = s[3:]
+    elif s.startswith("0091"):
+        s = s[4:]
+    elif s.startswith("0") and len(s) == 11:
+        s = s[1:]
+    return s
+
+def _validate_indian_phone(raw: str) -> str:
+    """Return normalized 10-digit phone or raise frappe.ValidationError."""
+    digits = _normalize_phone(raw)
+    if not _INDIAN_PHONE_RE.match(digits):
+        frappe.throw(_("Please enter a valid 10-digit Indian mobile number (starting with 6–9)."))
+    return digits
+
+def _device_label(brand: str, model: str) -> str:
+    """Return a clean device label, avoiding repeating the brand if model already starts with it."""
+    brand = (brand or "").strip()
+    model = (model or "").strip()
+    if not model:
+        return brand
+    # If model already starts with brand name (case-insensitive), show model only
+    if brand and model.lower().startswith(brand.lower()):
+        return model
+    return f"{brand} {model}".strip() if brand else model
+
 
 def _get_store_code(pos_profile_name: str) -> str:
     """Generate a short store code from the POS Profile name."""
@@ -24,16 +58,17 @@ def _get_store_code(pos_profile_name: str) -> str:
 
 
 def _next_daily_seq(pos_profile: str) -> int:
-    """Return the next sequential number for this store today."""
+    """Return the next sequential number for this store today (race-safe)."""
     today = frappe.utils.today()
-    count = frappe.db.count(
-        "POS Kiosk Token",
-        filters={
-            "pos_profile": pos_profile,
-            "creation": [">=", today + " 00:00:00"],
-        },
+    result = frappe.db.sql(
+        """SELECT COUNT(*) + 1
+           FROM `tabPOS Kiosk Token`
+           WHERE pos_profile = %s
+             AND DATE(creation) = %s
+        """,
+        (pos_profile, today),
     )
-    return count + 1
+    return int(result[0][0]) if result else 1
 
 
 def _generate_token_display(pos_profile: str, company_abbr: str) -> str:
@@ -65,12 +100,19 @@ def get_store_config(pos_profile: str):
 
     company = frappe.db.get_value("Company", profile.company, ["name", "abbr"], as_dict=True)
 
-    # Device brands — pull from Item Attribute or a simple hardcoded list
-    brands = [
-        "Apple", "Samsung", "OnePlus", "Xiaomi", "Realme", "Oppo", "Vivo",
-        "Motorola", "Nokia", "Google", "Lenovo", "Asus", "HP", "Dell",
-        "Acer", "Huawei", "Nothing", "Other",
-    ]
+    # Device brands — pulled from Brand doctype, top-level only (no sub-brands)
+    # Sub-brands have ch_parent_brand set (e.g. Galaxy → Samsung)
+    _raw_brands = frappe.db.sql(
+        """SELECT name FROM `tabBrand`
+           WHERE ch_disabled = 0
+             AND (ch_parent_brand IS NULL OR ch_parent_brand = '')
+             AND name != 'Test Brand'
+           ORDER BY name ASC""",
+        as_dict=True,
+    )
+    brands = [b.name for b in _raw_brands]
+    if "Other" not in brands:
+        brands.append("Other")
 
     # Issue categories
     issues = [
@@ -96,6 +138,45 @@ def get_store_config(pos_profile: str):
 
 
 @frappe.whitelist(allow_guest=True)
+def get_brand_models(brand: str):
+    """
+    Return distinct device model names for a given brand from Item Master.
+    Uses Brand doctype as single source of truth:
+    - Includes items tagged with the brand itself
+    - Includes items tagged with sub-brands (where ch_parent_brand = brand)
+    """
+    # Single source of truth: query Brand doctype for the brand + all sub-brands
+    brand_rows = frappe.db.sql(
+        "SELECT name FROM `tabBrand` WHERE name = %s OR ch_parent_brand = %s",
+        (brand, brand),
+        as_dict=True,
+    )
+    db_brands = [r.name for r in brand_rows] or [brand]
+
+    brand_placeholders = ", ".join(["%s"] * len(db_brands))
+
+    rows = frappe.db.sql(
+        f"""SELECT DISTINCT item_name FROM `tabItem`
+            WHERE brand IN ({brand_placeholders})
+              AND disabled = 0
+            ORDER BY item_name ASC
+            LIMIT 200""",
+        tuple(db_brands),
+        as_dict=True,
+    )
+
+    seen = set()
+    models = []
+    for r in rows:
+        name = r.item_name.strip()
+        if name not in seen:
+            seen.add(name)
+            models.append(name)
+
+    return models
+
+
+@frappe.whitelist(allow_guest=True)
 def create_token(
     pos_profile: str,
     customer_name: str,
@@ -115,6 +196,7 @@ def create_token(
         frappe.throw(_("Customer name and phone are required"))
     if not pos_profile:
         frappe.throw(_("Store is required"))
+    customer_phone = _validate_indian_phone(customer_phone)  # normalize + validate
 
     profile = frappe.db.get_value(
         "POS Profile", pos_profile, ["name", "company", "warehouse"], as_dict=True
@@ -123,35 +205,45 @@ def create_token(
         frappe.throw(_("Invalid POS Profile"))
 
     company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
-    token_display = _generate_token_display(pos_profile, company_abbr)
 
-    doc = frappe.get_doc(
-        {
-            "doctype": "POS Kiosk Token",
-            "pos_profile": pos_profile,
-            "company": profile.company,
-            "store": profile.warehouse,
-            "status": "Waiting",
-            "token_display": token_display,
-            "customer_name": customer_name.strip(),
-            "customer_phone": customer_phone.strip(),
-            "device_type": device_type,
-            "device_brand": device_brand,
-            "device_model": device_model,
-            "issue_category": issue_category,
-            "issue_description": issue_description,
-            "expires_at": frappe.utils.add_days(now_datetime(), 1),
-        }
-    )
-    doc.flags.ignore_permissions = True
-    doc.insert()
+    # Acquire a per-store advisory lock so concurrent kiosk submissions
+    # get unique sequential numbers for the day.
+    today = frappe.utils.today()
+    lock_key = f"pos_seq_{pos_profile}_{today}"
+    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    try:
+        token_display = _generate_token_display(pos_profile, company_abbr)
+        doc = frappe.get_doc(
+            {
+                "doctype": "POS Kiosk Token",
+                "pos_profile": pos_profile,
+                "company": profile.company,
+                "store": profile.warehouse,
+                "status": "Waiting",
+                "token_display": token_display,
+                "customer_name": customer_name.strip(),
+                "customer_phone": customer_phone.strip(),
+                "device_type": device_type,
+                "device_brand": device_brand,
+                "device_model": device_model,
+                "issue_category": issue_category,
+                "issue_description": issue_description,
+                "visit_source": "Kiosk",
+                "visit_purpose": "Repair",
+                "expires_at": frappe.utils.add_days(now_datetime(), 1),
+            }
+        )
+        doc.flags.ignore_permissions = True
+        doc.insert()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
     return {
         "token": token_display,
         "name": doc.name,
         "customer_name": doc.customer_name,
         "store": pos_profile,
-        "device": f"{device_brand} {device_model}".strip(),
+        "device": device_model if device_model else device_brand,
         "issue": issue_category,
         "created_at": str(doc.creation),
     }
@@ -203,7 +295,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
     )
 
     for t in tokens:
-        t["device"] = f"{t.get('device_brand', '')} {t.get('device_model', '')}".strip()
+        t["device"] = _device_label(t.get('device_brand', ''), t.get('device_model', ''))
         # Compute wait time in minutes
         created = get_datetime(t["creation"])
         end_time = get_datetime(t["completed_at"]) if t.get("completed_at") else now
@@ -216,6 +308,49 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
         )
 
     return tokens
+
+
+@frappe.whitelist()
+def get_store_users(pos_profile: str = None, role: str = None):
+    """
+    Return users mapped to a store via CH Store.store_users child table.
+    Filtered by pos_profile (looks up CH Store via pos_profile field).
+    Optionally filtered by role (Technician / Store Executive / Store Manager).
+    Falls back to all enabled non-guest users if no mapping exists.
+    """
+    users = []
+    if pos_profile:
+        # Find the CH Store linked to this POS Profile
+        store_name = frappe.db.get_value("CH Store", {"pos_profile": pos_profile, "disabled": 0}, "name")
+        if store_name:
+            filters = {"parent": store_name, "parenttype": "CH Store"}
+            if role:
+                filters["role"] = role
+            rows = frappe.db.get_all(
+                "CH Store User",
+                filters=filters,
+                fields=["user", "full_name", "role"],
+                order_by="full_name",
+            )
+            # Enrich with live full_name in case fetch_from hasn't run
+            for r in rows:
+                if not r.full_name:
+                    r.full_name = frappe.db.get_value("User", r.user, "full_name") or r.user
+            users = rows
+
+    if not users:
+        # Fallback: all enabled System Users
+        rows = frappe.db.get_all(
+            "User",
+            filters={"enabled": 1, "user_type": "System User", "name": ("not in", ["Administrator", "Guest"])},
+            fields=["name as user", "full_name"],
+            order_by="full_name",
+        )
+        for r in rows:
+            r["role"] = ""
+        users = rows
+
+    return users
 
 
 @frappe.whitelist()
@@ -258,13 +393,87 @@ def complete_token(token_name: str):
 
 @frappe.whitelist()
 def cancel_token(token_name: str):
-    """Cancel a waiting token."""
+    """Cancel a token (typically Waiting status)."""
     doc = frappe.get_doc("POS Kiosk Token", token_name)
+    if doc.status in ("Completed", "Cancelled", "Converted"):
+        frappe.throw(_("Cannot cancel a {0} token").format(doc.status))
     doc.flags.ignore_permissions = True
     doc.status = "Cancelled"
     doc.save()
     frappe.db.commit()
     return {"status": "ok"}
+
+
+@frappe.whitelist()
+def drop_token(token_name: str):
+    """Mark a token as Dropped (customer left / no-show)."""
+    doc = frappe.get_doc("POS Kiosk Token", token_name)
+    if doc.status in ("Completed", "Cancelled", "Converted", "Dropped"):
+        frappe.throw(_("Cannot drop a {0} token").format(doc.status))
+    doc.flags.ignore_permissions = True
+    doc.status = "Dropped"
+    doc.save()
+    frappe.db.commit()
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Counter Walk-in — creates a lightweight token from POS app
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def log_counter_walkin(
+    pos_profile: str,
+    visit_purpose: str = "Enquiry",
+    customer_name: str = "",
+    customer_phone: str = "",
+    remarks: str = "",
+):
+    """
+    Create a minimal POS Kiosk Token for a direct-counter walk-in.
+    This replaces the old log_walkin counter-only approach.
+    Returns token name and display number.
+    """
+    profile = frappe.db.get_value(
+        "POS Profile", pos_profile, ["name", "company", "warehouse"], as_dict=True
+    )
+    if not profile:
+        frappe.throw(_("Invalid POS Profile"))
+
+    company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
+
+    today = frappe.utils.today()
+    lock_key = f"pos_seq_{pos_profile}_{today}"
+    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    try:
+        token_display = _generate_token_display(pos_profile, company_abbr)
+        doc = frappe.get_doc({
+            "doctype": "POS Kiosk Token",
+            "pos_profile": pos_profile,
+            "company": profile.company,
+            "store": profile.warehouse,
+            "status": "In Progress",
+            "token_display": token_display,
+            "customer_name": customer_name.strip() or "Walk-in",
+            "customer_phone": customer_phone.strip() or "",
+            "visit_source": "Counter",
+            "visit_purpose": visit_purpose,
+            "issue_description": remarks,
+            "started_at": now_datetime(),
+            "technician": frappe.session.user,
+            "expires_at": frappe.utils.add_days(now_datetime(), 1),
+        })
+        doc.flags.ignore_permissions = True
+        doc.insert()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
+
+    return {
+        "status": "ok",
+        "token": token_display,
+        "name": doc.name,
+        "visit_purpose": visit_purpose,
+    }
 
 
 @frappe.whitelist()
@@ -297,6 +506,7 @@ def get_dashboard_stats(pos_profile: str = None, date_filter: str = "today"):
     in_progress = sum(1 for t in all_tokens if t.status == "In Progress")
     completed = sum(1 for t in all_tokens if t.status == "Completed")
     cancelled = sum(1 for t in all_tokens if t.status in ("Cancelled", "Expired"))
+    dropped = sum(1 for t in all_tokens if t.status == "Dropped")
 
     # Completion rate: completed / (completed + waiting + in_progress) — excludes cancelled
     serviceable = completed + waiting + in_progress
@@ -330,6 +540,7 @@ def get_dashboard_stats(pos_profile: str = None, date_filter: str = "today"):
         "in_progress": in_progress,
         "completed": completed,
         "cancelled": cancelled,
+        "dropped": dropped,
         "avg_wait_minutes": avg_wait,
         "completion_rate": completion_rate,
         "store_breakdown": list(store_breakdown.values()),
@@ -361,7 +572,7 @@ def get_technician_tokens(technician: str = None):
     )
 
     for t in tokens:
-        t["device"] = f"{t.get('device_brand', '')} {t.get('device_model', '')}".strip()
+        t["device"] = _device_label(t.get('device_brand', ''), t.get('device_model', ''))
 
     return tokens
 
@@ -458,3 +669,111 @@ def get_pos_profiles():
         order_by="name asc",
     )
     return profiles
+
+
+# ---------------------------------------------------------------------------
+# POS Integration APIs
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def get_pos_waiting_tokens(pos_profile: str):
+    """
+    Returns waiting/in-progress tokens for the given POS store.
+    Called by the POS Queue panel on load and after each action.
+    """
+    today = frappe.utils.today()
+    tokens = frappe.db.sql(
+        """SELECT name, token_display, customer_name, customer_phone,
+                  device_type, device_brand, device_model,
+                  issue_category, issue_description, status,
+                  technician, creation
+           FROM `tabPOS Kiosk Token`
+           WHERE pos_profile = %s
+             AND status IN ('Waiting', 'In Progress')
+             AND DATE(creation) = %s
+           ORDER BY creation ASC""",
+        (pos_profile, today),
+        as_dict=True,
+    )
+    return tokens
+
+
+@frappe.whitelist()
+def convert_token_to_gofix(token_name: str, pos_profile: str,
+                            customer: str = None, device_item: str = None,
+                            device_condition: str = "Good",
+                            accessories: str = "",
+                            warranty_status: str = "Out of Warranty",
+                            data_disclaimer: int = 0):
+    """
+    Convert a POS Kiosk Token into a GoFix Service Request.
+    - Pulls all device/issue info from the token
+    - Creates the Service Request doc
+    - Marks the token as Converted with a link back
+    Returns the new Service Request name.
+    """
+    token = frappe.get_doc("POS Kiosk Token", token_name)
+    if token.status == "Converted":
+        frappe.throw(_("This token has already been converted to a GoFix request."))
+
+    profile = frappe.db.get_value(
+        "POS Profile", pos_profile,
+        ["company", "warehouse"], as_dict=True
+    )
+    if not profile:
+        frappe.throw(_("Invalid POS Profile"))
+
+    # Resolve issue category — must match GoFix Issue Category doctype
+    issue_cat = None
+    if token.issue_category:
+        if frappe.db.exists("Issue Category", token.issue_category):
+            issue_cat = token.issue_category
+        else:
+            # Try a case-insensitive match
+            match = frappe.db.get_value(
+                "Issue Category", {"category_name": token.issue_category}, "name"
+            )
+            issue_cat = match
+
+    sr = frappe.get_doc({
+        "doctype": "Service Request",
+        "customer": customer or None,
+        "customer_name": token.customer_name,
+        "contact_number": token.customer_phone,
+        "company": profile.company,
+        "source_warehouse": profile.warehouse,
+        "walkin_source": "Walk-in",    # Walkin Source master record named 'Walk-in'
+        "decision": "Accepted",        # Customer is present — accepting the device
+        "device_item": device_item or None,
+        "device_item_name": _device_label(token.device_brand, token.device_model) if not device_item else None,
+        "brand": token.device_brand,
+        "device_condition": device_condition,
+        "accessories_received": accessories,
+        "warranty_status": warranty_status,
+        "issue_category": issue_cat,
+        "issue_description": token.issue_description or token.issue_category,
+        "data_backup_disclaimer": data_disclaimer,
+        "mode_of_service": "Walk-in",
+        "priority": "Medium",
+        "internal_remarks": f"Created from CH Queue token {token.token_display}",
+        # Store back-reference
+        "referral_code": token.name,
+    })
+    sr.flags.ignore_permissions = True
+    sr.flags.ignore_mandatory = True
+    sr.insert()
+
+    # Mark token as Converted and link back to SR
+    frappe.db.set_value("POS Kiosk Token", token_name, {
+        "status": "Converted",
+        "technician": frappe.session.user_fullname or frappe.session.user,
+        "linked_service_request": sr.name,
+    })
+    frappe.db.commit()
+
+    return {
+        "service_request": sr.name,
+        "token": token.token_display,
+        "customer_name": token.customer_name,
+    }
+

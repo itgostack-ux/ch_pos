@@ -300,6 +300,11 @@ button { cursor: pointer; font-family: inherit; }
 .badge-progress { background: rgba(56,139,253,0.15);  color: #388bfd; }
 .badge-done     { background: rgba(63,185,80,0.15);   color: #3fb950; }
 .badge-cancel   { background: rgba(248,81,73,0.15);   color: #f85149; }
+.badge-drop    { background: rgba(248,81,73,0.10);   color: #da7526; }
+.action-btn.danger { background: transparent; border-color: #f85149; color: #f85149; }
+.action-btn.danger:hover { background: rgba(248,81,73,0.12); }
+.action-btn.warn { background: transparent; border-color: #da7526; color: #da7526; }
+.action-btn.warn:hover { background: rgba(218,117,38,0.12); }
 
 /* Action buttons */
 .action-btn {
@@ -463,6 +468,7 @@ button { cursor: pointer; font-family: inherit; }
           <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value c-done" id="s-done">—</div></div>
           <div class="stat-card"><div class="stat-label">Completion Rate</div><div class="stat-value c-rate" id="s-rate">—</div><div class="stat-sub" id="s-avgwait"></div></div>
           <div class="stat-card"><div class="stat-label">Cancelled</div><div class="stat-value" style="color:var(--danger)" id="s-cancelled">—</div></div>
+          <div class="stat-card"><div class="stat-label">Dropped</div><div class="stat-value" style="color:#da7526" id="s-dropped">—</div></div>
         </div>
 
         <!-- Recent Activity -->
@@ -609,8 +615,10 @@ button { cursor: pointer; font-family: inherit; }
   <div class="modal">
     <h3>Assign Technician</h3>
     <input type="hidden" id="assign-token-name">
-    <label>Technician (User Email / Name)</label>
-    <input type="text" id="assign-tech-input" placeholder="e.g. tech@company.com" autocomplete="off">
+    <label>Technician</label>
+    <select id="assign-tech-select">
+      <option value="">Loading…</option>
+    </select>
     <div class="modal-actions">
       <button class="action-btn" onclick="closeAssignModal()">Cancel</button>
       <button class="action-btn primary" onclick="confirmAssign()">Assign</button>
@@ -678,26 +686,44 @@ function apiPost(method, body) {
 }
 
 function getCsrf() {
-  return document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('csrf_token='))?.split('=')[1] || '';
+  // Server-injected CSRF token via Jinja context
+  var token = '{{ csrf_token }}';
+  if (token) return token;
+  // Fallback: Frappe JS global or cookie
+  return (typeof frappe !== 'undefined' && frappe.csrf_token) ? frappe.csrf_token
+    : document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('csrf_token='))?.split('=')[1] || '';
 }
 
 // ── Store Dropdown ─────────────────────────────────────────────────────────
 function loadStoreDropdown() {
   return api('get_pos_profiles').then(profiles => {
+    // If a store is selected, filter dropdown to same company
+    let company = '';
+    if (mgmt.posProfile) {
+      const match = profiles.find(p => p.name === mgmt.posProfile);
+      if (match) company = match.company;
+    }
+    const filtered = company ? profiles.filter(p => p.company === company) : profiles;
+    mgmt._allProfiles = profiles;
+    mgmt._company = company;
+
     const sel = document.getElementById('store-selector');
-    profiles.forEach(p => {
+    // Clear existing options except the first (All Stores)
+    while (sel.options.length > 1) sel.remove(1);
+    filtered.forEach(p => {
       const opt = document.createElement('option');
       opt.value = p.name;
       opt.textContent = p.name;
       sel.appendChild(opt);
     });
     // Update sidebar store info
-    const active = profiles.find(p => p.name === mgmt.posProfile) || profiles[0];
+    const active = filtered.find(p => p.name === mgmt.posProfile) || filtered[0];
     if (active) {
       document.getElementById('sb-store').textContent = active.name;
       document.getElementById('sb-company').textContent = active.company || '';
     } else {
-      document.getElementById('sb-store').textContent = 'All Stores';
+      document.getElementById('sb-store').textContent = company ? company + ' — All Stores' : 'All Stores';
+      document.getElementById('sb-company').textContent = company || '';
     }
   });
 }
@@ -707,6 +733,14 @@ function onStoreChange() {
   const sel = document.getElementById('store-selector');
   const opt = sel.options[sel.selectedIndex];
   document.getElementById('sb-store').textContent = opt.text || 'All Stores';
+  // Update URL to reflect store selection
+  const url = new URL(window.location);
+  if (mgmt.posProfile) {
+    url.searchParams.set('store', mgmt.posProfile);
+  } else {
+    url.searchParams.delete('store');
+  }
+  window.history.replaceState({}, '', url);
   refreshAll();
 }
 
@@ -764,6 +798,7 @@ function fetchAndRenderStats() {
     document.getElementById('s-progress').textContent = d.in_progress ?? '—';
     document.getElementById('s-done').textContent   = d.completed ?? '—';
     document.getElementById('s-cancelled').textContent = d.cancelled ?? '—';
+    document.getElementById('s-dropped').textContent = d.dropped ?? '—';
     document.getElementById('s-rate').textContent   = (d.completion_rate ?? '—') + '%';
     document.getElementById('s-avgwait').textContent = d.avg_wait_minutes
       ? `Avg wait: ${d.avg_wait_minutes} min` : '';
@@ -857,10 +892,13 @@ function buildQueueActions(t) {
   if (t.status === 'Waiting') {
     html += `<button class="action-btn primary" onclick="openAssign('${esc(t.name)}')">Assign</button>`;
     html += `<button class="action-btn" onclick="doStart('${esc(t.name)}')">Start</button>`;
+    html += `<button class="action-btn danger" onclick="doCancel('${esc(t.name)}')">Cancel</button>`;
   } else if (t.status === 'In Progress') {
     html += `<button class="action-btn primary" onclick="doComplete('${esc(t.name)}')">Complete ✓</button>`;
     html += `<button class="action-btn" onclick="openAssign('${esc(t.name)}')">Re‑Assign</button>`;
-  } else if (t.status === 'Completed' || t.status === 'Cancelled') {
+    html += `<button class="action-btn warn" onclick="doDrop('${esc(t.name)}')">Drop</button>`;
+    html += `<button class="action-btn danger" onclick="doCancel('${esc(t.name)}')">Cancel</button>`;
+  } else if (t.status === 'Completed' || t.status === 'Cancelled' || t.status === 'Dropped') {
     html += `<span style="color:var(--muted);font-size:0.8rem">${t.status}</span>`;
   }
   return html || '—';
@@ -899,7 +937,9 @@ function fetchAndRenderMyTokens() {
         <td><div style="display:flex;gap:6px;">
           ${t.status === 'Waiting' || t.status === 'In Progress'
             ? `<button class="action-btn primary" onclick="doStart('${esc(t.name)}')">Start Attending</button>
-               <button class="action-btn" onclick="doComplete('${esc(t.name)}')">Complete</button>`
+               <button class="action-btn" onclick="doComplete('${esc(t.name)}')">Complete</button>
+               <button class="action-btn warn" onclick="doDrop('${esc(t.name)}')">Drop</button>
+               <button class="action-btn danger" onclick="doCancel('${esc(t.name)}')">Cancel</button>`
             : `<span style="color:var(--muted);font-size:0.8rem">${esc(t.status)}</span>`}
         </div></td>
       </tr>`).join('');
@@ -957,16 +997,23 @@ function fetchAndRenderReports() {
 // ── Token Actions ──────────────────────────────────────────────────────────
 function openAssign(tokenName) {
   document.getElementById('assign-token-name').value = tokenName;
-  document.getElementById('assign-tech-input').value = '';
+  const sel = document.getElementById('assign-tech-select');
+  sel.innerHTML = '<option value="">Loading…</option>';
   document.getElementById('assign-modal').classList.add('open');
-  setTimeout(() => document.getElementById('assign-tech-input').focus(), 100);
+  // Load store-specific users
+  api('get_store_users', mgmt.posProfile ? { pos_profile: mgmt.posProfile } : {}).then(users => {
+    sel.innerHTML = '<option value="">Select technician…</option>' +
+      users.map(u => `<option value="${esc(u.user)}">${esc(u.full_name || u.user)}${u.role ? ' — ' + u.role : ''}</option>`).join('');
+  }).catch(() => {
+    sel.innerHTML = '<option value="">Failed to load</option>';
+  });
 }
 function closeAssignModal() { document.getElementById('assign-modal').classList.remove('open'); }
 
 function confirmAssign() {
   const tokenName = document.getElementById('assign-token-name').value;
-  const tech      = document.getElementById('assign-tech-input').value.trim();
-  if (!tech) { alert('Please enter a technician.'); return; }
+  const tech      = document.getElementById('assign-tech-select').value;
+  if (!tech) { alert('Please select a technician.'); return; }
   apiPost('assign_token', { token_name: tokenName, technician: tech }).then(() => {
     closeAssignModal();
     refreshAll();
@@ -982,6 +1029,16 @@ function doComplete(tokenName) {
   apiPost('complete_token', { token_name: tokenName }).then(() => refreshAll()).catch(err => alert('Error: ' + err.message));
 }
 
+function doCancel(tokenName) {
+  if (!confirm('Cancel this token?')) return;
+  apiPost('cancel_token', { token_name: tokenName }).then(() => refreshAll()).catch(err => alert('Error: ' + err.message));
+}
+
+function doDrop(tokenName) {
+  if (!confirm('Mark this token as Dropped (customer left / no-show)?')) return;
+  apiPost('drop_token', { token_name: tokenName }).then(() => refreshAll()).catch(err => alert('Error: ' + err.message));
+}
+
 // ── Utilities ──────────────────────────────────────────────────────────────
 function statusBadge(status) {
   const map = {
@@ -989,6 +1046,7 @@ function statusBadge(status) {
     'In Progress': 'badge-progress',
     'Completed': 'badge-done',
     'Cancelled': 'badge-cancel',
+    'Dropped': 'badge-drop',
     'Expired': 'badge-cancel',
     'Converted': 'badge-done',
   };

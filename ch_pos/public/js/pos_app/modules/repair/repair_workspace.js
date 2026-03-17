@@ -245,10 +245,12 @@ export class RepairWorkspace {
 				device_field.set_value("");
 				serial_field.set_value("");
 				issue_cat_field.set_value("");
-				// Increment walk-in + repair intake counter
+				// Create walk-in token for this repair intake
 				if (PosState.pos_profile) {
-					frappe.call({ method: "ch_pos.api.pos_api.log_walkin", args: { pos_profile: PosState.pos_profile, source: "POS Counter" } });
-					frappe.call({ method: "ch_pos.api.pos_api.increment_repair_intake_count", args: { pos_profile: PosState.pos_profile } });
+					frappe.call({
+						method: "ch_pos.api.token_api.log_counter_walkin",
+						args: { pos_profile: PosState.pos_profile, visit_purpose: "Repair" },
+					});
 				}
 			});
 		});

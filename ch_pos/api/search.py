@@ -281,13 +281,8 @@ def load_kiosk_token(token, pos_profile=None):
         doc.db_set("status", "Expired")
         frappe.throw(f"Token {token} has expired.")
 
-    # Increment kiosk walk-in counter on active session log
-    if pos_profile:
-        try:
-            from ch_pos.api.pos_api import log_walkin
-            log_walkin(pos_profile, source="Kiosk")
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), "Kiosk walk-in counter failed")
+    # Note: kiosk walk-in is already tracked via POS Kiosk Token (created by create_token).
+    # Legacy session-log counter bump removed — footfall now derived from token records.
 
     return {
         "items": [

@@ -23,14 +23,18 @@ def create_repair_intake(data, pos_profile=None):
     doc.insert()
     doc.submit()
 
-    # Increment walk-in + repair intake counter on session log
+    # Create walk-in token for this repair intake
     if pos_profile:
         try:
-            from ch_pos.api.pos_api import log_walkin, increment_repair_intake_count
-            log_walkin(pos_profile, source="POS Counter")
-            increment_repair_intake_count(pos_profile)
+            from ch_pos.api.token_api import log_counter_walkin
+            log_counter_walkin(
+                pos_profile=pos_profile,
+                visit_purpose="Repair",
+                customer_name=data.get("customer", "Walk-in"),
+                customer_phone=data.get("customer_phone", ""),
+            )
         except Exception:
-            frappe.log_error(frappe.get_traceback(), "Repair walk-in counter failed")
+            frappe.log_error(frappe.get_traceback(), "Repair walk-in token failed")
 
     return {
         "intake_name": doc.name,
