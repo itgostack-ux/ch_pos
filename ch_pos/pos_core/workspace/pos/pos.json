@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\": \"sc_open_pos\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Open POS\", \"col\": 4}}, {\"id\": \"shortcuts_header\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Quick Actions</b></span>\", \"col\": 12}}, {\"id\": \"sc_tokens\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Kiosk Tokens\", \"col\": 3}}, {\"id\": \"sc_guided\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Guided Sessions\", \"col\": 3}}, {\"id\": \"sc_comparisons\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Comparisons\", \"col\": 3}}, {\"id\": \"sc_repair\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Repair Intake\", \"col\": 3}}, {\"id\": \"spacer_1\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"links_header\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Documents</b></span>\", \"col\": 12}}, {\"id\": \"card_kiosk\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Kiosk\", \"col\": 4}}, {\"id\": \"card_ai\", \"type\": \"card\", \"data\": {\"card_name\": \"AI & Comparison\", \"col\": 4}}, {\"id\": \"card_repair\", \"type\": \"card\", \"data\": {\"card_name\": \"Repair\", \"col\": 4}}, {\"id\": \"spacer_2\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"card_config\", \"type\": \"card\", \"data\": {\"card_name\": \"Configuration\", \"col\": 4}}]",
+ "content": "[{\"id\":\"sc_open_pos\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Open POS\",\"col\":4}},{\"id\":\"hdr_quick\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Quick Actions</b></span>\",\"col\":12}},{\"id\":\"sc_tokens\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Kiosk Tokens\",\"col\":3}},{\"id\":\"sc_guided\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Guided Sessions\",\"col\":3}},{\"id\":\"sc_comparisons\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Comparisons\",\"col\":3}},{\"id\":\"sc_repair\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Repair Intake\",\"col\":3}},{\"id\":\"sc_session_log\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Session Logs\",\"col\":3}},{\"id\":\"sc_incentive\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Incentive Ledger\",\"col\":3}},{\"id\":\"spacer_1\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"hdr_docs\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Documents</b></span>\",\"col\":12}},{\"id\":\"card_kiosk\",\"type\":\"card\",\"data\":{\"card_name\":\"POS Kiosk\",\"col\":4}},{\"id\":\"card_ai\",\"type\":\"card\",\"data\":{\"card_name\":\"AI & Comparison\",\"col\":4}},{\"id\":\"card_repair\",\"type\":\"card\",\"data\":{\"card_name\":\"Repair\",\"col\":4}},{\"id\":\"card_buyback\",\"type\":\"card\",\"data\":{\"card_name\":\"Buyback\",\"col\":4}},{\"id\":\"spacer_2\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"hdr_reports\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Reports</b></span>\",\"col\":12}},{\"id\":\"card_reports\",\"type\":\"card\",\"data\":{\"card_name\":\"Store Reports\",\"col\":6}},{\"id\":\"spacer_3\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"hdr_config\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Configuration</b></span>\",\"col\":12}},{\"id\":\"card_config\",\"type\":\"card\",\"data\":{\"card_name\":\"Configuration\",\"col\":4}}]",
  "creation": "2026-03-08 10:00:00",
  "custom_blocks": [],
  "docstatus": 0,
@@ -28,7 +28,7 @@
    "link_count": 0,
    "link_to": "POS Kiosk Token",
    "link_type": "DocType",
-   "onboard": 0,
+   "onboard": 1,
    "type": "Link"
   },
   {
@@ -47,6 +47,16 @@
    "label": "POS Session Log",
    "link_count": 0,
    "link_to": "POS Session Log",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Incentive Ledger",
+   "link_count": 0,
+   "link_to": "POS Incentive Ledger",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -106,6 +116,74 @@
    "link_count": 0,
    "link_to": "POS Repair Intake",
    "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback Assessment",
+   "link_count": 0,
+   "link_to": "Buyback Assessment",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Store Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "POS Exchange Reconciliation",
+   "link_count": 0,
+   "link_to": "POS Exchange Reconciliation",
+   "link_type": "Report",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "POS Margin Leakage",
+   "link_count": 0,
+   "link_to": "POS Margin Leakage",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "POS Tax Summary",
+   "link_count": 0,
+   "link_to": "POS Tax Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Executive Summary",
+   "link_count": 0,
+   "link_to": "Executive Summary",
+   "link_type": "Report",
    "onboard": 0,
    "type": "Link"
   },
@@ -161,16 +239,6 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "POS Incentive Ledger",
-   "link_count": 0,
-   "link_to": "POS Incentive Ledger",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
    "label": "POS Incentive Slab",
    "link_count": 0,
    "link_to": "POS Incentive Slab",
@@ -179,7 +247,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-03-13 00:11:11.737838",
+ "modified": "2026-03-17 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "POS",
@@ -191,6 +259,13 @@
  "roles": [],
  "sequence_id": 5.0,
  "shortcuts": [
+  {
+   "color": "#2490ef",
+   "doc_view": "",
+   "label": "Open POS",
+   "link_to": "ch-pos-app",
+   "type": "Page"
+  },
   {
    "doc_view": "",
    "label": "Kiosk Tokens",
@@ -216,11 +291,16 @@
    "type": "DocType"
   },
   {
-   "color": "#2490ef",
-   "doc_view": "",
-   "label": "Open POS",
-   "link_to": "ch-pos-app",
-   "type": "Page"
+   "doc_view": "List",
+   "label": "Session Logs",
+   "link_to": "POS Session Log",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "List",
+   "label": "Incentive Ledger",
+   "link_to": "POS Incentive Ledger",
+   "type": "DocType"
   }
  ],
  "title": "POS"
