@@ -12,6 +12,11 @@ export const PosState = {
 	company: null,
 	warehouse: null,
 	price_list: null,
+
+	// ── Session & Cash Control ──────────────────────────
+	session_name: null,
+	business_date: null,
+	store: null,
 	payment_modes: [],
 	store_caps: {},
 	pos_ext: {},

@@ -25,7 +25,11 @@
   "receipt_template",
   "kiosk_section",
   "kiosk_idle_timeout_sec",
-  "kiosk_allowed_item_groups"
+  "kiosk_allowed_item_groups",
+  "session_section",
+  "default_float",
+  "column_break_session",
+  "idle_timeout_minutes"
  ],
  "fields": [
   {
@@ -157,6 +161,31 @@
    "fieldtype": "Table MultiSelect",
    "label": "Allowed Item Groups",
    "options": "POS Kiosk Allowed Item Group"
+  },
+  {
+   "fieldname": "session_section",
+   "fieldtype": "Section Break",
+   "label": "Session & Cash Control"
+  },
+  {
+   "default": "0",
+   "description": "Default opening float amount (₹) for new sessions. 0 means cashier must enter manually.",
+   "fieldname": "default_float",
+   "fieldtype": "Currency",
+   "label": "Default Float",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_session",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "480",
+   "description": "Minutes of inactivity after which the session is flagged for auto-close (0 = disabled).",
+   "fieldname": "idle_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Idle Timeout (minutes)",
+   "non_negative": 1
   }
  ],
  "index_web_pages_for_search": 0,

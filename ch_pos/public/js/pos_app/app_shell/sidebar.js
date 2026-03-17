@@ -187,6 +187,9 @@ export class Sidebar {
 			</div>`;
 
 		this.wrapper.html(html);
+
+		// Hook point for session controls (rendered by SessionControls externally)
+		EventBus.emit("sidebar:rendered", this.wrapper);
 	}
 
 	/** Re-render store info after profile loads */

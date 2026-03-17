@@ -130,6 +130,12 @@ def create_pos_invoice(pos_profile, customer, items,
     """
     frappe.has_permission("POS Invoice", "create", throw=True)
 
+    # ── Session guard — no billing without active session ─────────────────────
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+    active = get_active_session(pos_profile) if pos_profile else None
+    if not active:
+        frappe.throw(frappe._("No active POS session. Open a session before billing."))
+
     # ── Duplicate-submit guard ────────────────────────────────────────────────
     if client_request_id:
         existing = frappe.db.sql(

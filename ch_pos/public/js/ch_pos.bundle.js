@@ -16,6 +16,10 @@ import { LayoutManager } from "./pos_app/app_shell/layout_manager.js";
 import { CartPanel } from "./pos_app/shared/cart_panel.js";
 import { format_number } from "./pos_app/shared/helpers.js";
 
+// Session & Cash Control
+import { SessionOpeningScreen } from "./pos_app/shared/session_opening_screen.js";
+import { SessionControls } from "./pos_app/app_shell/session_controls.js";
+
 // Services
 import { ItemService } from "./pos_app/services/item_service.js";
 import { CartService } from "./pos_app/services/cart_service.js";
@@ -58,6 +62,8 @@ ch_pos.PosApp = class PosApp {
 		this._init_cart_panel();
 		this._init_services();
 		this._init_modules();
+		this.session_opening_screen = new SessionOpeningScreen();
+		this.session_controls = new SessionControls();
 		this._check_pos_profile();
 	}
 
@@ -95,12 +101,20 @@ ch_pos.PosApp = class PosApp {
 			args: { user: frappe.session.user },
 			callback: (r) => {
 				const entries = r.message || [];
-				if (entries.length === 1) {
-					// Auto-resume the single open session
-					this._load_profile(entries[0]);
-				} else {
-					this._show_profile_selector(entries);
-				}
+				// Use session-based opening screen
+				this.session_opening_screen.show(entries).then((session_data) => {
+					// session_data = { session_name, business_date, store, pos_profile, company, opening_entry }
+					PosState.session_name = session_data.session_name;
+					PosState.business_date = session_data.business_date;
+					PosState.store = session_data.store;
+					EventBus.emit("session:loaded", session_data);
+
+					const entry = session_data.opening_entry || {
+						pos_profile: session_data.pos_profile,
+						company: session_data.company,
+					};
+					this._load_profile(entry);
+				});
 			},
 		});
 	}

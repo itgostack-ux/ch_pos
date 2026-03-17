@@ -1,0 +1,131 @@
+{
+ "actions": [],
+ "creation": "2026-03-17 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "user",
+  "employee_name",
+  "column_break_info",
+  "pin_hash",
+  "store",
+  "is_active",
+  "role_section",
+  "can_approve_opening",
+  "can_approve_closing",
+  "can_approve_cash_drop",
+  "can_override_business_date",
+  "column_break_role",
+  "can_approve_discount",
+  "can_force_close_session"
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "User",
+   "options": "User",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "employee_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_info",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "pin_hash",
+   "fieldtype": "Password",
+   "label": "Manager PIN",
+   "reqd": 1,
+   "description": "4-6 digit PIN for quick in-store approvals"
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "label": "Store",
+   "options": "CH Store",
+   "description": "Leave blank for all stores"
+  },
+  {
+   "default": 1,
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Active"
+  },
+  {
+   "fieldname": "role_section",
+   "fieldtype": "Section Break",
+   "label": "Approval Permissions"
+  },
+  {
+   "default": 1,
+   "fieldname": "can_approve_opening",
+   "fieldtype": "Check",
+   "label": "Can Approve Opening Balance"
+  },
+  {
+   "default": 1,
+   "fieldname": "can_approve_closing",
+   "fieldtype": "Check",
+   "label": "Can Approve Closing (Variance)"
+  },
+  {
+   "default": 1,
+   "fieldname": "can_approve_cash_drop",
+   "fieldtype": "Check",
+   "label": "Can Approve Cash Drop"
+  },
+  {
+   "default": 0,
+   "fieldname": "can_override_business_date",
+   "fieldtype": "Check",
+   "label": "Can Override Business Date"
+  },
+  {
+   "fieldname": "column_break_role",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": 1,
+   "fieldname": "can_approve_discount",
+   "fieldtype": "Check",
+   "label": "Can Approve Discount Override"
+  },
+  {
+   "default": 0,
+   "fieldname": "can_force_close_session",
+   "fieldtype": "Check",
+   "label": "Can Force-Close Session"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-17 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH Manager PIN",
+ "naming_rule": "By fieldname",
+ "autoname": "field:user",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

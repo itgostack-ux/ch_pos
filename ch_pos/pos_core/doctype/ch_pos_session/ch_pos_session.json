@@ -1,0 +1,397 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-03-17 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "store",
+  "pos_profile",
+  "register_id",
+  "column_break_info",
+  "user",
+  "status",
+  "business_date",
+  "shift_section",
+  "shift_start",
+  "shift_end",
+  "column_break_shift",
+  "duration_minutes",
+  "idle_timeout_sec",
+  "opening_section",
+  "opening_cash",
+  "expected_float",
+  "column_break_opening",
+  "opening_approved_by",
+  "opening_approved_at",
+  "opening_remarks",
+  "closing_section",
+  "closing_cash_expected",
+  "closing_cash_actual",
+  "cash_variance",
+  "column_break_closing",
+  "variance_reason",
+  "closing_approved_by",
+  "closing_approved_at",
+  "auto_closed",
+  "totals_section",
+  "total_invoices",
+  "total_sales",
+  "total_returns",
+  "total_return_amount",
+  "column_break_totals",
+  "net_sales",
+  "total_cash_drops",
+  "pos_opening_entry",
+  "session_log",
+  "payment_details",
+  "denomination_details",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "default": "POSS-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "POSS-.YYYY.-.#####",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Store",
+   "options": "CH Store",
+   "reqd": 1
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "POS Profile",
+   "options": "POS Profile",
+   "reqd": 1
+  },
+  {
+   "fieldname": "register_id",
+   "fieldtype": "Data",
+   "label": "Register / Terminal ID",
+   "description": "Physical terminal identifier"
+  },
+  {
+   "fieldname": "column_break_info",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Cashier",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "default": "Open",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Open\nSuspended\nClosing\nClosed",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "business_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Business Date",
+   "reqd": 1,
+   "description": "Controlled by store business date \u2014 not system date"
+  },
+  {
+   "fieldname": "shift_section",
+   "fieldtype": "Section Break",
+   "label": "Shift Timing"
+  },
+  {
+   "default": "Now",
+   "fieldname": "shift_start",
+   "fieldtype": "Datetime",
+   "label": "Shift Start",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shift_end",
+   "fieldtype": "Datetime",
+   "label": "Shift End",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "column_break_shift",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "duration_minutes",
+   "fieldtype": "Int",
+   "label": "Duration (min)",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "idle_timeout_sec",
+   "fieldtype": "Int",
+   "label": "Idle Timeout (sec)",
+   "default": "1800",
+   "description": "Auto-alert after this many seconds of inactivity"
+  },
+  {
+   "fieldname": "opening_section",
+   "fieldtype": "Section Break",
+   "label": "Opening Balance"
+  },
+  {
+   "fieldname": "opening_cash",
+   "fieldtype": "Currency",
+   "label": "Opening Cash",
+   "reqd": 1,
+   "non_negative": 1,
+   "description": "Cash in drawer at shift start"
+  },
+  {
+   "fieldname": "expected_float",
+   "fieldtype": "Currency",
+   "label": "Expected Float",
+   "read_only": 1,
+   "description": "Previous session closing balance or store default float"
+  },
+  {
+   "fieldname": "column_break_opening",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "opening_approved_by",
+   "fieldtype": "Data",
+   "label": "Opening Approved By",
+   "read_only": 1,
+   "description": "Manager who approved the opening balance"
+  },
+  {
+   "fieldname": "opening_approved_at",
+   "fieldtype": "Datetime",
+   "label": "Opening Approved At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "opening_remarks",
+   "fieldtype": "Small Text",
+   "label": "Opening Remarks"
+  },
+  {
+   "fieldname": "closing_section",
+   "fieldtype": "Section Break",
+   "label": "Closing & Reconciliation"
+  },
+  {
+   "fieldname": "closing_cash_expected",
+   "fieldtype": "Currency",
+   "label": "Expected Closing Cash",
+   "read_only": 1,
+   "description": "Opening cash + cash sales \u2212 cash returns \u2212 cash drops",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "closing_cash_actual",
+   "fieldtype": "Currency",
+   "label": "Actual Closing Cash",
+   "non_negative": 1,
+   "description": "Counted cash at end of shift",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "cash_variance",
+   "fieldtype": "Currency",
+   "label": "Cash Variance",
+   "read_only": 1,
+   "description": "Actual \u2212 Expected",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "column_break_closing",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "variance_reason",
+   "fieldtype": "Small Text",
+   "label": "Variance Reason",
+   "description": "Mandatory if variance > \u20b9100",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "closing_approved_by",
+   "fieldtype": "Data",
+   "label": "Closing Approved By",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "closing_approved_at",
+   "fieldtype": "Datetime",
+   "label": "Closing Approved At",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "auto_closed",
+   "fieldtype": "Check",
+   "label": "Auto-Closed",
+   "read_only": 1,
+   "description": "Set if session was force-closed by system/manager",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "totals_section",
+   "fieldtype": "Section Break",
+   "label": "Session Totals"
+  },
+  {
+   "fieldname": "total_invoices",
+   "fieldtype": "Int",
+   "label": "Total Invoices",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "total_sales",
+   "fieldtype": "Currency",
+   "label": "Total Sales",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "total_returns",
+   "fieldtype": "Int",
+   "label": "Total Returns",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "total_return_amount",
+   "fieldtype": "Currency",
+   "label": "Total Return Amount",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "column_break_totals",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "net_sales",
+   "fieldtype": "Currency",
+   "label": "Net Sales",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "total_cash_drops",
+   "fieldtype": "Currency",
+   "label": "Total Cash Drops",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "pos_opening_entry",
+   "fieldtype": "Link",
+   "label": "POS Opening Entry",
+   "options": "POS Opening Entry",
+   "read_only": 1,
+   "description": "ERPNext opening entry created for this session"
+  },
+  {
+   "fieldname": "session_log",
+   "fieldtype": "Link",
+   "label": "Session Log",
+   "options": "POS Session Log",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payment_details",
+   "fieldtype": "Table",
+   "label": "Payment Details",
+   "options": "POS Closing Payment Detail",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "denomination_details",
+   "fieldtype": "Table",
+   "label": "Cash Denomination Count",
+   "options": "CH Cash Denomination",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "CH POS Session",
+   "print_hide": 1,
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-03-17 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH POS Session",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "cancel": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "POS User",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "track_changes": 1
+}
