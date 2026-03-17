@@ -84,6 +84,24 @@ export class ReportsWorkspace {
 							</div>
 						</div>
 					</div>
+					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #ef4444">
+						<div class="section-body" style="display:flex;gap:12px;align-items:center">
+							<div class="ch-rpt-kpi-icon" style="background:#fee2e2;color:#ef4444;"><i class="fa fa-ban"></i></div>
+							<div>
+								<div class="ch-rpt-kpi-value ch-rpt-cancelled">0</div>
+								<div class="ch-rpt-kpi-label">${__("Cancelled")}</div>
+							</div>
+						</div>
+					</div>
+					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #f97316">
+						<div class="section-body" style="display:flex;gap:12px;align-items:center">
+							<div class="ch-rpt-kpi-icon" style="background:#fff7ed;color:#f97316;"><i class="fa fa-user-times"></i></div>
+							<div>
+								<div class="ch-rpt-kpi-value ch-rpt-dropped">0</div>
+								<div class="ch-rpt-kpi-label">${__("Dropped")}</div>
+							</div>
+						</div>
+					</div>
 				</div>
 
 				<div class="ch-rpt-kpi-row">
@@ -231,6 +249,8 @@ export class ReportsWorkspace {
 				panel.find(".ch-rpt-conversion").text((f.conversion_pct || 0) + "%");
 				panel.find(".ch-rpt-repairs").text(f.repair_intake_count || 0);
 				panel.find(".ch-rpt-buybacks").text(f.buyback_count || 0);
+				panel.find(".ch-rpt-cancelled").text(f.cancelled_count || 0);
+				panel.find(".ch-rpt-dropped").text(f.dropped_count || 0);
 			},
 		});
 
