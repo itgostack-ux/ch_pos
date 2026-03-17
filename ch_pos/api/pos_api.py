@@ -713,6 +713,44 @@ def validate_coupon(coupon_code, customer=None, cart_total=0):
 
 
 @frappe.whitelist()
+def scan_barcode(barcode, pos_profile=None):
+    """Look up an item by exact barcode or serial number for POS scanner."""
+    frappe.has_permission("POS Invoice", "create", throw=True)
+    barcode = (barcode or "").strip()
+    if not barcode:
+        return None
+
+    item_code = None
+
+    # 1. Check Item Barcode (exact match)
+    item_code = frappe.db.get_value("Item Barcode", {"barcode": barcode}, "parent")
+
+    # 2. Fallback: check Serial No
+    if not item_code:
+        sn = frappe.db.get_value(
+            "Serial No", barcode, ["item_code", "status"], as_dict=True
+        )
+        if sn and sn.status in ("Active", "Inactive"):
+            item_code = sn.item_code
+
+    # 3. Fallback: exact item_code match
+    if not item_code and frappe.db.exists("Item", barcode):
+        item_code = barcode
+
+    if not item_code:
+        return None
+
+    from ch_pos.api.search import pos_item_search
+    result = pos_item_search(
+        search_term=item_code,
+        pos_profile=pos_profile,
+        page_size=1,
+    )
+    items = (result or {}).get("items", [])
+    return items[0] if items else None
+
+
+@frappe.whitelist()
 def search_invoices_for_return(search_term, pos_profile=None):
     """Search POS Invoices for return/exchange processing."""
     search_term = (search_term or "").strip()
@@ -728,6 +766,7 @@ def search_invoices_for_return(search_term, pos_profile=None):
         ["name", "like", f"%{search_term}%"],
         ["customer", "like", f"%{search_term}%"],
         ["customer_name", "like", f"%{search_term}%"],
+        ["contact_mobile", "like", f"%{search_term}%"],
     ]
 
     invoices = frappe.get_all(

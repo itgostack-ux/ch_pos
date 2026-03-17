@@ -95,9 +95,12 @@ ch_pos.PosApp = class PosApp {
 			args: { user: frappe.session.user },
 			callback: (r) => {
 				const entries = r.message || [];
-				// Always show the profile selector so the user can choose
-				// between multiple POS profiles or resume an existing session
-				this._show_profile_selector(entries);
+				if (entries.length === 1) {
+					// Auto-resume the single open session
+					this._load_profile(entries[0]);
+				} else {
+					this._show_profile_selector(entries);
+				}
 			},
 		});
 	}

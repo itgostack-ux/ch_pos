@@ -66,6 +66,15 @@ export class QueueWorkspace {
 		const pos_profile = PosState.pos_profile;
 		if (!pos_profile) return;
 
+		// Show loading indicator while fetching
+		if (this._panel) {
+			this._panel.find(".ch-queue-token-list").html(
+				`<div style="text-align:center;padding:40px;color:var(--text-muted)">
+					<i class="fa fa-spinner fa-spin"></i> ${__("Loading tokens…")}
+				</div>`
+			);
+		}
+
 		frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile })
 			.then((tokens) => this._renderTokenList(tokens))
 			.catch(() => {

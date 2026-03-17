@@ -1,6 +1,6 @@
 import frappe
 from frappe.model.document import Document
-from frappe.utils import add_to_date, now_datetime
+from frappe.utils import add_to_date, flt, now_datetime
 
 from buyback.utils import validate_indian_phone
 
@@ -9,11 +9,13 @@ class POSKioskToken(Document):
     def validate(self):
         if self.customer_phone:
             self.customer_phone = validate_indian_phone(self.customer_phone, "Customer Phone")
+        for row in self.items:
+            row.amount = flt(row.qty or 0) * flt(row.rate or 0)
+        self._calculate_total()
 
     def before_submit(self):
         if not self.expires_at:
             self.expires_at = add_to_date(now_datetime(), minutes=30)
-        self._calculate_total()
 
     def on_cancel(self):
         """Handle token cancellation — expire the token."""
