@@ -20,7 +20,7 @@ const COMPANY_MODE_MAP = {
 	// Retail company modes (GoGizmo or any retail company)
 	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "model_compare", "claims", "exceptions"],
 	// Service company modes (GoFix or any service company)
-	service: ["sell", "returns", "buyback", "repair", "service", "claims", "exceptions"],
+	service: ["sell", "returns", "buyback", "repair", "queue", "service", "claims", "exceptions"],
 };
 
 /** Heuristic: does this company name indicate a service company? */
@@ -43,6 +43,7 @@ const MODE_SECTIONS = [
 		modes: [
 			{ key: "buyback", icon: "fa-exchange",  label: __("Buyback") },
 			{ key: "repair",  icon: "fa-wrench",    label: __("Repair") },
+			{ key: "queue",   icon: "fa-ticket",    label: __("Queue") },
 			{ key: "service", icon: "fa-cogs",      label: __("Service") },
 			{ key: "claims",  icon: "fa-shield",    label: __("Claims") },
 			{ key: "exceptions", icon: "fa-exclamation-triangle", label: __("Exceptions") },
@@ -198,24 +199,66 @@ export class Sidebar {
 	bind() {
 		const sidebar = this.wrapper;
 
-		// Walk-in Log button
+		// Walk-in Log button — creates a token record for direct counter walk-ins
 		sidebar.on("click", ".ch-pos-walkin-btn", () => {
-			frappe.call({
-				method: "ch_pos.api.pos_api.log_walkin",
-				args: { pos_profile: PosState.pos_profile, source: "POS Counter" },
-				callback: (r) => {
-					const d = r.message || {};
-					if (d.ok) {
-						frappe.show_alert({
-							message: __("Walk-in logged. Today: {0} walk-ins, {1} kiosk", [d.walkin_count, d.kiosk_count]),
-							indicator: "green",
-						});
-						EventBus.emit("walkin:logged", d);
-					} else {
-						frappe.show_alert({ message: __("Could not log walk-in: {0}", [d.reason || "No active session"]), indicator: "orange" });
-					}
+			const d = new frappe.ui.Dialog({
+				title: __("Log Walk-in"),
+				fields: [
+					{
+						label: __("Purpose"),
+						fieldname: "visit_purpose",
+						fieldtype: "Select",
+						options: "Enquiry\nRepair\nSales\nBuyback\nOther",
+						default: "Enquiry",
+						reqd: 1,
+					},
+					{
+						label: __("Customer Name"),
+						fieldname: "customer_name",
+						fieldtype: "Data",
+						placeholder: __("Optional"),
+					},
+					{
+						label: __("Phone"),
+						fieldname: "customer_phone",
+						fieldtype: "Data",
+						placeholder: __("Optional"),
+					},
+					{
+						label: __("Remarks"),
+						fieldname: "remarks",
+						fieldtype: "Small Text",
+						placeholder: __("Optional — what did the customer need?"),
+					},
+				],
+				primary_action_label: __("Log Walk-in"),
+				primary_action: (values) => {
+					d.hide();
+					frappe.call({
+						method: "ch_pos.api.token_api.log_counter_walkin",
+						args: {
+							pos_profile: PosState.pos_profile,
+							visit_purpose: values.visit_purpose,
+							customer_name: values.customer_name || "",
+							customer_phone: values.customer_phone || "",
+							remarks: values.remarks || "",
+						},
+						callback: (r) => {
+							const res = r.message || {};
+							if (res.status === "ok") {
+								frappe.show_alert({
+									message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
+									indicator: "green",
+								});
+								EventBus.emit("walkin:logged", res);
+							} else {
+								frappe.show_alert({ message: __("Could not log walk-in"), indicator: "orange" });
+							}
+						},
+					});
 				},
 			});
+			d.show();
 		});
 
 		// Collapse toggle
@@ -287,6 +330,6 @@ export class Sidebar {
 		return ["sell", "returns", "buyback", "repair"];
 	}
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "model_compare"];
+		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "model_compare", "claims", "exceptions", "queue"];
 	}
 }

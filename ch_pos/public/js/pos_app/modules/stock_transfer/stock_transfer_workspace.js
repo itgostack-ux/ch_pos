@@ -119,6 +119,13 @@ export class StockTransferWorkspace {
 		const from_wh = frappe.utils.escape_html(se.from_warehouse || "");
 		const to_wh = frappe.utils.escape_html(se.to_warehouse || "");
 
+		// Accept button for incoming drafts
+		const accept_btn = (tab === "incoming" && se.docstatus === 0)
+			? `<button class="btn btn-xs btn-success ch-st-accept-btn" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
+				<i class="fa fa-check"></i> ${__("Receive")}
+			   </button>`
+			: "";
+
 		// Parse courier info from remarks
 		let courier_html = "";
 		if (se.remarks) {
@@ -152,6 +159,7 @@ export class StockTransferWorkspace {
 						</div>
 						<div style="display:flex;gap:6px;align-items:center">
 							<span class="ch-pos-badge ${status_cls}">${status_label}</span>
+							${accept_btn}
 							<button class="btn btn-xs btn-outline-secondary ch-st-view-detail" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
 								<i class="fa fa-external-link"></i>
 							</button>
@@ -401,19 +409,100 @@ export class StockTransferWorkspace {
 	}
 
 	_accept_transfer(panel, name) {
-		frappe.confirm(
-			__("Submit stock entry {0}?", [name]),
-			() => {
+		// Fetch items first, then show receive dialog with editable quantities
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_stock_transfer_items",
+			args: { stock_entry: name },
+			freeze: true,
+			callback: (r) => {
+				if (!r.message) return;
+				this._show_receive_dialog(panel, r.message);
+			},
+		});
+	}
+
+	_show_receive_dialog(panel, data) {
+		const items = data.items || [];
+		const rows_html = items.map((item, idx) => `
+			<tr data-idx="${idx}">
+				<td>
+					<div style="font-weight:600">${frappe.utils.escape_html(item.item_name || item.item_code)}</div>
+					<div style="font-size:11px;color:var(--pos-text-muted)">${frappe.utils.escape_html(item.item_code)}</div>
+				</td>
+				<td class="text-center" style="font-weight:600">${item.qty}</td>
+				<td class="text-center">
+					<input type="number" class="form-control ch-st-recv-qty" data-idx="${idx}"
+						value="${item.qty}" min="0" max="${item.qty}" step="1"
+						style="width:80px;text-align:center;margin:0 auto;border-radius:var(--pos-radius-sm)">
+				</td>
+				<td class="text-center" style="color:var(--pos-text-muted)">${frappe.utils.escape_html(item.uom)}</td>
+			</tr>
+		`).join("");
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Receive Transfer {0}", [data.name]),
+			size: "large",
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "receive_items_html",
+					options: `
+						<div style="margin-bottom:12px;color:var(--pos-text-secondary);font-size:13px">
+							<strong>${frappe.utils.escape_html(data.from_warehouse || "")}</strong>
+							<i class="fa fa-arrow-right" style="margin:0 8px"></i>
+							<strong>${frappe.utils.escape_html(data.to_warehouse || "")}</strong>
+						</div>
+						<table class="table table-bordered" style="margin:0">
+							<thead><tr>
+								<th>${__("Item")}</th>
+								<th class="text-center" style="width:90px">${__("Sent")}</th>
+								<th class="text-center" style="width:100px">${__("Received")}</th>
+								<th class="text-center" style="width:70px">${__("UOM")}</th>
+							</tr></thead>
+							<tbody>${rows_html}</tbody>
+						</table>
+						<div style="font-size:12px;color:var(--pos-text-muted);margin-top:8px">
+							<i class="fa fa-info-circle"></i>
+							${__("Reduce quantities for items not fully received. Set to 0 to reject an item.")}
+						</div>
+					`,
+				},
+			],
+			primary_action_label: __("Confirm Receive"),
+			primary_action: () => {
+				const received_items = items.map((item, idx) => {
+					const input = dialog.$wrapper.find(`.ch-st-recv-qty[data-idx="${idx}"]`);
+					return {
+						item_code: item.item_code,
+						received_qty: parseFloat(input.val()) || 0,
+					};
+				});
+
+				// Validate at least one item received
+				const total_recv = received_items.reduce((s, r) => s + r.received_qty, 0);
+				if (total_recv <= 0) {
+					frappe.msgprint(__("At least one item must be received"));
+					return;
+				}
+
+				dialog.hide();
 				frappe.call({
-					method: "frappe.client.submit",
-					args: { doc: { doctype: "Stock Entry", name } },
+					method: "ch_pos.api.pos_api.receive_stock_transfer",
+					args: { stock_entry: data.name, received_items },
 					freeze: true,
-					callback: () => {
-						frappe.show_alert({ message: __("Transfer {0} accepted", [name]), indicator: "green" });
-						this._load_tab(panel, "incoming");
+					freeze_message: __("Processing receive..."),
+					callback: (r) => {
+						if (r.message) {
+							const msg = r.message.partial
+								? __("Transfer {0} partially received", [data.name])
+								: __("Transfer {0} received in full", [data.name]);
+							frappe.show_alert({ message: msg, indicator: "green" });
+							this._load_tab(panel, "incoming");
+						}
 					},
 				});
-			}
-		);
+			},
+		});
+		dialog.show();
 	}
 }

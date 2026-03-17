@@ -1184,12 +1184,31 @@ def get_repair_closure_data(service_request):
     """
     sr = frappe.get_doc("Service Request", service_request)
 
-    eng_users = frappe.db.sql("""
-        SELECT DISTINCT u.name, u.full_name FROM `tabUser` u
-        JOIN `tabHas Role` hr ON hr.parent = u.name
-        WHERE hr.role IN ('Service Engineer','Service Manager','Technician') AND u.enabled=1
-        ORDER BY u.full_name
-    """, as_dict=True)
+    # Get store-specific users from CH Store mapping; fall back to role-based global list
+    _sr_warehouse = sr.source_warehouse or ""
+    _store_name = None
+    if _sr_warehouse:
+        _pos_profile_name = frappe.db.get_value("POS Profile", {"warehouse": _sr_warehouse}, "name")
+        if _pos_profile_name:
+            _store_name = frappe.db.get_value("CH Store", {"pos_profile": _pos_profile_name, "disabled": 0}, "name")
+    if _store_name:
+        _rows = frappe.db.get_all(
+            "CH Store User",
+            filters={"parent": _store_name, "parenttype": "CH Store"},
+            fields=["user as name", "full_name"],
+            order_by="full_name",
+        )
+        for r in _rows:
+            if not r.full_name:
+                r.full_name = frappe.db.get_value("User", r.name, "full_name") or r.name
+        eng_users = _rows
+    else:
+        eng_users = frappe.db.sql("""
+            SELECT DISTINCT u.name, u.full_name FROM `tabUser` u
+            JOIN `tabHas Role` hr ON hr.parent = u.name
+            WHERE hr.role IN ('Service Engineer','Service Manager','Technician') AND u.enabled=1
+            ORDER BY u.full_name
+        """, as_dict=True)
 
     spare_parts = frappe.db.get_all(
         "Service Request Spare Part",
@@ -2299,6 +2318,93 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     se.insert()
     frappe.db.commit()
     return se.name
+
+
+@frappe.whitelist()
+def get_stock_transfer_items(stock_entry):
+    """Return line items of a Stock Entry for the receive dialog."""
+    se = frappe.get_doc("Stock Entry", stock_entry)
+    if se.stock_entry_type != "Material Transfer":
+        frappe.throw(frappe._("Not a Material Transfer"))
+
+    items = []
+    for row in se.items:
+        items.append({
+            "item_code": row.item_code,
+            "item_name": row.item_name,
+            "qty": flt(row.qty),
+            "uom": row.uom,
+            "s_warehouse": row.s_warehouse,
+            "t_warehouse": row.t_warehouse,
+        })
+    return {
+        "name": se.name,
+        "docstatus": se.docstatus,
+        "from_warehouse": se.from_warehouse,
+        "to_warehouse": se.to_warehouse,
+        "items": items,
+    }
+
+
+@frappe.whitelist()
+def receive_stock_transfer(stock_entry, received_items):
+    """Accept a stock transfer with (optionally) reduced quantities.
+
+    If all quantities match the original, the existing Stock Entry is submitted.
+    If any quantity is reduced, the original is amended: quantities are updated
+    in-place and the entry is submitted.  Items with received qty = 0 are removed.
+    """
+    import json
+    if isinstance(received_items, str):
+        received_items = json.loads(received_items)
+
+    se = frappe.get_doc("Stock Entry", stock_entry)
+    if se.docstatus != 0:
+        frappe.throw(frappe._("Stock Entry {0} is not in Draft state").format(stock_entry))
+    if se.stock_entry_type != "Material Transfer":
+        frappe.throw(frappe._("Not a Material Transfer"))
+
+    # Build a lookup: item_code → received qty
+    recv_map = {r["item_code"]: flt(r.get("received_qty", 0)) for r in received_items}
+
+    # Validate: received qty must not exceed original
+    for row in se.items:
+        recv_qty = recv_map.get(row.item_code, 0)
+        if recv_qty > flt(row.qty):
+            frappe.throw(
+                frappe._("Received qty ({0}) for {1} exceeds transferred qty ({2})").format(
+                    recv_qty, row.item_code, row.qty
+                )
+            )
+
+    # Check if this is a full or partial receive
+    is_partial = False
+    for row in se.items:
+        recv_qty = recv_map.get(row.item_code, 0)
+        if recv_qty != flt(row.qty):
+            is_partial = True
+            break
+
+    if is_partial:
+        # Update quantities in-place, remove zero-qty rows
+        rows_to_remove = []
+        for row in se.items:
+            recv_qty = recv_map.get(row.item_code, 0)
+            if recv_qty <= 0:
+                rows_to_remove.append(row)
+            else:
+                row.qty = recv_qty
+        for row in rows_to_remove:
+            se.items.remove(row)
+
+        if not se.items:
+            frappe.throw(frappe._("At least one item must be received"))
+
+        se.save()
+
+    se.submit()
+    frappe.db.commit()
+    return {"name": se.name, "partial": is_partial}
 
 
 # ── Model Comparison ──────────────────────────────────────
@@ -3484,23 +3590,32 @@ def increment_buyback_count(pos_profile):
 
 @frappe.whitelist()
 def get_today_footfall(pos_profile):
-	"""Return today's footfall summary: walk-ins, kiosk, repairs, buybacks, invoices."""
+	"""Return today's footfall summary derived from POS Kiosk Token records."""
 	today = nowdate()
 
-	# Session log totals for today
-	session_totals = frappe.db.sql("""
-		SELECT
-			COALESCE(SUM(walkin_count), 0) AS walkin_count,
-			COALESCE(SUM(kiosk_count), 0) AS kiosk_count,
-			COALESCE(SUM(repair_intake_count), 0) AS repair_intake_count,
-			COALESCE(SUM(buyback_count), 0) AS buyback_count
-		FROM `tabPOS Session Log`
-		WHERE pos_profile = %s
-		  AND DATE(session_start) = %s
-		  AND docstatus = 1
+	# Primary source: POS Kiosk Token records
+	source_counts = frappe.db.sql("""
+		SELECT IFNULL(visit_source, 'Counter') AS visit_source, COUNT(*) AS cnt
+		FROM `tabPOS Kiosk Token`
+		WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
+		GROUP BY visit_source
 	""", (pos_profile, today), as_dict=True)
 
-	s = session_totals[0] if session_totals else {}
+	source_map = {r.visit_source: cint(r.cnt) for r in source_counts}
+	walkin_count = source_map.get("Counter", 0)
+	kiosk_count = source_map.get("Kiosk", 0)
+	other_count = sum(v for k, v in source_map.items() if k not in ("Counter", "Kiosk"))
+
+	purpose_counts = frappe.db.sql("""
+		SELECT IFNULL(visit_purpose, '') AS visit_purpose, COUNT(*) AS cnt
+		FROM `tabPOS Kiosk Token`
+		WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
+		GROUP BY visit_purpose
+	""", (pos_profile, today), as_dict=True)
+
+	purpose_map = {r.visit_purpose: cint(r.cnt) for r in purpose_counts}
+	repair_intake_count = purpose_map.get("Repair", 0)
+	buyback_count = purpose_map.get("Buyback", 0)
 
 	# Invoices today
 	invoices_today = frappe.db.count("POS Invoice", {
@@ -3510,14 +3625,28 @@ def get_today_footfall(pos_profile):
 		"is_return": 0,
 	})
 
-	total_footfall = cint(s.get("walkin_count", 0)) + cint(s.get("kiosk_count", 0))
+	# Status counts
+	status_counts = frappe.db.sql("""
+		SELECT status, COUNT(*) AS cnt
+		FROM `tabPOS Kiosk Token`
+		WHERE pos_profile = %s AND DATE(creation) = %s
+		GROUP BY status
+	""", (pos_profile, today), as_dict=True)
+
+	status_map = {r.status: cint(r.cnt) for r in status_counts}
+	cancelled_count = cint(status_map.get("Cancelled", 0))
+	dropped_count = cint(status_map.get("Dropped", 0))
+
+	total_footfall = walkin_count + kiosk_count + other_count
 	conversion_pct = round((invoices_today / total_footfall * 100) if total_footfall > 0 else 0, 1)
 
 	return {
-		"walkin_count": cint(s.get("walkin_count", 0)),
-		"kiosk_count": cint(s.get("kiosk_count", 0)),
-		"repair_intake_count": cint(s.get("repair_intake_count", 0)),
-		"buyback_count": cint(s.get("buyback_count", 0)),
+		"walkin_count": walkin_count,
+		"kiosk_count": kiosk_count,
+		"repair_intake_count": repair_intake_count,
+		"buyback_count": buyback_count,
+		"cancelled_count": cancelled_count,
+		"dropped_count": dropped_count,
 		"total_footfall": total_footfall,
 		"invoices_today": invoices_today,
 		"conversion_pct": conversion_pct,

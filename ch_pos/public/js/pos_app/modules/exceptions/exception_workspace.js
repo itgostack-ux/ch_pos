@@ -136,14 +136,14 @@ export class ExceptionWorkspace {
 		frappe.xcall("frappe.client.get_list", {
 			doctype: "CH Exception Type",
 			filters: { enabled: 1 },
-			fields: ["name", "exception_type_name"],
-			order_by: "exception_type_name asc",
+			fields: ["name", "exception_type"],
+			order_by: "exception_type asc",
 			limit_page_length: 0,
 		}).then((types) => {
 			const sel = panel.find(".ch-exc-type");
 			sel.empty().append(`<option value="">${__("Select type...")}</option>`);
 			(types || []).forEach((t) => {
-				sel.append(`<option value="${frappe.utils.escape_html(t.name)}">${frappe.utils.escape_html(t.exception_type_name || t.name)}</option>`);
+				sel.append(`<option value="${frappe.utils.escape_html(t.name)}">${frappe.utils.escape_html(t.exception_type || t.name)}</option>`);
 			});
 		});
 	}
