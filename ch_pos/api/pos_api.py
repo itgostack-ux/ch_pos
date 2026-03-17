@@ -132,13 +132,13 @@ def create_pos_invoice(pos_profile, customer, items,
 
     # ── Duplicate-submit guard ────────────────────────────────────────────────
     if client_request_id:
-        _crid = frappe.db.escape(str(client_request_id)[:140])
         existing = frappe.db.sql(
-            f"""SELECT name FROM `tabPOS Invoice`
-                WHERE custom_client_request_id = {_crid}
+            """SELECT name FROM `tabPOS Invoice`
+                WHERE custom_client_request_id = %(crid)s
                   AND docstatus != 2
                   AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
                 LIMIT 1""",
+            {"crid": str(client_request_id)[:140]},
             as_dict=True,
         )
         if existing:
@@ -1033,6 +1033,7 @@ def check_serial_returnable(serial_no, original_invoice=None):
 @frappe.whitelist()
 def create_repair_job_from_pos(service_request):
     """Accept a Service Request and create Job Assignment in one step from POS."""
+    frappe.has_permission("Service Request", "write", throw=True)
     try:
         from gofix.gofix_services.doctype.service_request.service_request import accept_service_request
         from gofix.gofix_services.doctype.job_assignment.job_assignment import create_job_sheet_from_service_order
@@ -1578,6 +1579,7 @@ def create_buyback_assessment_with_grading(
     condition_checks=None, kyc_id_type=None, kyc_id_number=None, kyc_name=None
 ):
     """Create a Buyback Assessment with condition grading and KYC from POS."""
+    frappe.has_permission("Buyback Assessment", "create", throw=True)
     if isinstance(condition_checks, str):
         condition_checks = frappe.parse_json(condition_checks)
     condition_checks = condition_checks or {}
@@ -1599,7 +1601,6 @@ def create_buyback_assessment_with_grading(
     doc.quoted_price = valuation["final_price"]
     doc.remarks = _build_grading_remarks(condition_checks, valuation, kyc_id_type, kyc_id_number, kyc_name)
 
-    doc.flags.ignore_permissions = True
     doc.insert()
 
     # Auto-submit so the assessment is immediately usable at POS checkout
@@ -2170,6 +2171,7 @@ def store_dashboard(pos_profile):
 @frappe.whitelist()
 def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None):
     """Create a Material Request from POS for stock replenishment."""
+    frappe.has_permission("Material Request", "create", throw=True)
     import json
     if isinstance(items, str):
         items = json.loads(items)
@@ -2278,6 +2280,7 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
                           courier_name=None, courier_tracking=None,
                           handover_notes=None, expected_delivery_date=None):
     """Create a Stock Entry (Material Transfer) from POS with courier hand-over."""
+    frappe.has_permission("Stock Entry", "create", throw=True)
     import json
     if isinstance(items, str):
         items = json.loads(items)
@@ -2355,6 +2358,7 @@ def receive_stock_transfer(stock_entry, received_items):
     If any quantity is reduced, the original is amended: quantities are updated
     in-place and the entry is submitted.  Items with received qty = 0 are removed.
     """
+    frappe.has_permission("Stock Entry", "submit", throw=True)
     import json
     if isinstance(received_items, str):
         received_items = json.loads(received_items)

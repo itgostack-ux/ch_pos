@@ -93,97 +93,137 @@ def pos_item_search(
 
     items = []
     nearby_warehouses = _get_nearby_warehouses(pos_profile) if pos_profile else []
-    for row in items_raw:
-        enriched = _enrich_item(row, warehouse, profile_doc, nearby_warehouses)
-        items.append(enriched)
+
+    if items_raw:
+        item_codes = [r.item_code for r in items_raw]
+
+        # Batch-fetch variant attributes
+        all_attrs = frappe.get_all(
+            "Item Variant Attribute",
+            filters={"parent": ("in", item_codes)},
+            fields=["parent", "attribute", "attribute_value", "idx"],
+            order_by="parent, idx",
+        )
+        attrs_map = {}
+        for a in all_attrs:
+            attrs_map.setdefault(a.parent, []).append(
+                {"attribute": a.attribute, "attribute_value": a.attribute_value}
+            )
+
+        # Batch-fetch CH Item Prices (POS channel)
+        all_prices = frappe.get_all(
+            "CH Item Price",
+            filters={"item_code": ("in", item_codes), "channel": "POS", "status": "Active"},
+            fields=["item_code", "selling_price", "mrp", "mop"],
+        )
+        price_map = {p.item_code: p for p in all_prices}
+
+        # Batch-fetch stock from Bin
+        all_bins = []
+        if warehouse:
+            all_bins = frappe.get_all(
+                "Bin",
+                filters={"item_code": ("in", item_codes), "warehouse": warehouse},
+                fields=["item_code", "actual_qty"],
+            )
+        stock_map = {b.item_code: flt(b.actual_qty) for b in all_bins}
+
+        # Batch-fetch active offers
+        today = frappe.utils.today()
+        all_offers = frappe.get_all(
+            "CH Item Offer",
+            filters={
+                "item_code": ("in", item_codes),
+                "channel": "POS",
+                "status": "Active",
+                "start_date": ("<=", today),
+                "end_date": (">=", today),
+            },
+            fields=["item_code", "name", "offer_name", "offer_type", "value_type", "value", "priority"],
+            order_by="priority asc",
+        )
+        offers_map = {}
+        for o in all_offers:
+            offers_map.setdefault(o.item_code, []).append({
+                "name": o.name, "offer_name": o.offer_name,
+                "offer_type": o.offer_type, "value_type": o.value_type, "value": o.value,
+            })
+
+        # Batch-fetch nearby store stock (only needed item_codes)
+        nearby_wh_names = [ns["warehouse"] for ns in nearby_warehouses] if nearby_warehouses else []
+        nearby_stock_map = {}
+        if nearby_wh_names:
+            out_of_stock_items = [ic for ic in item_codes if stock_map.get(ic, 0) <= 0]
+            if out_of_stock_items:
+                nearby_bins = frappe.get_all(
+                    "Bin",
+                    filters={
+                        "item_code": ("in", out_of_stock_items),
+                        "warehouse": ("in", nearby_wh_names),
+                        "actual_qty": (">", 0),
+                    },
+                    fields=["item_code", "warehouse", "actual_qty"],
+                )
+                for nb in nearby_bins:
+                    nearby_stock_map.setdefault(nb.item_code, []).append(
+                        {"warehouse": nb.warehouse, "qty": flt(nb.actual_qty)}
+                    )
+
+        # Build a warehouse → store info lookup
+        wh_store_map = {}
+        if nearby_warehouses:
+            for ns in nearby_warehouses:
+                wh_store_map[ns["warehouse"]] = ns
+
+        for row in items_raw:
+            row.attributes = attrs_map.get(row.item_code, [])
+
+            # ch_item_type fallback heuristic
+            if not row.get("ch_item_type"):
+                name_lower = (row.item_name or "").lower()
+                if "refurb" in name_lower or "renewed" in name_lower:
+                    row.ch_item_type = "Refurbished"
+                elif "display" in name_lower or "demo" in name_lower:
+                    row.ch_item_type = "Display"
+                elif "pre-owned" in name_lower or "preowned" in name_lower or "used" in name_lower:
+                    row.ch_item_type = "Pre-Owned"
+
+            # Condition grade
+            row.condition_grade = ""
+            if row.get("ch_item_type") in ("Refurbished", "Pre-Owned"):
+                name_lower = (row.item_name or "").lower()
+                for grade in ["Superb", "Good", "Fair", "Excellent"]:
+                    if grade.lower() in name_lower:
+                        row.condition_grade = grade
+                        break
+
+            # Pricing
+            ch_price = price_map.get(row.item_code)
+            row.selling_price = flt(ch_price.selling_price) if ch_price else 0
+            row.mrp = flt(ch_price.mrp) if ch_price else 0
+
+            # Stock
+            row.stock_qty = stock_map.get(row.item_code, 0)
+
+            # Offers
+            row.offers = offers_map.get(row.item_code, [])
+
+            # Nearby stores
+            row.nearby_stores = []
+            if nearby_warehouses and row.stock_qty <= 0:
+                for ns_bin in nearby_stock_map.get(row.item_code, []):
+                    store_info = wh_store_map.get(ns_bin["warehouse"])
+                    if store_info:
+                        row.nearby_stores.append({
+                            "store_name": store_info["store_name"],
+                            "store_code": store_info["store_code"],
+                            "city": store_info["city"],
+                            "qty": ns_bin["qty"],
+                        })
+
+            items.append(row)
 
     return {"items": items, "total": total}
-
-
-def _enrich_item(row, warehouse, profile_doc, nearby_warehouses=None):
-    """Add pricing, stock, offer, variant attributes, and nearby-store data to an item row."""
-
-    # Variant attributes (Colour, Storage, RAM, etc.)
-    row.attributes = frappe.db.get_all(
-        "Item Variant Attribute",
-        filters={"parent": row.item_code},
-        fields=["attribute", "attribute_value"],
-        order_by="idx",
-    )
-
-    # Use the ch_item_type field from Item master (set by ch_item_master)
-    # Only fall back to name-based heuristic if the field is not set
-    if not row.get("ch_item_type"):
-        name_lower = (row.item_name or "").lower()
-        if "refurb" in name_lower or "renewed" in name_lower:
-            row.ch_item_type = "Refurbished"
-        elif "display" in name_lower or "demo" in name_lower:
-            row.ch_item_type = "Display"
-        elif "pre-owned" in name_lower or "preowned" in name_lower or "used" in name_lower:
-            row.ch_item_type = "Pre-Owned"
-
-    # Condition grade — detect from item name for Refurbished / Pre-Owned items
-    row.condition_grade = ""
-    if row.get("ch_item_type") in ("Refurbished", "Pre-Owned"):
-        name_lower = (row.item_name or "").lower()
-        for grade in ["Superb", "Good", "Fair", "Excellent"]:
-            if grade.lower() in name_lower:
-                row.condition_grade = grade
-                break
-
-    # CH Item Price (POS channel)
-    ch_price = frappe.db.get_value(
-        "CH Item Price",
-        {"item_code": row.item_code, "channel": "POS", "status": "Active"},
-        ["selling_price", "mrp", "mop"],
-        as_dict=True,
-    )
-    row.selling_price = flt(ch_price.selling_price) if ch_price else 0
-    row.mrp = flt(ch_price.mrp) if ch_price else 0
-
-    # Stock qty
-    if warehouse:
-        row.stock_qty = flt(
-            frappe.db.get_value("Bin", {"item_code": row.item_code, "warehouse": warehouse}, "actual_qty")
-        )
-    else:
-        row.stock_qty = 0
-
-    # Active offers
-    row.offers = _get_item_offers(row.item_code)
-
-    # Nearby store stock (only for out-of-stock or low-stock items)
-    row.nearby_stores = []
-    if nearby_warehouses and row.stock_qty <= 0:
-        for ns in nearby_warehouses:
-            qty = flt(frappe.db.get_value(
-                "Bin", {"item_code": row.item_code, "warehouse": ns["warehouse"]}, "actual_qty"
-            ))
-            if qty > 0:
-                row.nearby_stores.append({
-                    "store_name": ns["store_name"],
-                    "store_code": ns["store_code"],
-                    "city": ns["city"],
-                    "qty": qty,
-                })
-
-    return row
-
-
-def _get_item_offers(item_code):
-    today = frappe.utils.today()
-    return frappe.db.get_all(
-        "CH Item Offer",
-        filters={
-            "item_code": item_code,
-            "channel": "POS",
-            "status": "Active",
-            "start_date": ["<=", today],
-            "end_date": [">=", today],
-        },
-        fields=["name", "offer_name", "offer_type", "value_type", "value"],
-        order_by="priority asc",
-    )
 
 
 def _get_nearby_warehouses(pos_profile):
