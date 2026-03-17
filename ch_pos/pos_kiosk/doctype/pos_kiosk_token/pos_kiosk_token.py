@@ -2,8 +2,14 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import add_to_date, now_datetime
 
+from buyback.utils import validate_indian_phone
+
 
 class POSKioskToken(Document):
+    def validate(self):
+        if self.customer_phone:
+            self.customer_phone = validate_indian_phone(self.customer_phone, "Customer Phone")
+
     def before_submit(self):
         if not self.expires_at:
             self.expires_at = add_to_date(now_datetime(), minutes=30)

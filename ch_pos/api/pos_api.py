@@ -1,5 +1,6 @@
 import frappe
 from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money
+from buyback.utils import validate_indian_phone
 
 
 @frappe.whitelist()
@@ -585,6 +586,7 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None):
             "name",
         )
     elif mobile_no:
+        mobile_no = validate_indian_phone(mobile_no, "Mobile No")
         assessment_name = frappe.db.get_value(
             "Buyback Assessment",
             {"mobile_no": mobile_no, "status": ["in", valid_statuses]},
@@ -1445,7 +1447,6 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
         frappe.db.set_value("Sales Order", sr.service_order, "workflow_state", "Closed",
                             update_modified=False)
 
-    frappe.db.commit()
     return {
         "invoice": inv.name,
         "grand_total": inv.grand_total,
@@ -1580,6 +1581,8 @@ def create_buyback_assessment_with_grading(
     if isinstance(condition_checks, str):
         condition_checks = frappe.parse_json(condition_checks)
     condition_checks = condition_checks or {}
+
+    mobile_no = validate_indian_phone(mobile_no, "Mobile No")
 
     # Calculate valuation
     valuation = calculate_buyback_valuation(item_code, condition_checks)
@@ -2212,7 +2215,6 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
 
     mr.insert()
     mr.submit()
-    frappe.db.commit()
     return mr.name
 
 
@@ -2316,7 +2318,6 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
         se.remarks = " | ".join(remark_parts)
 
     se.insert()
-    frappe.db.commit()
     return se.name
 
 
@@ -2403,7 +2404,6 @@ def receive_stock_transfer(stock_entry, received_items):
         se.save()
 
     se.submit()
-    frappe.db.commit()
     return {"name": se.name, "partial": is_partial}
 
 
@@ -2892,7 +2892,6 @@ def create_quick_job_card(customer, contact_number, device_item,
         estimated_hours=flt(estimated_hours) if estimated_hours else None,
     )
 
-    frappe.db.commit()
     return {
         "service_request": sr.name,
         "service_order": service_order,
@@ -3555,7 +3554,6 @@ def log_walkin(pos_profile, source="POS Counter"):
 			"UPDATE `tabPOS Session Log` SET walkin_count = walkin_count + 1 WHERE name = %s",
 			(session_log,)
 		)
-	frappe.db.commit()
 
 	new_walkin = frappe.db.get_value("POS Session Log", session_log, "walkin_count") or 0
 	new_kiosk = frappe.db.get_value("POS Session Log", session_log, "kiosk_count") or 0
@@ -3571,7 +3569,6 @@ def increment_repair_intake_count(pos_profile):
 			"UPDATE `tabPOS Session Log` SET repair_intake_count = repair_intake_count + 1 WHERE name = %s",
 			(session_log,)
 		)
-		frappe.db.commit()
 	return {"ok": True}
 
 
@@ -3584,7 +3581,6 @@ def increment_buyback_count(pos_profile):
 			"UPDATE `tabPOS Session Log` SET buyback_count = buyback_count + 1 WHERE name = %s",
 			(session_log,)
 		)
-		frappe.db.commit()
 	return {"ok": True}
 
 
@@ -3677,7 +3673,6 @@ def flag_reprint_needed(pos_invoice, reason="Print failed"):
 		"inv": pos_invoice,
 		"reason": (reason or "Print failed")[:200],
 	})
-	frappe.db.commit()
 	return {"status": "queued", "pos_invoice": pos_invoice}
 
 

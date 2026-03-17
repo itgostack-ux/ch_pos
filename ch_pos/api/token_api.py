@@ -7,7 +7,9 @@ import re
 
 import frappe
 from frappe import _
-from frappe.utils import now_datetime, add_days, get_datetime, time_diff_in_hours
+from frappe.utils import now_datetime, get_datetime
+
+from buyback.utils import normalize_indian_phone, validate_indian_phone
 
 
 # ---------------------------------------------------------------------------
@@ -17,22 +19,12 @@ from frappe.utils import now_datetime, add_days, get_datetime, time_diff_in_hour
 _INDIAN_PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 
 def _normalize_phone(raw: str) -> str:
-    """Strip formatting and country-code prefix, return bare 10-digit string."""
-    s = re.sub(r"[\s\-().]", "", raw or "")
-    if s.startswith("+91"):
-        s = s[3:]
-    elif s.startswith("0091"):
-        s = s[4:]
-    elif s.startswith("0") and len(s) == 11:
-        s = s[1:]
-    return s
+    """Alias for backward compatibility — delegates to shared utility."""
+    return normalize_indian_phone(raw)
 
 def _validate_indian_phone(raw: str) -> str:
-    """Return normalized 10-digit phone or raise frappe.ValidationError."""
-    digits = _normalize_phone(raw)
-    if not _INDIAN_PHONE_RE.match(digits):
-        frappe.throw(_("Please enter a valid 10-digit Indian mobile number (starting with 6–9)."))
-    return digits
+    """Alias for backward compatibility — delegates to shared utility."""
+    return validate_indian_phone(raw, "Phone number")
 
 def _device_label(brand: str, model: str) -> str:
     """Return a clean device label, avoiding repeating the brand if model already starts with it."""
@@ -363,7 +355,6 @@ def assign_token(token_name: str, technician: str):
     if doc.status == "Waiting":
         doc.status = "In Progress"
     doc.save()
-    frappe.db.commit()
     return {"status": "ok", "token_status": doc.status}
 
 
@@ -375,7 +366,6 @@ def start_token(token_name: str):
     doc.started_at = now_datetime()
     doc.status = "In Progress"
     doc.save()
-    frappe.db.commit()
     return {"status": "ok"}
 
 
@@ -387,7 +377,6 @@ def complete_token(token_name: str):
     doc.completed_at = now_datetime()
     doc.status = "Completed"
     doc.save()
-    frappe.db.commit()
     return {"status": "ok"}
 
 
@@ -400,7 +389,6 @@ def cancel_token(token_name: str):
     doc.flags.ignore_permissions = True
     doc.status = "Cancelled"
     doc.save()
-    frappe.db.commit()
     return {"status": "ok"}
 
 
@@ -413,7 +401,6 @@ def drop_token(token_name: str):
     doc.flags.ignore_permissions = True
     doc.status = "Dropped"
     doc.save()
-    frappe.db.commit()
     return {"status": "ok"}
 
 
@@ -441,6 +428,10 @@ def log_counter_walkin(
         frappe.throw(_("Invalid POS Profile"))
 
     company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
+
+    # Validate phone if provided (walk-ins don't always have a phone)
+    if customer_phone and customer_phone.strip():
+        customer_phone = validate_indian_phone(customer_phone.strip(), "Phone number")
 
     today = frappe.utils.today()
     lock_key = f"pos_seq_{pos_profile}_{today}"
@@ -769,7 +760,6 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
         "technician": frappe.session.user_fullname or frappe.session.user,
         "linked_service_request": sr.name,
     })
-    frappe.db.commit()
 
     return {
         "service_request": sr.name,

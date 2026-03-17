@@ -1,8 +1,14 @@
 import frappe
 from frappe.model.document import Document
 
+from buyback.utils import validate_indian_phone
+
 
 class POSRepairIntake(Document):
+    def validate(self):
+        if self.customer_phone:
+            self.customer_phone = validate_indian_phone(self.customer_phone, "Customer Phone")
+
     def on_submit(self):
         self._create_service_request()
 
