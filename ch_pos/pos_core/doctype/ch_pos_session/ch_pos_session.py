@@ -189,10 +189,40 @@ class CHPOSSession(Document):
         if manager_pin_user:
             self.closing_approved_by = manager_pin_user
             self.closing_approved_at = now_datetime()
+        else:
+            self.closing_approved_by = None
+            self.closing_approved_at = None
 
-        self.save()
+        # Calculate totals and variance (runs _calculate_totals + _calculate_cash_variance + _validate_variance)
+        self._calculate_totals()
+        self._calculate_cash_variance()
+        self._validate_variance()
+
+        # Persist all computed fields (save() on submitted doc won't persist them)
+        update_fields = {
+            "status": "Closed",
+            "shift_end": self.shift_end,
+            "closing_cash_actual": self.closing_cash_actual,
+            "closing_cash_expected": self.closing_cash_expected,
+            "cash_variance": self.cash_variance,
+            "total_cash_drops": self.total_cash_drops,
+            "variance_reason": self.variance_reason,
+            "total_invoices": self.total_invoices,
+            "total_sales": self.total_sales,
+            "total_returns": self.total_returns,
+            "total_return_amount": self.total_return_amount,
+            "net_sales": self.net_sales,
+        }
+        if hasattr(self, 'duration_minutes'):
+            update_fields["duration_minutes"] = self.duration_minutes
+        update_fields["closing_approved_by"] = self.closing_approved_by
+        update_fields["closing_approved_at"] = self.closing_approved_at
+
+        for field, value in update_fields.items():
+            self.db_set(field, value, update_modified=False)
+
+        self.db_set("modified", now_datetime())
         self.status = "Closed"
-        self.db_set("status", "Closed")
         self._log_close_event()
 
     def _log_close_event(self):

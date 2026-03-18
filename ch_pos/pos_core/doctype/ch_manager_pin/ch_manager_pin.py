@@ -5,6 +5,7 @@ import hashlib
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils.password import get_decrypted_password
 
 
 class CHManagerPIN(Document):
@@ -40,7 +41,7 @@ def verify_manager_pin(pin, store=None, permission=None):
     )
 
     for mgr in managers:
-        stored_pin = frappe.utils.password.get_decrypted_password(
+        stored_pin = get_decrypted_password(
             "CH Manager PIN", mgr.name, "pin_hash"
         )
         if stored_pin == pin:
