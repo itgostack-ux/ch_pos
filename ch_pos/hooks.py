@@ -39,6 +39,7 @@ doc_events = {
             "ch_pos.overrides.pos_invoice.validate_margin_scheme",
             "ch_pos.overrides.discount_control.validate_pos_commercial_policy",
             "ch_pos.overrides.return_policy.validate_return_policy",
+            "ch_pos.overrides.pos_invoice.validate_eod_lock",
         ],
         "on_submit": [
             "ch_pos.overrides.pos_invoice.create_customer_device_records",

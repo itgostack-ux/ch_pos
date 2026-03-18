@@ -647,6 +647,33 @@ def _apply_margin_scheme(doc):
     doc.custom_margin_exempted = total_exempted
 
 
+def validate_eod_lock(doc, method=None):
+    """Hook: validate — block POS Invoice creation/amendment after session close.
+
+    Once a CH POS Session for this pos_profile + business_date is Closed,
+    no new invoices (or amendments) are allowed for that profile + date.
+    """
+    if not doc.pos_profile or not doc.posting_date:
+        return
+
+    closed = frappe.db.exists(
+        "CH POS Session",
+        {
+            "pos_profile": doc.pos_profile,
+            "business_date": doc.posting_date,
+            "status": "Closed",
+            "docstatus": 1,
+        },
+    )
+    if closed:
+        frappe.throw(
+            frappe._(
+                "POS Session for {0} on {1} is already closed. "
+                "No new invoices can be created. Contact your manager to reopen."
+            ).format(doc.pos_profile, doc.posting_date)
+        )
+
+
 def _get_incoming_rate(item):
     """Get purchase cost (incoming rate) for a POS Invoice item."""
     # Try from serial no first

@@ -270,6 +270,10 @@ def create_pos_invoice(pos_profile, customer, items,
         exchange_credit = flt(ba.quoted_price) or flt(ba.estimated_price)
         inv.custom_exchange_amount = exchange_credit
 
+        # Apply exchange credit as a discount so ERPNext reduces grand_total
+        # and payment validation (paid_amount >= grand_total) passes.
+        inv.discount_amount = flt(inv.discount_amount or 0) + exchange_credit
+
     # Additional discount
     if flt(additional_discount_percentage) > 0:
         inv.additional_discount_percentage = flt(additional_discount_percentage)
