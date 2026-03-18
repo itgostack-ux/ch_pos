@@ -3507,6 +3507,8 @@ def submit_closing_entry(closing_entry, counted_amounts_json, counted_cash=0, re
     Returns:
         {name, status, cash_variance, payment_variances: [...]}
     """
+    frappe.has_permission("POS Closing Entry", "submit", throw=True)
+
     if isinstance(counted_amounts_json, str):
         counted_amounts_json = frappe.parse_json(counted_amounts_json)
 
@@ -3878,6 +3880,8 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
 @frappe.whitelist()
 def pos_update_buyback_price(order_name, final_price, inspector_notes=None):
 	"""Update the final buyback price on an existing Buyback Order."""
+	frappe.has_permission("Buyback Order", "write", throw=True)
+
 	doc = frappe.get_doc("Buyback Order", order_name)
 	if doc.docstatus == 2:
 		frappe.throw(frappe._("Cannot update a cancelled order."))
