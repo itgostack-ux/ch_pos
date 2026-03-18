@@ -27,8 +27,17 @@ def _create_or_update_device(serial_no, customer, **kwargs):
 
 
 class CustomPOSInvoice(POSInvoice):
-    """Extends POS Invoice for margin scheme GST on selling side."""
+    """Extends POS Invoice for margin scheme GST on selling side.
 
+    Also overrides on_submit/on_cancel to create SLE/GL entries at submit time.
+    Standard ERPNext v15 POS Invoice defers stock ledger and GL entry creation
+    to POS Closing Entry → Consolidated Sales Invoice.  GoGizmo needs real-time
+    stock and accounting for IMEI serial tracking, so we invoke those methods
+    directly.
+    """
+    # POS Invoice DocType lacks this Sales Invoice field; accounts_controller
+    # accesses it during make_precision_loss_gl_entry.
+    use_company_roundoff_cost_center = 0
     def validate(self):
         # When loyalty points are redeemed, paid_amount must include loyalty_amount
         # so ERPNext's validate_full_payment (paid_amount >= invoice_total) passes.
@@ -39,7 +48,159 @@ class CustomPOSInvoice(POSInvoice):
         super().validate()
         _apply_margin_scheme(self)
 
+    def on_submit(self):
+        # Run standard POS Invoice on_submit (loyalty, phone payments, serial
+        # batch bundles, coupon code).
+        super().on_submit()
+
+        # Create SLE and GL entries that POS Invoice normally skips.
+        if self.update_stock == 1:
+            self.update_stock_ledger()
+
+        self.make_gl_entries()
+
+        if self.update_stock == 1:
+            self.repost_future_sle_and_gle()
+
+    def on_cancel(self):
+        # Reimplements POS Invoice on_cancel with SLE/GL reversal inserted
+        # before serial bundle delinking to preserve bundle references.
+        from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
+
+        self.ignore_linked_doctypes = (
+            "GL Entry",
+            "Stock Ledger Entry",
+            "Repost Item Valuation",
+            "Repost Payment Ledger",
+            "Repost Payment Ledger Items",
+            "Repost Accounting Ledger",
+            "Repost Accounting Ledger Items",
+            "Payment Ledger Entry",
+            "Serial and Batch Bundle",
+        )
+
+        # SellingController chain (same pattern as POSInvoice.on_cancel)
+        super(SalesInvoice, self).on_cancel()
+
+        # Loyalty points cleanup (from POS Invoice.on_cancel)
+        if not self.is_return and self.loyalty_program:
+            self.delete_loyalty_point_entry()
+        elif self.is_return and self.return_against and self.loyalty_program:
+            against_psi_doc = frappe.get_doc("POS Invoice", self.return_against)
+            against_psi_doc.delete_loyalty_point_entry()
+            against_psi_doc.make_loyalty_point_entry()
+
+        # Reverse SLE/GL entries BEFORE delinking serial bundles
+        if self.update_stock == 1:
+            self.update_stock_ledger()
+
+        self.make_gl_entries_on_cancel()
+
+        if self.update_stock == 1:
+            self.repost_future_sle_and_gle()
+
+        self.db_set("status", "Cancelled")
+
+        if self.coupon_code:
+            from erpnext.accounts.doctype.pricing_rule.utils import update_coupon_code_count
+
+            update_coupon_code_count(self.coupon_code, "cancelled")
+
+        # Delink serial bundles AFTER reversing stock/GL
+        self.delink_serial_and_batch_bundle()
+
+    def make_discount_gl_entries(self, gl_entries):
+        """Override: accounts_controller only handles Sales/Purchase Invoice.
+
+        POS Invoice is a selling document, so we read Selling Settings and
+        then delegate to the parent implementation with doctype temporarily
+        set so the if/elif branches match.
+        """
+        from erpnext.accounts.doctype.account.account import get_account_currency
+
+        enable_discount_accounting = cint(
+            frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
+        )
+
+        dr_or_cr = "debit"
+        rev_dr_cr = "credit"
+        supplier_or_customer = self.customer
+
+        if enable_discount_accounting:
+            for item in self.get("items"):
+                if item.get("discount_amount") and item.get("discount_account"):
+                    discount_amount = item.discount_amount * item.qty
+                    income_or_expense_account = (
+                        item.income_account
+                        if (not item.get("enable_deferred_revenue") or self.is_return)
+                        else item.get("deferred_revenue_account")
+                    )
+
+                    account_currency = get_account_currency(item.discount_account)
+                    gl_entries.append(
+                        self.get_gl_dict(
+                            {
+                                "account": item.discount_account,
+                                "against": supplier_or_customer,
+                                dr_or_cr: flt(
+                                    discount_amount * self.get("conversion_rate"),
+                                    item.precision("discount_amount"),
+                                ),
+                                dr_or_cr + "_in_transaction_currency": flt(
+                                    discount_amount, item.precision("discount_amount")
+                                ),
+                                "cost_center": item.cost_center,
+                                "project": item.project,
+                            },
+                            account_currency,
+                            item=item,
+                        )
+                    )
+
+                    account_currency = get_account_currency(income_or_expense_account)
+                    gl_entries.append(
+                        self.get_gl_dict(
+                            {
+                                "account": income_or_expense_account,
+                                "against": supplier_or_customer,
+                                rev_dr_cr: flt(
+                                    discount_amount * self.get("conversion_rate"),
+                                    item.precision("discount_amount"),
+                                ),
+                                rev_dr_cr + "_in_transaction_currency": flt(
+                                    discount_amount, item.precision("discount_amount")
+                                ),
+                                "cost_center": item.cost_center,
+                                "project": item.project or self.project,
+                            },
+                            account_currency,
+                            item=item,
+                        )
+                    )
+
+        if (
+            (enable_discount_accounting or self.get("is_cash_or_non_trade_discount"))
+            and self.get("additional_discount_account")
+            and self.get("discount_amount")
+        ):
+            import erpnext
+
+            gl_entries.append(
+                self.get_gl_dict(
+                    {
+                        "account": self.additional_discount_account,
+                        "against": supplier_or_customer,
+                        dr_or_cr: self.base_discount_amount,
+                        "cost_center": self.cost_center or erpnext.get_default_cost_center(self.company),
+                    },
+                    item=self,
+                )
+            )
+
     def get_gl_entries(self, warehouse_account=None):
+        # accounts_controller.make_discount_gl_entries only handles
+        # "Sales Invoice"/"Purchase Invoice" doctypes.  Override below
+        # ensures POS Invoice is handled like Sales Invoice for discounts.
         gl_entries = super().get_gl_entries(warehouse_account)
         if not cint(self.get("custom_is_margin_scheme")):
             return gl_entries
