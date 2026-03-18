@@ -2900,6 +2900,7 @@ def create_quick_job_card(customer, contact_number, device_item,
     This is the 'quick job card' flow for walk-in repairs from POS.
     Returns: {service_request, service_order, job_assignment}
     """
+    frappe.has_permission("Service Request", "create", throw=True)
     # 1. Create Service Request
     sr = frappe.new_doc("Service Request")
     sr.customer = customer
@@ -3336,6 +3337,7 @@ def _create_return_incentive_entries(return_invoice, pos_executive):
 def quick_create_customer(customer_name, mobile_no="", email_id="",
                           customer_group="Individual", company=None):
     """Create a new Customer quickly from the POS interface."""
+    frappe.has_permission("Customer", "create", throw=True)
     cust = frappe.new_doc("Customer")
     cust.customer_name = customer_name
     cust.customer_group = customer_group or "Individual"
@@ -3460,6 +3462,7 @@ def open_closing_entry(pos_profile, from_date, to_date=None, opening_cash=0,
     Returns:
         name of the created POS Closing Entry
     """
+    frappe.has_permission("POS Closing Entry", "create", throw=True)
     from_date = from_date or frappe.utils.nowdate()
     to_date = to_date or from_date
 
@@ -3834,6 +3837,7 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
 
 	Idempotent — returns existing order if one already exists for this assessment.
 	"""
+	frappe.has_permission("Buyback Order", "create", throw=True)
 	# Return existing order if already created
 	existing = frappe.db.get_value(
 		"Buyback Order",
@@ -4007,6 +4011,7 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 	Records a payment entry on the order, marks it Paid.
 	Actual JE/stock entry is handled by back-office accounting.
 	"""
+	frappe.has_permission("Buyback Order", "write", throw=True)
 	doc = frappe.get_doc("Buyback Order", order_name)
 
 	if not doc.customer_approved:
