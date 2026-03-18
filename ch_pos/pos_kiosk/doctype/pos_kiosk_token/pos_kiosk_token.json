@@ -252,7 +252,7 @@
   {
    "allow_on_submit": 1,
    "fieldname": "linked_service_request",
-   "fieldtype": "Dynamic Link",
+   "fieldtype": "Link",
    "label": "Service Request",
    "options": "Service Request"
   },
