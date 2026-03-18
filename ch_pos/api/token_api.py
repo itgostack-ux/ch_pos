@@ -71,6 +71,66 @@ def _generate_token_display(pos_profile: str, company_abbr: str) -> str:
     return f"{abbr}-{store_code}-{seq:03d}"
 
 
+def _resolve_pos_profile(identifier: str) -> dict | None:
+    """Resolve a store identifier to a POS Profile row.
+
+    Accepts:
+    - Exact POS Profile name
+    - CH Store identifiers (name/store_code/store_name/linked pos_profile)
+    - Fuzzy POS Profile match as last resort
+    """
+    if not identifier:
+        return None
+
+    # 1) Exact POS Profile name
+    profile = frappe.db.get_value(
+        "POS Profile",
+        identifier,
+        ["name", "company", "warehouse"],
+        as_dict=True,
+    )
+    if profile:
+        return profile
+
+    # 2) CH Store mapping (if available)
+    if frappe.db.exists("DocType", "CH Store"):
+        store_candidates = frappe.get_all(
+            "CH Store",
+            filters={"disabled": 0},
+            or_filters=[
+                ["name", "=", identifier],
+                ["store_code", "=", identifier],
+                ["store_name", "=", identifier],
+                ["store_name", "like", f"%{identifier}%"],
+                ["pos_profile", "=", identifier],
+            ],
+            fields=["pos_profile"],
+            limit_page_length=5,
+        )
+        mapped_profiles = sorted({(r.get("pos_profile") or "").strip() for r in store_candidates if r.get("pos_profile")})
+        if len(mapped_profiles) == 1:
+            profile = frappe.db.get_value(
+                "POS Profile",
+                mapped_profiles[0],
+                ["name", "company", "warehouse"],
+                as_dict=True,
+            )
+            if profile:
+                return profile
+
+    # 3) Fuzzy POS Profile fallback (must be unambiguous)
+    candidates = frappe.get_all(
+        "POS Profile",
+        filters={"name": ["like", f"%{identifier}%"]},
+        fields=["name", "company", "warehouse"],
+        limit_page_length=5,
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Guest API — Kiosk
 # ---------------------------------------------------------------------------
@@ -81,12 +141,8 @@ def get_store_config(pos_profile: str):
     Returns store configuration for the kiosk page dropdowns.
     Called on kiosk load with ?store=<pos_profile>.
     """
-    profile = frappe.db.get_value(
-        "POS Profile",
-        pos_profile,
-        ["name", "company", "warehouse"],
-        as_dict=True,
-    )
+    profile = _resolve_pos_profile(pos_profile)
+
     if not profile:
         frappe.throw(_("Store not found"), frappe.DoesNotExistError)
 
@@ -94,14 +150,24 @@ def get_store_config(pos_profile: str):
 
     # Device brands — pulled from Brand doctype, top-level only (no sub-brands)
     # Sub-brands have ch_parent_brand set (e.g. Galaxy → Samsung)
-    _raw_brands = frappe.db.sql(
-        """SELECT name FROM `tabBrand`
-           WHERE ch_disabled = 0
-             AND (ch_parent_brand IS NULL OR ch_parent_brand = '')
-             AND name != 'Test Brand'
-           ORDER BY name ASC""",
-        as_dict=True,
-    )
+    # Some environments may not yet have custom Brand fields during rollout.
+    # Fall back to a plain Brand list instead of failing with SQL 1054.
+    if frappe.db.has_column("Brand", "ch_disabled") and frappe.db.has_column("Brand", "ch_parent_brand"):
+        _raw_brands = frappe.db.sql(
+            """SELECT name FROM `tabBrand`
+               WHERE ch_disabled = 0
+                 AND (ch_parent_brand IS NULL OR ch_parent_brand = '')
+                 AND name != 'Test Brand'
+               ORDER BY name ASC""",
+            as_dict=True,
+        )
+    else:
+        _raw_brands = frappe.db.sql(
+            """SELECT name FROM `tabBrand`
+               WHERE name != 'Test Brand'
+               ORDER BY name ASC""",
+            as_dict=True,
+        )
     brands = [b.name for b in _raw_brands]
     if "Other" not in brands:
         brands.append("Other")
@@ -137,12 +203,20 @@ def get_brand_models(brand: str):
     - Includes items tagged with the brand itself
     - Includes items tagged with sub-brands (where ch_parent_brand = brand)
     """
-    # Single source of truth: query Brand doctype for the brand + all sub-brands
-    brand_rows = frappe.db.sql(
-        "SELECT name FROM `tabBrand` WHERE name = %s OR ch_parent_brand = %s",
-        (brand, brand),
-        as_dict=True,
-    )
+    # Single source of truth: query Brand doctype for the brand + all sub-brands.
+    # Some environments may not yet have ch_parent_brand custom field.
+    if frappe.db.has_column("Brand", "ch_parent_brand"):
+        brand_rows = frappe.db.sql(
+            "SELECT name FROM `tabBrand` WHERE name = %s OR ch_parent_brand = %s",
+            (brand, brand),
+            as_dict=True,
+        )
+    else:
+        brand_rows = frappe.db.sql(
+            "SELECT name FROM `tabBrand` WHERE name = %s",
+            (brand,),
+            as_dict=True,
+        )
     db_brands = [r.name for r in brand_rows] or [brand]
 
     brand_placeholders = ", ".join(["%s"] * len(db_brands))
@@ -190,9 +264,7 @@ def create_token(
         frappe.throw(_("Store is required"))
     customer_phone = _validate_indian_phone(customer_phone)  # normalize + validate
 
-    profile = frappe.db.get_value(
-        "POS Profile", pos_profile, ["name", "company", "warehouse"], as_dict=True
-    )
+    profile = _resolve_pos_profile(pos_profile)
     if not profile:
         frappe.throw(_("Invalid POS Profile"))
 
