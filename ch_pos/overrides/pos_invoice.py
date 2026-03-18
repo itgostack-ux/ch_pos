@@ -38,6 +38,9 @@ class CustomPOSInvoice(POSInvoice):
     # POS Invoice DocType lacks this Sales Invoice field; accounts_controller
     # accesses it during make_precision_loss_gl_entry.
     use_company_roundoff_cost_center = 0
+    # POS Invoice DocType lacks this Sales Invoice field; used in
+    # make_customer_gl_entry and make_tax_gl_entries for return invoices.
+    update_outstanding_for_self = 0
     def validate(self):
         # When loyalty points are redeemed, paid_amount must include loyalty_amount
         # so ERPNext's validate_full_payment (paid_amount >= invoice_total) passes.
