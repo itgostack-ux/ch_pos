@@ -3,6 +3,30 @@ from frappe.utils import flt, cint
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import POSInvoice
 
 
+def _get_serial_nos_from_item(item, parent_doc=None):
+    """Extract serial numbers from item row, checking serial_no field first,
+    then falling back to Serial and Batch Bundle (ERPNext v15 clears serial_no
+    on returns after bundle creation).
+
+    If parent_doc has _cached_serial_nos (set during on_cancel before delink),
+    use that instead — the bundle reference may already be cleared.
+    """
+    if parent_doc and hasattr(parent_doc, "_cached_serial_nos"):
+        cached = parent_doc._cached_serial_nos.get(item.name, [])
+        if cached:
+            return cached
+
+    serial_nos = (item.serial_no or "").strip()
+    if serial_nos:
+        return [s.strip() for s in serial_nos.split("\n") if s.strip()]
+
+    if item.serial_and_batch_bundle:
+        from erpnext.stock.serial_batch_bundle import get_serial_nos
+        return get_serial_nos(item.serial_and_batch_bundle) or []
+
+    return []
+
+
 def _update_serial_status(serial_no, new_status, company=None, warehouse=None, remarks=None, **kwargs):
     """Call the centralized CH Serial Lifecycle API for status transitions."""
     from ch_item_master.ch_item_master.doctype.ch_serial_lifecycle.ch_serial_lifecycle import (
@@ -109,8 +133,32 @@ class CustomPOSInvoice(POSInvoice):
 
             update_coupon_code_count(self.coupon_code, "cancelled")
 
+        # Cache serial numbers per item BEFORE delink clears the references.
+        # Doc_events (reverse_serial_lifecycle) fire after on_cancel returns,
+        # by which time serial_and_batch_bundle is already cleared.
+        self._cached_serial_nos = {}
+        for item in self.items:
+            self._cached_serial_nos[item.name] = _get_serial_nos_from_item(item)
+
         # Delink serial bundles AFTER reversing stock/GL
         self.delink_serial_and_batch_bundle()
+
+    def delink_serial_and_batch_bundle(self):
+        """Override: skip cancel if the bundle was already cancelled by SLE reversal."""
+        for row in self.items:
+            if row.serial_and_batch_bundle:
+                bundle_docstatus = frappe.db.get_value(
+                    "Serial and Batch Bundle", row.serial_and_batch_bundle, "docstatus"
+                )
+                if not self.consolidated_invoice:
+                    frappe.db.set_value(
+                        "Serial and Batch Bundle",
+                        row.serial_and_batch_bundle,
+                        {"is_cancelled": 1, "voucher_no": ""},
+                    )
+                if bundle_docstatus == 1:
+                    frappe.get_doc("Serial and Batch Bundle", row.serial_and_batch_bundle).cancel()
+                row.db_set("serial_and_batch_bundle", None)
 
     def make_discount_gl_entries(self, gl_entries):
         """Override: accounts_controller only handles Sales/Purchase Invoice.
@@ -264,14 +312,7 @@ def create_customer_device_records(doc, method=None):
     which handles deduplication, warranty syncing, and field population.
     """
     for item in doc.items:
-        serial_nos = (item.serial_no or "").strip()
-        if not serial_nos:
-            continue
-
-        for sn in serial_nos.split("\n"):
-            sn = sn.strip()
-            if not sn:
-                continue
+        for sn in _get_serial_nos_from_item(item):
 
             device_kwargs = {
                 "company": doc.company,
@@ -314,21 +355,19 @@ def create_customer_device_records(doc, method=None):
 
 
 def update_serial_lifecycle(doc, method=None):
-    """Hook: on_submit — update CH Serial Lifecycle status to 'Sold'.
+    """Hook: on_submit — update CH Serial Lifecycle status.
 
+    For sales: In Stock → Sold.
+    For returns (is_return=1): Sold → Returned → In Stock.
     Delegates to ch_item_master's update_lifecycle_status() which enforces
     valid state transitions and writes audit log entries.
     """
+    if doc.is_return:
+        _return_serial_lifecycle(doc)
+        return
+
     for item in doc.items:
-        serial_nos = (item.serial_no or "").strip()
-        if not serial_nos:
-            continue
-
-        for sn in serial_nos.split("\n"):
-            sn = sn.strip()
-            if not sn:
-                continue
-
+        for sn in _get_serial_nos_from_item(item):
             if not frappe.db.exists("CH Serial Lifecycle", sn):
                 continue
 
@@ -346,11 +385,43 @@ def update_serial_lifecycle(doc, method=None):
             )
 
 
+def _return_serial_lifecycle(doc):
+    """Handle serial lifecycle for return invoices (is_return=1).
+
+    Sold → Returned → In Stock (item returned to store).
+    """
+    for item in doc.items:
+        for sn in _get_serial_nos_from_item(item):
+            if not frappe.db.exists("CH Serial Lifecycle", sn):
+                continue
+
+            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            if current_status == "Sold":
+                _update_serial_status(
+                    serial_no=sn,
+                    new_status="Returned",
+                    company=doc.company,
+                    remarks=f"Returned via POS Invoice {doc.name} (return against {doc.return_against})",
+                    sale_date=None,
+                    sale_document=None,
+                    sale_rate=0,
+                    customer=None,
+                    customer_name=None,
+                )
+                _update_serial_status(
+                    serial_no=sn,
+                    new_status="In Stock",
+                    company=doc.company,
+                    warehouse=item.warehouse,
+                    remarks=f"Returned to stock — POS Invoice {doc.name}",
+                )
+
+
 def reverse_serial_lifecycle(doc, method=None):
     """Hook: on_cancel — revert serial lifecycle status.
 
-    Uses 'Returned' status since that is the valid transition from 'Sold'
-    in ch_item_master's VALID_TRANSITIONS dict.
+    For sales: Sold → Returned → In Stock.
+    For returns: In Stock → Sold (re-mark as sold since the return is voided).
     """
     # Require a cancellation reason from non-system users
     if frappe.session.user != "Administrator":
@@ -373,16 +444,13 @@ def reverse_serial_lifecycle(doc, method=None):
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Audit log failed on POS Invoice cancel")
+
+    if doc.is_return:
+        _cancel_return_serial_lifecycle(doc)
+        return
+
     for item in doc.items:
-        serial_nos = (item.serial_no or "").strip()
-        if not serial_nos:
-            continue
-
-        for sn in serial_nos.split("\n"):
-            sn = sn.strip()
-            if not sn:
-                continue
-
+        for sn in _get_serial_nos_from_item(item, parent_doc=doc):
             if not frappe.db.exists("CH Serial Lifecycle", sn):
                 continue
 
@@ -410,6 +478,46 @@ def reverse_serial_lifecycle(doc, method=None):
                 )
 
 
+def _cancel_return_serial_lifecycle(doc):
+    """Handle serial lifecycle when a return invoice is cancelled.
+
+    Cancelling a return means the original sale stands — re-mark as Sold.
+    In Stock → Sold (with original sale details from return_against).
+    """
+    orig_inv = doc.return_against
+    for item in doc.items:
+        for sn in _get_serial_nos_from_item(item, parent_doc=doc):
+            if not frappe.db.exists("CH Serial Lifecycle", sn):
+                continue
+
+            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            if current_status == "In Stock":
+                # Look up original sale details
+                sale_date = None
+                sale_rate = 0
+                customer = doc.customer
+                customer_name = doc.customer_name
+                if orig_inv:
+                    sale_date = frappe.db.get_value("POS Invoice", orig_inv, "posting_date")
+                    # Find rate from original invoice item
+                    orig_items = frappe.db.get_all("POS Invoice Item",
+                        filters={"parent": orig_inv, "serial_no": ["like", f"%{sn}%"]},
+                        fields=["rate"], limit=1)
+                    if orig_items:
+                        sale_rate = flt(orig_items[0].rate)
+                _update_serial_status(
+                    serial_no=sn,
+                    new_status="Sold",
+                    company=doc.company,
+                    remarks=f"Return {doc.name} cancelled — sale {orig_inv} reinstated",
+                    sale_date=sale_date,
+                    sale_document=orig_inv,
+                    sale_rate=sale_rate,
+                    customer=customer,
+                    customer_name=customer_name,
+                )
+
+
 def update_kiosk_token_status(doc, method=None):
     """Hook: on_submit — mark kiosk token as Converted if linked."""
     token = doc.get("custom_kiosk_token")
@@ -423,14 +531,7 @@ def update_kiosk_token_status(doc, method=None):
 def deactivate_customer_devices(doc, method=None):
     """Hook: on_cancel — deactivate customer device records created by this invoice."""
     for item in doc.items:
-        serial_nos = (item.serial_no or "").strip()
-        if not serial_nos:
-            continue
-
-        for sn in serial_nos.split("\n"):
-            sn = sn.strip()
-            if not sn:
-                continue
+        for sn in _get_serial_nos_from_item(item, parent_doc=doc):
 
             device = frappe.db.get_value(
                 "CH Customer Device",
