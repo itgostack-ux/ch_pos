@@ -17,6 +17,8 @@ export const PosState = {
 	session_name: null,
 	business_date: null,
 	store: null,
+	device: null,
+	session_status: null,  // Open, Locked, Pending Close, etc.
 	payment_modes: [],
 	store_caps: {},
 	pos_ext: {},

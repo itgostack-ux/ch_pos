@@ -35,26 +35,90 @@ export class SessionOpeningScreen {
 	}
 
 	_check_existing_session(entry, resolve) {
+		// First try get_pos_context for full isolation-aware context
+		frappe.call({
+			method: "ch_pos.api.isolation_api.get_pos_context",
+			callback: (r) => {
+				const ctx = r.message || {};
+				if (ctx.existing_session) {
+					// Active session exists — auto resume
+					resolve({
+						session_name: ctx.existing_session,
+						business_date: ctx.business_date,
+						store: ctx.store,
+						company: ctx.company,
+						device: ctx.device,
+						pos_profile: entry.pos_profile,
+						opening_entry: entry,
+					});
+				} else if (ctx.day_closed) {
+					this._show_day_closed_message({ message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
+				} else if (ctx.error) {
+					frappe.msgprint({
+						title: __("POS Setup Required"),
+						indicator: "red",
+						message: ctx.error,
+					});
+				} else {
+					// No session — fall back to regular status check for unclosed session detection
+					this._check_status_and_open(entry, resolve, ctx);
+				}
+			},
+			error: () => {
+				// Fallback to legacy flow if isolation API not available
+				this._check_status_legacy(entry, resolve);
+			},
+		});
+	}
+
+	_check_status_and_open(entry, resolve, ctx) {
 		frappe.call({
 			method: "ch_pos.api.session_api.get_session_status",
 			args: { pos_profile: entry.pos_profile },
 			callback: (r) => {
 				const data = r.message || {};
 				if (data.has_session) {
-					// Active session exists — auto resume
 					resolve({
 						session_name: data.session_name,
 						business_date: data.business_date,
 						store: data.store,
+						company: data.company || ctx.company,
+						device: data.device || ctx.device,
 						pos_profile: entry.pos_profile,
-						company: entry.company,
 						opening_entry: entry,
 					});
+				} else if (data.day_closed) {
+					this._show_day_closed_message(data);
 				} else if (data.unclosed_session) {
-					// Unclosed session — must close first
 					this._show_must_close(data, entry.pos_profile, resolve);
 				} else {
-					// No session — show opening screen for this profile
+					this._show_opening_form(entry.pos_profile, ctx.company || entry.company, resolve, ctx);
+				}
+			},
+		});
+	}
+
+	_check_status_legacy(entry, resolve) {
+		frappe.call({
+			method: "ch_pos.api.session_api.get_session_status",
+			args: { pos_profile: entry.pos_profile },
+			callback: (r) => {
+				const data = r.message || {};
+				if (data.has_session) {
+					resolve({
+						session_name: data.session_name,
+						business_date: data.business_date,
+						store: data.store,
+						company: data.company,
+						device: data.device,
+						pos_profile: entry.pos_profile,
+						opening_entry: entry,
+					});
+				} else if (data.day_closed) {
+					this._show_day_closed_message(data);
+				} else if (data.unclosed_session) {
+					this._show_must_close(data, entry.pos_profile, resolve);
+				} else {
 					this._show_opening_form(entry.pos_profile, entry.company, resolve);
 				}
 			},
@@ -149,6 +213,8 @@ export class SessionOpeningScreen {
 								company: open_map[profile]?.company,
 								opening_entry: open_map[profile],
 							});
+						} else if (data.day_closed) {
+							this._show_day_closed_message(data);
 						} else if (data.unclosed_session) {
 							frappe.msgprint(__("Close session {0} first", [data.unclosed_session]));
 						} else {
@@ -177,14 +243,34 @@ export class SessionOpeningScreen {
 		this._dialog = dlg;
 	}
 
-	_show_opening_form(pos_profile, company, resolve) {
+	_show_day_closed_message(data) {
+		frappe.msgprint({
+			title: __("Business Date Closed"),
+			indicator: "orange",
+			message: data.message || __(
+				"Store day is already closed. Complete settlement and advance business date before opening a new session."
+			),
+		});
+	}
+
+	_show_opening_form(pos_profile, company, resolve, ctx) {
+		const context_info = ctx ? `
+			<div class="text-muted" style="margin-bottom:12px">
+				${__("Profile")}: <b>${pos_profile}</b><br>
+				${ctx.company ? `${__("Company")}: <b>${frappe.utils.escape_html(ctx.company)}</b><br>` : ""}
+				${ctx.store ? `${__("Store")}: <b>${frappe.utils.escape_html(ctx.store)}</b><br>` : ""}
+				${ctx.device ? `${__("Device")}: <b>${frappe.utils.escape_html(ctx.device)}</b><br>` : ""}
+				${ctx.business_date ? `${__("Business Date")}: <b>${ctx.business_date}</b>` : ""}
+			</div>` : `
+			<div class="text-muted" style="margin-bottom:12px">
+				${__("Profile")}: <b>${pos_profile}</b>
+			</div>`;
+
 		const fields = [
 			{
 				fieldname: "info",
 				fieldtype: "HTML",
-				options: `<div class="text-muted" style="margin-bottom:12px">
-					${__("Profile")}: <b>${pos_profile}</b>
-				</div>`,
+				options: context_info,
 			},
 			{
 				fieldname: "opening_cash",
@@ -208,22 +294,27 @@ export class SessionOpeningScreen {
 			fields,
 			primary_action_label: __("Start Session"),
 			primary_action: (values) => {
-				this._create_session(dlg, pos_profile, values, {}, resolve, company);
+				this._create_session(dlg, pos_profile, values, {}, resolve, company, ctx);
 			},
 		});
 		dlg.show();
 		this._dialog = dlg;
 	}
 
-	_create_session(dlg, pos_profile, values, open_map, resolve, company) {
+	_create_session(dlg, pos_profile, values, open_map, resolve, company, ctx) {
 		dlg.disable_primary_action();
+		const args = {
+			pos_profile: pos_profile,
+			opening_cash: values.opening_cash || 0,
+			manager_pin: values.manager_pin || null,
+		};
+		// Pass device from context if available
+		if (ctx && ctx.device) {
+			args.device = ctx.device;
+		}
 		frappe.call({
 			method: "ch_pos.api.session_api.open_session",
-			args: {
-				pos_profile: pos_profile,
-				opening_cash: values.opening_cash || 0,
-				manager_pin: values.manager_pin || null,
-			},
+			args: args,
 			callback: (r) => {
 				if (r.message) {
 					dlg.hide();
@@ -235,9 +326,10 @@ export class SessionOpeningScreen {
 						session_name: r.message.session_name,
 						business_date: r.message.business_date,
 						store: r.message.store,
+						company: r.message.company || company || open_map[pos_profile]?.company,
+						device: r.message.device || (ctx && ctx.device) || null,
 						pos_profile: pos_profile,
-						company: company || open_map[pos_profile]?.company,
-						opening_entry: { pos_profile, company: company || open_map[pos_profile]?.company },
+						opening_entry: { pos_profile, company: r.message.company || company || open_map[pos_profile]?.company },
 					});
 				}
 			},

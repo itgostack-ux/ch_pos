@@ -7,9 +7,16 @@
   "store",
   "business_date",
   "column_break_info",
+  "status",
   "is_active",
   "set_by",
   "set_at",
+  "day_control_section",
+  "opened_on",
+  "opened_by",
+  "column_break_day_control",
+  "closed_on",
+  "closed_by",
   "override_section",
   "previous_date",
   "override_reason"
@@ -37,6 +44,15 @@
    "fieldtype": "Column Break"
   },
   {
+   "default": "Open",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Open\nClosing Pending\nClosed",
+   "description": "Open = sessions can operate; Closing Pending = settlement in progress; Closed = day is done"
+  },
+  {
    "default": 1,
    "fieldname": "is_active",
    "fieldtype": "Check",
@@ -53,6 +69,41 @@
    "fieldname": "set_at",
    "fieldtype": "Datetime",
    "label": "Set At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "day_control_section",
+   "fieldtype": "Section Break",
+   "label": "Day Open / Close"
+  },
+  {
+   "fieldname": "opened_on",
+   "fieldtype": "Datetime",
+   "label": "Day Opened On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "opened_by",
+   "fieldtype": "Link",
+   "label": "Day Opened By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_day_control",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "closed_on",
+   "fieldtype": "Datetime",
+   "label": "Day Closed On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "closed_by",
+   "fieldtype": "Link",
+   "label": "Day Closed By",
+   "options": "User",
    "read_only": 1
   },
   {

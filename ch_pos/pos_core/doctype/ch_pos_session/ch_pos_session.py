@@ -1,14 +1,15 @@
 """
 CH POS Session — central session entity for POS cash control.
 
-Lifecycle:  Draft → Open (submitted) → Closing → Closed (amended/resubmitted)
+Lifecycle:  Draft → Open (submitted) → Locked → Pending Close → Closed
 
 Rules:
-- One open session per POS Profile at a time
+- One open session per device per business date
 - POS cannot bill without an active Open session
 - Session must be closed before a new one can open
-- Cash variance > ₹100 requires manager approval
-- Supports user switching (multiple cashiers on same terminal)
+- Cash variance > threshold requires manager approval
+- Company/Store/Device must all match across session and transactions
+- Logout ≠ session close; Lock = temporary pause
 """
 
 import frappe
@@ -17,14 +18,26 @@ from frappe.model.document import Document
 from frappe.utils import flt, cint, now_datetime, getdate, nowdate, time_diff_in_seconds
 
 
-VARIANCE_AUTO_ALLOW = 100  # ₹100 threshold
+VARIANCE_AUTO_ALLOW = 100  # ₹100 default threshold
+
+
+def _get_variance_threshold():
+    """Get variance threshold from control settings, or default."""
+    try:
+        return flt(frappe.db.get_single_value("CH POS Control Settings", "variance_approval_threshold")) or VARIANCE_AUTO_ALLOW
+    except Exception:
+        return VARIANCE_AUTO_ALLOW
 
 
 class CHPOSSession(Document):
     def validate(self):
+        self._validate_company_device_consistency()
         self._validate_no_duplicate_open()
+        self._validate_no_duplicate_open_for_store()
+        self._validate_no_duplicate_device_date()
         self._validate_business_date()
-        if self.status == "Closing":
+        self._validate_user_allocation()
+        if self.status in ("Closing", "Pending Close"):
             self._calculate_totals()
             self._calculate_cash_variance()
             self._validate_variance()
@@ -35,14 +48,56 @@ class CHPOSSession(Document):
     def before_cancel(self):
         frappe.throw(_("POS Sessions cannot be cancelled. Close them instead."))
 
+    def _validate_company_device_consistency(self):
+        """Company on session must match device, store, POS Profile, and warehouse."""
+        if self.device:
+            device = frappe.db.get_value(
+                "CH Device Master", self.device,
+                ["company", "store", "is_active"], as_dict=True
+            )
+            if not device:
+                frappe.throw(_("Device {0} not found.").format(self.device))
+            if not device.is_active:
+                frappe.throw(_("Device {0} is inactive. Cannot open session.").format(self.device))
+            if self.company and device.company != self.company:
+                frappe.throw(
+                    _("Device {0} belongs to company {1}, but session company is {2}.").format(
+                        self.device, device.company, self.company
+                    )
+                )
+            if self.store and device.store != self.store:
+                frappe.throw(
+                    _("Device {0} belongs to store {1}, but session store is {2}.").format(
+                        self.device, device.store, self.store
+                    )
+                )
+
+        if self.pos_profile and self.company:
+            profile_company = frappe.db.get_value("POS Profile", self.pos_profile, "company")
+            if profile_company and profile_company != self.company:
+                frappe.throw(
+                    _("POS Profile {0} belongs to company {1}, but session company is {2}.").format(
+                        self.pos_profile, profile_company, self.company
+                    )
+                )
+
+        if self.store and self.company:
+            store_company = frappe.db.get_value("CH Store", self.store, "company")
+            if store_company and store_company != self.company:
+                frappe.throw(
+                    _("Store {0} belongs to company {1}, but session company is {2}.").format(
+                        self.store, store_company, self.company
+                    )
+                )
+
     def _validate_no_duplicate_open(self):
         """Ensure no other Open session exists for this POS Profile."""
-        if self.docstatus == 0:  # only check on first save
+        if self.docstatus == 0:
             existing = frappe.db.exists(
                 "CH POS Session",
                 {
                     "pos_profile": self.pos_profile,
-                    "status": "Open",
+                    "status": ("in", ["Open", "Locked", "Suspended"]),
                     "docstatus": 1,
                     "name": ("!=", self.name),
                 },
@@ -53,6 +108,78 @@ class CHPOSSession(Document):
                         existing, self.pos_profile
                     )
                 )
+
+    def _validate_no_duplicate_open_for_store(self):
+        """Ensure only one active session exists per store at any point in time."""
+        if self.docstatus != 0:
+            return
+
+        existing = frappe.db.get_value(
+            "CH POS Session",
+            {
+                "store": self.store,
+                "status": ("in", ["Open", "Locked", "Suspended", "Closing", "Pending Close"]),
+                "docstatus": 1,
+                "name": ("!=", self.name),
+            },
+            ["name", "pos_profile", "user"],
+            as_dict=True,
+        )
+        if existing:
+            frappe.throw(
+                _(
+                    "Store already has an active session {0} (Profile: {1}, Cashier: {2}). "
+                    "Close it before opening a new session."
+                ).format(existing.name, existing.pos_profile, existing.user)
+            )
+
+    def _validate_no_duplicate_device_date(self):
+        """One session per device per business date."""
+        if self.docstatus != 0 or not self.device:
+            return
+        existing = frappe.db.get_value(
+            "CH POS Session",
+            {
+                "device": self.device,
+                "business_date": self.business_date,
+                "docstatus": 1,
+                "name": ("!=", self.name),
+            },
+            ["name", "status"],
+            as_dict=True,
+        )
+        if existing:
+            frappe.throw(
+                _("Device {0} already has a session {1} (status: {2}) for business date {3}.").format(
+                    self.device, existing.name, existing.status, self.business_date
+                )
+            )
+
+    def _validate_user_allocation(self):
+        """User must be allocated to this company and store."""
+        if self.docstatus != 0:
+            return
+        try:
+            enforce = cint(frappe.db.get_single_value("CH POS Control Settings", "enforce_user_company_isolation"))
+        except Exception:
+            enforce = 0
+        if not enforce:
+            return
+
+        from ch_pos.pos_core.doctype.ch_pos_user_allocation.ch_pos_user_allocation import get_user_allocation
+        alloc = get_user_allocation(self.user, self.company)
+        if not alloc:
+            frappe.throw(
+                _("User {0} is not allocated to company {1} for POS operations.").format(
+                    self.user, self.company
+                )
+            )
+        if alloc.store != self.store:
+            frappe.throw(
+                _("User {0} is allocated to store {1}, not {2}.").format(
+                    self.user, alloc.store, self.store
+                )
+            )
 
     def _validate_business_date(self):
         """Business date must match the store's current business date."""
@@ -146,27 +273,42 @@ class CHPOSSession(Document):
         self.cash_variance = flt(self.closing_cash_actual) - cash_expected
 
     def _validate_variance(self):
-        """Enforce variance rules."""
+        """Enforce variance rules using configurable threshold."""
+        threshold = _get_variance_threshold()
         variance = abs(flt(self.cash_variance))
-        if variance > VARIANCE_AUTO_ALLOW:
+        if variance > threshold:
             if not self.variance_reason:
                 frappe.throw(
                     _("Cash variance is ₹{0}. Reason is mandatory for variance above ₹{1}.").format(
-                        variance, VARIANCE_AUTO_ALLOW
+                        variance, threshold
                     )
                 )
             if not self.closing_approved_by:
                 frappe.throw(
                     _("Cash variance ₹{0} exceeds ₹{1}. Manager approval required.").format(
-                        variance, VARIANCE_AUTO_ALLOW
+                        variance, threshold
                     )
                 )
+
+    def lock_session(self):
+        """Lock screen — temporary pause, no financial impact."""
+        if self.status != "Open":
+            frappe.throw(_("Only an Open session can be locked."))
+        self.db_set("status", "Locked")
+        self.status = "Locked"
+
+    def unlock_session(self):
+        """Unlock session — resume from lock screen."""
+        if self.status != "Locked":
+            frappe.throw(_("Session is not locked."))
+        self.db_set("status", "Open")
+        self.status = "Open"
 
     def close_session(self, closing_cash, denomination_rows=None, variance_reason=None,
                       manager_pin_user=None):
         """Close this session — called from POS UI."""
-        if self.status != "Open":
-            frappe.throw(_("Session is not open"))
+        if self.status not in ("Open", "Locked", "Pending Close"):
+            frappe.throw(_("Session is not in a closable state (current: {0})").format(self.status))
 
         self.status = "Closing"
         self.shift_end = now_datetime()
@@ -252,11 +394,11 @@ def get_store_business_date(store):
 
 
 def get_active_session(pos_profile):
-    """Return the active Open session for a POS Profile, or None."""
+    """Return the active Open/Locked session for a POS Profile, or None."""
     return frappe.db.get_value(
         "CH POS Session",
-        {"pos_profile": pos_profile, "status": "Open", "docstatus": 1},
-        ["name", "user", "business_date", "opening_cash", "store"],
+        {"pos_profile": pos_profile, "status": ("in", ["Open", "Locked"]), "docstatus": 1},
+        ["name", "user", "business_date", "opening_cash", "store", "company", "device", "status"],
         as_dict=True,
     )
 
@@ -270,7 +412,7 @@ def auto_close_stale_sessions():
     today = getdate(nowdate())
     stale = frappe.get_all(
         "CH POS Session",
-        filters={"status": "Open", "docstatus": 1, "business_date": ("<", today)},
+        filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", today)},
         fields=["name", "pos_profile", "store", "business_date"],
     )
     for s in stale:

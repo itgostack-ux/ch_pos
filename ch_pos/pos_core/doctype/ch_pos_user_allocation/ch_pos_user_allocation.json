@@ -1,0 +1,167 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-03-19 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "user",
+  "employee",
+  "column_break_user",
+  "company",
+  "store",
+  "is_active",
+  "device_section",
+  "default_device",
+  "role_profile",
+  "permissions_section",
+  "can_open_session",
+  "can_close_session",
+  "can_approve_variance",
+  "column_break_perms",
+  "can_do_cash_drop",
+  "can_do_petty_expense"
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "User",
+   "options": "User",
+   "reqd": 1,
+   "description": "ERPNext user account"
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "description": "Linked employee record (optional)"
+  },
+  {
+   "fieldname": "column_break_user",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "description": "User is allocated to this company for POS operations"
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Store",
+   "options": "CH Store",
+   "reqd": 1,
+   "description": "User can operate POS at this store"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Active"
+  },
+  {
+   "fieldname": "device_section",
+   "fieldtype": "Section Break",
+   "label": "Device & Role"
+  },
+  {
+   "fieldname": "default_device",
+   "fieldtype": "Link",
+   "label": "Default Device",
+   "options": "CH Device Master",
+   "description": "Auto-assigned device on login (optional)"
+  },
+  {
+   "fieldname": "role_profile",
+   "fieldtype": "Link",
+   "label": "Role Profile",
+   "options": "Role Profile",
+   "description": "Optional role profile for this allocation"
+  },
+  {
+   "fieldname": "permissions_section",
+   "fieldtype": "Section Break",
+   "label": "Permissions"
+  },
+  {
+   "default": "1",
+   "fieldname": "can_open_session",
+   "fieldtype": "Check",
+   "label": "Can Open Session"
+  },
+  {
+   "default": "1",
+   "fieldname": "can_close_session",
+   "fieldtype": "Check",
+   "label": "Can Close Session"
+  },
+  {
+   "default": "0",
+   "fieldname": "can_approve_variance",
+   "fieldtype": "Check",
+   "label": "Can Approve Variance"
+  },
+  {
+   "fieldname": "column_break_perms",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "can_do_cash_drop",
+   "fieldtype": "Check",
+   "label": "Can Do Cash Drop"
+  },
+  {
+   "default": "0",
+   "fieldname": "can_do_petty_expense",
+   "fieldtype": "Check",
+   "label": "Can Do Petty Expense"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-03-19 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH POS User Allocation",
+ "naming_rule": "Expression",
+ "autoname": "format:ALLOC-{user}-{company}",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager",
+   "report": 1,
+   "write": 1,
+   "create": 1
+  },
+  {
+   "read": 1,
+   "role": "Sales User"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

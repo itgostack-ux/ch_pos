@@ -6,7 +6,9 @@
  "engine": "InnoDB",
  "field_order": [
   "naming_series",
+  "company",
   "store",
+  "device",
   "pos_profile",
   "register_id",
   "column_break_info",
@@ -60,12 +62,29 @@
    "print_hide": 1
   },
   {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "description": "Company for this session — set from device, cannot be changed"
+  },
+  {
    "fieldname": "store",
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Store",
    "options": "CH Store",
    "reqd": 1
+  },
+  {
+   "fieldname": "device",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Device",
+   "options": "CH Device Master",
+   "description": "Physical device/register this session runs on"
   },
   {
    "fieldname": "pos_profile",
@@ -99,7 +118,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Open\nSuspended\nClosing\nClosed",
+   "options": "Open\nSuspended\nLocked\nClosing\nPending Close\nClosed",
    "read_only": 1,
    "allow_on_submit": 1
   },

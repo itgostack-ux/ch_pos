@@ -217,7 +217,20 @@ export class SessionClosingDashboard {
 						]),
 						indicator: msg.cash_variance == 0 ? "green" : "orange",
 					});
+
+					if (msg.advance_message) {
+						frappe.msgprint({
+							title: __("Business Date Update"),
+							indicator: msg.business_date_advanced ? "green" : "orange",
+							message: msg.business_date_advanced
+								? __("{0}<br><br>Next Business Date: <b>{1}</b>", [msg.advance_message, msg.next_business_date])
+								: msg.advance_message,
+						});
+					}
+
 					PosState.session_name = null;
+					PosState.session_status = null;
+					PosState.device = null;
 					EventBus.emit("session:closed");
 				}
 			},

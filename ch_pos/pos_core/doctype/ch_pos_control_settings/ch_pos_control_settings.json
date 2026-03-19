@@ -1,0 +1,151 @@
+{
+ "actions": [],
+ "creation": "2026-03-19 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "session_controls_section",
+  "variance_approval_threshold",
+  "allow_resume_open_session",
+  "column_break_session",
+  "require_manager_on_opening_balance_above",
+  "require_manager_on_cash_drop_above",
+  "business_date_section",
+  "require_all_store_sessions_closed_before_business_date_advance",
+  "require_settlement_before_session_close",
+  "column_break_bdate",
+  "enable_denomination_count",
+  "lock_after_session_close",
+  "isolation_section",
+  "enforce_device_company_isolation",
+  "enforce_user_company_isolation",
+  "column_break_isolation",
+  "block_cross_company_transactions"
+ ],
+ "fields": [
+  {
+   "fieldname": "session_controls_section",
+   "fieldtype": "Section Break",
+   "label": "Session Controls"
+  },
+  {
+   "default": "100",
+   "fieldname": "variance_approval_threshold",
+   "fieldtype": "Currency",
+   "label": "Variance Approval Threshold (₹)",
+   "description": "Manager approval required if cash variance exceeds this amount"
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_resume_open_session",
+   "fieldtype": "Check",
+   "label": "Allow Resume Open Session",
+   "description": "Allow user to resume existing open session on re-login"
+  },
+  {
+   "fieldname": "column_break_session",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "require_manager_on_opening_balance_above",
+   "fieldtype": "Currency",
+   "label": "Require Manager for Opening Above (₹)",
+   "description": "Manager PIN required if opening balance exceeds this. 0 = no limit."
+  },
+  {
+   "default": "0",
+   "fieldname": "require_manager_on_cash_drop_above",
+   "fieldtype": "Currency",
+   "label": "Require Manager for Cash Drop Above (₹)",
+   "description": "Manager PIN required if cash drop exceeds this. 0 = always require."
+  },
+  {
+   "fieldname": "business_date_section",
+   "fieldtype": "Section Break",
+   "label": "Business Date & Settlement"
+  },
+  {
+   "default": "1",
+   "fieldname": "require_all_store_sessions_closed_before_business_date_advance",
+   "fieldtype": "Check",
+   "label": "Require All Store Sessions Closed Before Business Date Advance"
+  },
+  {
+   "default": "1",
+   "fieldname": "require_settlement_before_session_close",
+   "fieldtype": "Check",
+   "label": "Require Settlement Before Session Close"
+  },
+  {
+   "fieldname": "column_break_bdate",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_denomination_count",
+   "fieldtype": "Check",
+   "label": "Enable Denomination Count",
+   "description": "Require cash denomination breakdown in settlement"
+  },
+  {
+   "default": "1",
+   "fieldname": "lock_after_session_close",
+   "fieldtype": "Check",
+   "label": "Lock After Session Close",
+   "description": "Block all POS operations after session close until next day"
+  },
+  {
+   "fieldname": "isolation_section",
+   "fieldtype": "Section Break",
+   "label": "Company Isolation"
+  },
+  {
+   "default": "1",
+   "fieldname": "enforce_device_company_isolation",
+   "fieldtype": "Check",
+   "label": "Enforce Device-Company Isolation",
+   "description": "Device must match company on session and all transactions"
+  },
+  {
+   "default": "1",
+   "fieldname": "enforce_user_company_isolation",
+   "fieldtype": "Check",
+   "label": "Enforce User-Company Isolation",
+   "description": "User must be allocated to company before operating POS"
+  },
+  {
+   "fieldname": "column_break_isolation",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "block_cross_company_transactions",
+   "fieldtype": "Check",
+   "label": "Block Cross-Company Transactions",
+   "description": "Prevent transactions where company on invoice differs from session company"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-03-19 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH POS Control Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC"
+}

@@ -8,14 +8,22 @@
   "session",
   "store",
   "pos_profile",
+  "company",
+  "device",
   "column_break_info",
   "user",
   "business_date",
   "status",
-  "drop_section",
+  "movement_section",
+  "movement_type",
   "amount",
+  "column_break_movement",
   "reason",
-  "column_break_drop",
+  "remarks",
+  "approval_section",
+  "created_by",
+  "posting_time",
+  "column_break_approval",
   "approved_by",
   "approved_at",
   "amended_from"
@@ -55,6 +63,23 @@
    "read_only": 1
   },
   {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "fetch_from": "session.company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "device",
+   "fieldtype": "Link",
+   "label": "Device",
+   "options": "CH Device Master",
+   "fetch_from": "session.device",
+   "read_only": 1
+  },
+  {
    "fieldname": "column_break_info",
    "fieldtype": "Column Break"
   },
@@ -79,21 +104,34 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Draft\nSubmitted\nCancelled",
+   "options": "Draft\nSubmitted\nApproved\nPosted\nCancelled",
    "read_only": 1
   },
   {
-   "fieldname": "drop_section",
+   "fieldname": "movement_section",
    "fieldtype": "Section Break",
-   "label": "Cash Drop Details"
+   "label": "Movement Details"
+  },
+  {
+   "default": "Cash Drop",
+   "fieldname": "movement_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Movement Type",
+   "options": "Cash Drop\nPetty Expense\nCash Adjustment\nRefund Payout\nBuyback Cash Payout",
+   "reqd": 1
   },
   {
    "fieldname": "amount",
    "fieldtype": "Currency",
    "in_list_view": 1,
-   "label": "Drop Amount (\u20b9)",
+   "label": "Amount (\u20b9)",
    "reqd": 1,
    "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_movement",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "reason",
@@ -102,14 +140,40 @@
    "reqd": 1
   },
   {
-   "fieldname": "column_break_drop",
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "approval_section",
+   "fieldtype": "Section Break",
+   "label": "Approval"
+  },
+  {
+   "fieldname": "created_by",
+   "fieldtype": "Link",
+   "label": "Created By",
+   "options": "User",
+   "default": "__user",
+   "read_only": 1
+  },
+  {
+   "default": "Now",
+   "fieldname": "posting_time",
+   "fieldtype": "Datetime",
+   "label": "Posting Time",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_approval",
    "fieldtype": "Column Break"
   },
   {
    "fieldname": "approved_by",
    "fieldtype": "Data",
    "label": "Approved By (Manager)",
-   "read_only": 1
+   "read_only": 1,
+   "description": "Manager who approved this movement"
   },
   {
    "fieldname": "approved_at",
@@ -130,7 +194,7 @@
  "index_web_pages_for_search": 0,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-03-17 10:00:00.000000",
+ "modified": "2026-03-19 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "CH Cash Drop",

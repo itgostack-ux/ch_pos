@@ -1,0 +1,369 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-03-19 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "company",
+  "store",
+  "device",
+  "column_break_info",
+  "session",
+  "business_date",
+  "settlement_status",
+  "sales_section",
+  "total_sales_cash",
+  "total_sales_card",
+  "total_sales_upi",
+  "column_break_sales",
+  "total_sales_wallet",
+  "total_sales_bank",
+  "total_gross_sales",
+  "cash_details_section",
+  "service_cash",
+  "retail_cash",
+  "column_break_cash_details",
+  "refund_cash_out",
+  "buyback_cash_out",
+  "petty_cash_out",
+  "cash_drop_total",
+  "reconciliation_section",
+  "opening_balance",
+  "expected_closing_cash",
+  "column_break_reconciliation",
+  "actual_closing_cash",
+  "variance_amount",
+  "variance_reason",
+  "denomination_section",
+  "denomination_details",
+  "signoff_section",
+  "signoff_by_user",
+  "signoff_time",
+  "column_break_signoff",
+  "signoff_by_manager",
+  "manager_signoff_time",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "default": "SETTLE-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "SETTLE-.YYYY.-.#####",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "fetch_from": "session.company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Store",
+   "options": "CH Store",
+   "reqd": 1,
+   "fetch_from": "session.store",
+   "read_only": 1
+  },
+  {
+   "fieldname": "device",
+   "fieldtype": "Link",
+   "label": "Device",
+   "options": "CH Device Master",
+   "fetch_from": "session.device",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_info",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "session",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "POS Session",
+   "options": "CH POS Session",
+   "reqd": 1,
+   "description": "Session this settlement belongs to"
+  },
+  {
+   "fieldname": "business_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Business Date",
+   "reqd": 1,
+   "fetch_from": "session.business_date",
+   "read_only": 1
+  },
+  {
+   "default": "Draft",
+   "fieldname": "settlement_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Draft\nSubmitted\nApproved\nClosed",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "sales_section",
+   "fieldtype": "Section Break",
+   "label": "Sales Totals by Tender"
+  },
+  {
+   "fieldname": "total_sales_cash",
+   "fieldtype": "Currency",
+   "label": "Cash Sales",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_sales_card",
+   "fieldtype": "Currency",
+   "label": "Card Sales",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_sales_upi",
+   "fieldtype": "Currency",
+   "label": "UPI Sales",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_sales",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "total_sales_wallet",
+   "fieldtype": "Currency",
+   "label": "Wallet Sales",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_sales_bank",
+   "fieldtype": "Currency",
+   "label": "Bank Transfer Sales",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_gross_sales",
+   "fieldtype": "Currency",
+   "label": "Total Gross Sales",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cash_details_section",
+   "fieldtype": "Section Break",
+   "label": "Cash Flow Details"
+  },
+  {
+   "fieldname": "service_cash",
+   "fieldtype": "Currency",
+   "label": "Service Cash",
+   "read_only": 1
+  },
+  {
+   "fieldname": "retail_cash",
+   "fieldtype": "Currency",
+   "label": "Retail Cash",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_cash_details",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "refund_cash_out",
+   "fieldtype": "Currency",
+   "label": "Refund Cash Out",
+   "read_only": 1
+  },
+  {
+   "fieldname": "buyback_cash_out",
+   "fieldtype": "Currency",
+   "label": "Buyback Cash Out",
+   "read_only": 1
+  },
+  {
+   "fieldname": "petty_cash_out",
+   "fieldtype": "Currency",
+   "label": "Petty Cash Out",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cash_drop_total",
+   "fieldtype": "Currency",
+   "label": "Cash Drop Total",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reconciliation_section",
+   "fieldtype": "Section Break",
+   "label": "Cash Reconciliation"
+  },
+  {
+   "fieldname": "opening_balance",
+   "fieldtype": "Currency",
+   "label": "Opening Balance",
+   "read_only": 1
+  },
+  {
+   "fieldname": "expected_closing_cash",
+   "fieldtype": "Currency",
+   "label": "Expected Closing Cash",
+   "read_only": 1,
+   "description": "Opening + cash sales − returns − cash drops − petty − buyback payouts"
+  },
+  {
+   "fieldname": "column_break_reconciliation",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "actual_closing_cash",
+   "fieldtype": "Currency",
+   "label": "Actual Closing Cash",
+   "description": "Physically counted cash",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "variance_amount",
+   "fieldtype": "Currency",
+   "label": "Variance",
+   "read_only": 1,
+   "description": "actual − expected",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "variance_reason",
+   "fieldtype": "Small Text",
+   "label": "Variance Reason",
+   "description": "Mandatory if variance exceeds threshold",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "denomination_section",
+   "fieldtype": "Section Break",
+   "label": "Denomination Count"
+  },
+  {
+   "fieldname": "denomination_details",
+   "fieldtype": "Table",
+   "label": "Cash Denomination Count",
+   "options": "CH Cash Denomination",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "signoff_section",
+   "fieldtype": "Section Break",
+   "label": "Sign-off"
+  },
+  {
+   "fieldname": "signoff_by_user",
+   "fieldtype": "Link",
+   "label": "Signed Off By (Cashier)",
+   "options": "User",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "signoff_time",
+   "fieldtype": "Datetime",
+   "label": "Cashier Signoff Time",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "column_break_signoff",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "signoff_by_manager",
+   "fieldtype": "Data",
+   "label": "Signed Off By (Manager)",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "description": "Manager approval for variance above threshold"
+  },
+  {
+   "fieldname": "manager_signoff_time",
+   "fieldtype": "Datetime",
+   "label": "Manager Signoff Time",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "CH POS Settlement",
+   "print_hide": 1,
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-03-19 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH POS Settlement",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "cancel": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "POS User",
+   "submit": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

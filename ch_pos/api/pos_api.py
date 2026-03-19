@@ -203,6 +203,7 @@ def create_pos_invoice(pos_profile, customer, items,
             warranty_items.append({
                 "warranty_plan": item.get("warranty_plan"),
                 "for_item_code": item.get("for_item_code"),
+                "serial_no": item.get("serial_no") or item.get("for_serial_no"),
                 "price": flt(item.get("rate")),
                 "is_vas": cint(item.get("is_vas", 0)),
             })
@@ -369,6 +370,13 @@ def create_pos_invoice(pos_profile, customer, items,
     # Create CH Sold Plan records for warranty items
     sold_plans = []
     for wi in warranty_items:
+        # Look up device purchase price from the same invoice
+        device_price = 0
+        if wi.get("for_item_code"):
+            for inv_item in inv.items:
+                if inv_item.item_code == wi["for_item_code"]:
+                    device_price = flt(inv_item.rate)
+                    break
         sp = _create_sold_plan(
             warranty_plan=wi["warranty_plan"],
             customer=customer,
@@ -376,6 +384,8 @@ def create_pos_invoice(pos_profile, customer, items,
             company=profile.company,
             sales_invoice=inv.name,
             plan_price=wi["price"],
+            serial_no=wi.get("serial_no"),
+            device_purchase_price=device_price,
         )
         if sp:
             sold_plans.append(sp.name)
@@ -399,7 +409,7 @@ def create_pos_invoice(pos_profile, customer, items,
                     company=profile.company,
                     customer=customer if customer != "Walk-in Customer" else None,
                     phone=customer_phone or None,
-                    valid_days=365,
+                    valid_days=180,
                     source_type="Purchase",
                     source_document=inv.name,
                     reason=f"VAS purchase on {inv.name}",
@@ -505,7 +515,8 @@ def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
         frappe.log_error(frappe.get_traceback(), f"Voucher email failed for {invoice_name}")
 
 
-def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price):
+def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price,
+                      serial_no=None, device_purchase_price=0):
     """Create a CH Sold Plan when a warranty is sold via POS.
 
     Uses the standard Frappe document lifecycle (insert → submit) so that
@@ -517,6 +528,7 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
     sp.warranty_plan = warranty_plan
     sp.customer = customer
     sp.item_code = item_code
+    sp.serial_no = serial_no
     sp.company = company
     sp.start_date = today
     sp.end_date = add_months(today, plan_doc.duration_months or 12)
@@ -525,6 +537,9 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
     sp.plan_price = plan_price
     sp.max_claims = plan_doc.max_claims or 1
     sp.deductible_amount = flt(plan_doc.deductible_amount)
+    sp.claims_per_year = plan_doc.claims_per_year or 0
+    sp.device_purchase_price = flt(device_purchase_price)
+    sp.max_coverage_value = flt(device_purchase_price) if flt(device_purchase_price) > 0 else 0
     sp.sold_by = frappe.session.user
     sp.insert(ignore_permissions=True)
     sp.submit()
