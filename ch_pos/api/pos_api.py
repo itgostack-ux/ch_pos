@@ -3409,6 +3409,13 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
 
 # ── POS Closing Entry APIs ───────────────────────────────────────
 
+def _raise_legacy_closing_entry_error():
+    frappe.throw(
+        _(
+            "POS Closing Entry is deprecated in this deployment. Use CH POS Settlement creation and CH POS Session close instead."
+        )
+    )
+
 @frappe.whitelist()
 def get_session_payment_summary(pos_profile, from_date, to_date=None):
     """Return expected payment totals for a POS profile + date range.
@@ -3505,6 +3512,7 @@ def open_closing_entry(pos_profile, from_date, to_date=None, opening_cash=0,
     Returns:
         name of the created POS Closing Entry
     """
+    _raise_legacy_closing_entry_error()
     frappe.has_permission("POS Closing Entry", "create", throw=True)
     from_date = from_date or frappe.utils.nowdate()
     to_date = to_date or from_date
@@ -3553,6 +3561,7 @@ def submit_closing_entry(closing_entry, counted_amounts_json, counted_cash=0, re
     Returns:
         {name, status, cash_variance, payment_variances: [...]}
     """
+    _raise_legacy_closing_entry_error()
     frappe.has_permission("POS Closing Entry", "submit", throw=True)
 
     if isinstance(counted_amounts_json, str):
