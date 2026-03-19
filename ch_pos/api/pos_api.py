@@ -521,8 +521,36 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
 
     Uses the standard Frappe document lifecycle (insert → submit) so that
     the CH Sold Plan controller's validate/on_submit hooks run properly.
+    Enforces purchase_window_hours from the plan master.
     """
     plan_doc = frappe.get_cached_doc("CH Warranty Plan", warranty_plan)
+
+    # ── 24-hour purchase window validation ────────────────────────────────
+    # Protection Plans / VAS must be bought within N hours of device purchase.
+    # Post-Repair Warranty is exempt (issued by GoFix after service).
+    purchase_window = plan_doc.purchase_window_hours or 0
+    if (purchase_window > 0
+            and plan_doc.plan_type not in ("Post-Repair Warranty", "Own Warranty")
+            and serial_no):
+        # Find the most recent sale of this serial to this customer
+        device_sold_at = frappe.db.get_value(
+            "Sales Invoice Item",
+            {"serial_no": ["like", f"%{serial_no}%"], "docstatus": 1,
+             "parenttype": "Sales Invoice"},
+            "creation",
+            order_by="creation desc",
+        )
+        if device_sold_at:
+            from frappe.utils import time_diff_in_hours, now_datetime as _now
+            hours_since = time_diff_in_hours(_now(), device_sold_at)
+            if hours_since > purchase_window:
+                frappe.throw(
+                    _("This plan must be purchased within {0} hours of device sale. "
+                      "Device was sold {1:.1f} hours ago.").format(
+                        purchase_window, hours_since),
+                    title=_("Purchase Window Expired"),
+                )
+
     today = nowdate()
     sp = frappe.new_doc("CH Sold Plan")
     sp.warranty_plan = warranty_plan
