@@ -405,6 +405,10 @@ def create_pos_invoice(pos_profile, customer, items,
     except Exception:
         if inv.name and frappe.db.exists("Sales Invoice", inv.name):
             try:
+                doc = frappe.get_doc("Sales Invoice", inv.name)
+                if doc.docstatus == 1:
+                    doc.flags.ignore_permissions = True
+                    doc.cancel()
                 frappe.delete_doc("Sales Invoice", inv.name, force=True, ignore_permissions=True)
             except Exception:
                 frappe.log_error(frappe.get_traceback(), f"Draft Sales Invoice cleanup failed for {inv.name}")
