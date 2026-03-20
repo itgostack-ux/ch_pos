@@ -1,7 +1,7 @@
 # Copyright (c) 2026, GoStack and contributors
-# Return Policy Control — validate hook for POS Invoice (Credit Note).
+# Return Policy Control — validate hook for Sales Invoice (Credit Note).
 #
-# Called from ch_pos hooks.py doc_events on POS Invoice validate.
+# Called from ch_pos hooks.py doc_events on Sales Invoice validate.
 # Enforces return window: if the original sale is older than the configured
 # return_policy_days, the return is blocked unless an approved exception exists.
 
@@ -13,7 +13,7 @@ from frappe.utils import flt, date_diff, getdate
 def validate_return_policy(doc, method=None):
 	"""Check return-against invoice date against configured return window.
 
-	Only applies to POS Invoice Credit Notes (is_return=1, return_against set).
+	Only applies to Sales Invoice Credit Notes (is_return=1, return_against set).
 	"""
 	if not doc.is_return or not doc.return_against:
 		return
@@ -28,7 +28,7 @@ def validate_return_policy(doc, method=None):
 		return  # No return window configured — allow all returns
 
 	# Get the original invoice date
-	original_date = frappe.db.get_value("POS Invoice", doc.return_against, "posting_date")
+	original_date = frappe.db.get_value("Sales Invoice", doc.return_against, "posting_date")
 	if not original_date:
 		return
 
@@ -40,7 +40,7 @@ def validate_return_policy(doc, method=None):
 	# Beyond policy window — check if exception already approved
 	exception_approved = frappe.db.exists("CH Exception Request", {
 		"exception_type": "Return Beyond Policy",
-		"reference_doctype": "POS Invoice",
+		"reference_doctype": "Sales Invoice",
 		"reference_name": doc.return_against,
 		"status": "Approved",
 		"company": company,
@@ -103,7 +103,7 @@ def _create_return_exception(doc, company, days_since_sale, return_days, origina
 			),
 			requested_value=abs(flt(doc.grand_total)),
 			original_value=0,
-			reference_doctype="POS Invoice",
+			reference_doctype="Sales Invoice",
 			reference_name=doc.return_against,
 			item_code=item_code,
 			serial_no=serial_no,

@@ -1,6 +1,6 @@
 import frappe
 from frappe.utils import flt, cint
-from erpnext.accounts.doctype.pos_invoice.pos_invoice import POSInvoice
+from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
 
 
 def _get_serial_nos_from_item(item, parent_doc=None):
@@ -27,6 +27,43 @@ def _get_serial_nos_from_item(item, parent_doc=None):
     return []
 
 
+def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=None):
+    """Auto-create a CH Serial Lifecycle row if one does not exist.
+
+    This closes the gap where serials entered the system outside the
+    Purchase Receipt IMEI-tracking path and therefore never got a
+    lifecycle document.  The row is created with status 'In Stock'
+    so that the subsequent sale/return transition is valid.
+    """
+    if frappe.db.exists("CH Serial Lifecycle", serial_no):
+        return
+
+    if not item_code:
+        item_code = frappe.db.get_value("Serial No", serial_no, "item_code")
+    if not item_code:
+        return  # cannot create without item_code
+
+    from frappe.utils import now_datetime
+    lc = frappe.new_doc("CH Serial Lifecycle")
+    lc.serial_no = serial_no
+    lc.item_code = item_code
+    lc.lifecycle_status = "In Stock"
+    lc.current_company = company
+    lc.current_warehouse = warehouse
+    lc.append("lifecycle_log", {
+        "log_timestamp": now_datetime(),
+        "from_status": "",
+        "to_status": "In Stock",
+        "changed_by": frappe.session.user,
+        "company": company,
+        "warehouse": warehouse,
+        "remarks": f"Auto-created on sale — Serial No existed without lifecycle record",
+    })
+    lc.flags.ignore_permissions = True
+    lc.flags.ignore_validate = True
+    lc.insert()
+
+
 def _update_serial_status(serial_no, new_status, company=None, warehouse=None, remarks=None, **kwargs):
     """Call the centralized CH Serial Lifecycle API for status transitions."""
     from ch_item_master.ch_item_master.doctype.ch_serial_lifecycle.ch_serial_lifecycle import (
@@ -50,19 +87,16 @@ def _create_or_update_device(serial_no, customer, **kwargs):
     return CHCustomerDevice.create_or_update_for_serial(serial_no, customer, **kwargs)
 
 
-class CustomPOSInvoice(POSInvoice):
-    """Extends POS Invoice for margin scheme GST on selling side.
+class CustomPOSInvoice(SalesInvoice):
+    """Extends Sales Invoice for margin scheme GST on selling side.
 
-    Also overrides on_submit/on_cancel to create SLE/GL entries at submit time.
-    Standard ERPNext v15 POS Invoice defers stock ledger and GL entry creation
-    to POS Closing Entry → Consolidated Sales Invoice.  GoGizmo needs real-time
-    stock and accounting for IMEI serial tracking, so we invoke those methods
-    directly.
+    Custom fields on Sales Invoice (is_pos=1) replace the old POS Invoice flow.
+    Each POS transaction is now a direct Sales Invoice — no consolidation needed.
     """
-    # POS Invoice DocType lacks this Sales Invoice field; accounts_controller
+    # Sales Invoice DocType lacks this Sales Invoice field; accounts_controller
     # accesses it during make_precision_loss_gl_entry.
     use_company_roundoff_cost_center = 0
-    # POS Invoice DocType lacks this Sales Invoice field; used in
+    # Sales Invoice DocType lacks this Sales Invoice field; used in
     # make_customer_gl_entry and make_tax_gl_entries for return invoices.
     update_outstanding_for_self = 0
     def validate(self):
@@ -76,11 +110,11 @@ class CustomPOSInvoice(POSInvoice):
         _apply_margin_scheme(self)
 
     def on_submit(self):
-        # Run standard POS Invoice on_submit (loyalty, phone payments, serial
+        # Run standard Sales Invoice on_submit (loyalty, phone payments, serial
         # batch bundles, coupon code).
         super().on_submit()
 
-        # Create SLE and GL entries that POS Invoice normally skips.
+        # Create SLE and GL entries that Sales Invoice normally skips.
         if self.update_stock == 1:
             self.update_stock_ledger()
 
@@ -90,7 +124,7 @@ class CustomPOSInvoice(POSInvoice):
             self.repost_future_sle_and_gle()
 
     def on_cancel(self):
-        # Reimplements POS Invoice on_cancel with SLE/GL reversal inserted
+        # Reimplements Sales Invoice on_cancel with SLE/GL reversal inserted
         # before serial bundle delinking to preserve bundle references.
         from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
 
@@ -109,11 +143,11 @@ class CustomPOSInvoice(POSInvoice):
         # SellingController chain (same pattern as POSInvoice.on_cancel)
         super(SalesInvoice, self).on_cancel()
 
-        # Loyalty points cleanup (from POS Invoice.on_cancel)
+        # Loyalty points cleanup (from Sales Invoice.on_cancel)
         if not self.is_return and self.loyalty_program:
             self.delete_loyalty_point_entry()
         elif self.is_return and self.return_against and self.loyalty_program:
-            against_psi_doc = frappe.get_doc("POS Invoice", self.return_against)
+            against_psi_doc = frappe.get_doc("Sales Invoice", self.return_against)
             against_psi_doc.delete_loyalty_point_entry()
             against_psi_doc.make_loyalty_point_entry()
 
@@ -163,7 +197,7 @@ class CustomPOSInvoice(POSInvoice):
     def make_discount_gl_entries(self, gl_entries):
         """Override: accounts_controller only handles Sales/Purchase Invoice.
 
-        POS Invoice is a selling document, so we read Selling Settings and
+        Sales Invoice is a selling document, so we read Selling Settings and
         then delegate to the parent implementation with doctype temporarily
         set so the if/elif branches match.
         """
@@ -251,7 +285,7 @@ class CustomPOSInvoice(POSInvoice):
     def get_gl_entries(self, warehouse_account=None):
         # accounts_controller.make_discount_gl_entries only handles
         # "Sales Invoice"/"Purchase Invoice" doctypes.  Override below
-        # ensures POS Invoice is handled like Sales Invoice for discounts.
+        # ensures Sales Invoice is handled like Sales Invoice for discounts.
         gl_entries = super().get_gl_entries(warehouse_account)
         if not cint(self.get("custom_is_margin_scheme")):
             return gl_entries
@@ -320,8 +354,8 @@ def create_customer_device_records(doc, method=None):
                 "item_name": item.item_name,
                 "brand": item.brand or frappe.db.get_value("Item", item.item_code, "brand"),
                 "purchase_date": doc.posting_date,
-                # purchase_invoice links to Sales Invoice — POS Invoice is a separate flow
-                # Store the POS Invoice name in a custom field if available, else skip
+                # purchase_invoice links to Sales Invoice — Sales Invoice is a separate flow
+                # Store the Sales Invoice name in a custom field if available, else skip
                 "purchase_price": flt(item.rate),
                 # purchase_store is a Link to Warehouse; use item.warehouse (already validated)
                 "purchase_store": item.warehouse or frappe.db.get_value(
@@ -335,9 +369,9 @@ def create_customer_device_records(doc, method=None):
             if "pos_invoice" in cd_meta_fields:
                 device_kwargs["pos_invoice"] = doc.name
             elif "purchase_invoice" in cd_meta_fields:
-                # Only set if the Link points to POS Invoice (not Sales Invoice)
+                # Only set if the Link points to Sales Invoice (not Sales Invoice)
                 pf = frappe.get_meta("CH Customer Device").get_field("purchase_invoice")
-                if pf and pf.options == "POS Invoice":
+                if pf and pf.options == "Sales Invoice":
                     device_kwargs["purchase_invoice"] = doc.name
 
             # Attach warranty plan if selected
@@ -368,15 +402,16 @@ def update_serial_lifecycle(doc, method=None):
 
     for item in doc.items:
         for sn in _get_serial_nos_from_item(item):
-            if not frappe.db.exists("CH Serial Lifecycle", sn):
-                continue
+            wh = doc.get("set_warehouse") or item.warehouse
+            _ensure_lifecycle_exists(sn, item_code=item.item_code,
+                                     company=doc.company, warehouse=wh)
 
             _update_serial_status(
                 serial_no=sn,
                 new_status="Sold",
                 company=doc.company,
-                warehouse=doc.get("set_warehouse") or doc.items[0].warehouse if doc.items else None,
-                remarks=f"Sold via POS Invoice {doc.name}",
+                warehouse=wh,
+                remarks=f"Sold via Sales Invoice {doc.name}",
                 sale_date=doc.posting_date,
                 sale_document=doc.name,
                 sale_rate=flt(item.rate),
@@ -392,8 +427,8 @@ def _return_serial_lifecycle(doc):
     """
     for item in doc.items:
         for sn in _get_serial_nos_from_item(item):
-            if not frappe.db.exists("CH Serial Lifecycle", sn):
-                continue
+            _ensure_lifecycle_exists(sn, item_code=item.item_code,
+                                     company=doc.company, warehouse=item.warehouse)
 
             current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
             if current_status == "Sold":
@@ -401,7 +436,7 @@ def _return_serial_lifecycle(doc):
                     serial_no=sn,
                     new_status="Returned",
                     company=doc.company,
-                    remarks=f"Returned via POS Invoice {doc.name} (return against {doc.return_against})",
+                    remarks=f"Returned via Sales Invoice {doc.name} (return against {doc.return_against})",
                     sale_date=None,
                     sale_document=None,
                     sale_rate=0,
@@ -413,7 +448,7 @@ def _return_serial_lifecycle(doc):
                     new_status="In Stock",
                     company=doc.company,
                     warehouse=item.warehouse,
-                    remarks=f"Returned to stock — POS Invoice {doc.name}",
+                    remarks=f"Returned to stock — Sales Invoice {doc.name}",
                 )
 
 
@@ -427,15 +462,15 @@ def reverse_serial_lifecycle(doc, method=None):
     if frappe.session.user != "Administrator":
         if not (doc.get("custom_cancel_reason") or "").strip():
             frappe.throw(
-                frappe._("A cancellation reason is required to cancel POS Invoice {0}").format(doc.name)
+                frappe._("A cancellation reason is required to cancel Sales Invoice {0}").format(doc.name)
             )
 
     # Emit audit log for the cancellation
     try:
         from ch_pos.audit import log_business_event
         log_business_event(
-            event_type="POS Invoice Cancelled",
-            ref_doctype="POS Invoice",
+            event_type="Sales Invoice Cancelled",
+            ref_doctype="Sales Invoice",
             ref_name=doc.name,
             before="Submitted",
             after="Cancelled",
@@ -443,7 +478,7 @@ def reverse_serial_lifecycle(doc, method=None):
             company=doc.company,
         )
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "Audit log failed on POS Invoice cancel")
+        frappe.log_error(frappe.get_traceback(), "Audit log failed on Sales Invoice cancel")
 
     if doc.is_return:
         _cancel_return_serial_lifecycle(doc)
@@ -451,8 +486,8 @@ def reverse_serial_lifecycle(doc, method=None):
 
     for item in doc.items:
         for sn in _get_serial_nos_from_item(item, parent_doc=doc):
-            if not frappe.db.exists("CH Serial Lifecycle", sn):
-                continue
+            _ensure_lifecycle_exists(sn, item_code=item.item_code,
+                                     company=doc.company, warehouse=item.warehouse)
 
             current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
             # Sold → Returned is a valid transition; then Returned → In Stock
@@ -461,7 +496,7 @@ def reverse_serial_lifecycle(doc, method=None):
                     serial_no=sn,
                     new_status="Returned",
                     company=doc.company,
-                    remarks=f"POS Invoice {doc.name} cancelled",
+                    remarks=f"Sales Invoice {doc.name} cancelled",
                     sale_date=None,
                     sale_document=None,
                     sale_rate=0,
@@ -474,7 +509,7 @@ def reverse_serial_lifecycle(doc, method=None):
                     new_status="In Stock",
                     company=doc.company,
                     warehouse=item.warehouse,
-                    remarks=f"Returned to stock — POS Invoice {doc.name} cancelled",
+                    remarks=f"Returned to stock — Sales Invoice {doc.name} cancelled",
                 )
 
 
@@ -487,8 +522,8 @@ def _cancel_return_serial_lifecycle(doc):
     orig_inv = doc.return_against
     for item in doc.items:
         for sn in _get_serial_nos_from_item(item, parent_doc=doc):
-            if not frappe.db.exists("CH Serial Lifecycle", sn):
-                continue
+            _ensure_lifecycle_exists(sn, item_code=item.item_code,
+                                     company=doc.company, warehouse=item.warehouse)
 
             current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
             if current_status == "In Stock":
@@ -498,9 +533,9 @@ def _cancel_return_serial_lifecycle(doc):
                 customer = doc.customer
                 customer_name = doc.customer_name
                 if orig_inv:
-                    sale_date = frappe.db.get_value("POS Invoice", orig_inv, "posting_date")
+                    sale_date = frappe.db.get_value("Sales Invoice", orig_inv, "posting_date")
                     # Find rate from original invoice item
-                    orig_items = frappe.db.get_all("POS Invoice Item",
+                    orig_items = frappe.db.get_all("Sales Invoice Item",
                         filters={"parent": orig_inv, "serial_no": ["like", f"%{sn}%"]},
                         fields=["rate"], limit=1)
                     if orig_items:
@@ -648,7 +683,7 @@ def _apply_margin_scheme(doc):
 
 
 def validate_eod_lock(doc, method=None):
-    """Hook: validate — block POS Invoice creation/amendment after session close.
+    """Hook: validate — block Sales Invoice creation/amendment after session close.
 
     Once a CH POS Session for this pos_profile + business_date is Closed,
     no new invoices (or amendments) are allowed for that profile + date.
@@ -675,7 +710,7 @@ def validate_eod_lock(doc, method=None):
 
 
 def _get_incoming_rate(item):
-    """Get purchase cost (incoming rate) for a POS Invoice item."""
+    """Get purchase cost (incoming rate) for a Sales Invoice item."""
     # Try from serial no first
     serial = (item.serial_no or "").strip().split("\n")[0].strip()
     if serial:

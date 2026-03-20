@@ -19,7 +19,7 @@ def get_columns():
     return [
         {"label": _("Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
         {"label": _("Invoice"), "fieldname": "name", "fieldtype": "Link",
-         "options": "POS Invoice", "width": 160},
+         "options": "Sales Invoice", "width": 160},
         {"label": _("Customer"), "fieldname": "customer", "fieldtype": "Link",
          "options": "Customer", "width": 140},
         {"label": _("Store"), "fieldname": "warehouse", "fieldtype": "Link",
@@ -60,7 +60,7 @@ def get_data(filters):
             pi.is_return,
             GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ')
                 AS mode_of_payment
-        FROM `tabPOS Invoice` pi
+        FROM `tabSales Invoice` pi
         LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         WHERE pi.docstatus = 1
           {conditions}
@@ -117,7 +117,7 @@ def _build_conditions(filters):
     if filters.get("mode_of_payment"):
         conditions.append("""pi.name IN (
             SELECT parent FROM `tabSales Invoice Payment`
-            WHERE mode_of_payment = %(mode_of_payment)s AND parenttype = 'POS Invoice'
+            WHERE mode_of_payment = %(mode_of_payment)s AND parenttype = 'Sales Invoice'
         )""")
     return ("AND " + " AND ".join(conditions)) if conditions else ""
 

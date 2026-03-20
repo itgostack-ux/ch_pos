@@ -7,6 +7,7 @@
  */
 import { PosState, EventBus } from "../state.js";
 import { Sidebar } from "./sidebar.js";
+import { SessionBar } from "./session_bar.js";
 import { NetworkStatus } from "./network_status.js";
 
 export class LayoutManager {
@@ -17,6 +18,7 @@ export class LayoutManager {
 		this.wrapper = $(wrapper);
 		this.page = wrapper.page;
 		this.sidebar = null;
+		this.session_bar = null;
 		this.network_status = null;
 
 		// DOM references (set after render)
@@ -32,6 +34,7 @@ export class LayoutManager {
 		this._render_shell();
 		this._init_components();
 		this._bind_mode_switch();
+		this._bind_keyboard_shortcuts();
 	}
 
 	/** Apply full-screen CSS classes and hide Frappe chrome */
@@ -50,6 +53,7 @@ export class LayoutManager {
 	_render_shell() {
 		const content = this.wrapper.find(".layout-main-section");
 		content.empty().append(`
+			<div class="ch-pos-session-bar"></div>
 			<div class="ch-pos-offline-bar"></div>
 			<div class="ch-pos-container">
 				<div class="ch-pos-sidebar"></div>
@@ -59,6 +63,7 @@ export class LayoutManager {
 		`);
 
 		// Cache DOM references
+		this.$session_bar = content.find(".ch-pos-session-bar");
 		this.$offline_bar = content.find(".ch-pos-offline-bar");
 		this.$container = content.find(".ch-pos-container");
 		this.$sidebar = content.find(".ch-pos-sidebar");
@@ -68,6 +73,9 @@ export class LayoutManager {
 
 	/** Initialize child components */
 	_init_components() {
+		// Session bar
+		this.session_bar = new SessionBar(this.$session_bar);
+
 		// Sidebar
 		this.sidebar = new Sidebar(this.$sidebar);
 
@@ -117,10 +125,47 @@ export class LayoutManager {
 		return this.$cart_panel;
 	}
 
+	/** Bind global keyboard shortcuts for POS workflow */
+	_bind_keyboard_shortcuts() {
+		$(document).on("keydown.ch_pos_shortcuts", (e) => {
+			// Only handle shortcuts outside of dialog overlays
+			if ($(".modal.show").length || $(".ch-pay-overlay.ch-pay-visible").length) return;
+
+			const tag = (e.target.tagName || "").toLowerCase();
+			const in_input = tag === "input" || tag === "textarea" || tag === "select";
+
+			switch (e.key) {
+				case "F2":
+					e.preventDefault();
+					EventBus.emit("search:focus");
+					break;
+				case "F5":
+					e.preventDefault();
+					EventBus.emit("cart:hold");
+					break;
+				case "F8":
+					e.preventDefault();
+					EventBus.emit("cart:pay");
+					break;
+				case "F9":
+					e.preventDefault();
+					EventBus.emit("held_bills:open");
+					break;
+				case "Escape":
+					if (!in_input) {
+						e.preventDefault();
+						EventBus.emit("cart:cancel");
+					}
+					break;
+			}
+		});
+	}
+
 	/** Teardown — restore Frappe UI */
 	destroy() {
 		$("body").removeClass("ch-pos-fullscreen");
 		$("header.navbar").show();
+		$(document).off("keydown.ch_pos_shortcuts");
 		EventBus.clear();
 	}
 }

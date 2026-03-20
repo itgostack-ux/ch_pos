@@ -265,7 +265,7 @@
    "fieldname": "converted_invoice",
    "fieldtype": "Link",
    "label": "Converted Invoice",
-   "options": "POS Invoice",
+   "options": "Sales Invoice",
    "read_only": 1
   },
   {

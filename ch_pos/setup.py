@@ -21,7 +21,7 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
     ],
-    "POS Invoice": [
+    "Sales Invoice": [
         {
             "fieldname": "custom_kiosk_token",
             "fieldtype": "Link",
@@ -137,8 +137,75 @@ CUSTOM_FIELDS = {
             "no_copy": 1,
             "module": "POS Core",
         },
+        # ── Payment type fields ──────────────────────────────────
+        {
+            "fieldname": "custom_payment_type_section",
+            "fieldtype": "Section Break",
+            "label": "Payment Type Details",
+            "insert_after": "custom_cancel_reason",
+            "collapsible": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_is_credit_sale",
+            "fieldtype": "Check",
+            "label": "Credit Sale",
+            "insert_after": "custom_payment_type_section",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_credit_days",
+            "fieldtype": "Int",
+            "label": "Credit Days",
+            "insert_after": "custom_is_credit_sale",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_is_credit_sale",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_payment_col_break",
+            "fieldtype": "Column Break",
+            "insert_after": "custom_credit_days",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_is_free_sale",
+            "fieldtype": "Check",
+            "label": "Free Sale",
+            "insert_after": "custom_payment_col_break",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_free_sale_reason",
+            "fieldtype": "Small Text",
+            "label": "Free Sale Reason",
+            "insert_after": "custom_is_free_sale",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_is_free_sale",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_free_sale_approved_by",
+            "fieldtype": "Data",
+            "label": "Free Sale Approved By",
+            "insert_after": "custom_free_sale_reason",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_is_free_sale",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_advance_adjusted",
+            "fieldtype": "Currency",
+            "label": "Advance Adjusted",
+            "insert_after": "custom_free_sale_approved_by",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_advance_adjusted",
+            "module": "POS Core",
+        },
     ],
-    "POS Invoice Item": [
+    "Sales Invoice Item": [
         {
             "fieldname": "custom_warranty_plan",
             "fieldtype": "Link",
@@ -234,7 +301,7 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
     ],
-    # Payment row custom fields — capture UPI TxID and card reference per payment line
+    # Payment row custom fields — capture UPI TxID, card reference, and finance details per payment line
     "Sales Invoice Payment": [
         {
             "fieldname": "custom_upi_transaction_id",
@@ -258,6 +325,39 @@ CUSTOM_FIELDS = {
             "fieldtype": "Data",
             "label": "Card Last 4 Digits",
             "insert_after": "custom_card_reference",
+            "module": "POS Core",
+        },
+        # Finance / EMI payment fields
+        {
+            "fieldname": "custom_finance_provider",
+            "fieldtype": "Data",
+            "label": "Finance Provider",
+            "insert_after": "custom_card_last_four",
+            "description": "Finance company name (Bajaj, HDFC, TVS, etc.)",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_finance_tenure",
+            "fieldtype": "Data",
+            "label": "Finance Tenure",
+            "insert_after": "custom_finance_provider",
+            "description": "EMI tenure (e.g. 6M, 12M, 18M)",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_finance_approval_id",
+            "fieldtype": "Data",
+            "label": "Finance Approval / Loan ID",
+            "insert_after": "custom_finance_tenure",
+            "description": "Approval or loan ID from finance provider",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_finance_down_payment",
+            "fieldtype": "Currency",
+            "label": "Finance Down Payment",
+            "insert_after": "custom_finance_approval_id",
+            "description": "Down payment amount collected for EMI/Finance",
             "module": "POS Core",
         },
     ],

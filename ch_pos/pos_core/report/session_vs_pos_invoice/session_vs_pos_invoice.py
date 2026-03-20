@@ -12,8 +12,8 @@ def execute(filters=None):
         {"fieldname": "user", "label": _("Cashier"), "fieldtype": "Link", "options": "User", "width": 140},
         {"fieldname": "session_net_sales", "label": _("Session Net Sales"), "fieldtype": "Currency", "width": 130},
         {"fieldname": "session_invoices", "label": _("Session Invoice Count"), "fieldtype": "Int", "width": 130},
-        {"fieldname": "pos_invoice_total", "label": _("POS Invoice Total"), "fieldtype": "Currency", "width": 130},
-        {"fieldname": "pos_invoice_count", "label": _("POS Invoice Count"), "fieldtype": "Int", "width": 130},
+        {"fieldname": "pos_invoice_total", "label": _("Sales Invoice Total"), "fieldtype": "Currency", "width": 130},
+        {"fieldname": "pos_invoice_count", "label": _("Sales Invoice Count"), "fieldtype": "Int", "width": 130},
         {"fieldname": "difference", "label": _("Difference (₹)"), "fieldtype": "Currency", "width": 120},
         {"fieldname": "count_diff", "label": _("Count Diff"), "fieldtype": "Int", "width": 90},
     ]
@@ -49,7 +49,7 @@ def execute(filters=None):
         inv_data = frappe.db.sql("""
             SELECT COALESCE(SUM(grand_total), 0) AS total,
                    COUNT(*) AS cnt
-            FROM `tabPOS Invoice`
+            FROM `tabSales Invoice`
             WHERE pos_profile = %(pp)s
               AND posting_date = %(bd)s
               AND docstatus = 1

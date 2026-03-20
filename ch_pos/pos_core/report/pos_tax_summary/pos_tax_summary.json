@@ -9,7 +9,7 @@
  "module": "POS Core",
  "name": "POS Tax Summary",
  "owner": "Administrator",
- "ref_doctype": "POS Invoice",
+ "ref_doctype": "Sales Invoice",
  "report_name": "POS Tax Summary",
  "report_type": "Script Report",
  "roles": [

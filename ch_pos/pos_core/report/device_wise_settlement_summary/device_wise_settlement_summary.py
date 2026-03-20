@@ -14,9 +14,9 @@ def execute(filters=None):
         {"fieldname": "expected_closing_cash", "label": _("Expected Cash"), "fieldtype": "Currency", "width": 120},
         {"fieldname": "actual_closing_cash", "label": _("Actual Cash"), "fieldtype": "Currency", "width": 120},
         {"fieldname": "variance_amount", "label": _("Variance"), "fieldtype": "Currency", "width": 120},
-        {"fieldname": "cash_sales_total", "label": _("Cash Sales"), "fieldtype": "Currency", "width": 120},
-        {"fieldname": "card_sales_total", "label": _("Card Sales"), "fieldtype": "Currency", "width": 120},
-        {"fieldname": "upi_sales_total", "label": _("UPI Sales"), "fieldtype": "Currency", "width": 120},
+        {"fieldname": "total_sales_cash", "label": _("Cash Sales"), "fieldtype": "Currency", "width": 120},
+        {"fieldname": "total_sales_card", "label": _("Card Sales"), "fieldtype": "Currency", "width": 120},
+        {"fieldname": "total_sales_upi", "label": _("UPI Sales"), "fieldtype": "Currency", "width": 120},
     ]
 
     conditions = {"docstatus": 1}
@@ -35,7 +35,7 @@ def execute(filters=None):
         filters=conditions,
         fields=["device", "store", "company", "session", "business_date",
                 "settlement_status", "expected_closing_cash", "actual_closing_cash",
-                "variance_amount", "cash_sales_total", "card_sales_total", "upi_sales_total"],
+            "variance_amount", "total_sales_cash", "total_sales_card", "total_sales_upi"],
         order_by="business_date desc, device asc",
     )
 

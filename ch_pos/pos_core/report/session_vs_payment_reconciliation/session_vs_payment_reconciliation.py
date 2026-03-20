@@ -42,7 +42,7 @@ def execute(filters=None):
             SUM(sip.amount) AS payment_total,
             COUNT(DISTINCT pi.name) AS invoice_count
         FROM `tabCH POS Session` s
-        JOIN `tabPOS Invoice` pi
+        JOIN `tabSales Invoice` pi
             ON pi.pos_profile = s.pos_profile
             AND pi.posting_date = s.business_date
             AND pi.docstatus = 1

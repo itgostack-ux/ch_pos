@@ -8,7 +8,7 @@ Workflow:
   1. Cashier receives EDC batch report from bank at end of day.
   2. Creates POS EDC Settlement, enters settlement_date + terminal_id.
   3. Uploads transactions via upload_edc_transactions() API or enters manually.
-  4. Clicks "Auto Match" to match each transaction against a POS Invoice by RRN
+  4. Clicks "Auto Match" to match each transaction against a Sales Invoice by RRN
      or by (amount + date) approximation.
   5. Reviews unmatched rows and either manually links or marks as Disputed.
   6. Submits when satisfied — status becomes Matched (if 100%) or Discrepancy.
@@ -57,11 +57,11 @@ class POSEDCSettlement(Document):
 
 	@frappe.whitelist()
 	def auto_match(self):
-		"""Attempt to auto-match each Unmatched transaction to a POS Invoice.
+		"""Attempt to auto-match each Unmatched transaction to a Sales Invoice.
 
 		Match strategy (in order):
-		  1. RRN match — look for custom_card_reference = rrn on POS Invoice payments
-		  2. Amount + date match — single POS Invoice with exact amount on settlement_date
+		  1. RRN match — look for custom_card_reference = rrn on Sales Invoice payments
+		  2. Amount + date match — single Sales Invoice with exact amount on settlement_date
 		     with a card payment mode
 		"""
 		matched_count = 0
@@ -73,7 +73,7 @@ class POSEDCSettlement(Document):
 			if row.rrn:
 				invoice = frappe.db.get_value(
 					"Sales Invoice Payment",
-					{"custom_card_reference": row.rrn, "parenttype": "POS Invoice"},
+					{"custom_card_reference": row.rrn, "parenttype": "Sales Invoice"},
 					"parent",
 				)
 				if invoice:
@@ -92,7 +92,7 @@ class POSEDCSettlement(Document):
 				"""
 				results = frappe.db.sql("""
 					SELECT pi.name
-					FROM `tabPOS Invoice` pi
+					FROM `tabSales Invoice` pi
 					JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
 					WHERE pi.posting_date = %(date)s
 					  AND pi.docstatus = 1

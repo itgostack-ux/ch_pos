@@ -308,6 +308,13 @@ export class SessionControls {
 			session_name: PosState.session_name,
 		}).then((data) => {
 			this._render_settlement_dialog(data);
+		}).catch((err) => {
+			console.error("Settlement load error:", err);
+			frappe.msgprint({
+				title: __("Settlement Error"),
+				message: err.message || err.exc || __("Failed to load session data for settlement"),
+				indicator: "red",
+			});
 		});
 	}
 
@@ -422,7 +429,11 @@ export class SessionControls {
 							});
 						}
 					},
-					error: () => dlg.enable_primary_action(),
+					error: (err) => {
+						dlg.enable_primary_action();
+						const msg = err && err.message ? err.message : __("Failed to submit settlement. Check console for details.");
+						frappe.msgprint({ title: __("Settlement Error"), message: msg, indicator: "red" });
+					},
 				});
 			},
 		});

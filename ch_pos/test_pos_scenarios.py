@@ -1,8 +1,8 @@
 """
 CH POS — Scenario Test Suite
 Tests retail sale closure flows end-to-end through the Python API layer.
-Run: bench --site erpnext.local execute test_pos_scenarios.test_all
-Or: cd /home/palla/erpnext-bench && python test_pos_scenarios.py
+Run: bench --site erpnext.local execute ch_pos.test_pos_scenarios.test_all
+Or: cd /home/palla/erpnext-bench && python apps/ch_pos/ch_pos/test_pos_scenarios.py
 """
 import sys
 sys.path.insert(0, "/home/palla/erpnext-bench/apps/frappe")
@@ -27,57 +27,146 @@ def warn(name, detail=""):
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def ensure_active_session(ctx):
+    if not ctx.get("pos_profile"):
+        return
+
+    from ch_pos.api.session_api import get_session_status, open_session
+
+    status = get_session_status(ctx["pos_profile"].name)
+    if status.get("has_session"):
+        ctx["session_name"] = status.get("session_name")
+        ctx["created_session"] = False
+        return
+
+    if status.get("unclosed_session") and status.get("unclosed_profile") == ctx["pos_profile"].name:
+        ctx["session_name"] = status.get("unclosed_session")
+        ctx["created_session"] = False
+        return
+
+    if status.get("unclosed_session"):
+        warn(
+            "Session Setup",
+            f"Store is blocked by active session {status.get('unclosed_session')} on profile {status.get('unclosed_profile')}",
+        )
+        return
+
+    if status.get("day_closed"):
+        warn("Session Setup", status.get("message") or "Business date already closed for this store")
+        return
+
+    opened = open_session(ctx["pos_profile"].name, opening_cash=1000)
+    ctx["session_name"] = opened.get("session_name")
+    ctx["created_session"] = True
+
+
+def cleanup_created_session(ctx):
+    if not ctx.get("created_session") or not ctx.get("session_name"):
+        return
+
+    try:
+        from ch_pos.api.isolation_api import create_settlement
+        from ch_pos.api.session_api import close_session, get_x_report
+
+        session_name = ctx["session_name"]
+        report = get_x_report(session_name)
+        actual_cash = report.get("settlement", {}).get("actual_closing_cash") if report.get("settlement") else None
+        if actual_cash is None:
+            actual_cash = report.get("cash_in_drawer") or 0
+
+        try:
+            create_settlement(session_name=session_name, actual_closing_cash=actual_cash)
+        except Exception as exc:
+            if "already exists" not in str(exc):
+                raise
+
+        close_session(session_name=session_name, closing_cash=actual_cash)
+        print(f"  ℹ️  Closed test session {session_name}")
+    except Exception as exc:
+        warn("Session Cleanup", str(exc)[:300])
+
 def get_context():
     """Gather real data references for tests."""
     frappe.set_user("Administrator")
 
     ctx = {}
 
-    # POS Profile
-    profiles = frappe.get_all("POS Profile", filters={"disabled": 0}, fields=["name", "company", "cost_center", "warehouse"], limit=1)
-    ctx["pos_profile"] = profiles[0] if profiles else None
+    # POS Profile — choose one that can actually open a CH POS session
+    profiles = frappe.get_all(
+        "POS Profile",
+        filters={"disabled": 0},
+        fields=["name", "company", "cost_center", "warehouse"],
+        order_by="name asc",
+    )
+    ctx["pos_profile"] = None
+    ctx["store"] = None
+    for profile in profiles:
+        store = frappe.db.get_value("POS Profile Extension", {"pos_profile": profile.name}, "store")
+        if not store and profile.warehouse:
+            store = frappe.db.get_value("CH Store", {"warehouse": profile.warehouse}, "name")
+        if store:
+            ctx["pos_profile"] = profile
+            ctx["store"] = store
+            break
+    if not ctx["pos_profile"] and profiles:
+        ctx["pos_profile"] = profiles[0]
 
     # Customer
     customers = frappe.get_all("Customer", fields=["name"], limit=1)
     ctx["customer"] = customers[0].name if customers else None
 
-    # Simple (non-serial) item with stock
+    warehouse = ctx["pos_profile"].warehouse if ctx.get("pos_profile") else None
+
+    # Simple (non-serial) item with stock in the chosen POS warehouse
     simple = frappe.db.sql("""
         SELECT i.name, i.item_name, ip.price_list_rate as rate
         FROM `tabItem` i
         JOIN `tabItem Price` ip ON ip.item_code = i.name
+        JOIN `tabBin` b ON b.item_code = i.name
         WHERE i.has_serial_no = 0
           AND i.disabled = 0
           AND i.is_stock_item = 1
           AND ip.selling = 1
+          AND b.warehouse = %(warehouse)s
+          AND b.actual_qty > 0
+        ORDER BY b.actual_qty DESC, i.name ASC
         LIMIT 1
-    """, as_dict=True)
+    """, {"warehouse": warehouse}, as_dict=True)
     ctx["simple_item"] = simple[0] if simple else None
 
-    # Serial-tracked item  
+    # Generic serial-tracked item for normal IMEI sale tests
     serial = frappe.db.sql("""
-        SELECT i.name, i.item_name, ip.price_list_rate as rate
-        FROM `tabItem` i
-        JOIN `tabItem Price` ip ON ip.item_code = i.name
-        WHERE i.has_serial_no = 1
+        SELECT sn.item_code AS name, i.item_name, MIN(ip.price_list_rate) AS rate
+        FROM `tabSerial No` sn
+        JOIN `tabItem` i ON i.name = sn.item_code
+        LEFT JOIN `tabItem Price` ip ON ip.item_code = i.name AND ip.selling = 1
+        WHERE sn.warehouse = %(warehouse)s
+          AND sn.status = 'Active'
+          AND i.has_serial_no = 1
           AND i.disabled = 0
-          AND ip.selling = 1
+          AND IFNULL(i.ch_item_type, '') = ''
+        GROUP BY sn.item_code, i.item_name
+        ORDER BY sn.item_code ASC
         LIMIT 1
-    """, as_dict=True)
+    """, {"warehouse": warehouse}, as_dict=True)
     ctx["serial_item"] = serial[0] if serial else None
 
     # Available serial — use SNBB-aware query to skip over-consumed serials
     if ctx["serial_item"]:
-        # Net SNBB balance > 0 means the serial actually has stock available
         snbb_serials = frappe.db.sql("""
             SELECT sbe.serial_no
             FROM `tabSerial and Batch Entry` sbe
             JOIN `tabSerial and Batch Bundle` sbb ON sbe.parent = sbb.name
-            WHERE sbb.item_code = %s AND sbb.docstatus = 1
+            JOIN `tabSerial No` sn ON sn.name = sbe.serial_no
+            WHERE sbb.item_code = %s
+              AND sbb.docstatus = 1
+              AND sn.warehouse = %s
+              AND sn.status = 'Active'
             GROUP BY sbe.serial_no
             HAVING SUM(sbe.qty) > 0
             LIMIT 1
-        """, (ctx["serial_item"].name,), as_dict=True)
+        """, (ctx["serial_item"].name, warehouse), as_dict=True)
         ctx["available_serial"] = snbb_serials[0].serial_no if snbb_serials else None
     else:
         ctx["available_serial"] = None
@@ -114,6 +203,11 @@ def get_context():
     for k, v in ctx.items():
         print(f"   {k:25s}: {v}")
     print("─────────────────────────────────────────────────────────────────\n")
+    ensure_active_session(ctx)
+    if ctx.get("session_name"):
+        print(f"   {'session_name':25s}: {ctx['session_name']}")
+        print(f"   {'created_session':25s}: {ctx.get('created_session', False)}")
+        print("─────────────────────────────────────────────────────────────────\n")
     return ctx
 
 
@@ -497,26 +591,26 @@ def scenario_9_api_get_applicable_offers(ctx):
 def scenario_10_return_credit_note(ctx):
     """S10: Return / credit note flow."""
     name = "S10: Return / Credit Note"
-    if not frappe.db.exists("DocType", "POS Invoice"):
-        warn(name, "POS Invoice doctype not found — skipping")
+    if not frappe.db.exists("DocType", "Sales Invoice"):
+        warn(name, "Sales Invoice doctype not found — skipping")
         return
     if not ctx["pos_profile"] or not ctx["customer"]:
         warn(name, "Missing base data — skipping")
         return
 
     # Check if there's any submitted POS invoice to return against
-    existing = frappe.get_all("POS Invoice",
+    existing = frappe.get_all("Sales Invoice",
         filters={"docstatus": 1, "is_return": 0, "customer": ctx["customer"]},
         fields=["name", "grand_total"], limit=1)
     if not existing:
-        warn(name, f"No submitted POS Invoice for {ctx['customer']} to return against")
+        warn(name, f"No submitted Sales Invoice for {ctx['customer']} to return against")
         return
 
     try:
         from ch_pos.api.pos_api import create_pos_return
         orig_inv = existing[0].name
         # Get first item from that invoice
-        inv_items = frappe.get_all("POS Invoice Item",
+        inv_items = frappe.get_all("Sales Invoice Item",
             filters={"parent": orig_inv},
             fields=["item_code", "item_name", "qty", "rate", "serial_no"], limit=1)
         if not inv_items:
@@ -537,9 +631,9 @@ def scenario_10_return_credit_note(ctx):
         if result and result.get("name"):
             ok(name, f"Credit note {result['name']} for {orig_inv}")
             try:
-                ret = frappe.get_doc("POS Invoice", result["name"])
+                ret = frappe.get_doc("Sales Invoice", result["name"])
                 if ret.docstatus == 1: ret.cancel()
-                frappe.delete_doc("POS Invoice", result["name"], force=True)
+                frappe.delete_doc("Sales Invoice", result["name"], force=True)
             except: pass
         else:
             fail(name, str(result))
@@ -551,15 +645,15 @@ def scenario_11_manager_override():
     """S11: Manager approval — check that manager_approved flag is stored."""
     name = "S11: Manager approval override (flag persisted)"
     try:
-        # Check if POS Invoice Item has manager_approved field
-        has_field = frappe.db.exists("Custom Field", {"dt": "POS Invoice Item", "fieldname": "custom_manager_approved"})
+        # Check if Sales Invoice Item has manager_approved field
+        has_field = frappe.db.exists("Custom Field", {"dt": "Sales Invoice Item", "fieldname": "custom_manager_approved"})
         if not has_field:
             # Check actual DB column
-            has_field = frappe.db.sql("SHOW COLUMNS FROM `tabPOS Invoice Item` LIKE 'custom_manager_approved'")
+            has_field = frappe.db.sql("SHOW COLUMNS FROM `tabSales Invoice Item` LIKE 'custom_manager_approved'")
         if has_field:
-            ok(name, "custom_manager_approved field exists on POS Invoice Item — override flag will be persisted")
+            ok(name, "custom_manager_approved field exists on Sales Invoice Item — override flag will be persisted")
         else:
-            warn(name, "custom_manager_approved not found on POS Invoice Item — override metadata won't be stored per line")
+            warn(name, "custom_manager_approved not found on Sales Invoice Item — override metadata won't be stored per line")
     except Exception as e:
         fail(name, str(e)[:200])
 
@@ -620,15 +714,33 @@ def scenario_13_margin_scheme_invoice(ctx):
 
     # Find a refurbished / pre-owned item with an active serial
     rfb = frappe.db.sql("""
-        SELECT i.name, i.item_name, ip.price_list_rate as rate, i.ch_item_type
+        SELECT
+            i.name,
+            i.item_name,
+            MIN(ip.price_list_rate) AS rate,
+            i.ch_item_type,
+            COALESCE(b.actual_qty, 0) - COALESCE(d.reserved_qty, 0) AS approx_available
         FROM `tabItem` i
-        JOIN `tabItem Price` ip ON ip.item_code = i.name
+        JOIN `tabSerial No` sn ON sn.item_code = i.name
+        LEFT JOIN `tabItem Price` ip ON ip.item_code = i.name AND ip.selling = 1
+        LEFT JOIN `tabBin` b ON b.item_code = i.name AND b.warehouse = %(warehouse)s
+        LEFT JOIN (
+            SELECT pii.item_code, pii.warehouse, SUM(pii.stock_qty) AS reserved_qty
+            FROM `tabSales Invoice Item` pii
+            JOIN `tabSales Invoice` pi ON pi.name = pii.parent
+            WHERE pi.docstatus = 0
+            GROUP BY pii.item_code, pii.warehouse
+        ) d ON d.item_code = i.name AND d.warehouse = %(warehouse)s
         WHERE i.ch_item_type IN ('Refurbished', 'Pre-Owned')
           AND i.disabled = 0
           AND i.has_serial_no = 1
-          AND ip.selling = 1
+          AND sn.warehouse = %(warehouse)s
+          AND sn.status = 'Active'
+        GROUP BY i.name, i.item_name, i.ch_item_type, b.actual_qty, d.reserved_qty
+        HAVING approx_available > 0
+        ORDER BY approx_available DESC, i.name ASC
         LIMIT 1
-    """, as_dict=True)
+    """, {"warehouse": ctx["pos_profile"].warehouse}, as_dict=True)
     if not rfb:
         warn(name, "No Refurbished/Pre-Owned item found — skipping")
         return
@@ -671,7 +783,7 @@ def scenario_13_margin_scheme_invoice(ctx):
         if result and result.get("name"):
             inv_name = result["name"]
             # Verify margin scheme fields on the submitted invoice
-            inv_data = frappe.db.get_value("POS Invoice", inv_name,
+            inv_data = frappe.db.get_value("Sales Invoice", inv_name,
                 ["custom_is_margin_scheme", "custom_margin_gst",
                  "custom_margin_taxable", "custom_margin_exempted"],
                 as_dict=True)
@@ -718,7 +830,7 @@ def scenario_14_credit_sale_invoice(ctx):
             sale_type="Credit Sale",
         )
         if result and result.get("name"):
-            sale_type_val = frappe.db.get_value("POS Invoice", result["name"], "custom_ch_sale_type")
+            sale_type_val = frappe.db.get_value("Sales Invoice", result["name"], "custom_ch_sale_type")
             ok(name, f"Invoice {result['name']} created via Credit Sale. custom_sale_type={sale_type_val}")
         else:
             fail(name, str(result))
@@ -825,8 +937,9 @@ def test_all():
         print(line)
     print("═══════════════════════════════════════════════════════════════\n")
     print("  All test invoices are committed to the database.")
-    print("  Search POS Invoice list to review and validate each scenario.\n")
+    print("  Search Sales Invoice list to review and validate each scenario.\n")
 
+    cleanup_created_session(ctx)
     frappe.db.commit()   # keep all test records in the system
 
 if __name__ == "__main__":

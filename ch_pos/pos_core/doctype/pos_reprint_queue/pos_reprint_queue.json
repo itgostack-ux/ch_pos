@@ -15,8 +15,8 @@
   {
    "fieldname": "pos_invoice",
    "fieldtype": "Link",
-   "label": "POS Invoice",
-   "options": "POS Invoice",
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
    "reqd": 1,
    "in_list_view": 1
   },

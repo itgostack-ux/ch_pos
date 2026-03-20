@@ -69,8 +69,8 @@
    "fieldname": "matched_pos_invoice",
    "fieldtype": "Link",
    "in_list_view": 1,
-   "label": "Matched POS Invoice",
-   "options": "POS Invoice"
+   "label": "Matched Sales Invoice",
+   "options": "Sales Invoice"
   }
  ],
  "index_web_pages_for_search": 0,

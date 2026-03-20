@@ -7,10 +7,10 @@
  "modified": "2026-03-19 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
- "name": "Session vs POS Invoice",
+ "name": "Session vs Sales Invoice",
  "owner": "Administrator",
  "ref_doctype": "CH POS Session",
- "report_name": "Session vs POS Invoice",
+ "report_name": "Session vs Sales Invoice",
  "report_type": "Script Report",
  "roles": [
   {"role": "System Manager"},

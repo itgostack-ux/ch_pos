@@ -9,7 +9,7 @@
  "module": "POS Core",
  "name": "POS Exchange Reconciliation",
  "owner": "Administrator",
- "ref_doctype": "POS Invoice",
+ "ref_doctype": "Sales Invoice",
  "report_name": "POS Exchange Reconciliation",
  "report_type": "Script Report",
  "roles": [

@@ -118,7 +118,7 @@
    "fieldtype": "Currency",
    "label": "Expected Cash",
    "read_only": 1,
-   "description": "Auto-computed from submitted POS Invoices (Cash payments)"
+   "description": "Auto-computed from submitted Sales Invoices (Cash payments)"
   },
   {
    "default": "0",

@@ -37,9 +37,9 @@ def execute(filters=None):
             SUM(s.expected_closing_cash) AS total_expected,
             SUM(s.actual_closing_cash) AS total_actual,
             SUM(s.variance_amount) AS total_variance,
-            SUM(s.cash_sales_total) AS total_cash_sales,
-            SUM(s.card_sales_total) AS total_card_sales,
-            SUM(s.upi_sales_total) AS total_upi_sales
+            SUM(s.total_sales_cash) AS total_cash_sales,
+            SUM(s.total_sales_card) AS total_card_sales,
+            SUM(s.total_sales_upi) AS total_upi_sales
         FROM `tabCH POS Settlement` s
         WHERE {conditions}
         GROUP BY s.company, s.business_date

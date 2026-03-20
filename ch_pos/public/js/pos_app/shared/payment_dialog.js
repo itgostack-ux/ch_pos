@@ -1,13 +1,15 @@
 /**
- * CH POS — Professional Payment Screen v2
+ * CH POS — Payment Screen v3
  *
- * Poorvika/Sathya-grade checkout overlay:
+ * Comprehensive payment overlay supporting 10 payment types:
+ *  1. Full (Cash/UPI/Card)  2. Split  3. EMI/Finance
+ *  4. Credit Sales  5. Loyalty  6. Voucher  7. Exchange
+ *  8. Free Sales  9. Advance Adjustment  10. Refunds
+ *
  *  Left  : Itemized bill, serial numbers, all discounts, tax note
- *  Right : Split payment rows (Cash/Card/UPI), reference capture,
- *          bank offers, loyalty toggle, quick-cash amounts,
- *          live balance/change, idempotency UUID, success screen
- *
- * Replaces the old single-MOP dialog.
+ *  Right : Split payment rows with type-specific fields,
+ *          sale mode toggles (Credit/Free), advance adjustment,
+ *          bank offers, loyalty, quick-cash, success screen
  */
 import { PosState, EventBus } from "../state.js";
 import { format_number } from "./helpers.js";
@@ -23,6 +25,8 @@ function _mop_icon(mop) {
 		return `<i class="fa fa-money" style="color:#16a34a"></i>`;
 	if (lc.includes("bank") || lc.includes("neft") || lc.includes("rtgs") || lc.includes("transfer"))
 		return `<i class="fa fa-university" style="color:#6366f1"></i>`;
+	if (lc.includes("finance") || lc.includes("emi") || lc.includes("bajaj") || lc.includes("hdfc") || lc.includes("tvs"))
+		return `<i class="fa fa-calculator" style="color:#7c3aed"></i>`;
 	if (lc.includes("voucher") || lc.includes("gift"))
 		return `<i class="fa fa-gift" style="color:#f59e0b"></i>`;
 	return `<i class="fa fa-exchange" style="color:#64748b"></i>`;
@@ -31,10 +35,24 @@ function _mop_icon(mop) {
 export class PaymentDialog {
 	constructor() {
 		this._overlay = null;
-		this._payments = [];    // [{mode, amount, upi_transaction_id, card_reference, card_last_four}]
+		this._payments = [];    // [{mode, amount, upi_transaction_id, card_reference, card_last_four, finance_provider, finance_tenure, finance_approval_id, finance_down_payment}]
 		this._loyalty_amount = 0;
 		this._redeem_loyalty = false;
 		this._submitting = false;
+
+		// Credit Sale state
+		this._is_credit_sale = false;
+		this._credit_days = 30;
+
+		// Free Sale state
+		this._is_free_sale = false;
+		this._free_sale_reason = "";
+		this._free_sale_approved_by = "";
+
+		// Advance Adjustment
+		this._advance_amount = 0;
+		this._customer_advances = [];  // [{name, amount, balance}]
+
 		this._bind_events();
 	}
 
@@ -52,17 +70,47 @@ export class PaymentDialog {
 			return;
 		}
 
-		// Reset per-transaction payment state
-		this._payments = [];
-		this._loyalty_amount = 0;
-		this._redeem_loyalty = false;
+		// Restore or reset per-transaction payment state
+		const saved = PosState._payment_state;
 		this._submitting = false;
+		if (saved) {
+			this._payments = saved.payments || [];
+			this._loyalty_amount = saved.loyalty_amount || 0;
+			this._redeem_loyalty = saved.redeem_loyalty || false;
+			this._is_credit_sale = saved.is_credit_sale || false;
+			this._credit_days = saved.credit_days || 30;
+			this._is_free_sale = saved.is_free_sale || false;
+			this._free_sale_reason = saved.free_sale_reason || "";
+			this._free_sale_approved_by = saved.free_sale_approved_by || "";
+			this._free_sale_approval_name = saved.free_sale_approval_name || null;
+			this._required_managers = saved.required_managers || [];
+			this._advance_amount = saved.advance_amount || 0;
+			this._customer_advances = saved.customer_advances || [];
+		} else {
+			this._payments = [];
+			this._loyalty_amount = 0;
+			this._redeem_loyalty = false;
+			this._is_credit_sale = false;
+			this._credit_days = 30;
+			this._is_free_sale = false;
+			this._free_sale_reason = "";
+			this._free_sale_approved_by = "";
+			this._free_sale_approval_name = null;
+			this._required_managers = [];
+			this._advance_amount = 0;
+			this._customer_advances = [];
 
-		// Pre-seed with default MOP covering full amount
-		const total = this._calc_grand_total();
-		const def_mop = PosState.payment_modes.find(p => p.default) || PosState.payment_modes[0];
-		if (def_mop) {
-			this._payments = [{ mode: def_mop.mode_of_payment, amount: total, upi_transaction_id: "", card_reference: "", card_last_four: "" }];
+			// Pre-seed with default MOP covering full amount
+			const total = this._calc_grand_total();
+			const def_mop = PosState.payment_modes.find(p => p.default) || PosState.payment_modes[0];
+			if (def_mop) {
+				this._payments = [{ mode: def_mop.mode_of_payment, amount: total, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
+			}
+		}
+
+		// Load customer advances if not walk-in
+		if (PosState.customer && PosState.customer !== "Walk-in Customer") {
+			this._load_customer_advances();
 		}
 
 		this._mount_overlay();
@@ -79,6 +127,41 @@ export class PaymentDialog {
 		this._render_payments();
 		this._update_totals();
 		if (this._payments[0]) this._load_bank_offers(this._payments[0].mode);
+		this._load_sale_types();
+		this._restore_payment_ui();
+	}
+
+	/** Restore saved payment UI state (checkboxes, sections) after overlay mounts */
+	_restore_payment_ui() {
+		if (!this._overlay) return;
+		const ov = this._overlay;
+
+		if (this._is_credit_sale) {
+			ov.find("#ch-pay-credit-chk").prop("checked", true);
+			ov.find("#ch-pay-credit-section").show();
+			ov.find("#ch-pay-credit-days").val(this._credit_days);
+		}
+		if (this._is_free_sale) {
+			ov.find("#ch-pay-free-chk").prop("checked", true);
+			ov.find("#ch-pay-free-section").show();
+			ov.find("#ch-pay-mop-section").hide();
+			ov.find("#ch-pay-rows").hide();
+			ov.find("#ch-pay-quick-cash").hide();
+			ov.find("#ch-pay-free-reason").val(this._free_sale_reason);
+			// Restore approval status
+			if (this._free_sale_approval_name && this._required_managers.length) {
+				ov.find("#ch-pay-free-request-btn").hide();
+				ov.find("#ch-pay-free-reason").prop("readonly", true);
+				this._render_approval_status(this._required_managers);
+				// Resume polling if not yet approved
+				if (!this._free_sale_approved_by) {
+					this._start_approval_polling();
+				}
+			} else {
+				this._load_category_managers();
+				ov.find("#ch-pay-free-request-btn").prop("disabled", !this._free_sale_reason);
+			}
+		}
 	}
 
 	_build_overlay_html() {
@@ -86,6 +169,7 @@ export class PaymentDialog {
 		const loyalty_pts = flt(PosState.loyalty_points) || 0;
 		const has_loyalty = loyalty_pts > 0 && PosState.loyalty_program;
 		const max_loyalty = has_loyalty ? flt(loyalty_pts * (PosState.conversion_factor || 0)) : 0;
+		const is_walkin = !PosState.customer || PosState.customer === "Walk-in Customer";
 
 		const mop_btns = (PosState.payment_modes || []).map(p => `
 			<button class="ch-pay-mop-btn" data-mop="${frappe.utils.escape_html(p.mode_of_payment)}">
@@ -108,6 +192,80 @@ export class PaymentDialog {
 					</div>
 				</div>
 			</div>` : "";
+
+		// Sale mode toggles — Credit Sale / Free Sale (not for walk-in)
+		const sale_modes_html = !is_walkin ? `
+			<div class="ch-pay-sale-modes">
+				<label class="ch-pay-mode-toggle" title="${__("Allow partial/zero payment — balance on credit")}">
+					<input type="checkbox" id="ch-pay-credit-chk">
+					<span class="ch-pay-mode-tag ch-pay-mode-credit">
+						<i class="fa fa-handshake-o"></i> ${__("Credit Sale")}
+					</span>
+				</label>
+				<label class="ch-pay-mode-toggle" title="${__("Zero-value sale — requires manager approval")}">
+					<input type="checkbox" id="ch-pay-free-chk">
+					<span class="ch-pay-mode-tag ch-pay-mode-free">
+						<i class="fa fa-gift"></i> ${__("Free Sale")}
+					</span>
+				</label>
+			</div>` : "";
+
+		// Credit sale details (hidden by default)
+		const credit_html = !is_walkin ? `
+			<div id="ch-pay-credit-section" class="ch-pay-credit-section" style="display:none">
+				<div class="ch-pay-credit-header">
+					<i class="fa fa-handshake-o"></i> ${__("Credit Sale Details")}
+				</div>
+				<div class="ch-pay-credit-body">
+					<div class="ch-pay-credit-info" id="ch-pay-credit-info"></div>
+					<div class="ch-pay-credit-field">
+						<label>${__("Credit Days")}</label>
+						<input type="number" class="form-control form-control-sm" id="ch-pay-credit-days"
+							value="30" min="1" max="180" step="1">
+					</div>
+				</div>
+			</div>` : "";
+
+		// Free sale details (hidden by default) — category manager approval
+		const free_html = !is_walkin ? `
+			<div id="ch-pay-free-section" class="ch-pay-free-section" style="display:none">
+				<div class="ch-pay-free-header">
+					<i class="fa fa-gift"></i> ${__("FREE SALE — CATEGORY MANAGER APPROVAL REQUIRED")}
+				</div>
+				<div class="ch-pay-free-body">
+					<div class="ch-pay-free-field">
+						<label>${__("Reason")} <span class="text-danger">*</span></label>
+						<input type="text" class="form-control form-control-sm" id="ch-pay-free-reason"
+							placeholder="${__("e.g. Warranty replacement, Display damage compensation")}">
+					</div>
+					<div id="ch-pay-free-managers" class="ch-pay-free-managers"></div>
+					<button class="btn btn-sm btn-primary ch-pay-free-request-btn" id="ch-pay-free-request-btn" style="margin-top:8px" disabled>
+						<i class="fa fa-paper-plane"></i> ${__("Request Approval")}
+					</button>
+					<div id="ch-pay-free-status" class="ch-pay-free-status" style="display:none"></div>
+				</div>
+			</div>` : "";
+
+		// Advance adjustment section
+		const advance_html = !is_walkin ? `
+			<div id="ch-pay-advance-section" class="ch-pay-advance-section" style="display:none">
+				<div class="ch-pay-advance-header">
+					<i class="fa fa-history"></i> ${__("Customer Advances")}
+				</div>
+				<div id="ch-pay-advance-list" class="ch-pay-advance-list"></div>
+			</div>` : "";
+
+		// Sale type selector (DS, CS, FS, FREE, SS)
+		const sale_type_html = `
+			<div class="ch-pay-sale-type-section" id="ch-pay-sale-type-section">
+				<div class="ch-pay-sale-type-label">${__("Sale Type")}</div>
+				<div class="ch-pay-sale-type-pills" id="ch-pay-sale-type-pills"></div>
+				<div class="ch-pay-sale-sub-row" id="ch-pay-sale-sub-row" style="display:none">
+					<select class="form-control form-control-sm" id="ch-pay-sale-sub-select"></select>
+					<input type="text" class="form-control form-control-sm" id="ch-pay-sale-ref-input"
+						placeholder="${__("Reference No...")}" style="display:none;max-width:180px">
+				</div>
+			</div>`;
 
 		return `
 		<div id="ch-pos-payment-overlay" class="ch-pay-overlay">
@@ -147,8 +305,23 @@ export class PaymentDialog {
 						</span>
 					</div>
 
+					<!-- Sale mode toggles (Credit / Free) -->
+					${sale_modes_html}
+
+					<!-- Credit sale details -->
+					${credit_html}
+
+					<!-- Free sale details -->
+					${free_html}
+
+					<!-- Sale type selector -->
+					${sale_type_html}
+
+					<!-- Advance adjustment -->
+					${advance_html}
+
 					<!-- MOP quick-add buttons -->
-					<div class="ch-pay-mop-section">
+					<div class="ch-pay-mop-section" id="ch-pay-mop-section">
 						<div class="ch-pay-mop-label">${__("Add Payment")}</div>
 						<div class="ch-pay-mop-btns">${mop_btns}</div>
 					</div>
@@ -168,8 +341,12 @@ export class PaymentDialog {
 							<span>${__("Total Paid")}</span>
 							<b id="ch-pay-total-paid">₹0</b>
 						</div>
+						<div class="ch-pay-bal-row" id="ch-pay-advance-bal-row" style="display:none">
+							<span>${__("Advance Applied")}</span>
+							<b id="ch-pay-advance-applied" style="color:#7c3aed">₹0</b>
+						</div>
 						<div class="ch-pay-bal-row">
-							<span>${__("Balance Due")}</span>
+							<span id="ch-pay-balance-label">${__("Balance Due")}</span>
 							<b id="ch-pay-balance-due" class="ch-pay-bal-positive">₹${format_number(total)}</b>
 						</div>
 						<div class="ch-pay-bal-row ch-pay-change-row" id="ch-pay-change-row" style="display:none">
@@ -263,7 +440,7 @@ export class PaymentDialog {
 			if (idx >= 0) {
 				this._payments[idx].amount = flt(this._payments[idx].amount) + Math.max(0, due);
 			} else {
-				this._payments.push({ mode: mop, amount: Math.max(0, due), upi_transaction_id: "", card_reference: "", card_last_four: "" });
+				this._payments.push({ mode: mop, amount: Math.max(0, due), upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 });
 			}
 			this._render_payments();
 			this._update_totals();
@@ -288,14 +465,97 @@ export class PaymentDialog {
 		// UPI UTR
 		ov.on("input", ".ch-pay-row-utr", e => {
 			this._payments[parseInt($(e.currentTarget).data("idx"))].upi_transaction_id = $(e.currentTarget).val().trim();
+			this._update_totals();
 		});
 		// Card RRN
 		ov.on("input", ".ch-pay-row-rrn", e => {
 			this._payments[parseInt($(e.currentTarget).data("idx"))].card_reference = $(e.currentTarget).val().trim();
+			this._update_totals();
 		});
 		// Card last 4
 		ov.on("input", ".ch-pay-row-card4", e => {
 			this._payments[parseInt($(e.currentTarget).data("idx"))].card_last_four = $(e.currentTarget).val().trim();
+		});
+
+		// Finance/EMI fields
+		ov.on("input", ".ch-pay-row-fin-provider", e => {
+			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_provider = $(e.currentTarget).val().trim();
+			this._update_totals();
+		});
+		ov.on("input", ".ch-pay-row-fin-tenure", e => {
+			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_tenure = $(e.currentTarget).val().trim();
+		});
+		ov.on("input", ".ch-pay-row-fin-approval", e => {
+			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_approval_id = $(e.currentTarget).val().trim();
+			this._update_totals();
+		});
+		ov.on("input", ".ch-pay-row-fin-down", e => {
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			this._payments[idx].finance_down_payment = flt($(e.currentTarget).val()) || 0;
+			this._update_totals();
+		});
+
+		// ── Credit Sale toggle ────────────────────────
+		ov.on("change", "#ch-pay-credit-chk", e => {
+			this._is_credit_sale = $(e.currentTarget).is(":checked");
+			ov.find("#ch-pay-credit-section").toggle(this._is_credit_sale);
+			if (this._is_credit_sale) {
+				// Uncheck free sale — mutually exclusive
+				this._is_free_sale = false;
+				ov.find("#ch-pay-free-chk").prop("checked", false);
+				ov.find("#ch-pay-free-section").hide();
+				this._load_credit_info();
+			}
+			this._update_totals();
+		});
+		ov.on("input", "#ch-pay-credit-days", e => {
+			this._credit_days = parseInt($(e.currentTarget).val()) || 30;
+		});
+
+		// ── Free Sale toggle ──────────────────────────
+		ov.on("change", "#ch-pay-free-chk", e => {
+			this._is_free_sale = $(e.currentTarget).is(":checked");
+			ov.find("#ch-pay-free-section").toggle(this._is_free_sale);
+			if (this._is_free_sale) {
+				// Uncheck credit sale — mutually exclusive
+				this._is_credit_sale = false;
+				ov.find("#ch-pay-credit-chk").prop("checked", false);
+				ov.find("#ch-pay-credit-section").hide();
+				// Hide MOP section and payment rows for free sale
+				ov.find("#ch-pay-mop-section").hide();
+				ov.find("#ch-pay-rows").hide();
+				ov.find("#ch-pay-quick-cash").hide();
+				// Load category managers for items in cart
+				this._load_category_managers();
+			} else {
+				ov.find("#ch-pay-mop-section").show();
+				ov.find("#ch-pay-rows").show();
+				this._free_sale_approval_name = null;
+				this._free_sale_approved_by = "";
+				clearInterval(this._approval_poll);
+			}
+			this._update_totals();
+		});
+		ov.on("input", "#ch-pay-free-reason", e => {
+			this._free_sale_reason = $(e.currentTarget).val().trim();
+			ov.find("#ch-pay-free-request-btn").prop("disabled", !this._free_sale_reason);
+			this._update_totals();
+		});
+		ov.on("click", "#ch-pay-free-request-btn", () => {
+			this._request_free_sale_approval();
+		});
+
+		// ── Advance adjustment toggle ─────────────────
+		ov.on("change", ".ch-pay-advance-chk", e => {
+			const $row = $(e.currentTarget).closest(".ch-pay-advance-item");
+			const advName = $row.data("advance");
+			const advBal = flt($row.data("balance"));
+			if ($(e.currentTarget).is(":checked")) {
+				this._advance_amount += advBal;
+			} else {
+				this._advance_amount = Math.max(0, this._advance_amount - advBal);
+			}
+			this._update_totals();
 		});
 
 		// Loyalty
@@ -323,6 +583,46 @@ export class PaymentDialog {
 		// Submit
 		ov.on("click", "#ch-pay-submit", () => this._submit_invoice());
 
+		// Sale type pills — unified with credit/free checkboxes
+		ov.on("click", ".ch-pay-saletype-btn", e => {
+			const btn = $(e.currentTarget);
+			const type = btn.data("type");
+			ov.find(".ch-pay-saletype-btn").removeClass("active");
+			btn.addClass("active");
+			PosState.sale_type = type;
+			PosState.sale_sub_type = null;
+			PosState.sale_reference = null;
+			this._update_sale_sub_type(type);
+			EventBus.emit("sale_type:changed", type);
+
+			// Sync checkboxes based on sale type properties
+			const st = this._sale_types.find(t => t.sale_type_name === type);
+			if (st) {
+				const is_free = st.requires_payment === 0 || st.requires_payment === false;
+				const is_credit = (st.code || "").toUpperCase() === "CS";
+
+				// Toggle free sale checkbox
+				if (is_free !== this._is_free_sale) {
+					ov.find("#ch-pay-free-chk").prop("checked", is_free).trigger("change");
+				}
+				// Toggle credit sale checkbox
+				if (is_credit !== this._is_credit_sale) {
+					ov.find("#ch-pay-credit-chk").prop("checked", is_credit).trigger("change");
+				}
+			}
+		});
+		ov.on("change", "#ch-pay-sale-sub-select", e => {
+			const val = $(e.currentTarget).val();
+			PosState.sale_sub_type = val || null;
+			PosState.sale_reference = null;
+			const opt = $(e.currentTarget).find(":selected");
+			const ref = ov.find("#ch-pay-sale-ref-input");
+			if (opt.data("ref")) { ref.show().val(""); } else { ref.hide().val(""); }
+		});
+		ov.on("change", "#ch-pay-sale-ref-input", e => {
+			PosState.sale_reference = $(e.currentTarget).val().trim() || null;
+		});
+
 		// Escape to close
 		$(document).one("keydown.ch_pay_overlay", e => {
 			if (e.key === "Escape") this._close();
@@ -335,6 +635,58 @@ export class PaymentDialog {
 		this._payments[cash_idx].amount = amt;
 		this._overlay.find(`.ch-pay-row-amount[data-idx="${cash_idx}"]`).val(amt.toFixed(2));
 		this._update_totals();
+	}
+
+	// ───────────────────────────────────── Sale type pills ──
+
+	_load_sale_types() {
+		this._sale_types = [];
+		frappe.xcall("ch_pos.api.pos_api.get_sale_types", {
+			company: PosState.company,
+		}).then((types) => {
+			this._sale_types = types || [];
+			if (this._sale_types.length) {
+				this._render_sale_type_pills();
+			}
+		});
+	}
+
+	_render_sale_type_pills() {
+		const pills = this._overlay.find("#ch-pay-sale-type-pills");
+		let btns = "";
+		for (const st of this._sale_types) {
+			const active = (st.is_default || st.sale_type_name === PosState.sale_type) ? " active" : "";
+			btns += `<button class="ch-pay-saletype-btn${active}" data-type="${frappe.utils.escape_html(st.sale_type_name)}">${frappe.utils.escape_html(st.code || st.sale_type_name)}</button>`;
+			if (st.is_default && !PosState.sale_type) {
+				PosState.sale_type = st.sale_type_name;
+			}
+		}
+		pills.html(btns);
+		if (PosState.sale_type) {
+			this._update_sale_sub_type(PosState.sale_type);
+		}
+	}
+
+	_update_sale_sub_type(type_name) {
+		const st = this._sale_types.find(t => t.sale_type_name === type_name);
+		const row = this._overlay.find("#ch-pay-sale-sub-row");
+		const sel = row.find("#ch-pay-sale-sub-select");
+		const ref = row.find("#ch-pay-sale-ref-input");
+
+		if (!st || !st.sub_types || !st.sub_types.length) {
+			row.hide();
+			PosState.sale_sub_type = null;
+			PosState.sale_reference = null;
+			return;
+		}
+
+		let options = `<option value="">${__("Select sub-type...")}</option>`;
+		for (const sub of st.sub_types) {
+			options += `<option value="${frappe.utils.escape_html(sub.sale_sub_type)}" data-ref="${sub.requires_reference ? 1 : 0}">${frappe.utils.escape_html(sub.sale_sub_type)}</option>`;
+		}
+		sel.html(options);
+		ref.hide().val("");
+		row.show();
 	}
 
 	// ───────────────────────────────────────── Render rows ──
@@ -357,10 +709,29 @@ export class PaymentDialog {
 						<input type="text" class="form-control form-control-sm ch-pay-row-card4" data-idx="${idx}"
 							placeholder="${__("Last 4 digits")}" maxlength="4" value="${frappe.utils.escape_html(p.card_last_four || "")}">
 					</div>`;
+			} else if (type === "finance") {
+				ref_html = `
+					<div class="ch-pay-finance-refs mt-1">
+						<div class="ch-pay-fin-row">
+							<input type="text" class="form-control form-control-sm ch-pay-row-fin-provider" data-idx="${idx}"
+								placeholder="${__("Finance Provider (Bajaj, HDFC, TVS...)")}" value="${frappe.utils.escape_html(p.finance_provider || "")}">
+							<input type="text" class="form-control form-control-sm ch-pay-row-fin-tenure" data-idx="${idx}"
+								placeholder="${__("Tenure (e.g. 6M, 12M)")}" value="${frappe.utils.escape_html(p.finance_tenure || "")}">
+						</div>
+						<div class="ch-pay-fin-row">
+							<input type="text" class="form-control form-control-sm ch-pay-row-fin-approval" data-idx="${idx}"
+								placeholder="${__("Approval / Loan ID")} *" value="${frappe.utils.escape_html(p.finance_approval_id || "")}">
+							<div class="input-group input-group-sm">
+								<span class="input-group-addon">₹</span>
+								<input type="number" class="form-control ch-pay-row-fin-down" data-idx="${idx}"
+									placeholder="${__("Down Payment")}" value="${flt(p.finance_down_payment) || ""}" min="0" step="0.01">
+							</div>
+						</div>
+					</div>`;
 			}
 
 			container.append(`
-				<div class="ch-pay-row" data-idx="${idx}">
+				<div class="ch-pay-row${type === "finance" ? " ch-pay-row-finance" : ""}" data-idx="${idx}">
 					<div class="ch-pay-row-header">
 						<span class="ch-pay-row-mop-label">${_mop_icon(p.mode)} ${frappe.utils.escape_html(p.mode)}</span>
 						${this._payments.length > 1
@@ -378,8 +749,8 @@ export class PaymentDialog {
 
 		// Show/hide quick cash section
 		const has_cash = this._payments.some(p => this._mop_type(p.mode) === "cash");
-		this._overlay.find("#ch-pay-quick-cash").toggle(has_cash);
-		if (has_cash) this._render_quick_cash();
+		this._overlay.find("#ch-pay-quick-cash").toggle(has_cash && !this._is_free_sale);
+		if (has_cash && !this._is_free_sale) this._render_quick_cash();
 	}
 
 	_render_quick_cash() {
@@ -409,44 +780,92 @@ export class PaymentDialog {
 	// ───────────────────────────────────────── Live totals ──
 
 	_update_totals() {
-		const grand      = this._calc_grand_total();
+		const grand      = this._is_free_sale ? 0 : this._calc_grand_total();
 		const loyalty    = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
-		const cash_paid  = this._payments.reduce((s, p) => s + flt(p.amount), 0);
-		const total_paid = cash_paid + loyalty;
+		const advance    = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
+		const net_due    = Math.max(0, grand - loyalty - advance);
+		const cash_paid  = this._is_free_sale ? 0 : this._payments.reduce((s, p) => s + flt(p.amount), 0);
+		const total_paid = cash_paid + loyalty + advance;
 		const balance    = Math.max(0, grand - total_paid);
 		const change     = Math.max(0, total_paid - grand);
-		const ready      = balance <= 0.005;
+		const refs_valid = this._validate_payment_refs();
 
-		this._overlay.find("#ch-pay-amount-due").text(`₹${format_number(Math.max(0, grand - loyalty))}`);
+		// Ready logic:
+		// - Free sale: reason + all category managers approved required
+		// - Credit sale: balance can be > 0, just need refs valid
+		// - Normal: balance <= 0 + refs valid
+		let ready = false;
+		if (this._is_free_sale) {
+			ready = !!(this._free_sale_reason && this._free_sale_approved_by);
+		} else if (this._is_credit_sale) {
+			ready = refs_valid && cash_paid >= 0;
+		} else {
+			ready = balance <= 0.005 && refs_valid;
+		}
+
+		this._overlay.find("#ch-pay-amount-due").text(`₹${format_number(Math.max(0, net_due))}`);
 		this._overlay.find("#ch-pay-total-paid").text(`₹${format_number(total_paid)}`);
+
+		// Advance applied row
+		if (advance > 0) {
+			this._overlay.find("#ch-pay-advance-bal-row").show();
+			this._overlay.find("#ch-pay-advance-applied").text(`₹${format_number(advance)}`);
+		} else {
+			this._overlay.find("#ch-pay-advance-bal-row").hide();
+		}
+
+		// Balance label changes for credit sale
 		const $bal = this._overlay.find("#ch-pay-balance-due");
-		$bal.text(`₹${format_number(balance)}`)
-			.removeClass("ch-pay-bal-positive ch-pay-bal-zero")
-			.addClass(balance > 0 ? "ch-pay-bal-positive" : "ch-pay-bal-zero");
+		const $label = this._overlay.find("#ch-pay-balance-label");
+		if (this._is_credit_sale && balance > 0.005) {
+			$label.text(__("Credit Amount"));
+			$bal.text(`₹${format_number(balance)}`)
+				.removeClass("ch-pay-bal-positive ch-pay-bal-zero")
+				.addClass("ch-pay-bal-credit");
+		} else if (this._is_free_sale) {
+			$label.text(__("Balance Due"));
+			$bal.text("₹0").removeClass("ch-pay-bal-positive ch-pay-bal-credit").addClass("ch-pay-bal-zero");
+		} else {
+			$label.text(__("Balance Due"));
+			$bal.text(`₹${format_number(balance)}`)
+				.removeClass("ch-pay-bal-positive ch-pay-bal-zero ch-pay-bal-credit")
+				.addClass(balance > 0 ? "ch-pay-bal-positive" : "ch-pay-bal-zero");
+		}
 
 		const $cr = this._overlay.find("#ch-pay-change-row");
-		if (change > 0.005) {
+		if (change > 0.005 && !this._is_free_sale) {
 			$cr.show();
 			this._overlay.find("#ch-pay-change").text(`₹${format_number(change)}`);
 		} else {
 			$cr.hide();
 		}
 
-		this._overlay.find("#ch-pay-submit")
-			.prop("disabled", !ready || this._submitting)
+		// Submit button label & state
+		const $btn = this._overlay.find("#ch-pay-submit");
+		const $lbl = this._overlay.find("#ch-pay-submit-label");
+		$btn.prop("disabled", !ready || this._submitting)
 			.toggleClass("btn-success", ready)
 			.toggleClass("btn-default", !ready);
 
+		if (this._is_free_sale) {
+			$lbl.text(__("Confirm Free Sale"));
+		} else if (this._is_credit_sale) {
+			$lbl.text(balance > 0.005 ? __("Confirm Credit Sale — ₹{0} on credit", [format_number(balance)]) : __("Confirm Payment"));
+		} else {
+			$lbl.text(__("Confirm Payment"));
+		}
+
 		// Refresh quick cash buttons if cash row present
 		const has_cash = this._payments.some(p => this._mop_type(p.mode) === "cash");
-		if (has_cash) this._render_quick_cash();
+		if (has_cash && !this._is_free_sale) this._render_quick_cash();
 	}
 
 	_calc_balance_due() {
-		const grand   = this._calc_grand_total();
+		const grand   = this._is_free_sale ? 0 : this._calc_grand_total();
 		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
+		const advance = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
 		const paid    = this._payments.reduce((s, p) => s + flt(p.amount), 0);
-		return Math.max(0, grand - loyalty - paid);
+		return Math.max(0, grand - loyalty - advance - paid);
 	}
 
 	// ───────────────────────────────────────── Bank offers ──
@@ -470,17 +889,73 @@ export class PaymentDialog {
 
 	// ───────────────────────────────────────── Helpers ──
 
+	/** Validate that all payment reference fields are filled */
+	_validate_payment_refs() {
+		let all_valid = true;
+		for (let i = 0; i < this._payments.length; i++) {
+			const p = this._payments[i];
+			const type = this._mop_type(p.mode);
+			const has_amount = flt(p.amount) > 0;
+
+			if (type === "upi" && has_amount) {
+				const valid = !!(p.upi_transaction_id || "").trim();
+				this._overlay?.find(`.ch-pay-row-utr[data-idx="${i}"]`)
+					.toggleClass("ch-pay-ref-invalid", !valid)
+					.toggleClass("ch-pay-ref-valid", valid);
+				if (!valid) all_valid = false;
+			}
+			if (type === "card" && has_amount) {
+				const valid = !!(p.card_reference || "").trim();
+				this._overlay?.find(`.ch-pay-row-rrn[data-idx="${i}"]`)
+					.toggleClass("ch-pay-ref-invalid", !valid)
+					.toggleClass("ch-pay-ref-valid", valid);
+				if (!valid) all_valid = false;
+			}
+			if (type === "finance" && has_amount) {
+				const prov_valid = !!(p.finance_provider || "").trim();
+				const appr_valid = !!(p.finance_approval_id || "").trim();
+				this._overlay?.find(`.ch-pay-row-fin-provider[data-idx="${i}"]`)
+					.toggleClass("ch-pay-ref-invalid", !prov_valid)
+					.toggleClass("ch-pay-ref-valid", prov_valid);
+				this._overlay?.find(`.ch-pay-row-fin-approval[data-idx="${i}"]`)
+					.toggleClass("ch-pay-ref-invalid", !appr_valid)
+					.toggleClass("ch-pay-ref-valid", appr_valid);
+				if (!prov_valid || !appr_valid) all_valid = false;
+			}
+		}
+		return all_valid;
+	}
+
 	_mop_type(mop_name) {
 		const lc = (mop_name || "").toLowerCase();
 		if (lc.includes("upi") || lc.includes("gpay") || lc.includes("phonepe") || lc.includes("paytm")) return "upi";
-		if (lc.includes("card") || lc.includes("credit") || lc.includes("debit") || lc.includes("edc")) return "card";
+		if (lc.includes("card") || lc.includes("debit") || lc.includes("edc")) return "card";
+		if (lc.includes("finance") || lc.includes("emi") || lc.includes("bajaj") || lc.includes("hdfc") || lc.includes("tvs")) return "finance";
 		if (lc.includes("cash")) return "cash";
 		return "other";
 	}
 
 	_close() {
 		clearTimeout(this._auto_timer);
+		clearInterval(this._approval_poll);
 		$(document).off("keydown.ch_pay_overlay");
+
+		// Save payment state to PosState so it persists when Back is clicked
+		PosState._payment_state = {
+			payments: this._payments,
+			loyalty_amount: this._loyalty_amount,
+			redeem_loyalty: this._redeem_loyalty,
+			is_credit_sale: this._is_credit_sale,
+			credit_days: this._credit_days,
+			is_free_sale: this._is_free_sale,
+			free_sale_reason: this._free_sale_reason,
+			free_sale_approved_by: this._free_sale_approved_by,
+			free_sale_approval_name: this._free_sale_approval_name,
+			required_managers: this._required_managers,
+			advance_amount: this._advance_amount,
+			customer_advances: this._customer_advances,
+		};
+
 		if (this._overlay) {
 			this._overlay.removeClass("ch-pay-visible");
 			setTimeout(() => { this._overlay?.remove(); this._overlay = null; }, 280);
@@ -492,20 +967,51 @@ export class PaymentDialog {
 	_submit_invoice() {
 		if (this._submitting) return;
 
-		const grand   = this._calc_grand_total();
+		const grand   = this._is_free_sale ? 0 : this._calc_grand_total();
 		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
+		const advance = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
 		const balance = this._calc_balance_due();
 
-		if (balance > 0.005) {
+		// Free sale validations
+		if (this._is_free_sale) {
+			if (!this._free_sale_reason) {
+				frappe.show_alert({ message: __("Enter reason for free sale"), indicator: "orange" });
+				return;
+			}
+			if (!this._free_sale_approved_by) {
+				frappe.show_alert({ message: __("Enter manager name who approved this free sale"), indicator: "orange" });
+				return;
+			}
+		}
+
+		// Normal/credit sale validations
+		if (!this._is_free_sale && !this._is_credit_sale && balance > 0.005) {
 			frappe.show_alert({ message: __("Payment not complete — ₹{0} still due", [format_number(balance)]), indicator: "red" });
 			return;
 		}
 
-		// Validate UPI references (card RRN is optional but encouraged)
-		for (const p of this._payments) {
-			if (this._mop_type(p.mode) === "upi" && !p.upi_transaction_id) {
-				frappe.show_alert({ message: __("Enter UPI Transaction ID for {0}", [p.mode]), indicator: "orange" });
-				return;
+		// Validate UPI, Card, and Finance references (mandatory for non-zero amounts)
+		if (!this._is_free_sale) {
+			for (const p of this._payments) {
+				const type = this._mop_type(p.mode);
+				if (type === "upi" && flt(p.amount) > 0 && !p.upi_transaction_id) {
+					frappe.show_alert({ message: __("Enter UPI Transaction ID for {0}", [p.mode]), indicator: "orange" });
+					return;
+				}
+				if (type === "card" && flt(p.amount) > 0 && !p.card_reference) {
+					frappe.show_alert({ message: __("Enter Card RRN for {0}", [p.mode]), indicator: "orange" });
+					return;
+				}
+				if (type === "finance" && flt(p.amount) > 0) {
+					if (!p.finance_provider) {
+						frappe.show_alert({ message: __("Enter Finance Provider for {0}", [p.mode]), indicator: "orange" });
+						return;
+					}
+					if (!p.finance_approval_id) {
+						frappe.show_alert({ message: __("Enter Approval/Loan ID for {0}", [p.mode]), indicator: "orange" });
+						return;
+					}
+				}
 			}
 		}
 
@@ -530,12 +1036,16 @@ export class PaymentDialog {
 			serial_no:        c.serial_no || null,
 		}));
 
-		const payments = this._payments.map(p => ({
-			mode_of_payment:    p.mode,
-			amount:             flt(p.amount),
-			upi_transaction_id: p.upi_transaction_id || "",
-			card_reference:     p.card_reference || "",
-			card_last_four:     p.card_last_four || "",
+		const payments = this._is_free_sale ? [] : this._payments.map(p => ({
+			mode_of_payment:      p.mode,
+			amount:               flt(p.amount),
+			upi_transaction_id:   p.upi_transaction_id || "",
+			card_reference:       p.card_reference || "",
+			card_last_four:       p.card_last_four || "",
+			finance_provider:     p.finance_provider || "",
+			finance_tenure:       p.finance_tenure || "",
+			finance_approval_id:  p.finance_approval_id || "",
+			finance_down_payment: flt(p.finance_down_payment) || 0,
 		}));
 
 		const invoice_data = {
@@ -553,11 +1063,19 @@ export class PaymentDialog {
 			loyalty_points:                 this._redeem_loyalty ? cint(loyalty / (PosState.conversion_factor || 1)) : 0,
 			loyalty_amount:                 this._redeem_loyalty ? loyalty : 0,
 			sales_executive:                PosState.sales_executive || null,
-			sale_type:                      PosState.sale_type || null,
+			sale_type:                      this._is_free_sale ? "Free Sale" : (PosState.sale_type || null),
 			sale_sub_type:                  PosState.sale_sub_type || null,
 			sale_reference:                 PosState.sale_reference || null,
 			discount_reason:                PosState.discount_reason || null,
 			client_request_id:              this._gen_uuid(),
+			// New payment type fields
+			is_credit_sale:                 this._is_credit_sale ? 1 : 0,
+			credit_days:                    this._is_credit_sale ? this._credit_days : 0,
+			is_free_sale:                   this._is_free_sale ? 1 : 0,
+			free_sale_reason:               this._is_free_sale ? this._free_sale_reason : "",
+			free_sale_approved_by:          this._is_free_sale ? this._free_sale_approved_by : "",
+			free_sale_approval_name:        this._is_free_sale ? (this._free_sale_approval_name || "") : "",
+			advance_amount:                 advance > 0 ? advance : 0,
 		};
 
 		if (!navigator.onLine) {
@@ -680,7 +1198,7 @@ export class PaymentDialog {
 			this._overlay.find(".ch-pay-countdown-badge").text(countdown);
 			this._auto_timer = setTimeout(tick, 1000);
 			const name = $(e.currentTarget).data("name");
-			const url  = `/printview?doctype=POS%20Invoice&name=${encodeURIComponent(name)}&format=POS%20Invoice&no_letterhead=1`;
+			const url  = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=Custom%20Sales%20Invoice&no_letterhead=1`;
 			window.open(url, "_blank");
 		});
 	}
@@ -715,6 +1233,197 @@ export class PaymentDialog {
 		net -= flt(PosState.exchange_amount);
 		net -= flt(PosState.product_exchange_credit);
 		return Math.max(0, net);
+	}
+
+	// ─────────────────────────────────── Customer advance lookup ──
+
+	_load_customer_advances() {
+		if (!PosState.customer || PosState.customer === "Walk-in Customer") return;
+		frappe.xcall("ch_pos.api.pos_api.get_customer_advances", {
+			customer: PosState.customer,
+		}).then(advances => {
+			this._customer_advances = advances || [];
+			if (this._customer_advances.length > 0 && this._overlay) {
+				this._overlay.find("#ch-pay-advance-section").show();
+				const list = this._overlay.find("#ch-pay-advance-list");
+				list.empty();
+				this._customer_advances.forEach(adv => {
+					list.append(`
+						<div class="ch-pay-advance-item" data-advance="${frappe.utils.escape_html(adv.name)}" data-balance="${flt(adv.balance)}">
+							<label class="ch-pay-advance-lbl">
+								<input type="checkbox" class="ch-pay-advance-chk">
+								<span><b>${frappe.utils.escape_html(adv.name)}</b> — ₹${format_number(adv.balance)} available</span>
+							</label>
+							<span class="ch-pay-advance-date">${frappe.utils.escape_html(adv.posting_date || "")}</span>
+						</div>`);
+				});
+			}
+		}).catch(() => {});
+	}
+
+	_load_credit_info() {
+		if (!PosState.customer || PosState.customer === "Walk-in Customer") return;
+		frappe.xcall("ch_pos.api.pos_api.get_customer_credit_info", {
+			customer: PosState.customer,
+			company: PosState.company,
+		}).then(info => {
+			if (!this._overlay) return;
+			const $info = this._overlay.find("#ch-pay-credit-info");
+			if (!info) {
+				$info.html(`<div class="text-muted">${__("No credit limit configured for this customer")}</div>`);
+				return;
+			}
+			const limit = flt(info.credit_limit);
+			const outstanding = flt(info.outstanding);
+			const available = Math.max(0, limit - outstanding);
+			const cart_total = this._calc_grand_total();
+			const over_limit = cart_total > available;
+			$info.html(`
+				<div class="ch-pay-credit-stat">
+					<span>${__("Credit Limit")}</span>
+					<b>₹${format_number(limit)}</b>
+				</div>
+				<div class="ch-pay-credit-stat">
+					<span>${__("Outstanding")}</span>
+					<b style="color:#dc2626">₹${format_number(outstanding)}</b>
+				</div>
+				<div class="ch-pay-credit-stat">
+					<span>${__("Available")}</span>
+					<b style="color:${over_limit ? "#dc2626" : "#16a34a"}">₹${format_number(available)}</b>
+				</div>
+				${over_limit ? `<div class="ch-pay-credit-warn"><i class="fa fa-exclamation-triangle"></i> ${__("Cart total exceeds available credit")}</div>` : ""}
+			`);
+		}).catch(() => {});
+	}
+
+	// ── Category Manager Approval Flow ──────────────────────────
+
+	_load_category_managers() {
+		const items = PosState.cart.map(c => ({
+			item_code: c.item_code,
+			is_warranty: c.is_warranty || false,
+			is_vas: c.is_vas || false,
+		}));
+		const $mgr = this._overlay.find("#ch-pay-free-managers");
+		$mgr.html(`<div class="text-muted" style="padding:8px 0"><i class="fa fa-spinner fa-spin"></i> ${__("Loading category managers...")}</div>`);
+
+		frappe.xcall("ch_pos.api.free_sale_api.get_category_managers_for_cart", {
+			items: JSON.stringify(items),
+		}).then(managers => {
+			this._required_managers = managers || [];
+			if (!managers || !managers.length) {
+				$mgr.html(`<div class="text-warning" style="padding:8px 0"><i class="fa fa-exclamation-triangle"></i> ${__("No category managers assigned. Please set Category Manager in CH Category master.")}</div>`);
+				return;
+			}
+			const rows = managers.map(m => `
+				<div class="ch-pay-free-mgr-row" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-color)">
+					<span class="badge" style="background:var(--primary);color:#fff">${frappe.utils.escape_html(m.category)}</span>
+					<span style="flex:1">${frappe.utils.escape_html(m.manager_name)}</span>
+					<span class="badge badge-warning">⏳ ${__("Pending")}</span>
+				</div>
+			`).join("");
+			$mgr.html(`
+				<div class="ch-pay-free-mgr-label" style="font-weight:600;margin-top:8px;margin-bottom:4px">
+					${__("Approvals needed from")}:
+				</div>
+				${rows}
+			`);
+		}).catch(() => {
+			$mgr.html(`<div class="text-danger" style="padding:8px 0"><i class="fa fa-times-circle"></i> ${__("Failed to load category managers")}</div>`);
+		});
+	}
+
+	_request_free_sale_approval() {
+		if (!this._free_sale_reason) {
+			frappe.show_alert({ message: __("Enter reason for free sale"), indicator: "orange" });
+			return;
+		}
+
+		const items = PosState.cart.map(c => ({
+			item_code: c.item_code,
+			item_name: c.item_name,
+			qty: c.qty,
+			rate: c.rate,
+			is_warranty: c.is_warranty || false,
+			is_vas: c.is_vas || false,
+			serial_no: c.serial_no || "",
+		}));
+
+		this._overlay.find("#ch-pay-free-request-btn")
+			.prop("disabled", true)
+			.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Sending...")}`);
+
+		frappe.xcall("ch_pos.api.free_sale_api.request_free_sale_approval", {
+			reason: this._free_sale_reason,
+			customer: PosState.customer,
+			items: JSON.stringify(items),
+			grand_total: this._calc_grand_total(),
+			store: PosState.store,
+			company: PosState.company,
+		}).then(result => {
+			this._free_sale_approval_name = result.approval_name;
+			this._overlay.find("#ch-pay-free-request-btn").hide();
+			this._overlay.find("#ch-pay-free-reason").prop("readonly", true);
+
+			frappe.show_alert({ message: __("Approval request sent to category managers"), indicator: "blue" });
+			this._render_approval_status(result.managers);
+			this._start_approval_polling();
+		}).catch(err => {
+			this._overlay.find("#ch-pay-free-request-btn")
+				.prop("disabled", false)
+				.html(`<i class="fa fa-paper-plane"></i> ${__("Request Approval")}`);
+			frappe.show_alert({ message: err.message || __("Failed to send approval request"), indicator: "red" });
+		});
+	}
+
+	_render_approval_status(managers) {
+		const $status = this._overlay.find("#ch-pay-free-status");
+		$status.show();
+
+		const rows = managers.map(m => {
+			const icon = m.status === "Approved" ? "✅" : m.status === "Rejected" ? "❌" : "⏳";
+			const badge_cls = m.status === "Approved" ? "badge-success" : m.status === "Rejected" ? "badge-danger" : "badge-warning";
+			return `
+				<div class="ch-pay-free-mgr-row" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-color)">
+					<span class="badge" style="background:var(--primary);color:#fff">${frappe.utils.escape_html(m.category)}</span>
+					<span style="flex:1">${frappe.utils.escape_html(m.manager_name)}</span>
+					<span class="badge ${badge_cls}">${icon} ${__(m.status)}</span>
+				</div>`;
+		}).join("");
+
+		const all_approved = managers.every(m => m.status === "Approved");
+		const any_rejected = managers.some(m => m.status === "Rejected");
+
+		$status.html(`
+			<div style="margin-top:8px;padding:10px;border-radius:6px;background:${any_rejected ? '#fef2f2' : all_approved ? '#f0fdf4' : '#fffbeb'}">
+				<div style="font-weight:600;margin-bottom:6px">
+					${all_approved ? '✅ ' + __("All managers approved") : any_rejected ? '❌ ' + __("Approval rejected") : '⏳ ' + __("Waiting for approvals...")}
+				</div>
+				${rows}
+			</div>
+		`);
+
+		// Update approval state
+		if (all_approved) {
+			this._free_sale_approved_by = managers.map(m => m.manager_name).join(", ");
+			clearInterval(this._approval_poll);
+		}
+		this._update_totals();
+	}
+
+	_start_approval_polling() {
+		clearInterval(this._approval_poll);
+		this._approval_poll = setInterval(() => {
+			if (!this._free_sale_approval_name || !this._overlay) {
+				clearInterval(this._approval_poll);
+				return;
+			}
+			frappe.xcall("ch_pos.api.free_sale_api.check_approval_status", {
+				approval_name: this._free_sale_approval_name,
+			}).then(result => {
+				this._render_approval_status(result.approvals);
+			}).catch(() => {});
+		}, 5000);
 	}
 
 	// ─────────────────────────────────── Legacy single-mode compat ──

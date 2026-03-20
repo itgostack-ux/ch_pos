@@ -107,11 +107,12 @@ export class ProductGrid {
 				.html(items.map((item) => this._card_html(item)).join(""));
 		} else {
 			const header = `<div class="ch-pos-list-header">
-				<span class="col-code">${__("Code")}</span>
-				<span class="col-name">${__("Product")}</span>
 				<span class="col-brand">${__("Brand")}</span>
+				<span class="col-name">${__("Model / Product")}</span>
+				<span class="col-specs">${__("Specs")}</span>
 				<span class="col-price">${__("Price")}</span>
 				<span class="col-stock">${__("Stock")}</span>
+				<span class="col-condition">${__("Condition")}</span>
 			</div>`;
 			grid.addClass("list-view").removeClass("card-view")
 				.html(header + items.map((item) => this._row_html(item)).join(""));
@@ -242,22 +243,71 @@ export class ProductGrid {
 	}
 
 	_row_html(item) {
-		const price = item.selling_price
-			? `₹${format_number(item.selling_price)}`
-			: item.mrp ? `₹${format_number(item.mrp)}` : "—";
+		const sell_price = item.selling_price || item.mrp || 0;
+		const has_offer = item.offers && item.offers.length;
+		const show_mrp = has_offer && item.mrp && item.mrp > sell_price;
+		const price_html = sell_price
+			? `<span class="row-price${has_offer ? " has-offer" : ""}">₹${format_number(sell_price)}</span>
+			   ${show_mrp ? `<span class="row-mrp">₹${format_number(item.mrp)}</span>` : ""}`
+			: `<span class="row-price">—</span>`;
+
 		const in_stock = item.stock_qty > 0;
+		const low_stock = in_stock && item.stock_qty <= 3;
 		const stock_html = in_stock
-			? `<span class="stock-badge in">${Math.floor(item.stock_qty)}</span>`
-			: `<span class="stock-badge out">0</span>`;
+			? (low_stock
+				? `<span class="stock-badge low">${Math.floor(item.stock_qty)} left</span>`
+				: `<span class="stock-badge in">${Math.floor(item.stock_qty)}</span>`)
+			: `<span class="stock-badge out">OOS</span>`;
+
+		// Specs: attributes as compact pills
+		let specs_html = "";
+		if (item.attributes && item.attributes.length) {
+			specs_html = item.attributes
+				.filter(a => a.attribute_value)
+				.map(a => `<span class="row-spec-pill">${frappe.utils.escape_html(a.attribute_value)}</span>`)
+				.join("");
+		}
+		// Serial badge
+		if (item.has_serial_no) {
+			specs_html += `<span class="row-spec-pill row-serial-pill">IMEI</span>`;
+		}
+
+		// Condition: type + grade
+		let condition_html = "";
+		const item_type = item.ch_item_type || "";
+		if (item_type && item_type !== "New") {
+			const type_cls = item_type === "Refurbished" ? "refurb"
+				: item_type === "Pre-Owned" ? "preowned"
+				: item_type === "Display" ? "display" : "";
+			condition_html += `<span class="row-condition-badge ${type_cls}">${frappe.utils.escape_html(item_type)}</span>`;
+		}
+		if (item.condition_grade) {
+			const g = item.condition_grade;
+			const gcls = g === "Superb" || g === "Excellent" ? "grade-superb"
+				: g === "Good" ? "grade-good" : "grade-fair";
+			condition_html += `<span class="row-grade-badge ${gcls}">${frappe.utils.escape_html(g)}</span>`;
+		}
+		if (item.ch_default_warranty_months && item.ch_default_warranty_months > 0) {
+			condition_html += `<span class="row-warranty-badge">${item.ch_default_warranty_months}M</span>`;
+		}
+
+		// Offer tag
+		const offer_html = has_offer
+			? `<span class="row-offer-tag">${frappe.utils.escape_html(item.offers[0].offer_name)}</span>`
+			: "";
 
 		return `
 			<div class="ch-pos-item-row${!in_stock ? " out-of-stock" : ""}"
 				data-item-code="${frappe.utils.escape_html(item.item_code)}">
-				<span class="col-code">${frappe.utils.escape_html(item.item_code)}</span>
-				<span class="col-name">${frappe.utils.escape_html(item.item_name)}</span>
-				<span class="col-brand">${frappe.utils.escape_html(item.brand || "")}</span>
-				<span class="col-price">${price}</span>
+				<span class="col-brand">${frappe.utils.escape_html(item.brand || "—")}</span>
+				<span class="col-name">
+					<span class="row-item-name">${frappe.utils.escape_html(item.item_name)}</span>
+					${offer_html}
+				</span>
+				<span class="col-specs">${specs_html}</span>
+				<span class="col-price">${price_html}</span>
 				<span class="col-stock">${stock_html}</span>
+				<span class="col-condition">${condition_html}</span>
 			</div>`;
 	}
 

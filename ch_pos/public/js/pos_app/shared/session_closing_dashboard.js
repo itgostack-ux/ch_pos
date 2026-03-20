@@ -22,7 +22,14 @@ export class SessionClosingDashboard {
 		// Fetch X Report data first
 		frappe.xcall("ch_pos.api.session_api.get_x_report", { session_name })
 			.then((data) => this._render(data))
-			.catch((err) => frappe.msgprint(__("Failed to load session data")));
+			.catch((err) => {
+				console.error("Session close error:", err);
+				frappe.msgprint({
+					title: __("Failed to load session data"),
+					message: err.message || err.exc || JSON.stringify(err),
+					indicator: "red",
+				});
+			});
 	}
 
 	_render(data) {
@@ -234,8 +241,10 @@ export class SessionClosingDashboard {
 					EventBus.emit("session:closed");
 				}
 			},
-			error: () => {
+			error: (err) => {
 				dlg.enable_primary_action();
+				const msg = err && err.message ? err.message : __("Failed to close session. Check console for details.");
+				frappe.msgprint({ title: __("Close Session Error"), message: msg, indicator: "red" });
 			},
 		});
 	}

@@ -317,7 +317,7 @@ def validate_coupon_code(coupon_code, customer=None):
 def apply_coupon_code(coupon_code, customer=None):
     """Validate and return coupon details for POS cart application.
 
-    The actual application happens when the POS Invoice is created —
+    The actual application happens when the Sales Invoice is created —
     we just pass coupon_code to create_pos_invoice().
     This API is for pre-validation + UI feedback.
     """

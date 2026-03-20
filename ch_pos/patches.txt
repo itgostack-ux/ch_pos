@@ -1,0 +1,2 @@
+ch_pos.patches.v1_0.add_payment_type_custom_fields
+ch_pos.patches.v1_0.migrate_pos_invoice_to_sales_invoice

@@ -13,6 +13,102 @@ from frappe.model.document import Document
 from frappe.utils import flt, now_datetime
 
 
+def build_settlement_snapshot(session):
+    if isinstance(session, str):
+        session = frappe.get_doc("CH POS Session", session)
+
+    payment_rows = frappe.db.sql("""
+        SELECT mop.type AS mop_type, sip.mode_of_payment, SUM(sip.amount) AS total
+        FROM `tabSales Invoice` pi
+        JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
+        JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
+        WHERE pi.pos_profile = %(pp)s
+          AND pi.docstatus = 1
+          AND IFNULL(pi.consolidated_invoice, '') = ''
+          AND pi.posting_date = %(bd)s
+        GROUP BY mop.type, sip.mode_of_payment
+    """, {"pp": session.pos_profile, "bd": session.business_date}, as_dict=True)
+
+    cash_total = 0
+    card_total = 0
+    upi_total = 0
+    wallet_total = 0
+    bank_total = 0
+
+    for row in payment_rows:
+        amount = flt(row.total)
+        mop_lower = (row.mode_of_payment or "").lower()
+        if row.mop_type == "Cash":
+            cash_total += amount
+        elif "upi" in mop_lower or "phonepe" in mop_lower or "gpay" in mop_lower:
+            upi_total += amount
+        elif "wallet" in mop_lower:
+            wallet_total += amount
+        elif row.mop_type == "Bank":
+            if any(token in mop_lower for token in ("card", "edc", "credit", "debit")):
+                card_total += amount
+            else:
+                bank_total += amount
+        else:
+            bank_total += amount
+
+    return_cash = flt(frappe.db.sql("""
+        SELECT COALESCE(SUM(sip.amount), 0)
+        FROM `tabSales Invoice` pi
+        JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
+        JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
+        WHERE pi.pos_profile = %(pp)s
+          AND pi.docstatus = 1
+          AND IFNULL(pi.consolidated_invoice, '') = ''
+          AND pi.posting_date = %(bd)s
+          AND pi.is_return = 1
+          AND mop.type = 'Cash'
+    """, {"pp": session.pos_profile, "bd": session.business_date})[0][0])
+
+    movements = frappe.db.sql("""
+        SELECT IFNULL(movement_type, 'Cash Drop') AS movement_type,
+               COALESCE(SUM(amount), 0) AS total
+        FROM `tabCH Cash Drop`
+        WHERE session = %(session)s AND docstatus = 1
+        GROUP BY IFNULL(movement_type, 'Cash Drop')
+    """, {"session": session.name}, as_dict=True)
+
+    movement_map = {row.movement_type: flt(row.total) for row in movements}
+    cash_drop_total = movement_map.get("Cash Drop", 0)
+    petty_cash_out = movement_map.get("Petty Expense", 0)
+    buyback_cash_out = movement_map.get("Buyback Cash Payout", 0)
+    refund_cash_out = abs(return_cash)
+
+    expected_closing_cash = (
+        flt(session.opening_cash)
+        + cash_total
+        - refund_cash_out
+        - cash_drop_total
+        - petty_cash_out
+        - buyback_cash_out
+    )
+
+    return {
+        "payment_rows": payment_rows,
+        "opening_balance": flt(session.opening_cash),
+        "business_date": session.business_date,
+        "company": session.company,
+        "store": session.store,
+        "device": session.device,
+        "total_sales_cash": cash_total,
+        "total_sales_card": card_total,
+        "total_sales_upi": upi_total,
+        "total_sales_wallet": wallet_total,
+        "total_sales_bank": bank_total,
+        "total_gross_sales": cash_total + card_total + upi_total + wallet_total + bank_total,
+        "refund_cash_out": refund_cash_out,
+        "cash_drop_total": cash_drop_total,
+        "petty_cash_out": petty_cash_out,
+        "buyback_cash_out": buyback_cash_out,
+        "expected_closing_cash": expected_closing_cash,
+    }
+
+
 class CHPOSSettlement(Document):
     def validate(self):
         self._validate_session()
@@ -69,7 +165,8 @@ class CHPOSSettlement(Document):
         if self.denomination_details:
             total = 0
             for row in self.denomination_details:
-                row.amount = flt(row.denomination) * (row.count or 0)
+                row.count = flt(row.count or row.get("quantity") or 0)
+                row.amount = flt(row.denomination) * flt(row.count)
                 total += flt(row.amount)
             if total > 0:
                 self.actual_closing_cash = total
@@ -101,93 +198,23 @@ class CHPOSSettlement(Document):
     def calculate_from_transactions(self):
         """Pull actual tender-wise totals from POS invoices for this session."""
         session = frappe.get_doc("CH POS Session", self.session)
-        self.opening_balance = flt(session.opening_cash)
-        self.business_date = session.business_date
-        self.company = session.company
-        self.store = session.store
-        self.device = session.device
+        snapshot = build_settlement_snapshot(session)
 
-        # Tender-wise totals from POS Invoices
-        payment_rows = frappe.db.sql("""
-            SELECT mop.type AS mop_type, sip.mode_of_payment, SUM(sip.amount) AS total
-            FROM `tabPOS Invoice` pi
-            JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
-            JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
-            WHERE pi.pos_profile = %(pp)s
-              AND pi.docstatus = 1
-              AND IFNULL(pi.consolidated_invoice, '') = ''
-              AND pi.posting_date = %(bd)s
-              AND pi.is_return = 0
-            GROUP BY mop.type, sip.mode_of_payment
-        """, {"pp": session.pos_profile, "bd": session.business_date}, as_dict=True)
-
-        cash_total = 0
-        card_total = 0
-        upi_total = 0
-        wallet_total = 0
-        bank_total = 0
-
-        for r in payment_rows:
-            amt = flt(r.total)
-            mop_lower = (r.mode_of_payment or "").lower()
-            if r.mop_type == "Cash":
-                cash_total += amt
-            elif "upi" in mop_lower or "phonepe" in mop_lower or "gpay" in mop_lower:
-                upi_total += amt
-            elif "wallet" in mop_lower:
-                wallet_total += amt
-            elif r.mop_type == "Bank":
-                if "card" in mop_lower or "edc" in mop_lower or "credit" in mop_lower or "debit" in mop_lower:
-                    card_total += amt
-                else:
-                    bank_total += amt
-            else:
-                bank_total += amt
-
-        self.total_sales_cash = cash_total
-        self.total_sales_card = card_total
-        self.total_sales_upi = upi_total
-        self.total_sales_wallet = wallet_total
-        self.total_sales_bank = bank_total
-        self.total_gross_sales = cash_total + card_total + upi_total + wallet_total + bank_total
-
-        # Return-related cash out
-        return_cash = flt(frappe.db.sql("""
-            SELECT COALESCE(SUM(sip.amount), 0)
-            FROM `tabPOS Invoice` pi
-            JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
-            JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
-            WHERE pi.pos_profile = %(pp)s
-              AND pi.docstatus = 1
-              AND IFNULL(pi.consolidated_invoice, '') = ''
-              AND pi.posting_date = %(bd)s
-              AND pi.is_return = 1
-              AND mop.type = 'Cash'
-        """, {"pp": session.pos_profile, "bd": session.business_date})[0][0])
-        self.refund_cash_out = abs(return_cash)
-
-        # Cash movements from CH Cash Drop (all movement types)
-        movements = frappe.db.sql("""
-            SELECT IFNULL(movement_type, 'Cash Drop') AS movement_type,
-                   COALESCE(SUM(amount), 0) AS total
-            FROM `tabCH Cash Drop`
-            WHERE session = %(session)s AND docstatus = 1
-            GROUP BY IFNULL(movement_type, 'Cash Drop')
-        """, {"session": self.session}, as_dict=True)
-
-        mov_map = {m.movement_type: flt(m.total) for m in movements}
-        self.cash_drop_total = mov_map.get("Cash Drop", 0)
-        self.petty_cash_out = mov_map.get("Petty Expense", 0)
-        self.buyback_cash_out = mov_map.get("Buyback Cash Payout", 0)
-
-        # Expected closing cash
-        self.expected_closing_cash = (
-            flt(self.opening_balance)
-            + flt(self.total_sales_cash)
-            - flt(self.refund_cash_out)
-            - flt(self.cash_drop_total)
-            - flt(self.petty_cash_out)
-            - flt(self.buyback_cash_out)
-        )
+        self.opening_balance = snapshot["opening_balance"]
+        self.business_date = snapshot["business_date"]
+        self.company = snapshot["company"]
+        self.store = snapshot["store"]
+        self.device = snapshot["device"]
+        self.total_sales_cash = snapshot["total_sales_cash"]
+        self.total_sales_card = snapshot["total_sales_card"]
+        self.total_sales_upi = snapshot["total_sales_upi"]
+        self.total_sales_wallet = snapshot["total_sales_wallet"]
+        self.total_sales_bank = snapshot["total_sales_bank"]
+        self.total_gross_sales = snapshot["total_gross_sales"]
+        self.refund_cash_out = snapshot["refund_cash_out"]
+        self.cash_drop_total = snapshot["cash_drop_total"]
+        self.petty_cash_out = snapshot["petty_cash_out"]
+        self.buyback_cash_out = snapshot["buyback_cash_out"]
+        self.expected_closing_cash = snapshot["expected_closing_cash"]
 
         self.variance_amount = flt(self.actual_closing_cash) - flt(self.expected_closing_cash)

@@ -15,7 +15,7 @@ Covers the 15 test scenarios from the specification:
 11. Device-company isolation validation
 12. User allocation uniqueness per company
 13. Settlement variance requires manager approval
-14. POS Invoice isolation via doc_events
+14. Sales Invoice isolation via doc_events
 15. Control Settings toggle enforcement
 
 Run: bench --site erpnext.local execute ch_pos.tests.test_isolation.test_all
@@ -490,7 +490,7 @@ def test_14_reports_installed(ctx):
         "Cash Variance Report",
         "Cash Movement Report",
         "User Wise Session Activity",
-        "Session vs POS Invoice",
+        "Session vs Sales Invoice",
         "Session vs Payment Reconciliation",
         "Closed Session Audit",
     ]

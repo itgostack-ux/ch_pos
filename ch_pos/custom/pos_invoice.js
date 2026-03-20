@@ -1,4 +1,4 @@
-frappe.ui.form.on("POS Invoice", {
+frappe.ui.form.on("Sales Invoice", {
     refresh(frm) {
         // Show linked documents in sidebar
         if (frm.doc.custom_kiosk_token) {

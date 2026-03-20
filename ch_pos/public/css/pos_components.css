@@ -453,7 +453,7 @@
 }
 .ch-pos-list-header {
   display: grid;
-  grid-template-columns: 100px 1fr 100px 100px 80px;
+  grid-template-columns: 90px 1fr 1fr 100px 70px 100px;
   gap: 8px;
   padding: 8px 14px;
   font-size: var(--pos-fs-2xs);
@@ -465,7 +465,7 @@
 }
 .ch-pos-item-row {
   display: grid;
-  grid-template-columns: 100px 1fr 100px 100px 80px;
+  grid-template-columns: 90px 1fr 1fr 100px 70px 100px;
   gap: 8px;
   padding: 10px 14px;
   background: var(--pos-surface);
@@ -481,8 +481,11 @@
 }
 .ch-pos-item-row .col-code { color: var(--pos-text-muted); font-family: var(--pos-font-mono); font-size: var(--pos-fs-2xs); }
 .ch-pos-item-row .col-name { font-weight: 600; color: var(--pos-text); }
-.ch-pos-item-row .col-brand { color: var(--pos-text-secondary); }
+.ch-pos-item-row .col-brand { color: var(--pos-text-secondary); font-weight: 600; }
 .ch-pos-item-row .col-price { font-weight: 700; color: var(--pos-text); }
+.ch-pos-item-row .col-specs { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+.ch-pos-item-row .col-condition { font-size: var(--pos-fs-2xs); font-weight: 600; }
+.ch-pos-item-row .col-stock { text-align: center; }
 .stock-badge { padding: 2px 8px; border-radius: var(--pos-radius-pill); font-size: var(--pos-fs-2xs); font-weight: 700; }
 .stock-badge.in { background: var(--pos-success-light); color: var(--pos-success-dark); }
 .stock-badge.out { background: var(--pos-danger-light); color: var(--pos-danger); }
@@ -514,9 +517,20 @@
 /* Customer Header */
 .ch-pos-customer-bar {
   padding: 20px 20px 14px;
+  position: relative;
+  z-index: 5;
 }
 .ch-pos-customer-bar .ch-pos-customer-select .frappe-control {
   margin-bottom: 0;
+}
+.ch-pos-customer-bar .ch-pos-customer-select .frappe-control .control-label {
+  display: none;
+}
+.ch-pos-customer-bar .ch-pos-customer-select .link-field.ui-front {
+  z-index: 10;
+}
+.ch-pos-customer-bar .awesomplete > [role=listbox] {
+  z-index: 100;
 }
 .ch-pos-customer-bar .ch-pos-customer-select input {
   height: 50px !important;
@@ -527,6 +541,7 @@
   padding-left: 16px !important;
   background: var(--pos-surface-sunken) !important;
   transition: all var(--pos-transition);
+  cursor: text;
 }
 .ch-pos-customer-bar .ch-pos-customer-select input:focus {
   border-color: var(--pos-primary) !important;
@@ -3277,6 +3292,283 @@
   opacity: 0.7;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   PAYMENT — Sale Mode Toggles (Credit/Free)
+   ═══════════════════════════════════════════════════════════ */
+.ch-pay-sale-modes {
+  display: flex;
+  gap: 10px;
+  padding: 10px 20px 6px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.ch-pay-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.ch-pay-mode-toggle input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: #7c3aed;
+}
+.ch-pay-mode-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.15s;
+}
+.ch-pay-mode-credit {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+.ch-pay-mode-free {
+  background: #ede9fe;
+  color: #5b21b6;
+  border: 1px solid #c4b5fd;
+}
+.ch-pay-mode-toggle input:checked + .ch-pay-mode-credit {
+  background: #f59e0b;
+  color: #fff;
+  border-color: #f59e0b;
+}
+.ch-pay-mode-toggle input:checked + .ch-pay-mode-free {
+  background: #7c3aed;
+  color: #fff;
+  border-color: #7c3aed;
+}
+
+/* ── Credit Sale Section ─────────────────────────────────── */
+
+/* ── Sale Type in Payment Dialog ─────────────────────────── */
+.ch-pay-sale-type-section {
+  padding: 8px 20px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.ch-pay-sale-type-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--pos-text-muted, #6b7280);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.ch-pay-sale-type-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ch-pay-saletype-btn {
+  padding: 5px 14px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1.5px solid var(--pos-border, #d1d5db);
+  border-radius: var(--pos-radius-pill, 20px);
+  background: var(--pos-surface, #fff);
+  color: var(--pos-text-muted, #6b7280);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.ch-pay-saletype-btn:hover {
+  border-color: var(--pos-primary, #4f6ef7);
+  color: var(--pos-primary, #4f6ef7);
+}
+.ch-pay-saletype-btn.active {
+  background: var(--pos-primary, #4f6ef7);
+  border-color: var(--pos-primary, #4f6ef7);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(79,110,247,0.25);
+}
+.ch-pay-sale-sub-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  align-items: center;
+}
+.ch-pay-sale-sub-row select,
+.ch-pay-sale-sub-row input {
+  font-size: 12px;
+  height: 32px;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.ch-pay-credit-section {
+  margin: 0 20px;
+  padding: 10px 14px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  margin-bottom: 6px;
+}
+.ch-pay-credit-header {
+  font-size: 12px;
+  font-weight: 700;
+  color: #92400e;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ch-pay-credit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ch-pay-credit-stat {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #78350f;
+  padding: 2px 0;
+}
+.ch-pay-credit-warn {
+  font-size: 12px;
+  color: #dc2626;
+  margin-top: 4px;
+  padding: 4px 8px;
+  background: #fef2f2;
+  border-radius: 6px;
+}
+.ch-pay-credit-field label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #92400e;
+  margin-bottom: 2px;
+  display: block;
+}
+.ch-pay-credit-field input {
+  width: 100px;
+}
+
+/* ── Free Sale Section ───────────────────────────────────── */
+.ch-pay-free-section {
+  margin: 0 20px;
+  padding: 10px 14px;
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 10px;
+  margin-bottom: 6px;
+}
+.ch-pay-free-header {
+  font-size: 12px;
+  font-weight: 700;
+  color: #5b21b6;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ch-pay-free-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ch-pay-free-field label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6d28d9;
+  margin-bottom: 2px;
+  display: block;
+}
+.ch-pay-free-field input {
+  width: 100%;
+}
+
+/* ── Advance Adjustment Section ──────────────────────────── */
+.ch-pay-advance-section {
+  margin: 0 20px 6px;
+  padding: 10px 14px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+}
+.ch-pay-advance-header {
+  font-size: 12px;
+  font-weight: 700;
+  color: #166534;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ch-pay-advance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ch-pay-advance-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: #fff;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+}
+.ch-pay-advance-lbl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1e293b;
+  cursor: pointer;
+}
+.ch-pay-advance-lbl input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: #16a34a;
+}
+.ch-pay-advance-date {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+/* ── Finance/EMI Payment Row ─────────────────────────────── */
+.ch-pay-row-finance {
+  border-color: #c4b5fd;
+  background: #faf5ff;
+}
+.ch-pay-row-finance:focus-within {
+  border-color: #7c3aed;
+}
+.ch-pay-finance-refs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ch-pay-fin-row {
+  display: flex;
+  gap: 8px;
+}
+.ch-pay-fin-row input,
+.ch-pay-fin-row .input-group {
+  flex: 1;
+}
+.ch-pay-fin-row input {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 13px;
+  color: #334155;
+  outline: none;
+}
+.ch-pay-fin-row input:focus {
+  border-color: #7c3aed;
+}
+
+/* ── Credit balance highlight ────────────────────────────── */
+.ch-pay-bal-credit {
+  color: #f59e0b;
+  font-weight: 700;
+}
+
 /* ── Responsive tweak for narrow screens ─────────────────────────────── */
 @media (max-width: 768px) {
   .ch-pay-screen {
@@ -3297,5 +3589,303 @@
   .ch-pay-right {
     height: 62%;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SESSION BAR — Persistent top identity bar
+   ═══════════════════════════════════════════════════════════ */
+.ch-pos-session-bar {
+  flex-shrink: 0;
+}
+.ch-session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 16px;
+  background: var(--sidebar-bg);
+  color: rgba(255,255,255,0.75);
+  font-size: var(--pos-fs-xs);
+  font-family: var(--pos-font);
+  gap: 12px;
+  flex-shrink: 0;
+}
+.ch-session-left,
+.ch-session-center,
+.ch-session-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ch-session-divider {
+  color: rgba(255,255,255,0.15);
+  font-size: 10px;
+}
+.ch-session-store-name,
+.ch-session-user {
+  font-weight: 600;
+  color: rgba(255,255,255,0.9);
+}
+.ch-session-status-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--pos-success);
+  flex-shrink: 0;
+}
+.ch-session-status-dot.status-open { background: var(--pos-success); box-shadow: 0 0 6px rgba(16,185,129,0.5); }
+.ch-session-status-dot.status-locked { background: var(--pos-warning); }
+.ch-session-status-dot.status-closed { background: var(--pos-text-muted); }
+.ch-session-shortcut {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  background: rgba(255,255,255,0.07);
+  border-radius: var(--pos-radius-sm);
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.45);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   IMEI / SERIAL INPUT — Dedicated scan-first field
+   ═══════════════════════════════════════════════════════════ */
+.ch-pos-imei-wrap {
+  position: relative;
+  min-width: 200px;
+  max-width: 260px;
+}
+.ch-pos-imei-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--pos-warning);
+  font-size: 14px;
+  z-index: 1;
+}
+.ch-pos-imei-input {
+  padding-left: 36px !important;
+  height: 40px !important;
+  border: 2px solid var(--pos-warning) !important;
+  border-radius: var(--pos-radius-sm) !important;
+  font-size: var(--pos-fs-md) !important;
+  font-weight: 600;
+  font-family: var(--pos-font-mono);
+  background: #fffbeb !important;
+  transition: all var(--pos-transition);
+}
+.ch-pos-imei-input:focus {
+  border-color: var(--pos-primary) !important;
+  background: var(--pos-surface) !important;
+  box-shadow: 0 0 0 3px rgba(245,158,11,0.15) !important;
+}
+.ch-pos-imei-input::placeholder {
+  font-family: var(--pos-font);
+  font-weight: 400;
+}
+
+/* ── Toolbar left now has two inputs ─────────────────────── */
+.ch-pos-toolbar-left {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   LIST VIEW — Rich row spec/condition badges
+   ═══════════════════════════════════════════════════════════ */
+.ch-pos-row-spec,
+.row-spec-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--pos-radius-pill);
+  background: var(--pos-surface-sunken);
+  color: var(--pos-text-secondary);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.ch-pos-row-spec.spec-serial,
+.row-serial-pill {
+  background: var(--pos-info-light);
+  color: var(--pos-info);
+}
+.ch-pos-row-spec.spec-offer,
+.row-offer-tag {
+  background: var(--pos-danger-light);
+  color: var(--pos-danger);
+  font-size: 9px;
+}
+.ch-pos-row-cond,
+.row-condition-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--pos-radius-pill);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.ch-pos-row-cond.cond-new { background: var(--pos-success-light); color: var(--pos-success-dark); }
+.ch-pos-row-cond.cond-refurb,
+.row-condition-badge.refurb { background: #fff3cd; color: #856404; }
+.ch-pos-row-cond.cond-preowned,
+.row-condition-badge.preowned { background: #f3e8ff; color: #6b21a8; }
+.ch-pos-row-cond.cond-display,
+.row-condition-badge.display { background: var(--pos-info-light); color: #1e40af; }
+.row-grade-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-left: 3px;
+  border-radius: var(--pos-radius-pill);
+  font-size: 9px;
+  font-weight: 700;
+}
+.row-grade-badge.grade-superb { background: #d1fae5; color: #065f46; }
+.row-grade-badge.grade-good { background: #fef3c7; color: #92400e; }
+.row-grade-badge.grade-fair { background: #fee2e2; color: #991b1b; }
+.row-warranty-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-left: 3px;
+  border-radius: var(--pos-radius-pill);
+  background: var(--pos-primary-light);
+  color: var(--pos-primary-text);
+  font-size: 9px;
+  font-weight: 700;
+}
+.row-price.has-offer { color: var(--pos-danger); }
+.row-mrp {
+  text-decoration: line-through;
+  color: var(--pos-text-muted);
+  font-size: var(--pos-fs-2xs);
+  margin-left: 4px;
+}
+.row-item-name { font-weight: 600; }
+
+/* ═══════════════════════════════════════════════════════════
+   CART — Inline line controls
+   ═══════════════════════════════════════════════════════════ */
+.cart-disc-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: var(--pos-radius-pill);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--pos-transition);
+  border: 1px solid var(--pos-border);
+  color: var(--pos-text-muted);
+  background: var(--pos-surface);
+  margin-left: auto;
+}
+.cart-disc-badge:hover {
+  border-color: var(--pos-primary);
+  color: var(--pos-primary);
+  background: var(--pos-primary-light);
+}
+.cart-disc-badge.has-disc {
+  background: var(--pos-danger-light);
+  color: var(--pos-danger);
+  border-color: var(--pos-danger);
+}
+.cart-disc-badge i { font-size: 9px; }
+
+/* Read-only discount label (auto-applied offers only) */
+.cart-disc-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--pos-radius-pill);
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: auto;
+}
+.cart-disc-label.has-disc {
+  background: var(--pos-danger-light);
+  color: var(--pos-danger);
+}
+
+.cart-line-action {
+  padding: 2px 6px !important;
+  font-size: 10px;
+  border-radius: var(--pos-radius-sm) !important;
+  border: 1px solid var(--pos-border) !important;
+  background: var(--pos-surface) !important;
+  color: var(--pos-text-muted);
+  opacity: 0;
+  transition: opacity var(--pos-transition), color var(--pos-transition);
+}
+.ch-pos-cart-line:hover .cart-line-action { opacity: 1; }
+.cart-line-action:hover {
+  color: var(--pos-info) !important;
+  border-color: var(--pos-info) !important;
+  background: var(--pos-info-light) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TOAST — POS notification system
+   ═══════════════════════════════════════════════════════════ */
+.ch-pos-toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 100001;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+}
+.ch-pos-toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-radius: var(--pos-radius-sm);
+  font-size: var(--pos-fs-sm);
+  font-weight: 600;
+  font-family: var(--pos-font);
+  box-shadow: var(--pos-shadow-lg);
+  pointer-events: auto;
+  transform: translateX(120%);
+  opacity: 0;
+  transition: all 0.3s ease;
+}
+.ch-pos-toast.ch-pos-toast-visible {
+  transform: translateX(0);
+  opacity: 1;
+}
+.ch-pos-toast i { font-size: 16px; flex-shrink: 0; }
+.ch-pos-toast-success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+.ch-pos-toast-error { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; }
+.ch-pos-toast-warning { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; }
+.ch-pos-toast-info { background: #eff6ff; color: #1e40af; border: 1px solid #93c5fd; }
+
+/* ═══════════════════════════════════════════════════════════
+   PAYMENT — Reference validation highlights
+   ═══════════════════════════════════════════════════════════ */
+.ch-pay-ref-invalid {
+  border-color: var(--pos-danger) !important;
+  background: var(--pos-danger-light) !important;
+}
+.ch-pay-ref-valid {
+  border-color: var(--pos-success) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   RESPONSIVE — Session bar
+   ═══════════════════════════════════════════════════════════ */
+@media (max-width: 1024px) {
+  .ch-session-right { display: none; }
+  .ch-pos-imei-wrap { min-width: 160px; }
+}
+@media (max-width: 768px) {
+  .ch-session-center { display: none; }
+  .ch-session-bar { height: 36px; font-size: 10px; }
 }
 /* ── end payment overlay ─────────────────────────────────────────────── */

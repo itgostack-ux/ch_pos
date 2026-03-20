@@ -49,8 +49,8 @@ def _replenish_stock_if_needed():
             {"item_code": item_code, "warehouse": warehouse}, "actual_qty") or 0
         pos_reserved = frappe.db.sql("""
             SELECT IFNULL(SUM(pi.stock_qty), 0) as qty
-            FROM `tabPOS Invoice Item` pi
-            JOIN `tabPOS Invoice` p ON pi.parent = p.name
+            FROM `tabSales Invoice Item` pi
+            JOIN `tabSales Invoice` p ON pi.parent = p.name
             WHERE pi.item_code = %s AND pi.warehouse = %s
               AND p.docstatus = 1 AND p.is_return = 0
               AND IFNULL(p.consolidated_invoice, '') = ''
@@ -136,7 +136,7 @@ def run():
 
     # ── 1. CH Discount Reasons ────────────────────────────────────────────────
     print("\n[1] CH Discount Reasons")
-    # Names MUST match the Select options on POS Invoice.custom_discount_reason
+    # Names MUST match the Select options on Sales Invoice.custom_discount_reason
     _ensure("CH Discount Reason", "Customer Negotiation", {
         "name": "Customer Negotiation",
         "reason_name": "Customer Negotiation",
@@ -287,10 +287,23 @@ def run():
 
     # ── 5. Stock replenishment ────────────────────────────────────────────────
     # Ensure the test items always have enough stock.
-    # POS Invoice reserved qty reduces available stock without reducing Bin qty
+    # Sales Invoice reserved qty reduces available stock without reducing Bin qty
     # (until POS Closing Entry). We top-up when availability drops below 5.
     print("\n[5] Stock Replenishment")
     _replenish_stock_if_needed()
+
+    # Ensure QA loyalty program has accounting configuration for redemption tests
+    if frappe.db.exists("Loyalty Program", "QA Buyback Loyalty"):
+        if not frappe.db.get_value("Loyalty Program", "QA Buyback Loyalty", "expense_account"):
+            frappe.db.set_value(
+                "Loyalty Program",
+                "QA Buyback Loyalty",
+                "expense_account",
+                "Sales Expenses - GGR",
+                update_modified=False,
+            )
+            frappe.db.commit()
+            print("  + Updated QA Buyback Loyalty expense account: Sales Expenses - GGR")
 
     # ── 6. Summary ────────────────────────────────────────────────────────────
     print("\n[6] Verification")

@@ -28,7 +28,7 @@ def get_pos_context():
 
     Returns everything the POS frontend needs to render the correct UI.
     """
-    frappe.has_permission("POS Invoice", "read", throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     user = frappe.session.user
 
     # Get user allocation
@@ -110,7 +110,7 @@ def get_pos_context():
 @frappe.whitelist()
 def lock_session(session_name):
     """Lock screen — temporary pause, no financial impact."""
-    frappe.has_permission("POS Invoice", "read", throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
     session.lock_session()
     frappe.db.commit()
@@ -120,7 +120,7 @@ def lock_session(session_name):
 @frappe.whitelist()
 def unlock_session(session_name, password=None):
     """Unlock session — resume from lock screen."""
-    frappe.has_permission("POS Invoice", "read", throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
     session.unlock_session()
     frappe.db.commit()
@@ -134,7 +134,7 @@ def unlock_session(session_name, password=None):
 def create_settlement(session_name, actual_closing_cash, denominations=None,
                       variance_reason=None, manager_pin=None):
     """Create a CH POS Settlement for a session. Called before session close."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status not in ("Open", "Locked", "Pending Close"):
@@ -183,8 +183,8 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
             settlement.append("denomination_details", {
                 "note_or_coin": d.get("note_or_coin", "Note"),
                 "denomination": flt(d.get("denomination")),
-                "quantity": int(d.get("quantity", 0)),
-                "amount": flt(d.get("denomination")) * int(d.get("quantity", 0)),
+                "count": int(d.get("count", d.get("quantity", 0))),
+                "amount": flt(d.get("denomination")) * int(d.get("count", d.get("quantity", 0))),
             })
 
     if manager_user:
@@ -212,7 +212,7 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
 def create_cash_movement(session_name, movement_type, amount, reason,
                          manager_pin=None, remarks=None):
     """Create a CH Cash Drop (cash movement) during an active session."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
     amount = flt(amount)
     if amount <= 0:
         frappe.throw(_("Amount must be positive"))
@@ -260,13 +260,13 @@ def create_cash_movement(session_name, movement_type, amount, reason,
     }
 
 
-# ── POS Invoice Isolation Validators (doc_events) ───────────────────────────
+# ── Sales Invoice Isolation Validators (doc_events) ───────────────────────────
 
 
 def validate_pos_invoice_isolation(doc, method=None):
-    """Validate that POS Invoice company/session/device are consistent.
+    """Validate that Sales Invoice company/session/device are consistent.
 
-    Called as doc_event on POS Invoice validate.
+    Called as doc_event on Sales Invoice validate.
     """
     if not doc.pos_profile:
         return
@@ -297,11 +297,11 @@ def validate_pos_invoice_isolation(doc, method=None):
         )
 
     # Set session/device/business_date on invoice custom fields (if they exist)
-    if frappe.get_meta("POS Invoice").has_field("ch_pos_session"):
+    if frappe.get_meta("Sales Invoice").has_field("ch_pos_session"):
         doc.ch_pos_session = session.name
-    if frappe.get_meta("POS Invoice").has_field("ch_device"):
+    if frappe.get_meta("Sales Invoice").has_field("ch_device"):
         doc.ch_device = session.get("device")
-    if frappe.get_meta("POS Invoice").has_field("ch_business_date"):
+    if frappe.get_meta("Sales Invoice").has_field("ch_business_date"):
         doc.ch_business_date = session.business_date
 
 

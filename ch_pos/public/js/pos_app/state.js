@@ -58,6 +58,12 @@ export const PosState = {
 	product_exchange_credit: 0,
 	product_exchange_invoice: null,
 
+	// ── Payment Mode State ──────────────────────────────
+	is_credit_sale: false,
+	is_free_sale: false,
+	free_sale_reason: "",
+	free_sale_approved_by: "",
+
 	// ── Loyalty ─────────────────────────────────────────
 	loyalty_points: 0,
 	loyalty_program: null,
@@ -66,7 +72,7 @@ export const PosState = {
 	// ── Item Search ─────────────────────────────────────
 	search_term: "",
 	item_group_filter: "",
-	view_mode: "card",
+	view_mode: "list",
 	in_stock_only: false,
 	item_page: 0,
 	item_page_size: 20,
@@ -81,6 +87,13 @@ export const PosState = {
 	active_company: null,       // currently selected company for billing
 	sales_executive: null,      // selected POS Executive name (for billing attribution)
 	sales_executive_name: null, // display name
+
+	// ── Service Mode ────────────────────────────────────
+	active_service_job: null,   // current service job being worked on
+	service_job_items: [],      // items linked to active service job
+
+	// ── Customer Summary (enriched) ─────────────────────
+	customer_summary: null,     // { order_count, active_warranties, active_service_jobs }
 
 	/** Reset transaction-specific state (after submit/cancel) */
 	reset_transaction() {
@@ -106,7 +119,15 @@ export const PosState = {
 		this.return_items = [];
 		this.product_exchange_credit = 0;
 		this.product_exchange_invoice = null;
+		this.is_credit_sale = false;
+		this.is_free_sale = false;
+		this.free_sale_reason = "";
+		this.free_sale_approved_by = "";
+		this._payment_state = null;
 		this.loyalty_points = 0;
+		this.active_service_job = null;
+		this.service_job_items = [];
+		this.customer_summary = null;
 		// Keep executive and company selection across transactions
 		EventBus.emit("state:transaction_reset");
 	},

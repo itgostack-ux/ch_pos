@@ -44,16 +44,6 @@ export class CartPanel {
 				<div class="ch-pos-cust-badges"></div>
 			</div>
 
-			<!-- A3. Sale Type Selector -->
-			<div class="ch-pos-sale-type-bar" style="display:none">
-				<div class="ch-pos-sale-type-pills"></div>
-				<div class="ch-pos-sale-sub-type-row" style="display:none">
-					<select class="form-control form-control-sm ch-pos-sale-sub-type-select"></select>
-					<input type="text" class="form-control form-control-sm ch-pos-sale-reference-input"
-						placeholder="${__("Reference No...")}" style="display:none;max-width:180px">
-				</div>
-			</div>
-
 			<!-- B. Quick Retail Actions -->
 			<div class="ch-pos-quick-actions">
 				<button class="btn btn-outline-primary ch-pos-btn-exchange">
@@ -173,7 +163,6 @@ export class CartPanel {
 
 		this._render_customer_selector();
 		this._render_executive_bar();
-		this._load_sale_types();
 	}
 
 	/** Populate the executive / company bar from PosState.executive_access */
@@ -185,22 +174,11 @@ export class CartPanel {
 			return;
 		}
 
-		// Company switcher (only if user has access to multiple companies)
+		// Always show current company as badge (no toggle — companies are separate POS Profiles)
 		const switcher = bar.find(".ch-pos-company-switcher");
-		if (access.companies.length > 1) {
-			let btns = "";
-			for (const cr of access.companies) {
-				const short = cr.company.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
-				const active = cr.company === PosState.active_company ? " active" : "";
-				btns += `<button class="ch-pos-company-btn${active}" data-company="${frappe.utils.escape_html(cr.company)}">${frappe.utils.escape_html(short)}</button>`;
-			}
-			switcher.html(`<div class="ch-pos-company-pills">${btns}</div>`).show();
-		} else {
-			// Single company — show as badge, no switcher
-			const comp = access.companies[0].company;
-			const short = comp.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
-			switcher.html(`<span class="ch-pos-company-single">${frappe.utils.escape_html(short)}</span>`).show();
-		}
+		const comp = PosState.company || (access.companies[0] && access.companies[0].company) || "";
+		const short = comp.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
+		switcher.html(`<span class="ch-pos-company-single">${frappe.utils.escape_html(short)}</span>`).show();
 
 		// Executive selector dropdown
 		this._populate_executive_dropdown();
@@ -243,67 +221,6 @@ export class CartPanel {
 				PosState.sales_executive_name = execs[0].executive_name;
 			}
 		}
-	}
-
-	/** Load sale types from server and render pills */
-	_load_sale_types() {
-		this._sale_types = [];
-		frappe.xcall("ch_pos.api.pos_api.get_sale_types", {
-			company: PosState.company,
-		}).then((types) => {
-			this._sale_types = types || [];
-			if (this._sale_types.length) {
-				this._render_sale_type_bar();
-			}
-		});
-	}
-
-	_render_sale_type_bar() {
-		const bar = this.wrapper.find(".ch-pos-sale-type-bar");
-		const pills = bar.find(".ch-pos-sale-type-pills");
-		if (!this._sale_types.length) {
-			bar.hide();
-			return;
-		}
-
-		let btns = "";
-		for (const st of this._sale_types) {
-			const active = (st.is_default || st.sale_type_name === PosState.sale_type) ? " active" : "";
-			btns += `<button class="ch-pos-saletype-btn${active}" data-type="${frappe.utils.escape_html(st.sale_type_name)}">${frappe.utils.escape_html(st.code || st.sale_type_name)}</button>`;
-			if (st.is_default && !PosState.sale_type) {
-				PosState.sale_type = st.sale_type_name;
-			}
-		}
-		pills.html(btns);
-		bar.show();
-
-		// If the default sale type has sub-types, show them
-		if (PosState.sale_type) {
-			this._update_sub_type_selector(PosState.sale_type);
-		}
-	}
-
-	_update_sub_type_selector(type_name) {
-		const st = this._sale_types.find((t) => t.sale_type_name === type_name);
-		const row = this.wrapper.find(".ch-pos-sale-sub-type-row");
-		const sel = row.find(".ch-pos-sale-sub-type-select");
-		const ref = row.find(".ch-pos-sale-reference-input");
-
-		if (!st || !st.sub_types || !st.sub_types.length) {
-			row.hide();
-			PosState.sale_sub_type = null;
-			PosState.sale_reference = null;
-			return;
-		}
-
-		let options = `<option value="">${__("Select sub-type...")}</option>`;
-		for (const sub of st.sub_types) {
-			const selected = sub.sale_sub_type === PosState.sale_sub_type ? " selected" : "";
-			options += `<option value="${frappe.utils.escape_html(sub.sale_sub_type)}" data-ref="${sub.requires_reference ? 1 : 0}">${frappe.utils.escape_html(sub.sale_sub_type)}</option>`;
-		}
-		sel.html(options);
-		ref.hide().val("");
-		row.show();
 	}
 
 	_render_customer_selector() {
@@ -416,18 +333,6 @@ export class CartPanel {
 		w.on("click", ".ch-pos-btn-new-customer", () => this._show_new_customer_dialog());
 		EventBus.on("customer:new", () => this._show_new_customer_dialog());
 
-		// Company switcher
-		w.on("click", ".ch-pos-company-btn", (e) => {
-			const btn = $(e.currentTarget);
-			const company = btn.data("company");
-			if (company === PosState.active_company) return;
-			w.find(".ch-pos-company-btn").removeClass("active");
-			btn.addClass("active");
-			PosState.active_company = company;
-			this._populate_executive_dropdown();
-			EventBus.emit("company:switched", company);
-		});
-
 		// Executive selector change
 		w.on("change", ".ch-pos-executive-select", (e) => {
 			const val = $(e.currentTarget).val();
@@ -446,39 +351,6 @@ export class CartPanel {
 			if (val && !PosState.customer) {
 				PosState.customer = val;
 			}
-		});
-
-		// Sale type pills
-		w.on("click", ".ch-pos-saletype-btn", (e) => {
-			const btn = $(e.currentTarget);
-			const type = btn.data("type");
-			w.find(".ch-pos-saletype-btn").removeClass("active");
-			btn.addClass("active");
-			PosState.sale_type = type;
-			PosState.sale_sub_type = null;
-			PosState.sale_reference = null;
-			this._update_sub_type_selector(type);
-			EventBus.emit("sale_type:changed", type);
-		});
-
-		// Sale sub-type select
-		w.on("change", ".ch-pos-sale-sub-type-select", (e) => {
-			const val = $(e.currentTarget).val();
-			PosState.sale_sub_type = val || null;
-			PosState.sale_reference = null;
-			// Show reference input if the sub-type requires it
-			const opt = $(e.currentTarget).find(":selected");
-			const ref_input = w.find(".ch-pos-sale-reference-input");
-			if (opt.data("ref")) {
-				ref_input.show().val("");
-			} else {
-				ref_input.hide().val("");
-			}
-		});
-
-		// Sale reference input
-		w.on("change", ".ch-pos-sale-reference-input", (e) => {
-			PosState.sale_reference = $(e.currentTarget).val().trim() || null;
 		});
 
 		// Cart actions
@@ -510,6 +382,15 @@ export class CartPanel {
 		});
 		w.on("click", ".ch-pos-cart-remove", function () {
 			EventBus.emit("cart:remove", $(this).data("idx"));
+		});
+
+		// Line discount dialog removed — use cart-level discount only
+
+		// Inline VAS button
+		w.on("click", ".ch-pos-line-vas", function () {
+			const idx = $(this).data("idx");
+			const item = PosState.cart[idx];
+			if (item) EventBus.emit("vas:open", { for_item: item });
 		});
 
 		// Coupon / Voucher
@@ -727,6 +608,7 @@ export class CartPanel {
 
 	_cart_line_html(item, idx) {
 		const amount = flt(item.qty) * flt(item.rate);
+		const discount_amt = flt(item.discount_amount || 0);
 		const offer_tag = item.offer_applied
 			? `<span class="cart-offer-tag">${frappe.utils.escape_html(item.offer_applied)}</span>`
 			: "";
@@ -737,6 +619,20 @@ export class CartPanel {
 			? `<span class="cart-margin-tag">${frappe.utils.escape_html(item.ch_item_type)}</span>`
 			: "";
 		const special = item.is_warranty ? " is-warranty-line" : item.is_vas ? " is-vas-line" : "";
+
+		// Show auto-applied offer discount as read-only label
+		const disc_label = discount_amt > 0
+			? `<span class="cart-disc-label has-disc" title="${__("Offer discount")}">-₹${format_number(discount_amt)}</span>`
+			: "";
+
+		// Inline action buttons for serialized items
+		let inline_actions = "";
+		if (item.serial_no && !item.is_warranty && !item.is_vas) {
+			inline_actions = `
+				<button class="btn btn-xs cart-line-action ch-pos-line-vas" data-idx="${idx}" title="${__("Add VAS")}">
+					<i class="fa fa-shield"></i>
+				</button>`;
+		}
 
 		return `
 			<div class="ch-pos-cart-line${special}" data-idx="${idx}">
@@ -754,6 +650,8 @@ export class CartPanel {
 						<button class="btn ch-pos-qty-plus" data-idx="${idx}">+</button>
 					</div>
 					<span class="cart-item-rate">@ ₹${format_number(item.rate)}</span>
+					${disc_label}
+					${inline_actions}
 					<button class="btn btn-link text-danger ch-pos-cart-remove" data-idx="${idx}">
 						<i class="fa fa-trash-o"></i>
 					</button>
@@ -793,6 +691,21 @@ export class CartPanel {
 			const avail = info.credit_available;
 			const cls = avail > 0 ? "badge-success" : "badge-danger";
 			html += `<span class="ch-pos-badge ${cls}">Credit: ₹${format_number(avail)} / ₹${format_number(info.credit_limit)}</span>`;
+		}
+
+		// Order count
+		if (info.order_count > 0) {
+			html += `<span class="ch-pos-badge badge-muted"><i class="fa fa-shopping-bag" style="font-size:9px"></i> ${info.order_count} ${__("orders")}</span>`;
+		}
+
+		// Active warranties
+		if (info.active_warranties > 0) {
+			html += `<span class="ch-pos-badge badge-success"><i class="fa fa-shield" style="font-size:9px"></i> ${info.active_warranties} ${__("active")}</span>`;
+		}
+
+		// Active service jobs
+		if (info.active_service_jobs > 0) {
+			html += `<span class="ch-pos-badge badge-info"><i class="fa fa-wrench" style="font-size:9px"></i> ${info.active_service_jobs} ${__("jobs")}</span>`;
 		}
 
 		badges.html(html);

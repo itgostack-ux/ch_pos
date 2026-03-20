@@ -9,6 +9,7 @@
   "executive_name",
   "user",
   "employee",
+  "sales_person",
   "column_break_basic",
   "store",
   "company",
@@ -47,6 +48,13 @@
    "label": "Employee",
    "options": "Employee",
    "description": "Link to HR Employee record for payroll integration"
+  },
+  {
+   "fieldname": "sales_person",
+   "fieldtype": "Link",
+   "label": "Sales Person",
+   "options": "Sales Person",
+   "description": "Linked Sales Person for target tracking. Auto-resolved from Employee if not set."
   },
   {
    "fieldname": "column_break_basic",

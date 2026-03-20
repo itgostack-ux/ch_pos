@@ -136,7 +136,7 @@ export class ImeiWorkspace {
 				<div class="ch-timeline-dot sale"></div>
 				<div class="ch-timeline-content">
 					<div class="ch-timeline-top">
-						<a class="ch-timeline-link" data-doctype="POS Invoice" data-name="${s.invoice}">${s.invoice}</a>
+						<a class="ch-timeline-link" data-doctype="Sales Invoice" data-name="${s.invoice}">${s.invoice}</a>
 						<span class="text-muted">${frappe.datetime.str_to_user(s.date)}</span>
 					</div>
 					<span>${__("Sold to")} <b>${frappe.utils.escape_html(s.customer || "")}</b> — ₹${format_number(s.rate)}</span>
@@ -148,7 +148,7 @@ export class ImeiWorkspace {
 				<div class="ch-timeline-dot return"></div>
 				<div class="ch-timeline-content">
 					<div class="ch-timeline-top">
-						<a class="ch-timeline-link" data-doctype="POS Invoice" data-name="${r.invoice}">${r.invoice}</a>
+						<a class="ch-timeline-link" data-doctype="Sales Invoice" data-name="${r.invoice}">${r.invoice}</a>
 						<span class="text-muted">${frappe.datetime.str_to_user(r.date)}</span>
 					</div>
 					<span>${__("Returned")} — ₹${format_number(Math.abs(r.rate))}</span>

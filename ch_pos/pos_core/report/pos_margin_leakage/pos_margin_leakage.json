@@ -9,7 +9,7 @@
  "module": "POS Core",
  "name": "POS Margin Leakage",
  "owner": "Administrator",
- "ref_doctype": "POS Invoice",
+ "ref_doctype": "Sales Invoice",
  "report_name": "POS Margin Leakage",
  "report_type": "Script Report",
  "roles": [

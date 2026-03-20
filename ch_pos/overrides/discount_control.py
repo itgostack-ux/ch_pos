@@ -1,7 +1,7 @@
 # Copyright (c) 2026, GoStack and contributors
-# POS Discount Control — validate hook for POS Invoice
+# POS Discount Control — validate hook for Sales Invoice
 #
-# Called from ch_pos hooks.py doc_events on POS Invoice validate.
+# Called from ch_pos hooks.py doc_events on Sales Invoice validate.
 # Enforces commercial policy: discount limits, MOP floor, override logging.
 
 import frappe
@@ -10,7 +10,7 @@ from frappe.utils import flt
 
 
 def validate_pos_commercial_policy(doc, method=None):
-	"""Validate POS Invoice items against CH Commercial Policy rules.
+	"""Validate Sales Invoice items against CH Commercial Policy rules.
 
 	1. Check each item's rate against CH Item Price selling_price
 	2. Enforce MOP floor (unless item has allowed tags)

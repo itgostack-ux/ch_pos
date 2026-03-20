@@ -10,14 +10,14 @@ required_apps = ["frappe", "erpnext"]
 after_install = "ch_pos.setup.after_install"
 before_uninstall = "ch_pos.setup.before_uninstall"
 
-# Override POS Invoice for margin scheme calculation
+# Override Sales Invoice for margin scheme calculation
 override_doctype_class = {
-    "POS Invoice": "ch_pos.overrides.pos_invoice.CustomPOSInvoice",
+    "Sales Invoice": "ch_pos.overrides.pos_invoice.CustomPOSInvoice",
 }
 
 # Client scripts
 doctype_js = {
-    "POS Invoice": "custom/pos_invoice.js",
+    "Sales Invoice": "custom/pos_invoice.js",
 }
 
 # App-level JS (extends POS UI)
@@ -34,7 +34,7 @@ app_include_css = [
 
 # Doc events
 doc_events = {
-    "POS Invoice": {
+    "Sales Invoice": {
         "validate": [
             "ch_pos.overrides.pos_invoice.validate_margin_scheme",
             "ch_pos.overrides.discount_control.validate_pos_commercial_policy",

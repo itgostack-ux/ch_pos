@@ -316,7 +316,7 @@ export class ReturnsWorkspace {
 		PosState.return_items = return_items;
 
 		// Set customer from original invoice
-		frappe.db.get_value("POS Invoice", invoice_name, "customer").then((r) => {
+		frappe.db.get_value("Sales Invoice", invoice_name, "customer").then((r) => {
 			if (r.message && r.message.customer) {
 				PosState.customer = r.message.customer;
 				EventBus.emit("customer:set", r.message.customer);

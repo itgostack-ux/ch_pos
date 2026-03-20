@@ -194,7 +194,7 @@ class CHPOSSession(Document):
     def _calculate_totals(self):
         """Fetch invoice totals for this session's date range and profile."""
         invoices = frappe.get_all(
-            "POS Invoice",
+            "Sales Invoice",
             filters={
                 "pos_profile": self.pos_profile,
                 "docstatus": 1,
@@ -227,7 +227,7 @@ class CHPOSSession(Document):
         # Fetch payment-wise expected amounts
         rows = frappe.db.sql("""
             SELECT sip.mode_of_payment, SUM(sip.amount) AS expected_amount
-            FROM `tabPOS Invoice` pi
+            FROM `tabSales Invoice` pi
             JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             WHERE pi.pos_profile = %(pos_profile)s
               AND pi.docstatus = 1

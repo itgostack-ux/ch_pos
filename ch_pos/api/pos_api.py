@@ -115,20 +115,29 @@ def create_pos_invoice(pos_profile, customer, items,
                        redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
                        sales_executive=None, sale_type=None, sale_sub_type=None,
                        sale_reference=None, discount_reason=None,
-                       client_request_id=None):
-    """Create and submit a POS Invoice from the CH POS App cart.
+                       client_request_id=None,
+                       is_credit_sale=0, credit_days=0,
+                       is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
+                       advance_amount=0):
+    """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
       Legacy:  mode_of_payment + amount_paid
       Split:   payments = [{mode_of_payment, amount, upi_transaction_id?,
-                             card_reference?, card_last_four?}, ...]
+                             card_reference?, card_last_four?,
+                             finance_provider?, finance_tenure?,
+                             finance_approval_id?, finance_down_payment?}, ...]
+
+    Payment types supported:
+      Cash, UPI, Card, Finance/EMI, Credit Sale, Free Sale,
+      Loyalty, Voucher, Exchange, Advance Adjustment
 
     Idempotency:
       Pass a unique client_request_id (UUID) per attempt. Retries with the
       same ID within 10 minutes return the existing invoice without
       creating a duplicate.
     """
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
 
     # ── Session guard — no billing without active session ─────────────────────
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
@@ -139,7 +148,7 @@ def create_pos_invoice(pos_profile, customer, items,
     # ── Duplicate-submit guard ────────────────────────────────────────────────
     if client_request_id:
         existing = frappe.db.sql(
-            """SELECT name FROM `tabPOS Invoice`
+            """SELECT name FROM `tabSales Invoice`
                 WHERE custom_client_request_id = %(crid)s
                   AND docstatus != 2
                   AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
@@ -154,7 +163,7 @@ def create_pos_invoice(pos_profile, customer, items,
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
 
-    inv = frappe.new_doc("POS Invoice")
+    inv = frappe.new_doc("Sales Invoice")
     inv.pos_profile = pos_profile
     inv.customer = customer
     inv.company = profile.company
@@ -209,7 +218,20 @@ def create_pos_invoice(pos_profile, customer, items,
             })
 
     # Payment — supports split payments (new) and single mode (legacy)
-    if payments:
+    # Free sales may have no payments
+    if cint(is_free_sale):
+        # Free sale — set custom fields, no payment required
+        inv.custom_is_free_sale = 1
+        inv.custom_free_sale_reason = (free_sale_reason or "")[:200]
+        inv.custom_free_sale_approved_by = (free_sale_approved_by or "")[:140]
+        # Add a zero-amount payment so ERPNext validation passes
+        default_mop = "Cash"
+        for pm in (profile.payments or []):
+            if cint(pm.default):
+                default_mop = pm.mode_of_payment
+                break
+        inv.append("payments", {"mode_of_payment": default_mop, "amount": 0})
+    elif payments:
         if isinstance(payments, str):
             payments = frappe.parse_json(payments)
         if not payments:
@@ -225,6 +247,15 @@ def create_pos_invoice(pos_profile, customer, items,
                 row["custom_card_reference"] = p["card_reference"]
             if p.get("card_last_four"):
                 row["custom_card_last_four"] = p["card_last_four"]
+            # Finance/EMI fields
+            if p.get("finance_provider"):
+                row["custom_finance_provider"] = p["finance_provider"]
+            if p.get("finance_tenure"):
+                row["custom_finance_tenure"] = p["finance_tenure"]
+            if p.get("finance_approval_id"):
+                row["custom_finance_approval_id"] = p["finance_approval_id"]
+            if flt(p.get("finance_down_payment")):
+                row["custom_finance_down_payment"] = flt(p["finance_down_payment"])
             inv.append("payments", row)
     elif mode_of_payment:
         inv.append("payments", {
@@ -233,6 +264,17 @@ def create_pos_invoice(pos_profile, customer, items,
         })
     else:
         frappe.throw(frappe._("Payment mode is required"))
+
+    # Credit sale — allow partial/zero payment, track credit terms
+    if cint(is_credit_sale) and not cint(is_free_sale):
+        inv.custom_is_credit_sale = 1
+        inv.custom_credit_days = cint(credit_days) or 30
+
+    # Advance adjustment — reduce effective amount due
+    if flt(advance_amount) > 0 and not cint(is_free_sale):
+        inv.custom_advance_adjusted = flt(advance_amount)
+        # Treat advance as discount so grand_total reduces for ERPNext validation
+        inv.discount_amount = flt(inv.discount_amount or 0) + flt(advance_amount)
 
     # Taxes from POS Profile
     for tax in (profile.get("taxes") or []):
@@ -336,6 +378,13 @@ def create_pos_invoice(pos_profile, customer, items,
     # Sales executive attribution
     if sales_executive:
         inv.custom_sales_executive = sales_executive
+        # Add Sales Team row for ERPNext target tracking
+        sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
+        if sales_person:
+            inv.append("sales_team", {
+                "sales_person": sales_person,
+                "allocated_percentage": 100,
+            })
 
     # Sale type classification
     if sale_type:
@@ -350,10 +399,18 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.custom_client_request_id = str(client_request_id)[:140]
 
     inv.flags.ignore_permissions = True
-    inv.save()
-    inv.submit()
+    try:
+        inv.insert(ignore_permissions=True)
+        inv.submit()
+    except Exception:
+        if inv.name and frappe.db.exists("Sales Invoice", inv.name):
+            try:
+                frappe.delete_doc("Sales Invoice", inv.name, force=True, ignore_permissions=True)
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), f"Draft Sales Invoice cleanup failed for {inv.name}")
+        raise
 
-    # Set reverse link on Buyback Assessment → POS Invoice
+    # Set reverse link on Buyback Assessment → Sales Invoice
     if exchange_assessment:
         frappe.db.set_value(
             "Buyback Assessment", exchange_assessment,
@@ -442,7 +499,7 @@ def create_pos_invoice(pos_profile, customer, items,
         if flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
             log_business_event(
                 event_type="Discount Override",
-                ref_doctype="POS Invoice", ref_name=inv.name,
+                ref_doctype="Sales Invoice", ref_name=inv.name,
                 before="0",
                 after=f"{additional_discount_percentage}% / ₹{additional_discount_amount}",
                 remarks=f"Reason: {discount_reason or 'N/A'}",
@@ -453,7 +510,7 @@ def create_pos_invoice(pos_profile, customer, items,
         if exchange_assessment:
             log_business_event(
                 event_type="Exchange Conversion",
-                ref_doctype="POS Invoice", ref_name=inv.name,
+                ref_doctype="Sales Invoice", ref_name=inv.name,
                 before=exchange_assessment,
                 after=f"Credit: ₹{exchange_credit}",
                 store=_store, company=_company,
@@ -463,13 +520,13 @@ def create_pos_invoice(pos_profile, customer, items,
         if voucher_code and flt(voucher_redeemed) > 0:
             log_business_event(
                 event_type="Voucher Redemption",
-                ref_doctype="POS Invoice", ref_name=inv.name,
+                ref_doctype="Sales Invoice", ref_name=inv.name,
                 before=voucher_code,
                 after=f"₹{voucher_redeemed} redeemed",
                 store=_store, company=_company,
             )
     except Exception:
-        frappe.log_error(frappe.get_traceback(), f"Audit log failed for POS Invoice {inv.name}")
+        frappe.log_error(frappe.get_traceback(), f"Audit log failed for Sales Invoice {inv.name}")
 
     return {
         "name": inv.name,
@@ -766,9 +823,81 @@ def validate_coupon(coupon_code, customer=None, cart_total=0):
 
 
 @frappe.whitelist()
+def get_customer_credit_info(customer, company=None):
+    """Return credit limit and outstanding for a customer."""
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    if not customer or customer == "Walk-in Customer":
+        return None
+
+    credit_limit = 0
+    outstanding = 0
+
+    # Check Customer Credit Limit child table first
+    if company:
+        cl = frappe.db.get_value(
+            "Customer Credit Limit",
+            {"parent": customer, "parenttype": "Customer", "company": company},
+            "credit_limit",
+        )
+        if cl:
+            credit_limit = flt(cl)
+
+    # Fallback to Customer's default credit limit
+    if not credit_limit:
+        credit_limit = flt(frappe.db.get_value("Customer", customer, "credit_limit"))
+
+    if not credit_limit:
+        return None
+
+    # Get outstanding from GL
+    outstanding = flt(frappe.db.sql("""
+        SELECT SUM(debit - credit) FROM `tabGL Entry`
+        WHERE party_type = 'Customer' AND party = %s
+          AND is_cancelled = 0
+          {company_filter}
+    """.format(
+        company_filter=f"AND company = {frappe.db.escape(company)}" if company else ""
+    ), customer)[0][0] or 0)
+
+    return {
+        "credit_limit": credit_limit,
+        "outstanding": outstanding,
+        "available": max(0, credit_limit - outstanding),
+    }
+
+
+@frappe.whitelist()
+def get_customer_advances(customer):
+    """Return unallocated advance payments for a customer that can be adjusted against a new sale."""
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    if not customer or customer == "Walk-in Customer":
+        return []
+
+    # Look for unallocated Payment Entries (advance payments received)
+    advances = frappe.db.sql("""
+        SELECT pe.name, pe.posting_date, pe.paid_amount,
+               pe.paid_amount - IFNULL(
+                   (SELECT SUM(pr.allocated_amount)
+                    FROM `tabPayment Entry Reference` pr
+                    WHERE pr.parent = pe.name AND pr.docstatus = 1), 0
+               ) AS balance
+        FROM `tabPayment Entry` pe
+        WHERE pe.party_type = 'Customer'
+          AND pe.party = %(customer)s
+          AND pe.payment_type = 'Receive'
+          AND pe.docstatus = 1
+        HAVING balance > 0.01
+        ORDER BY pe.posting_date ASC
+        LIMIT 10
+    """, {"customer": customer}, as_dict=True)
+
+    return advances or []
+
+
+@frappe.whitelist()
 def scan_barcode(barcode, pos_profile=None):
     """Look up an item by exact barcode or serial number for POS scanner."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
     barcode = (barcode or "").strip()
     if not barcode:
         return None
@@ -805,7 +934,7 @@ def scan_barcode(barcode, pos_profile=None):
 
 @frappe.whitelist()
 def search_invoices_for_return(search_term, pos_profile=None):
-    """Search POS Invoices for return/exchange processing."""
+    """Search Sales Invoices for return/exchange processing."""
     search_term = (search_term or "").strip()
     if not search_term:
         return []
@@ -823,7 +952,7 @@ def search_invoices_for_return(search_term, pos_profile=None):
     ]
 
     invoices = frappe.get_all(
-        "POS Invoice",
+        "Sales Invoice",
         filters=filters,
         or_filters=or_filters,
         fields=[
@@ -836,7 +965,7 @@ def search_invoices_for_return(search_term, pos_profile=None):
 
     for inv in invoices:
         inv["items_count"] = frappe.db.count(
-            "POS Invoice Item", {"parent": inv["name"]}
+            "Sales Invoice Item", {"parent": inv["name"]}
         )
 
     return invoices
@@ -844,8 +973,8 @@ def search_invoices_for_return(search_term, pos_profile=None):
 
 @frappe.whitelist()
 def get_invoice_items_for_return(invoice_name):
-    """Get items from a POS Invoice that can still be returned."""
-    inv = frappe.get_doc("POS Invoice", invoice_name)
+    """Get items from a Sales Invoice that can still be returned."""
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1 or inv.is_return:
         frappe.throw(frappe._("Only submitted non-return invoices can be returned"))
 
@@ -854,8 +983,8 @@ def get_invoice_items_for_return(invoice_name):
         # Calculate already-returned qty for this item row
         already_returned = flt(frappe.db.sql("""
             SELECT ABS(SUM(ri.qty))
-            FROM `tabPOS Invoice Item` ri
-            JOIN `tabPOS Invoice` pi ON pi.name = ri.parent
+            FROM `tabSales Invoice Item` ri
+            JOIN `tabSales Invoice` pi ON pi.name = ri.parent
             WHERE pi.return_against = %s
               AND pi.docstatus = 1
               AND ri.item_code = %s
@@ -885,22 +1014,22 @@ def get_invoice_items_for_return(invoice_name):
 
 @frappe.whitelist()
 def create_pos_return(original_invoice, return_items, sales_executive=None):
-    """Create a POS Invoice return (credit note) for specific items."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    """Create a Sales Invoice return (credit note) for specific items."""
+    frappe.has_permission("Sales Invoice", "create", throw=True)
     if isinstance(return_items, str):
         return_items = frappe.parse_json(return_items)
 
-    orig = frappe.get_doc("POS Invoice", original_invoice)
+    orig = frappe.get_doc("Sales Invoice", original_invoice)
     if orig.docstatus != 1 or orig.is_return:
         frappe.throw(frappe._("Can only create returns for submitted non-return invoices"))
 
-    ret = frappe.new_doc("POS Invoice")
+    ret = frappe.new_doc("Sales Invoice")
     ret.pos_profile = orig.pos_profile
     ret.customer = orig.customer
     ret.company = orig.company
     ret.selling_price_list = orig.selling_price_list
     ret.currency = orig.currency
-    # POS Invoice doesn't have a top-level warehouse field; get from items
+    # Sales Invoice doesn't have a top-level warehouse field; get from items
     _orig_warehouse = (
         orig.get("set_warehouse")
         or (orig.items[0].warehouse if orig.items else None)
@@ -960,6 +1089,12 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
 
     if sales_executive:
         ret.custom_sales_executive = sales_executive
+        sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
+        if sales_person:
+            ret.append("sales_team", {
+                "sales_person": sales_person,
+                "allocated_percentage": 100,
+            })
 
     # Set paid_amount before save so ERPNext's validate_change_amount
     # doesn't hit a NoneType error on return invoices (grand_total < 0)
@@ -979,7 +1114,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
         from ch_pos.audit import log_business_event
         log_business_event(
             event_type="Return Approved",
-            ref_doctype="POS Invoice", ref_name=ret.name,
+            ref_doctype="Sales Invoice", ref_name=ret.name,
             before=original_invoice,
             after=f"Return ₹{total_return_amount}",
             company=orig.company,
@@ -1075,8 +1210,8 @@ def check_serial_returnable(serial_no, original_invoice=None):
     if original_invoice:
         already_returned = frappe.db.sql("""
             SELECT ri.parent
-            FROM `tabPOS Invoice Item` ri
-            JOIN `tabPOS Invoice` pi ON pi.name = ri.parent
+            FROM `tabSales Invoice Item` ri
+            JOIN `tabSales Invoice` pi ON pi.name = ri.parent
             WHERE pi.return_against = %s AND pi.docstatus = 1
               AND ri.serial_no = %s
             LIMIT 1
@@ -1188,9 +1323,9 @@ def get_store_repairs(pos_profile):
                 sr["job_assignment"] = ja.name
                 sr["job_status"] = ja.assignment_status
                 sr["technician"] = ja.service_engineer
-        # Check if already billed via POS Invoice or Sales Invoice
+        # Check if already billed via Sales Invoice or Sales Invoice
         sr["billed"] = bool(frappe.db.get_value(
-            "POS Invoice Item",
+            "Sales Invoice Item",
             {"description": ["like", f"%{sr.name}%"], "docstatus": 1},
             "parent",
         ) or frappe.db.get_value(
@@ -1203,11 +1338,11 @@ def get_store_repairs(pos_profile):
 @frappe.whitelist()
 def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile,
                            customer="Walk-in Customer", service_order=None, upi_txn_id=None):
-    """Create a POS Invoice to collect payment for a completed repair job.
+    """Create a Sales Invoice to collect payment for a completed repair job.
 
     Marks Service Request as billed after invoice submission.
     """
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
     amount = flt(amount)
     if amount <= 0:
         frappe.throw(frappe._("Repair charge must be greater than zero"))
@@ -1222,7 +1357,7 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     if not repair_item:
         frappe.throw(frappe._("No 'Repair Service' item found. Please create a non-stock service item named 'Repair Service'."))
 
-    inv = frappe.new_doc("POS Invoice")
+    inv = frappe.new_doc("Sales Invoice")
     inv.pos_profile = pos_profile
     inv.customer = customer
     inv.company = profile.company
@@ -1349,7 +1484,7 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     1. Assign technician to Job Assignment (if provided)
     2. Save spare parts onto Service Request (replace child rows)
     3. Set QC status on the linked Sales Order
-    4. Create POS Invoice with service charge line + one line per spare part
+    4. Create Sales Invoice with service charge line + one line per spare part
     5. Create Material Issue Stock Entry for spare parts
     6. Mark SR as delivered / closed
 
@@ -1357,7 +1492,7 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     spare_parts: list of {spare_part_item, item_name, qty, uom, rate}
     qc_result: "Pass" | "Fail" | "Not Repairable" | "Customer Cancelled"
     """
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
 
     if isinstance(payments, str):
         payments = frappe.parse_json(payments)
@@ -1431,7 +1566,7 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
             "workflow_state": wf_state,
         }, update_modified=False)
 
-    # 4 — Build and submit POS Invoice
+    # 4 — Build and submit Sales Invoice
     # Resolve spare part item codes (user may have typed a name instead of a code)
     for part in spare_parts:
         code = part.get("spare_part_item", "")
@@ -1454,7 +1589,7 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     if not repair_item:
         frappe.throw(frappe._("No service item found. Create a non-stock item in the 'Repair Services' group."))
 
-    inv = frappe.new_doc("POS Invoice")
+    inv = frappe.new_doc("Sales Invoice")
     inv.pos_profile = pos_profile
     inv.customer = sr.customer
     inv.company = profile.company
@@ -1837,12 +1972,12 @@ def imei_history(serial_no):
         "amc_expiry_date": str(sn.amc_expiry_date) if sn.amc_expiry_date else None,
     }
 
-    # Sales history — POS Invoice items referencing this serial
+    # Sales history — Sales Invoice items referencing this serial
     out["sales"] = frappe.db.sql("""
         SELECT pii.parent as invoice, pii.item_code, pii.item_name, pii.rate,
                pi.customer, pi.customer_name, pi.posting_date as date
-        FROM `tabPOS Invoice Item` pii
-        JOIN `tabPOS Invoice` pi ON pi.name = pii.parent
+        FROM `tabSales Invoice Item` pii
+        JOIN `tabSales Invoice` pi ON pi.name = pii.parent
         WHERE pii.serial_no LIKE %(sn_pattern)s
           AND pi.docstatus = 1 AND pi.is_return = 0
         ORDER BY pi.posting_date DESC
@@ -1852,8 +1987,8 @@ def imei_history(serial_no):
     out["returns"] = frappe.db.sql("""
         SELECT pii.parent as invoice, pii.item_code, pii.item_name, pii.rate,
                pi.customer, pi.customer_name, pi.posting_date as date
-        FROM `tabPOS Invoice Item` pii
-        JOIN `tabPOS Invoice` pi ON pi.name = pii.parent
+        FROM `tabSales Invoice Item` pii
+        JOIN `tabSales Invoice` pi ON pi.name = pii.parent
         WHERE pii.serial_no LIKE %(sn_pattern)s
           AND pi.docstatus = 1 AND pi.is_return = 1
         ORDER BY pi.posting_date DESC
@@ -1954,8 +2089,8 @@ def customer_360(identifier, company=None):
     # Invoices
     out["invoices"] = frappe.db.sql("""
         SELECT name, posting_date, grand_total, status,
-               (SELECT COUNT(*) FROM `tabPOS Invoice Item` WHERE parent = pi.name) as items_count
-        FROM `tabPOS Invoice` pi
+               (SELECT COUNT(*) FROM `tabSales Invoice Item` WHERE parent = pi.name) as items_count
+        FROM `tabSales Invoice` pi
         WHERE customer = %(customer)s AND docstatus = 1
         ORDER BY posting_date DESC LIMIT 50
     """, {"customer": customer}, as_dict=True)
@@ -2024,7 +2159,7 @@ def customer_360(identifier, company=None):
     # Refund / return invoices
     out["refunds"] = frappe.db.sql("""
         SELECT name, posting_date, grand_total, return_against, status
-        FROM `tabPOS Invoice`
+        FROM `tabSales Invoice`
         WHERE customer = %(customer)s AND docstatus = 1 AND is_return = 1
         ORDER BY posting_date DESC LIMIT 20
     """, {"customer": customer}, as_dict=True)
@@ -2033,7 +2168,7 @@ def customer_360(identifier, company=None):
     out["swap_invoices"] = frappe.db.sql("""
         SELECT name, posting_date, grand_total, custom_ch_sale_type,
                custom_ch_sale_sub_type, custom_exchange_assessment, status
-        FROM `tabPOS Invoice`
+        FROM `tabSales Invoice`
         WHERE customer = %(customer)s AND docstatus = 1
           AND custom_exchange_assessment IS NOT NULL AND custom_exchange_assessment != ''
         ORDER BY posting_date DESC LIMIT 20
@@ -2042,7 +2177,7 @@ def customer_360(identifier, company=None):
     # Coupon usage
     out["coupon_usage"] = frappe.db.sql("""
         SELECT name, posting_date, coupon_code, grand_total
-        FROM `tabPOS Invoice`
+        FROM `tabSales Invoice`
         WHERE customer = %(customer)s AND docstatus = 1
           AND coupon_code IS NOT NULL AND coupon_code != ''
         ORDER BY posting_date DESC LIMIT 20
@@ -2091,7 +2226,7 @@ def store_dashboard(pos_profile):
 
     # Today's invoices
     invoices = frappe.get_all(
-        "POS Invoice",
+        "Sales Invoice",
         filters={
             "pos_profile": pos_profile,
             "posting_date": today,
@@ -2109,14 +2244,14 @@ def store_dashboard(pos_profile):
         inv_names = [inv.name for inv in invoices]
         items_sold = frappe.db.sql(
             """SELECT COALESCE(SUM(ii.qty), 0)
-               FROM `tabPOS Invoice Item` ii
+               FROM `tabSales Invoice Item` ii
                WHERE ii.parent IN %s""",
             (inv_names,),
         )[0][0] or 0
 
     # Returns today
     total_returns = frappe.db.count(
-        "POS Invoice",
+        "Sales Invoice",
         filters={
             "pos_profile": pos_profile,
             "posting_date": today,
@@ -2130,8 +2265,8 @@ def store_dashboard(pos_profile):
     if invoices:
         top_items_raw = frappe.db.sql(
             """SELECT ii.item_name, SUM(ii.qty) AS qty, SUM(ii.amount) AS revenue
-               FROM `tabPOS Invoice Item` ii
-               JOIN `tabPOS Invoice` pi ON pi.name = ii.parent
+               FROM `tabSales Invoice Item` ii
+               JOIN `tabSales Invoice` pi ON pi.name = ii.parent
                WHERE pi.pos_profile = %s AND pi.posting_date = %s
                  AND pi.docstatus = 1 AND pi.is_return = 0
                GROUP BY ii.item_code
@@ -2195,7 +2330,7 @@ def store_dashboard(pos_profile):
         hourly_raw = frappe.db.sql(
             """SELECT HOUR(pi.posting_time) AS hr, SUM(pi.grand_total) AS revenue,
                       COUNT(*) AS cnt
-               FROM `tabPOS Invoice` pi
+               FROM `tabSales Invoice` pi
                WHERE pi.pos_profile = %s AND pi.posting_date = %s
                  AND pi.docstatus = 1 AND pi.is_return = 0
                GROUP BY HOUR(pi.posting_time)
@@ -2800,7 +2935,7 @@ def get_customer_pos_info(customer, company=None):
 # ── Swap Eligibility ──────────────────────────────────────────
 @frappe.whitelist()
 def validate_swap_eligibility(invoice_name, swap_window_days=7):
-    """Check if a POS Invoice is eligible for in-store swap.
+    """Check if a Sales Invoice is eligible for in-store swap.
 
     Rules:
     - Invoice must be submitted, non-return, not already fully returned
@@ -2809,10 +2944,10 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7):
     """
     swap_window_days = cint(swap_window_days) or 7
 
-    if not frappe.db.exists("POS Invoice", invoice_name):
+    if not frappe.db.exists("Sales Invoice", invoice_name):
         return {"eligible": False, "reason": frappe._("Invoice {0} not found").format(invoice_name)}
 
-    inv = frappe.get_doc("POS Invoice", invoice_name)
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
 
     if inv.docstatus != 1:
         return {"eligible": False, "reason": frappe._("Invoice is not submitted")}
@@ -2837,8 +2972,8 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7):
     for item in inv.items:
         already_returned = flt(frappe.db.sql("""
             SELECT ABS(SUM(ri.qty))
-            FROM `tabPOS Invoice Item` ri
-            JOIN `tabPOS Invoice` pi ON pi.name = ri.parent
+            FROM `tabSales Invoice Item` ri
+            JOIN `tabSales Invoice` pi ON pi.name = ri.parent
             WHERE pi.return_against = %s AND pi.docstatus = 1
               AND ri.item_code = %s AND ri.pos_invoice_item = %s
         """, (invoice_name, item.item_code, item.name))[0][0] or 0)
@@ -3047,7 +3182,7 @@ def _get_executive_access(user, warehouse):
         "POS Executive",
         filters={"store": ("in", stores), "is_active": 1} if stores else {"is_active": 1},
         fields=["name", "executive_name", "user", "store", "company", "role",
-                "can_give_discount", "max_discount_pct"],
+                "can_give_discount", "max_discount_pct", "sales_person"],
         order_by="company, executive_name",
     )
 
@@ -3124,7 +3259,7 @@ def get_store_executives(warehouse=None, company=None):
         "POS Executive",
         filters=filters,
         fields=["name", "executive_name", "user", "store", "company", "role",
-                "can_give_discount", "max_discount_pct"],
+                "can_give_discount", "max_discount_pct", "sales_person"],
         order_by="company, executive_name",
     )
 
@@ -3442,7 +3577,7 @@ def get_session_payment_summary(pos_profile, from_date, to_date=None):
         SELECT
             sip.mode_of_payment,
             SUM(sip.amount) AS expected_amount
-        FROM `tabPOS Invoice` pi
+        FROM `tabSales Invoice` pi
         JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         WHERE pi.pos_profile = %(pos_profile)s
           AND pi.docstatus = 1
@@ -3454,7 +3589,7 @@ def get_session_payment_summary(pos_profile, from_date, to_date=None):
 
     # Invoice totals
     invoices = frappe.get_all(
-        "POS Invoice",
+        "Sales Invoice",
         filters={
             "pos_profile": pos_profile,
             "docstatus": 1,
@@ -3724,7 +3859,7 @@ def get_today_footfall(pos_profile):
 	buyback_count = purpose_map.get("Buyback", 0)
 
 	# Invoices today
-	invoices_today = frappe.db.count("POS Invoice", {
+	invoices_today = frappe.db.count("Sales Invoice", {
 		"pos_profile": pos_profile,
 		"posting_date": today,
 		"docstatus": 1,
@@ -3766,11 +3901,11 @@ def flag_reprint_needed(pos_invoice, reason="Print failed"):
 	Frontend calls this when the receipt printer is offline or errors.
 	Store managers can see pending reprints in the CH Store Operations workspace.
 	"""
-	if not frappe.db.exists("POS Invoice", pos_invoice):
-		frappe.throw(frappe._("POS Invoice {0} not found").format(pos_invoice))
+	if not frappe.db.exists("Sales Invoice", pos_invoice):
+		frappe.throw(frappe._("Sales Invoice {0} not found").format(pos_invoice))
 
 	# Append to session log reprint queue if session log linked
-	session_log = frappe.db.get_value("POS Session Log", {"pos_profile": frappe.db.get_value("POS Invoice", pos_invoice, "pos_profile"), "status": ["!=", "Closed"], "docstatus": 1}, "name")
+	session_log = frappe.db.get_value("POS Session Log", {"pos_profile": frappe.db.get_value("Sales Invoice", pos_invoice, "pos_profile"), "status": ["!=", "Closed"], "docstatus": 1}, "name")
 
 	frappe.db.sql("""
 		INSERT INTO `tabPOS Reprint Queue`
@@ -4220,7 +4355,7 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Reprint — Today's POS Invoices
+# Reprint — Today's Sales Invoices
 # ═══════════════════════════════════════════════════════════════════════════
 
 @frappe.whitelist()
@@ -4242,8 +4377,8 @@ def get_todays_invoices(pos_profile, date=None):
 			pi.is_return,
 			pi.status,
 			GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
-		FROM `tabPOS Invoice` pi
-		JOIN `tabPOS Invoice Item` pii ON pii.parent = pi.name
+		FROM `tabSales Invoice` pi
+		JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
 		WHERE pi.pos_profile = %s
 		  AND pi.posting_date = %s
 		  AND pi.docstatus = 1
@@ -4341,7 +4476,7 @@ def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_ser
 					"subject": subject,
 					"email_content": message,
 					"type": "Alert",
-					"document_type": "POS Invoice",
+					"document_type": "Sales Invoice",
 					"document_name": "",
 					"from_user": frappe.session.user,
 					"for_user": uid,

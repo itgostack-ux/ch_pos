@@ -143,7 +143,7 @@ export class Customer360Workspace {
 			</div>`;
 
 		html += section_table(__("Recent Purchases"), "shopping-cart", d.invoices, [
-			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="Sales Invoice" data-name="${r.name}">${r.name}</a>` },
 			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
 			{ label: __("Items"), render: (r) => `${r.items_count || 0}` },
 			{ label: __("Total"), render: (r) => `₹${format_number(r.grand_total)}` },
@@ -210,21 +210,21 @@ export class Customer360Workspace {
 		]);
 
 		html += section_table(__("Refunds / Returns"), "undo", d.refunds, [
-			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="Sales Invoice" data-name="${r.name}">${r.name}</a>` },
 			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
 			{ label: __("Against"), render: (r) => r.return_against || "—" },
 			{ label: __("Amount"), render: (r) => `₹${format_number(Math.abs(r.grand_total || 0))}` },
 		]);
 
 		html += section_table(__("Swap / Exchange"), "retweet", d.swap_invoices, [
-			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="Sales Invoice" data-name="${r.name}">${r.name}</a>` },
 			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
 			{ label: __("Type"), render: (r) => frappe.utils.escape_html(r.custom_ch_sale_type || "") },
 			{ label: __("Total"), render: (r) => `₹${format_number(r.grand_total || 0)}` },
 		]);
 
 		html += section_table(__("Coupon Usage"), "tag", d.coupon_usage, [
-			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="POS Invoice" data-name="${r.name}">${r.name}</a>` },
+			{ label: __("Invoice"), render: (r) => `<a class="ch-c360-link" data-doctype="Sales Invoice" data-name="${r.name}">${r.name}</a>` },
 			{ label: __("Date"), render: (r) => frappe.datetime.str_to_user(r.posting_date) },
 			{ label: __("Coupon"), render: (r) => frappe.utils.escape_html(r.coupon_code || "") },
 			{ label: __("Total"), render: (r) => `₹${format_number(r.grand_total || 0)}` },

@@ -9,7 +9,7 @@ Usage:
 
     log_business_event(
         event_type="Discount Override",
-        ref_doctype="POS Invoice",
+        ref_doctype="Sales Invoice",
         ref_name=inv.name,
         before="0%",
         after="15%",

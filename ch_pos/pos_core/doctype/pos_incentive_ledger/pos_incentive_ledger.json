@@ -100,14 +100,14 @@
   {
    "fieldname": "invoice",
    "fieldtype": "Link",
-   "label": "POS Invoice",
-   "options": "POS Invoice"
+   "label": "Sales Invoice",
+   "options": "Sales Invoice"
   },
   {
    "fieldname": "return_invoice",
    "fieldtype": "Link",
    "label": "Return Invoice",
-   "options": "POS Invoice",
+   "options": "Sales Invoice",
    "description": "For returns/swaps, the credit note"
   },
   {

@@ -6,7 +6,7 @@
 # negative (Loss) or fell below 10% (Leaking).
 #
 # Uses:
-#   - POS Invoice Item: rate, qty, discount_amount, serial_no, incoming_rate
+#   - Sales Invoice Item: rate, qty, discount_amount, serial_no, incoming_rate
 #   - CH Serial Lifecycle: purchase_rate (for refurbished items)
 
 import frappe
@@ -23,7 +23,7 @@ def get_columns():
     return [
         {"label": _("Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
         {"label": _("Invoice"), "fieldname": "invoice", "fieldtype": "Link",
-         "options": "POS Invoice", "width": 155},
+         "options": "Sales Invoice", "width": 155},
         {"label": _("Store"), "fieldname": "warehouse", "fieldtype": "Link",
          "options": "Warehouse", "width": 130},
         {"label": _("Item Code"), "fieldname": "item_code", "fieldtype": "Link",
@@ -56,8 +56,8 @@ def get_data(filters):
             pii.serial_no,
             pii.incoming_rate,
             pii.custom_is_margin_item
-        FROM `tabPOS Invoice` pi
-        JOIN `tabPOS Invoice Item` pii ON pii.parent = pi.name
+        FROM `tabSales Invoice` pi
+        JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
         WHERE pi.docstatus = 1
           AND pi.is_return = 0
           {conditions}

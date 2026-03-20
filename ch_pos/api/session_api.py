@@ -15,6 +15,7 @@ from frappe import _
 from frappe.utils import flt, cint, nowdate, now_datetime, getdate, add_days
 
 from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
+from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import build_settlement_snapshot
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
     get_active_session,
     get_store_business_date,
@@ -28,7 +29,7 @@ from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
 def get_session_status(pos_profile):
     """Check if an active session exists for this profile.
     Called on POS startup to decide: show opening screen or resume."""
-    frappe.has_permission("POS Invoice", "read", throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
 
     session = get_active_session(pos_profile)
     if session:
@@ -112,7 +113,7 @@ def get_session_status(pos_profile):
 @frappe.whitelist()
 def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
     """Open a new POS session. Called from the POS opening screen."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
     opening_cash = flt(opening_cash)
 
     # Get store from POS Profile Extension
@@ -269,7 +270,7 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
 def close_session(session_name, closing_cash, denominations=None,
                   variance_reason=None, manager_pin=None):
     """Close a POS session with cash reconciliation. Called from POS closing dashboard."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status not in ("Open", "Locked", "Pending Close"):
@@ -278,19 +279,23 @@ def close_session(session_name, closing_cash, denominations=None,
 
     # Settlement gate: if require_settlement_before_session_close is enabled,
     # a submitted CH POS Settlement must exist for this session.
-    if _is_settlement_required():
-        settlement_exists = frappe.db.exists(
-            "CH POS Settlement",
-            {"session": session_name, "docstatus": 1},
-        )
-        if not settlement_exists:
+    settlement_name = frappe.db.get_value(
+        "CH POS Settlement",
+        {"session": session_name, "docstatus": 1},
+        "name",
+    )
+    if _is_settlement_required() and not settlement_name:
             frappe.throw(
                 _("Settlement must be completed before closing session {0}. "
                   "Please complete the settlement process first.").format(session_name)
             )
 
+    settlement_doc = frappe.get_doc("CH POS Settlement", settlement_name) if settlement_name else None
+
     # Parse denominations
     denomination_rows = frappe.parse_json(denominations) if denominations else []
+    authoritative_closing_cash = flt(closing_cash)
+    authoritative_variance_reason = variance_reason
 
     # Manager PIN for variance approval (checked inside close_session if variance > threshold)
     manager_user = None
@@ -302,10 +307,24 @@ def close_session(session_name, closing_cash, denominations=None,
             frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
         manager_user = pin_result["user"]
 
+    if settlement_doc:
+        authoritative_closing_cash = flt(settlement_doc.actual_closing_cash)
+        authoritative_variance_reason = settlement_doc.variance_reason or authoritative_variance_reason
+        if settlement_doc.signoff_by_manager:
+            manager_user = settlement_doc.signoff_by_manager
+        if settlement_doc.denomination_details:
+            denomination_rows = [
+                {
+                    "denomination": row.denomination,
+                    "count": row.count,
+                }
+                for row in settlement_doc.denomination_details
+            ]
+
     session.close_session(
-        closing_cash=closing_cash,
+        closing_cash=authoritative_closing_cash,
         denomination_rows=denomination_rows,
-        variance_reason=variance_reason,
+        variance_reason=authoritative_variance_reason,
         manager_pin_user=manager_user,
     )
 
@@ -337,7 +356,7 @@ def close_session(session_name, closing_cash, denominations=None,
 @frappe.whitelist()
 def switch_user(session_name, new_user, manager_pin):
     """Switch cashier on an active session. Requires manager PIN."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status != "Open":
@@ -372,7 +391,7 @@ def switch_user(session_name, new_user, manager_pin):
 @frappe.whitelist()
 def create_cash_drop(session_name, amount, reason, manager_pin):
     """Create a cash drop (register → safe) during an active session."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
     amount = flt(amount)
     if amount <= 0:
         frappe.throw(_("Amount must be positive"))
@@ -420,7 +439,7 @@ def get_business_date(store):
 @frappe.whitelist()
 def override_business_date(store, new_date, reason, manager_pin):
     """Override the business date. Requires manager with override permission."""
-    frappe.has_permission("POS Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
 
     pin_result = verify_manager_pin(
         manager_pin, store=store, permission="can_override_business_date"
@@ -442,7 +461,7 @@ def override_business_date(store, new_date, reason, manager_pin):
 @frappe.whitelist()
 def verify_pin(pin, store=None, permission=None):
     """Verify a manager PIN from the POS UI."""
-    frappe.has_permission("POS Invoice", "read", throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     return verify_manager_pin(pin, store=store, permission=permission)
 
 
@@ -452,12 +471,19 @@ def verify_pin(pin, store=None, permission=None):
 @frappe.whitelist()
 def get_x_report(session_name):
     """X Report — interim session report (during shift). Does not close session."""
-    frappe.has_permission("POS Invoice", "read", throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
+    snapshot = build_settlement_snapshot(session)
+    settlement_name = frappe.db.get_value(
+        "CH POS Settlement",
+        {"session": session_name, "docstatus": 1},
+        "name",
+    )
+    settlement = frappe.get_doc("CH POS Settlement", settlement_name) if settlement_name else None
 
     # Fetch live invoice data
     invoices = frappe.get_all(
-        "POS Invoice",
+        "Sales Invoice",
         filters={
             "pos_profile": session.pos_profile,
             "docstatus": 1,
@@ -468,32 +494,9 @@ def get_x_report(session_name):
                 "posting_time", "customer_name"],
     )
 
-    # Payment mode breakdown
-    payment_rows = frappe.db.sql("""
-        SELECT sip.mode_of_payment, SUM(sip.amount) AS total
-        FROM `tabPOS Invoice` pi
-        JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
-        WHERE pi.pos_profile = %(pp)s
-          AND pi.docstatus = 1
-          AND IFNULL(pi.consolidated_invoice, '') = ''
-          AND pi.posting_date = %(bd)s
-        GROUP BY sip.mode_of_payment
-    """, {"pp": session.pos_profile, "bd": session.business_date}, as_dict=True)
-
     total_sales = sum(flt(i.grand_total) for i in invoices if not i.is_return)
     total_returns = sum(abs(flt(i.grand_total)) for i in invoices if i.is_return)
     total_tax = sum(flt(i.total_taxes_and_charges) for i in invoices if not i.is_return)
-
-    # Cash drops
-    total_drops = flt(frappe.db.sql("""
-        SELECT COALESCE(SUM(amount), 0)
-        FROM `tabCH Cash Drop`
-        WHERE session = %s AND docstatus = 1
-    """, session_name)[0][0])
-
-    # Cash expected
-    cash_mode_total = sum(flt(r.total) for r in payment_rows
-                          if frappe.db.get_value("Mode of Payment", r.mode_of_payment, "type") == "Cash")
 
     return {
         "session_name": session.name,
@@ -509,16 +512,25 @@ def get_x_report(session_name):
         "total_returns": total_returns,
         "net_sales": total_sales - total_returns,
         "total_tax": total_tax,
-        "payment_modes": [{"mode": r.mode_of_payment, "total": flt(r.total)} for r in payment_rows],
-        "cash_in_drawer": flt(session.opening_cash) + cash_mode_total - total_drops,
-        "total_cash_drops": total_drops,
+        "payment_modes": [{"mode": r.mode_of_payment, "total": flt(r.total)} for r in snapshot["payment_rows"]],
+        "cash_in_drawer": snapshot["expected_closing_cash"],
+        "total_cash_drops": snapshot["cash_drop_total"],
+        "refund_cash_out": snapshot["refund_cash_out"],
+        "petty_cash_out": snapshot["petty_cash_out"],
+        "buyback_cash_out": snapshot["buyback_cash_out"],
+        "settlement": {
+            "name": settlement.name,
+            "status": settlement.settlement_status,
+            "actual_closing_cash": flt(settlement.actual_closing_cash),
+            "variance_amount": flt(settlement.variance_amount),
+        } if settlement else None,
     }
 
 
 @frappe.whitelist()
 def get_z_report(store, business_date):
     """Z Report — end-of-day store summary across all sessions."""
-    frappe.has_permission("POS Invoice", "read", throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     business_date = getdate(business_date)
 
     sessions = frappe.get_all(
@@ -533,7 +545,7 @@ def get_z_report(store, business_date):
     # Aggregate payment modes across all sessions
     payment_rows = frappe.db.sql("""
         SELECT sip.mode_of_payment, SUM(sip.amount) AS total
-        FROM `tabPOS Invoice` pi
+        FROM `tabSales Invoice` pi
         JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         WHERE pi.docstatus = 1
           AND IFNULL(pi.consolidated_invoice, '') = ''
@@ -652,7 +664,7 @@ def _is_settlement_complete_for_store(store, business_date):
         frappe.db.sql(
             """
             SELECT COALESCE(SUM(sip.amount), 0)
-            FROM `tabPOS Invoice` pi
+            FROM `tabSales Invoice` pi
             JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
             WHERE pi.docstatus = 1

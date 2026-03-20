@@ -6,7 +6,7 @@
 # on each exchange transaction.
 #
 # Joins:
-#   POS Invoice  (sells new device, gives exchange credit)
+#   Sales Invoice  (sells new device, gives exchange credit)
 #   Buyback Assessment (the valuation quoted)
 #   Buyback Order (the actual final price paid to original owner)
 
@@ -23,8 +23,8 @@ def execute(filters=None):
 def get_columns():
     return [
         {"label": _("Invoice Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
-        {"label": _("POS Invoice"), "fieldname": "invoice", "fieldtype": "Link",
-         "options": "POS Invoice", "width": 155},
+        {"label": _("Sales Invoice"), "fieldname": "invoice", "fieldtype": "Link",
+         "options": "Sales Invoice", "width": 155},
         {"label": _("Customer"), "fieldname": "customer", "fieldtype": "Link",
          "options": "Customer", "width": 130},
         {"label": _("Store"), "fieldname": "warehouse", "fieldtype": "Link",
@@ -58,7 +58,7 @@ def get_data(filters):
             pi.warehouse,
             pi.custom_exchange_assessment AS exchange_assessment,
             pi.custom_exchange_amount AS exchange_amount
-        FROM `tabPOS Invoice` pi
+        FROM `tabSales Invoice` pi
         WHERE pi.docstatus = 1
           AND pi.custom_exchange_assessment IS NOT NULL
           AND pi.custom_exchange_assessment != ''

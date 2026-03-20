@@ -33,7 +33,7 @@ export class SellWorkspace {
 		// Scrollable items area + pager
 		panel.append(`
 			<div class="ch-pos-items-area">
-				<div class="ch-pos-items-grid card-view"></div>
+				<div class="ch-pos-items-grid list-view"></div>
 			</div>
 			<div class="ch-pos-items-pager"></div>
 		`);

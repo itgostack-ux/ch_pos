@@ -321,6 +321,17 @@ export class CartService {
 				const sel_plan = plans.find((p) => p.name === sel_name);
 				if (!sel_plan) return;
 
+				// Prevent duplicate: same warranty plan on same device/IMEI
+				const dup = PosState.cart.find(
+					(c) => c.is_warranty && c.warranty_plan === sel_plan.name
+						&& c.for_item_code === cart_item.item_code
+						&& (c.for_serial_no || "") === (cart_item.serial_no || "")
+				);
+				if (dup) {
+					frappe.show_alert({ message: __("This warranty is already added for this device"), indicator: "orange" });
+					return;
+				}
+
 				cart_item.warranty_plan = sel_plan.name;
 				PosState.cart.push({
 					item_code: sel_plan.service_item || sel_plan.name,
@@ -335,6 +346,7 @@ export class CartService {
 					applied_offer: null,
 					warranty_plan: sel_plan.name,
 					for_item_code: cart_item.item_code,
+					for_serial_no: cart_item.serial_no || "",
 					is_warranty: true,
 					is_vas: false,
 				});
@@ -765,7 +777,21 @@ export class CartService {
 				const plan = plans.find((p) => p.name === sel);
 				if (!plan || plan.blocked) return;
 
-				const for_item_code = (values.for_item || "").split(" (")[0] || null;
+				const for_raw = values.for_item || "";
+				const for_item_code = for_raw.split(" (")[0] || null;
+				const serial_match = for_raw.match(/\(([^)]+)\)/);
+				const for_serial_no = serial_match ? serial_match[1] : "";
+
+				// Prevent duplicate: same plan on same device/IMEI
+				const dup = PosState.cart.find(
+					(c) => c.is_vas && c.warranty_plan === plan.name
+						&& c.for_item_code === for_item_code
+						&& (c.for_serial_no || "") === for_serial_no
+				);
+				if (dup) {
+					frappe.show_alert({ message: __("This plan is already added for this device"), indicator: "orange" });
+					return;
+				}
 
 				dialog.hide();
 				PosState.cart.push({
@@ -781,6 +807,7 @@ export class CartService {
 					applied_offer: null,
 					warranty_plan: plan.name,
 					for_item_code,
+					for_serial_no,
 					is_warranty: false,
 					is_vas: true,
 				});
@@ -808,7 +835,7 @@ export class CartService {
 					fieldname: "invoice",
 					fieldtype: "Link",
 					label: __("Original Invoice"),
-					options: "POS Invoice",
+					options: "Sales Invoice",
 					reqd: 1,
 					get_query: () => ({
 						filters: { is_return: 0, docstatus: 1, status: ["!=", "Credit Note Issued"] },
@@ -921,6 +948,12 @@ export class CartService {
 					exchange_assessment: PosState.exchange_assessment,
 					exchange_amount: PosState.exchange_amount,
 					sale_type: PosState.sale_type,
+					// Payment state — persisted across hold/restore
+					is_credit_sale: PosState.is_credit_sale || false,
+					is_free_sale: PosState.is_free_sale || false,
+					free_sale_reason: PosState.free_sale_reason || "",
+					free_sale_approved_by: PosState.free_sale_approved_by || "",
+					_payment_state: PosState._payment_state || null,
 					timestamp: frappe.datetime.now_datetime(),
 				};
 				localStorage.setItem(key, JSON.stringify(data));
@@ -1046,6 +1079,12 @@ export class CartService {
 		PosState.exchange_assessment = bill.exchange_assessment || null;
 		PosState.exchange_amount = bill.exchange_amount || 0;
 		PosState.sale_type = bill.sale_type || null;
+		// Restore payment state
+		PosState.is_credit_sale = bill.is_credit_sale || false;
+		PosState.is_free_sale = bill.is_free_sale || false;
+		PosState.free_sale_reason = bill.free_sale_reason || "";
+		PosState.free_sale_approved_by = bill.free_sale_approved_by || "";
+		PosState._payment_state = bill._payment_state || null;
 
 		// Remove from storage
 		localStorage.removeItem(bill.key);
@@ -1127,7 +1166,7 @@ export class CartService {
 		// Print button
 		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
 			const name = $(e.currentTarget).data("name");
-			const url = `/printview?doctype=POS%20Invoice&name=${encodeURIComponent(name)}&format=POS%20Invoice&no_letterhead=1`;
+			const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=Custom%20Sales%20Invoice&no_letterhead=1`;
 			window.open(url, "_blank");
 		});
 	}

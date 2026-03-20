@@ -19,10 +19,16 @@ export class ContextualToolbar {
 		this.panel.prepend(`
 			<div class="ch-pos-toolbar">
 				<div class="ch-pos-toolbar-left">
+					<div class="ch-pos-imei-wrap">
+						<i class="fa fa-barcode ch-pos-imei-icon"></i>
+						<input type="text" class="form-control ch-pos-imei-input"
+							placeholder="${__("Scan IMEI / Serial...")}"
+							autocomplete="off">
+					</div>
 					<div class="ch-pos-search-wrap">
 						<i class="fa fa-search ch-pos-search-icon"></i>
 						<input type="text" class="form-control ch-pos-search"
-							placeholder="${__("Scan barcode or search products...")}"
+							placeholder="${__("Search products...")}"
 							value="${frappe.utils.escape_html(PosState.search_term || "")}">
 					</div>
 				</div>
@@ -70,9 +76,26 @@ export class ContextualToolbar {
 			do_search($(this).val().trim());
 		});
 
-		// F2 / Escape → focus search bar
+		// IMEI / Serial scan — Enter to scan immediately
+		panel.on("keydown", ".ch-pos-imei-input", (e) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				const val = panel.find(".ch-pos-imei-input").val().trim();
+				if (val.length >= 4) {
+					this._handle_scan(val);
+					panel.find(".ch-pos-imei-input").val("");
+				}
+			}
+		});
+
+		// F2 / Escape → focus IMEI input first, then search
 		EventBus.on("search:focus", () => {
-			panel.find(".ch-pos-search").focus().select();
+			const imei = panel.find(".ch-pos-imei-input");
+			if (imei.length && !imei.is(":focus")) {
+				imei.focus().select();
+			} else {
+				panel.find(".ch-pos-search").focus().select();
+			}
 		});
 		// Clear filters from empty-state button
 		EventBus.on("search:cleared", () => {

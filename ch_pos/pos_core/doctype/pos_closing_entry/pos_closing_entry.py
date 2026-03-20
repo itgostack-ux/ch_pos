@@ -6,7 +6,7 @@ POS Closing Entry — end-of-day reconciliation for a POS terminal.
 
 Lifecycle:  Draft → Submitted  (or Discrepancy if variance found)
 
-Fetches expected amounts from submitted POS Invoices for the given
+Fetches expected amounts from submitted Sales Invoices for the given
 date range and POS Profile, then compares against counted amounts
 entered by the cashier.
 """
@@ -38,7 +38,7 @@ class POSClosingEntry(Document):
 			self.closed_by = frappe.session.user
 
 	def _invoice_filter_args(self):
-		"""Build the SQL WHERE clause arguments for POS Invoice queries."""
+		"""Build the SQL WHERE clause arguments for Sales Invoice queries."""
 		return {
 			"pos_profile": self.pos_profile,
 			"docstatus": 1,
@@ -47,11 +47,11 @@ class POSClosingEntry(Document):
 		}
 
 	def _fetch_invoice_summary(self):
-		"""Query submitted POS Invoices and populate summary totals."""
+		"""Query submitted Sales Invoices and populate summary totals."""
 		f = self._invoice_filter_args()
 
 		invoices = frappe.get_all(
-			"POS Invoice",
+			"Sales Invoice",
 			filters=f,
 			fields=[
 				"name", "grand_total", "is_return",
@@ -89,14 +89,14 @@ class POSClosingEntry(Document):
 		self.net_sales = total_amount - total_return_amount
 
 	def _sync_payment_details(self):
-		"""Fetch expected amounts per payment mode from POS Invoice payments."""
+		"""Fetch expected amounts per payment mode from Sales Invoice payments."""
 		f = self._invoice_filter_args()
 
 		rows = frappe.db.sql("""
 			SELECT
 				sip.mode_of_payment,
 				SUM(sip.amount) AS expected_amount
-			FROM `tabPOS Invoice` pi
+			FROM `tabSales Invoice` pi
 			JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
 			WHERE pi.pos_profile = %(pos_profile)s
 			  AND pi.docstatus = 1
