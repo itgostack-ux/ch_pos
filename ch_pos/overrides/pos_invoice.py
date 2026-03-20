@@ -162,10 +162,11 @@ class CustomPOSInvoice(SalesInvoice):
 
         self.db_set("status", "Cancelled")
 
-        if self.coupon_code:
+        coupon = getattr(self, "coupon_code", None) or getattr(self, "custom_coupon_code", None)
+        if coupon:
             from erpnext.accounts.doctype.pricing_rule.utils import update_coupon_code_count
 
-            update_coupon_code_count(self.coupon_code, "cancelled")
+            update_coupon_code_count(coupon, "cancelled")
 
         # Cache serial numbers per item BEFORE delink clears the references.
         # Doc_events (reverse_serial_lifecycle) fire after on_cancel returns,
@@ -184,7 +185,7 @@ class CustomPOSInvoice(SalesInvoice):
                 bundle_docstatus = frappe.db.get_value(
                     "Serial and Batch Bundle", row.serial_and_batch_bundle, "docstatus"
                 )
-                if not self.consolidated_invoice:
+                if not getattr(self, "consolidated_invoice", None):
                     frappe.db.set_value(
                         "Serial and Batch Bundle",
                         row.serial_and_batch_bundle,
