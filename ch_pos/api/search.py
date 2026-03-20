@@ -43,9 +43,15 @@ def pos_item_search(
         values["brand"] = filters["brand"]
 
     if filters.get("in_stock_only") and warehouse:
+        # For serial-tracked items check Active serials; for others check Bin qty
         conditions.append(
-            "EXISTS (SELECT 1 FROM `tabBin` b"
-            " WHERE b.item_code = i.name AND b.warehouse = %(wh)s AND b.actual_qty > 0)"
+            "(CASE WHEN i.has_serial_no = 1 THEN"
+            " EXISTS (SELECT 1 FROM `tabSerial No` sn"
+            "   WHERE sn.item_code = i.name AND sn.warehouse = %(wh)s AND sn.status = 'Active')"
+            " ELSE"
+            " EXISTS (SELECT 1 FROM `tabBin` b"
+            "   WHERE b.item_code = i.name AND b.warehouse = %(wh)s AND b.actual_qty > 0)"
+            " END)"
         )
         values["wh"] = warehouse
 
@@ -127,6 +133,23 @@ def pos_item_search(
                 fields=["item_code", "actual_qty"],
             )
         stock_map = {b.item_code: flt(b.actual_qty) for b in all_bins}
+
+        # For serial-tracked items, use count of Active serials (stays in sync with IMEI picker)
+        if warehouse:
+            serial_item_codes = [r.item_code for r in items_raw if r.has_serial_no]
+            if serial_item_codes:
+                serial_counts = frappe.db.sql(
+                    """SELECT item_code, COUNT(*) as cnt
+                       FROM `tabSerial No`
+                       WHERE item_code IN %(item_codes)s
+                         AND warehouse = %(warehouse)s
+                         AND status = 'Active'
+                       GROUP BY item_code""",
+                    {"item_codes": serial_item_codes, "warehouse": warehouse},
+                    as_dict=True,
+                )
+                for sc in serial_counts:
+                    stock_map[sc.item_code] = sc.cnt
 
         # Batch-fetch active offers
         today = frappe.utils.today()
