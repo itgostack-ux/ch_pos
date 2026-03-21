@@ -1101,7 +1101,11 @@ export class PaymentDialog {
 						this._on_error(__("Invoice creation failed"));
 					}
 				},
-				error: () => this._on_error(__("Invoice creation failed")),
+				error: (xhr) => {
+					const resp = xhr && xhr.responseJSON;
+					const server_msg = resp && (resp.message || resp.exc_type);
+					this._on_error(server_msg ? frappe.utils.strip_html(server_msg) : __("Invoice creation failed"));
+				},
 			});
 		};
 

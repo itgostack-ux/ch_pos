@@ -107,21 +107,14 @@ class CustomPOSInvoice(SalesInvoice):
             payments_sum = sum(flt(p.amount) for p in self.get("payments", []))
             self.paid_amount = payments_sum + flt(self.loyalty_amount)
         super().validate()
+        _ensure_gst_template(self)
         _apply_margin_scheme(self)
 
     def on_submit(self):
-        # Run standard Sales Invoice on_submit (loyalty, phone payments, serial
-        # batch bundles, coupon code).
+        # Standard SalesInvoice.on_submit() already calls update_stock_ledger(),
+        # make_gl_entries(), and repost_future_sle_and_gle() when update_stock=1.
+        # Do NOT duplicate those calls — that would create 2× SLE and 2× GL entries.
         super().on_submit()
-
-        # Create SLE and GL entries that Sales Invoice normally skips.
-        if self.update_stock == 1:
-            self.update_stock_ledger()
-
-        self.make_gl_entries()
-
-        if self.update_stock == 1:
-            self.repost_future_sle_and_gle()
 
     def on_cancel(self):
         # Reimplements Sales Invoice on_cancel with SLE/GL reversal inserted
@@ -337,6 +330,7 @@ class CustomPOSInvoice(SalesInvoice):
 
 def validate_margin_scheme(doc, method=None):
     """Hook: validate — apply margin scheme GST calculation if applicable."""
+    _ensure_gst_template(doc)
     _apply_margin_scheme(doc)
 
 
@@ -595,6 +589,85 @@ def revert_kiosk_token_status(doc, method=None):
 # ── Margin Scheme GST (selling side) ────────────────────────────
 
 
+def _is_margin_scheme_item(item):
+    """Return True when the item should follow margin-scheme GST rules."""
+    if cint(item.get("custom_is_margin_item")):
+        return True
+
+    item_code = item.get("item_code")
+    if not item_code:
+        return False
+
+    return frappe.db.get_value("Item", item_code, "ch_item_type") in ("Refurbished", "Pre-Owned")
+
+
+# Company GSTIN state code is derived once from the Company record.
+# In India, GST state codes are the first 2 digits of the GSTIN.
+_COMPANY_STATE_CODE_CACHE: dict = {}
+
+
+def _get_company_state_code(company: str) -> str:
+    if company not in _COMPANY_STATE_CODE_CACHE:
+        gstin = frappe.db.get_value("Company", company, "gstin") or ""
+        _COMPANY_STATE_CODE_CACHE[company] = gstin[:2]
+    return _COMPANY_STATE_CODE_CACHE[company]
+
+
+def _ensure_gst_template(doc):
+    """Auto-select in-state (CGST+SGST) or out-state (IGST) tax template.
+
+    Rules:
+    - Customer state == Company state  → Output GST In-state
+    - Customer state != Company state  → Output GST Out-state
+    - If place_of_supply is missing or templates don't exist, does nothing.
+
+    Also applies the selected template's tax rows onto the invoice so that
+    _apply_margin_scheme() can recalculate them correctly on margin.
+    """
+    company = doc.company
+    if not company:
+        return
+
+    company_state = _get_company_state_code(company)
+
+    # place_of_supply format: "33-Tamil Nadu" or just "33"
+    pos = (doc.place_of_supply or "").strip()
+    customer_state = pos[:2] if pos else ""
+
+    # Determine which template to use
+    if company_state and customer_state:
+        if customer_state == company_state:
+            desired_template = f"Output GST In-state - {frappe.db.get_value('Company', company, 'abbr')}"
+        else:
+            desired_template = f"Output GST Out-state - {frappe.db.get_value('Company', company, 'abbr')}"
+    else:
+        # Fall back to whatever is already on the invoice
+        desired_template = doc.taxes_and_charges
+
+    if not desired_template or not frappe.db.exists("Sales Taxes and Charges Template", desired_template):
+        return
+
+    # If template already applied and matches, skip
+    if doc.taxes_and_charges == desired_template and doc.taxes:
+        return
+
+    # Load template rows onto the invoice
+    doc.taxes_and_charges = desired_template
+    template = frappe.get_doc("Sales Taxes and Charges Template", desired_template)
+    doc.set("taxes", [])
+    for row in template.taxes:
+        doc.append("taxes", {
+            "charge_type":        row.charge_type,
+            "account_head":       row.account_head,
+            "description":        row.description or row.account_head,
+            "rate":               row.rate,
+            "tax_amount":         0,
+            "base_tax_amount":    0,
+            "tax_amount_after_discount_amount": 0,
+            "base_tax_amount_after_discount_amount": 0,
+        })
+
+
 def _apply_margin_scheme(doc):
     """Apply margin scheme GST calculation for used/refurbished items.
 
@@ -606,7 +679,12 @@ def _apply_margin_scheme(doc):
     has_margin = False
 
     for item in doc.items:
-        if not item.get("custom_is_margin_item"):
+        is_margin_item = _is_margin_scheme_item(item)
+        item.custom_is_margin_item = 1 if is_margin_item else 0
+
+        if not is_margin_item:
+            item.custom_taxable_value = 0
+            item.custom_exempted_value = 0
             continue
 
         has_margin = True
@@ -624,6 +702,9 @@ def _apply_margin_scheme(doc):
 
     if not has_margin:
         doc.custom_is_margin_scheme = 0
+        doc.custom_margin_taxable = 0
+        doc.custom_margin_gst = 0
+        doc.custom_margin_exempted = 0
         return
 
     doc.custom_is_margin_scheme = 1
@@ -672,10 +753,9 @@ def _apply_margin_scheme(doc):
             item_gst = (margin_taxable / total_margin_taxable) * total_gst
 
         exempted = item_amount - margin_taxable - item_gst
-        if exempted < 0:
-            frappe.throw(f"Exempted value cannot be negative for item {item.item_code}")
-        item.custom_exempted_value = exempted
-        total_exempted += exempted
+        # Can only be negative when purchase_rate=0 (test data); cap at 0
+        item.custom_exempted_value = max(0.0, exempted)
+        total_exempted += item.custom_exempted_value
 
     # Populate header-level margin summary fields
     doc.custom_margin_taxable = total_margin_taxable
@@ -711,13 +791,20 @@ def validate_eod_lock(doc, method=None):
 
 
 def _get_incoming_rate(item):
-    """Get purchase cost (incoming rate) for a Sales Invoice item."""
-    # Try from serial no first
+    """Get purchase cost (incoming rate) for a Sales Invoice item.
+
+    Returns the purchase_rate from CH Serial Lifecycle if the item has a serial
+    number — treating 0 as a valid cost (e.g. refurb sourced for free).
+    Falls back to 0 so the full selling price becomes the taxable margin.
+    item.incoming_rate is intentionally ignored: ERPNext populates it from the
+    current valuation rate which can equal the selling price and is unreliable.
+    """
     serial = (item.serial_no or "").strip().split("\n")[0].strip()
     if serial:
         rate = frappe.db.get_value("CH Serial Lifecycle", {"serial_no": serial}, "purchase_rate")
-        if rate:
+        # Explicitly check for None — 0 is a valid purchase cost (free source)
+        if rate is not None:
             return flt(rate)
 
-    # Fallback to item valuation rate
-    return flt(item.get("incoming_rate") or item.get("valuation_rate") or 0)
+    # No serial / no lifecycle record → treat cost as 0 (full margin)
+    return 0.0

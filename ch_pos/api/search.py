@@ -317,18 +317,30 @@ def get_nearby_stock(item_code, pos_profile):
 
 @frappe.whitelist()
 def get_available_serials(item_code, warehouse):
-    """Return list of available serial numbers for an item in a warehouse."""
-    serials = frappe.db.sql(
-        """SELECT sn.name as serial_no, sn.warranty_expiry_date
-           FROM `tabSerial No` sn
-           WHERE sn.item_code = %(item_code)s
-             AND sn.warehouse = %(warehouse)s
-             AND sn.status = 'Active'
-           ORDER BY sn.name""",
-        {"item_code": item_code, "warehouse": warehouse},
-        as_dict=True,
-    )
-    return serials
+    """Return list of available serial numbers for an item in a warehouse, FIFO ordered."""
+    # Primary: use SNBB inward dates for true FIFO order
+    rows = frappe.db.sql("""
+        SELECT
+            sn.name AS serial_no,
+            sn.warranty_expiry_date,
+            MIN(sbb.posting_date) AS inward_date
+        FROM `tabSerial No` sn
+        LEFT JOIN `tabSerial and Batch Entry` sbe ON sbe.serial_no = sn.name
+        LEFT JOIN `tabSerial and Batch Bundle` sbb
+            ON sbe.parent = sbb.name
+            AND sbb.type_of_transaction = 'Inward'
+            AND sbb.docstatus = 1
+        WHERE sn.item_code = %(item_code)s
+          AND sn.warehouse = %(warehouse)s
+          AND sn.status = 'Active'
+        GROUP BY sn.name, sn.warranty_expiry_date
+        ORDER BY inward_date ASC, sn.name ASC
+    """, {"item_code": item_code, "warehouse": warehouse}, as_dict=True)
+
+    # Tag the first (oldest) serial so the UI can show a "Sell First" badge
+    for i, r in enumerate(rows):
+        r["is_oldest"] = 1 if i == 0 else 0
+    return rows
 
 
 @frappe.whitelist()

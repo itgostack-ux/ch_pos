@@ -402,12 +402,19 @@ def create_pos_invoice(pos_profile, customer, items,
     try:
         inv.insert(ignore_permissions=True)
         inv.submit()
-    except Exception:
+    except Exception as _submit_exc:
+        # Re-raise with a cleaner message so the POS shows the actual reason
+        # (e.g. "Insufficient Stock") instead of a generic "Invoice creation failed".
         if inv.name and frappe.db.exists("Sales Invoice", inv.name):
             try:
                 doc = frappe.get_doc("Sales Invoice", inv.name)
                 if doc.docstatus == 1:
                     doc.flags.ignore_permissions = True
+                    doc.flags.ignore_validate = True
+                    # Provide a system cancellation reason to bypass the
+                    # "cancellation_reason required" validation in pos_invoice.py
+                    if hasattr(doc, "custom_cancel_reason"):
+                        doc.custom_cancel_reason = "System: auto-rollback on submit failure"
                     doc.cancel()
                 frappe.delete_doc("Sales Invoice", inv.name, force=True, ignore_permissions=True)
             except Exception:
@@ -487,11 +494,14 @@ def create_pos_invoice(pos_profile, customer, items,
     # Create incentive ledger entries for the sales executive
     incentive_total = 0
     if sales_executive:
-        incentive_total = _create_incentive_entries(
-            invoice=inv,
-            pos_executive=sales_executive,
-            transaction_type="Sale",
-        )
+        try:
+            incentive_total = _create_incentive_entries(
+                invoice=inv,
+                pos_executive=sales_executive,
+                transaction_type="Sale",
+            )
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Incentive ledger failed for {inv.name}")
 
     # ── Audit logging (best-effort, never blocks sale) ────────────────────────
     try:
@@ -1134,8 +1144,16 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
         "incentive_clawback": incentive_clawback,
     }
 @frappe.whitelist()
-def validate_serial_for_sale(serial_no, item_code, warehouse):
-    """Validate a serial number can be sold from this warehouse, enforcing FIFO."""
+def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_override=0):
+    """Validate a serial number can be sold from this warehouse, enforcing FIFO.
+
+    If a FIFO violation is detected and allow_fifo_override is falsy, returns
+    {valid: False, fifo_violation: True, oldest_serial, oldest_date, selected_date}
+    so the JS can show a soft-warning confirm dialog.
+
+    When allow_fifo_override=1 the FIFO check is skipped (user has already
+    confirmed the override in the UI); the exception is logged via log_fifo_override.
+    """
     if not frappe.db.exists("Serial No", serial_no):
         return {"valid": False, "reason": frappe._("Serial No {0} does not exist").format(serial_no)}
 
@@ -1162,40 +1180,80 @@ def validate_serial_for_sale(serial_no, item_code, warehouse):
         return {"valid": False, "reason": frappe._("Serial No {0} status is {1}").format(serial_no, sn.status)}
 
     # ── FIFO enforcement ────────────────────────────────────────────────────
-    oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse)
-    if oldest_serial and oldest_serial != serial_no:
-        # Determine the receipt date of the selected serial for comparison
-        selected_date_row = frappe.db.sql("""
-            SELECT MIN(sbb.posting_date) AS received_date
-            FROM `tabSerial and Batch Entry` sbe
-            JOIN `tabSerial and Batch Bundle` sbb
-                ON sbe.parent = sbb.name
-                AND sbb.type_of_transaction = 'Inward'
-                AND sbb.docstatus = 1
-            WHERE sbe.serial_no = %s
-        """, serial_no, as_dict=True)
-        selected_date = selected_date_row[0].received_date if selected_date_row else None
+    if not cint(allow_fifo_override):
+        oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse)
+        if oldest_serial and oldest_serial != serial_no:
+            # Determine the receipt date of the selected serial (for display in the dialog).
+            selected_date_row = frappe.db.sql("""
+                SELECT MIN(sbb.posting_date) AS received_date
+                FROM `tabSerial and Batch Entry` sbe
+                JOIN `tabSerial and Batch Bundle` sbb
+                    ON sbe.parent = sbb.name
+                    AND sbb.type_of_transaction = 'Inward'
+                    AND sbb.docstatus = 1
+                WHERE sbe.serial_no = %s
+            """, serial_no, as_dict=True)
+            selected_date = selected_date_row[0].received_date if selected_date_row else None
 
-        if oldest_date and selected_date and selected_date > oldest_date:
-            # FIFO violated — alert managers and reject
-            _send_fifo_violation_alert(
-                item_code=item_code,
-                warehouse=warehouse,
-                selected_serial=serial_no,
-                oldest_serial=oldest_serial,
-                cashier=frappe.session.user,
-            )
-            return {
-                "valid": False,
-                "fifo_violation": True,
-                "reason": frappe._(
-                    "FIFO violation: Serial {0} (received {1}) must be sold before {2} (received {3}). "
-                    "Alert sent to RSM/ASM."
-                ).format(oldest_serial, oldest_date, serial_no, selected_date),
-            }
+            # Warn whenever the selected serial is NOT the FIFO-oldest, even if
+            # both were received on the same day (same stock entry).  Strict
+            # greater-than was the previous check, which silently passed same-day
+            # serials without any warning.
+            if oldest_date and selected_date and selected_date >= oldest_date:
+                # Soft FIFO violation — return warning so JS can confirm with user.
+                # Manager alert fires only when the cashier confirms the override
+                # (see log_fifo_override below).
+                return {
+                    "valid": False,
+                    "fifo_violation": True,
+                    "oldest_serial": oldest_serial,
+                    "oldest_date": str(oldest_date),
+                    "selected_date": str(selected_date),
+                    "reason": frappe._(
+                        "Older stock exists: {0} (received {1}) should be sold before {2} (received {3})."
+                    ).format(oldest_serial, oldest_date, serial_no, selected_date),
+                }
 
-    # Check if already in current POS cart (prevent double-scan)
     return {"valid": True, "serial_no": serial_no, "item_code": item_code}
+
+@frappe.whitelist()
+def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_date, pos_profile=None):
+    """Record a cashier-confirmed FIFO override exception.
+
+    Called from the JS confirm dialog when the user chooses to proceed despite
+    the FIFO warning.  Logs to CH Business Audit Log and notifies RSM/ASM.
+    """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+
+    store = frappe.get_cached_value("POS Profile", pos_profile, "warehouse") if pos_profile else warehouse
+    company = frappe.get_cached_value("POS Profile", pos_profile, "company") if pos_profile else None
+
+    # Write audit entry
+    try:
+        from ch_pos.audit import log_business_event
+        log_business_event(
+            event_type="Other",
+            ref_doctype="Serial No",
+            ref_name=serial_no,
+            before=f"Oldest: {oldest_serial} (received {oldest_date})",
+            after=f"Sold out of order: {serial_no}",
+            remarks=f"Cashier confirmed FIFO override — item {item_code} at {warehouse}",
+            store=store,
+            company=company,
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"FIFO override audit log failed for {serial_no}")
+
+    # Notify managers (same as previous hard-reject alert)
+    _send_fifo_violation_alert(
+        item_code=item_code,
+        warehouse=warehouse,
+        selected_serial=serial_no,
+        oldest_serial=oldest_serial,
+        cashier=frappe.session.user,
+    )
+
+    return {"logged": True}
 
 
 @frappe.whitelist()

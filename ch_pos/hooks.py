@@ -8,6 +8,7 @@ app_license = "MIT"
 required_apps = ["frappe", "erpnext"]
 
 after_install = "ch_pos.setup.after_install"
+after_migrate = "ch_pos.setup.after_migrate"
 before_uninstall = "ch_pos.setup.before_uninstall"
 
 # Override Sales Invoice for margin scheme calculation
@@ -62,6 +63,13 @@ scheduler_events = {
         "ch_pos.pos_kiosk.doctype.pos_kiosk_token.pos_kiosk_token.expire_old_tokens",
         "ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session.auto_close_stale_sessions",
     ],
+    "cron": {
+        # Close all open POS sessions at 6:00 AM every day.
+        # Stores open at 10:00 AM, so cashiers are forced to start a fresh session.
+        "0 6 * * *": [
+            "ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session.auto_close_overnight_sessions",
+        ],
+    },
 }
 
 # Fixtures (install custom fields and workspaces)

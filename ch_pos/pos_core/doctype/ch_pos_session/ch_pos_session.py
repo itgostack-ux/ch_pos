@@ -198,7 +198,6 @@ class CHPOSSession(Document):
             filters={
                 "pos_profile": self.pos_profile,
                 "docstatus": 1,
-                "consolidated_invoice": ("in", [None, ""]),
                 "posting_date": self.business_date,
             },
             fields=["name", "grand_total", "is_return"],
@@ -231,7 +230,6 @@ class CHPOSSession(Document):
             JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             WHERE pi.pos_profile = %(pos_profile)s
               AND pi.docstatus = 1
-              AND IFNULL(pi.consolidated_invoice, '') = ''
               AND pi.posting_date = %(bdate)s
             GROUP BY sip.mode_of_payment
         """, {"pos_profile": self.pos_profile, "bdate": self.business_date}, as_dict=True)
@@ -274,6 +272,9 @@ class CHPOSSession(Document):
 
     def _validate_variance(self):
         """Enforce variance rules using configurable threshold."""
+        # Auto-close bypasses manager approval — variance is logged but not blocked.
+        if getattr(self, "auto_closed", 0):
+            return
         threshold = _get_variance_threshold()
         variance = abs(flt(self.cash_variance))
         if variance > threshold:
@@ -365,6 +366,18 @@ class CHPOSSession(Document):
 
         self.db_set("modified", now_datetime())
         self.status = "Closed"
+
+        # Mark the linked ERPNext POS Opening Entry as closed so that
+        # check_opening_entry() (which filters pos_closing_entry=None) stops
+        # showing this entry in the "Open POS Session" dialog.
+        if getattr(self, "pos_opening_entry", None):
+            frappe.db.set_value(
+                "POS Opening Entry",
+                self.pos_opening_entry,
+                {"pos_closing_entry": self.name, "status": "Closed"},
+                update_modified=False,
+            )
+
         self._log_close_event()
 
     def _log_close_event(self):
@@ -427,4 +440,33 @@ def auto_close_stale_sessions():
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"Auto-close failed for {s.name}")
     if stale:
+        frappe.db.commit()
+
+
+def auto_close_overnight_sessions():
+    """Scheduler (cron 0 6 * * *): force-close ALL open sessions at 6 AM.
+
+    Runs every day at 06:00 AM. Closes any session still in Open / Locked /
+    Suspended state regardless of business_date, so cashiers are forced to
+    open a fresh session when the store opens at 10:00 AM.
+    """
+    open_sessions = frappe.get_all(
+        "CH POS Session",
+        filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1},
+        fields=["name", "pos_profile", "store", "business_date"],
+    )
+    for s in open_sessions:
+        try:
+            doc = frappe.get_doc("CH POS Session", s.name)
+            doc.auto_closed = 1
+            doc.close_session(
+                closing_cash=0,
+                variance_reason="Auto-closed: overnight session expiry (6 AM close)",
+            )
+            frappe.logger("session").info(
+                f"Overnight auto-close: {s.name} (store: {s.store}, biz date: {s.business_date})"
+            )
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Overnight auto-close failed for {s.name}")
+    if open_sessions:
         frappe.db.commit()

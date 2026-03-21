@@ -1,5 +1,6 @@
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+from textwrap import dedent
 
 
 CUSTOM_FIELDS = {
@@ -379,6 +380,140 @@ CUSTOM_FIELDS = {
 def after_install():
     _ensure_module_defs()
     create_custom_fields(CUSTOM_FIELDS, update=True)
+    sync_margin_receipt_format()
+
+
+def after_migrate():
+    sync_margin_receipt_format()
+
+
+def sync_margin_receipt_format():
+    """Keep the shared Sales Invoice print format margin-aware for POS flows."""
+    if not frappe.db.exists("Print Format", "Custom Sales Invoice"):
+        return
+
+    pf = frappe.get_doc("Print Format", "Custom Sales Invoice")
+    html = (pf.html or "").replace("\r\n", "\n")
+
+    old_hsn_block = dedent(
+        """
+        {% set hsn_map = {} %}
+        {% for item in doc.items %}
+        {% set hsn = item.gst_hsn_code or "NA" %}
+        {% if hsn not in hsn_map %}
+        {% set _ = hsn_map.update({
+        hsn: {
+        "taxable": 0,
+        "cgst_rate": 0, "cgst_amt": 0,
+        "sgst_rate": 0, "sgst_amt": 0,
+        "igst_rate": 0, "igst_amt": 0
+        }
+        }) %}
+        {% endif %}
+        {% set _ = hsn_map[hsn].update({
+        "taxable": hsn_map[hsn].taxable + item.net_amount
+        }) %}
+        {% endfor %}
+
+        {% for tax in doc.taxes %}
+        {% for hsn in hsn_map %}
+        {% if "CGST" in tax.account_head %}
+        {% set _ = hsn_map[hsn].update({
+        "cgst_rate": tax.rate,
+        "cgst_amt": hsn_map[hsn].cgst_amt + tax.tax_amount
+        }) %}
+        {% elif "SGST" in tax.account_head %}
+        {% set _ = hsn_map[hsn].update({
+        "sgst_rate": tax.rate,
+        "sgst_amt": hsn_map[hsn].sgst_amt + tax.tax_amount
+        }) %}
+        {% elif "IGST" in tax.account_head %}
+        {% set _ = hsn_map[hsn].update({
+        "igst_rate": tax.rate,
+        "igst_amt": hsn_map[hsn].igst_amt + tax.tax_amount
+        }) %}
+        {% endif %}
+        {% endfor %}
+        {% endfor %}
+        """
+    ).strip()
+
+    new_hsn_block = dedent(
+        """
+        {% set hsn_map = {} %}
+        {% set line_taxable_map = {} %}
+        {% set line_gst_map = {} %}
+        {% for item in doc.items %}
+        {% set hsn = item.gst_hsn_code or "NA" %}
+        {% set item_type = frappe.db.get_value("Item", item.item_code, "ch_item_type") or "" %}
+        {% set is_margin_item = item.custom_is_margin_item or item_type in ["Refurbished", "Pre-Owned"] %}
+        {% set item_taxable = item.custom_taxable_value if is_margin_item else item.net_amount %}
+        {% if hsn not in hsn_map %}
+        {% set _ = hsn_map.update({
+        hsn: {
+        "taxable": 0,
+        "cgst_rate": 0, "cgst_amt": 0,
+        "sgst_rate": 0, "sgst_amt": 0,
+        "igst_rate": 0, "igst_amt": 0
+        }
+        }) %}
+        {% endif %}
+        {% set _ = line_taxable_map.update({item.name: item_taxable}) %}
+        {% set _ = line_gst_map.update({item.name: 0}) %}
+        {% set _ = hsn_map[hsn].update({
+        "taxable": hsn_map[hsn].taxable + item_taxable
+        }) %}
+        {% for tax in doc.taxes %}
+        {% if tax.charge_type == "On Net Total" %}
+        {% set component = (item_taxable * tax.rate) / 100 %}
+        {% set _ = line_gst_map.update({item.name: line_gst_map[item.name] + component}) %}
+        {% if "CGST" in tax.account_head %}
+        {% set _ = hsn_map[hsn].update({
+        "cgst_rate": tax.rate,
+        "cgst_amt": hsn_map[hsn].cgst_amt + component
+        }) %}
+        {% elif "SGST" in tax.account_head %}
+        {% set _ = hsn_map[hsn].update({
+        "sgst_rate": tax.rate,
+        "sgst_amt": hsn_map[hsn].sgst_amt + component
+        }) %}
+        {% elif "IGST" in tax.account_head %}
+        {% set _ = hsn_map[hsn].update({
+        "igst_rate": tax.rate,
+        "igst_amt": hsn_map[hsn].igst_amt + component
+        }) %}
+        {% endif %}
+        {% endif %}
+        {% endfor %}
+        {% endfor %}
+        """
+    ).strip()
+
+    replacements = {
+        old_hsn_block: new_hsn_block,
+        '{{ item.net_amount or ""}}': '{{ "%.2f"|format(line_taxable_map.get(item.name, 0)) }}',
+        '{{ item.item_wise_tax_detail or ""}}': '{{ "%.2f"|format(line_gst_map.get(item.name, 0)) }}',
+        '{% set total_tax = total_taxes_and_charges + row_tax %}': '{% set total_taxes_and_charges = total_taxes_and_charges + row_tax %}',
+    }
+
+    updated = html
+    for old, new in replacements.items():
+        if old in updated:
+            updated = updated.replace(old, new)
+
+    if updated != html:
+        pf.html = updated.replace("\n", "\r\n")
+        pf.save(ignore_permissions=True)
+
+    blank_profiles = frappe.get_all(
+        "POS Profile",
+        filters={"print_format": ["in", ["", None]]},
+        pluck="name",
+    )
+    for profile_name in blank_profiles:
+        frappe.db.set_value("POS Profile", profile_name, "print_format", "Custom Sales Invoice", update_modified=False)
+
+    frappe.db.commit()
 
 
 def _ensure_module_defs():

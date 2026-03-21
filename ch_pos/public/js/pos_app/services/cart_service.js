@@ -188,17 +188,60 @@ export class CartService {
 						warehouse: PosState.warehouse,
 					},
 					callback: (r) => {
-						if (r.message && r.message.valid) {
+						const res = r.message || {};
+						if (res.valid) {
 							dlg.hide();
 							this._add_new_cart_item(item_data, final_serial);
 							frappe.show_alert({
 								message: __("{0} added with IMEI {1}", [item_data.item_name, final_serial]),
 								indicator: "green",
 							});
+						} else if (res.fifo_violation) {
+							// Soft FIFO warning — ask for confirmation before proceeding
+							dlg.enable_primary_action();
+							frappe.confirm(
+								`<div style="line-height:1.7">
+									<b style="color:#e67e22">⚠ Older stock exists</b><br>
+									<b>${frappe.utils.escape_html(res.oldest_serial)}</b>
+									(received ${frappe.utils.escape_html(res.oldest_date || "")})
+									should be sold first.<br><br>
+									You selected <b>${frappe.utils.escape_html(final_serial)}</b>
+									(received ${frappe.utils.escape_html(res.selected_date || "")}).<br><br>
+									Do you still want to bill <b>${frappe.utils.escape_html(final_serial)}</b>?
+									This exception will be recorded.
+								</div>`,
+								() => {
+									// User confirmed override — log exception then add to cart
+									frappe.call({
+										method: "ch_pos.api.pos_api.log_fifo_override",
+										args: {
+											serial_no: final_serial,
+											item_code: item_data.item_code,
+											warehouse: PosState.warehouse,
+											oldest_serial: res.oldest_serial,
+											oldest_date: res.oldest_date,
+											pos_profile: PosState.pos_profile,
+										},
+									});
+									dlg.hide();
+									this._add_new_cart_item(item_data, final_serial);
+									frappe.show_alert({
+										message: __("{0} added (FIFO override recorded)", [final_serial]),
+										indicator: "orange",
+									});
+								},
+								() => {
+									// User cancelled — re-enable so they can pick the older serial
+									frappe.show_alert({
+										message: __("Please select {0} to follow FIFO", [res.oldest_serial]),
+										indicator: "blue",
+									});
+								}
+							);
 						} else {
 							dlg.enable_primary_action();
 							frappe.show_alert({
-								message: r.message?.reason || __("Invalid serial number"),
+								message: res.reason || __("Invalid serial number"),
 								indicator: "red",
 							});
 						}
@@ -226,13 +269,20 @@ export class CartService {
 			const cart_serials = new Set(PosState.cart.map(c => c.serial_no).filter(Boolean));
 			const available = serials.filter(s => !cart_serials.has(s.serial_no));
 
-			const rows = available.map((s) => {
+			const rows = available.map((s, idx) => {
 				const warranty_info = s.warranty_expiry_date
 					? `<span class="text-muted" style="font-size:11px">WE: ${frappe.datetime.str_to_user(s.warranty_expiry_date)}</span>`
 					: "";
+				// FIFO badge: the first serial (oldest inward date) should be sold first
+				const fifo_badge = s.is_oldest
+					? `<span style="font-size:10px;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:4px;padding:1px 5px;margin-left:6px">${__("Sell First")}</span>`
+					: "";
+				const inward_info = s.inward_date && idx > 0
+					? `<span class="text-muted" style="font-size:10px;margin-left:4px">In: ${frappe.datetime.str_to_user(s.inward_date)}</span>`
+					: "";
 				return `<div class="ch-imei-row" data-serial="${frappe.utils.escape_html(s.serial_no)}">
 					<span class="ch-imei-serial">${frappe.utils.escape_html(s.serial_no)}</span>
-					${warranty_info}
+					${fifo_badge}${inward_info}${warranty_info}
 				</div>`;
 			}).join("");
 
