@@ -1028,6 +1028,7 @@ export class PaymentDialog {
 			discount_amount:  c.discount_amount || 0,
 			warranty_plan:    c.warranty_plan || null,
 			for_item_code:    c.for_item_code || null,
+			for_serial_no:    c.for_serial_no || null,
 			is_warranty:      c.is_warranty || false,
 			is_vas:           c.is_vas || false,
 			manager_approved: c.manager_approved || false,
