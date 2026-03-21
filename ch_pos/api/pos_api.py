@@ -437,26 +437,61 @@ def create_pos_invoice(pos_profile, customer, items,
 
     # Create CH Sold Plan records for warranty items
     sold_plans = []
+
+    # Build a map of device items on this invoice (non-warranty rows) so we can
+    # auto-infer for_item_code when the JS didn't send it (e.g. VAS dialog with
+    # no device selected — happens when only one device is in the cart).
+    device_items_on_inv = [
+        inv_item for inv_item in inv.items
+        if not any(
+            wi2.get("warranty_plan") and inv_item.item_code == (
+                frappe.db.get_value("CH Warranty Plan", wi2["warranty_plan"], "service_item")
+            )
+            for wi2 in warranty_items
+        )
+    ]
+
     for wi in warranty_items:
+        # Auto-infer for_item_code: if not sent and exactly one device in cart, use it
+        if not wi.get("for_item_code") and len(device_items_on_inv) == 1:
+            wi["for_item_code"] = device_items_on_inv[0].item_code
+            if not wi.get("serial_no") and getattr(device_items_on_inv[0], "serial_no", None):
+                wi["serial_no"] = device_items_on_inv[0].serial_no
+
+        # Guard: if still no for_item_code, skip rather than crash the invoice
+        if not wi.get("for_item_code"):
+            frappe.log_error(
+                f"Sold Plan skipped for warranty_plan={wi.get('warranty_plan')} on "
+                f"{inv.name}: for_item_code is missing and could not be inferred.",
+                "Sold Plan: missing for_item_code",
+            )
+            continue
+
         # Look up device purchase price from the same invoice
         device_price = 0
-        if wi.get("for_item_code"):
-            for inv_item in inv.items:
-                if inv_item.item_code == wi["for_item_code"]:
-                    device_price = flt(inv_item.rate)
-                    break
-        sp = _create_sold_plan(
-            warranty_plan=wi["warranty_plan"],
-            customer=customer,
-            item_code=wi["for_item_code"],
-            company=profile.company,
-            sales_invoice=inv.name,
-            plan_price=wi["price"],
-            serial_no=wi.get("serial_no"),
-            device_purchase_price=device_price,
-        )
-        if sp:
-            sold_plans.append(sp.name)
+        for inv_item in inv.items:
+            if inv_item.item_code == wi["for_item_code"]:
+                device_price = flt(inv_item.rate)
+                break
+
+        try:
+            sp = _create_sold_plan(
+                warranty_plan=wi["warranty_plan"],
+                customer=customer,
+                item_code=wi["for_item_code"],
+                company=profile.company,
+                sales_invoice=inv.name,
+                plan_price=wi["price"],
+                serial_no=wi.get("serial_no"),
+                device_purchase_price=device_price,
+            )
+            if sp:
+                sold_plans.append(sp.name)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Sold Plan creation failed for {inv.name} / {wi.get('warranty_plan')}"
+            )
 
     # ── VAS Voucher Generation ────────────────────────────────────────────────
     # For each VAS item: generate floor(price/500) × ₹500 vouchers, email to customer
