@@ -16,6 +16,15 @@ override_doctype_class = {
     "Sales Invoice": "ch_pos.overrides.pos_invoice.CustomPOSInvoice",
 }
 
+# Override whitelisted ERPNext functions with fixed versions.
+# This avoids patching upstream repos (frappe/erpnext) which would be
+# overwritten on bench update.
+override_whitelisted_methods = {
+    # Fixed: counts draft invoices + submitted-but-not-yet-stocked invoices
+    "erpnext.accounts.doctype.pos_invoice.pos_invoice.get_stock_availability":
+        "ch_pos.overrides.pos_reserved_qty.get_stock_availability",
+}
+
 # Client scripts
 doctype_js = {
     "Sales Invoice": "custom/pos_invoice.js",
