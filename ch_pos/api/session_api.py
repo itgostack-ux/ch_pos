@@ -130,7 +130,7 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
 
     # Resolve company from POS Profile
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company or frappe.defaults.get_default("company")
+    company = profile.company or frappe.defaults.get_global_default("company")
 
     # Resolve device — from parameter, from user allocation, or None
     device_doc = None

@@ -2501,7 +2501,7 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
         items = json.loads(items)
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company or frappe.defaults.get_default("company")
+    company = profile.company or frappe.defaults.get_global_default("company")
     warehouse = profile.warehouse
 
     mr = frappe.new_doc("Material Request")
@@ -2614,7 +2614,7 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     if from_warehouse == to_warehouse:
         frappe.throw(frappe._("Source and destination warehouses must be different"))
 
-    company = frappe.db.get_value("Warehouse", from_warehouse, "company") or frappe.defaults.get_default("company")
+    company = frappe.db.get_value("Warehouse", from_warehouse, "company") or frappe.defaults.get_global_default("company")
 
     se = frappe.new_doc("Stock Entry")
     se.stock_entry_type = "Material Transfer"
@@ -3189,7 +3189,7 @@ def create_quick_job_card(customer, contact_number, device_item,
     sr.accessories_received = accessories_received or ""
     sr.data_backup_disclaimer = cint(data_backup_disclaimer)
     sr.mode_of_service = "Walk-in"
-    sr.company = frappe.defaults.get_default("company") or ""
+    sr.company = frappe.defaults.get_global_default("company") or ""
     sr.source_warehouse = frappe.form_dict.get("warehouse") or ""
     sr.service_date = nowdate()
     sr.decision = "Draft"
@@ -3232,7 +3232,7 @@ def create_quick_job_card(customer, contact_number, device_item,
 def get_central_warehouses(company=None):
     """Return warehouses suitable as source for stock requests (non-POS, non-store)."""
     if not company:
-        company = frappe.defaults.get_default("company")
+        company = frappe.defaults.get_global_default("company")
 
     warehouses = frappe.db.get_all(
         "Warehouse",
@@ -4135,7 +4135,7 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
 
 	assessment = frappe.get_doc("Buyback Assessment", assessment_name)
 	warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse") or ""
-	company = frappe.db.get_value("POS Profile", pos_profile, "company") or frappe.defaults.get_default("company")
+	company = frappe.db.get_value("POS Profile", pos_profile, "company") or frappe.defaults.get_global_default("company")
 
 	price = flt(final_price) or flt(assessment.quoted_price) or flt(assessment.estimated_price)
 
@@ -4422,7 +4422,7 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 		order.customer_name = ins.customer_name or assessment.customer_name or ""
 		order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
 		order.store = assessment.store or ""
-		order.company = assessment.company or frappe.defaults.get_default("company")
+		order.company = assessment.company or frappe.defaults.get_global_default("company")
 		order.item = ins.item or assessment.item or ""
 		order.item_name = ins.item_name or assessment.item_name or ""
 		order.brand = assessment.brand or ""
