@@ -1051,8 +1051,8 @@ def get_invoice_items_for_return(invoice_name):
             WHERE pi.return_against = %s
               AND pi.docstatus = 1
               AND ri.item_code = %s
-              AND ri.pos_invoice_item = %s
-        """, (invoice_name, item.item_code, item.name))[0][0] or 0)
+              AND (ri.sales_invoice_item = %s OR ri.pos_invoice_item = %s)
+        """, (invoice_name, item.item_code, item.name, item.name))[0][0] or 0)
 
         returnable_qty = flt(item.qty) - already_returned
         if returnable_qty <= 0:
@@ -1118,6 +1118,11 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
             "rate": rate,
             "uom": "Nos",
             "warehouse": _orig_warehouse,
+            # ERPNext validate_returned_items looks for this field when doctype
+            # is Sales Invoice; without it the key (item_code, row_name) can't
+            # be found in valid_items and a spurious msgprint fires on every
+            # save/submit.  Keep pos_invoice_item for backward compatibility.
+            "sales_invoice_item": ri.get("original_item_row", ""),
             "pos_invoice_item": ri.get("original_item_row", ""),
         }
         if ri.get("serial_no"):
@@ -1152,7 +1157,13 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     # `total_return_amount` (pre-tax sum) which left the GST portion
     # unaccounted, producing "Debit and Credit not equal" errors.
     ret.run_method("calculate_taxes_and_totals")
-    correct_payment = ret.grand_total  # negative, includes tax
+    # Use rounded_total when it differs from grand_total (ERPNext rounds POS
+    # invoice totals and uses `rounded_total or grand_total` as the canonical
+    # amount-to-pay in set_total_amount_to_default_mop).  If we set payment to
+    # grand_total but the internal calc uses rounded_total, the difference is
+    # treated as a positive pending_amount → payment gets replaced with the
+    # rounding diff (e.g. 0.4), which then fails verify_payment_amount_is_negative.
+    correct_payment = flt(ret.rounded_total or ret.grand_total)  # negative for returns
 
     # Payment (negative) — set AFTER tax calculation
     default_mode = "Cash"
@@ -3109,8 +3120,9 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7):
             FROM `tabSales Invoice Item` ri
             JOIN `tabSales Invoice` pi ON pi.name = ri.parent
             WHERE pi.return_against = %s AND pi.docstatus = 1
-              AND ri.item_code = %s AND ri.pos_invoice_item = %s
-        """, (invoice_name, item.item_code, item.name))[0][0] or 0)
+              AND ri.item_code = %s
+              AND (ri.sales_invoice_item = %s OR ri.pos_invoice_item = %s)
+        """, (invoice_name, item.item_code, item.name, item.name))[0][0] or 0)
         if flt(item.qty) - already_returned > 0:
             returnable_count += 1
 
