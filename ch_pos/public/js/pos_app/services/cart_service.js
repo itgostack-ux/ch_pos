@@ -69,9 +69,80 @@ export class CartService {
 		EventBus.on("vas:open", () => this._show_vas_dialog());
 		EventBus.on("product_exchange:open", () => this._show_product_exchange_dialog());
 		EventBus.on("manager:request_approval", (opts) => this._show_manager_approval_dialog(opts));
+
+		// Direct serial add: scanned the FIFO-oldest (Sell First) serial from main screen.
+		EventBus.on("cart:scan_serial", (item_data) => this._add_to_cart_direct_serial(item_data));
 	}
 
 	// ── Add to Cart ─────────────────────────────────────
+
+	/**
+	 * Direct-add path: called when the cashier scans the FIFO-oldest serial
+	 * from the main screen.  Runs all the same pre-checks as add_to_cart /
+	 * _prompt_serial_scan but skips the IMEI selection dialog.
+	 */
+	_add_to_cart_direct_serial(item_data) {
+		const serial_no = (item_data.serial_no || "").trim();
+		if (!serial_no) {
+			EventBus.emit("cart:add_item", item_data);
+			return;
+		}
+
+		// Pre-checks (mirrors add_to_cart)
+		if (item_data.stock_qty <= 0) {
+			frappe.show_alert({ message: __("Item {0} is out of stock", [item_data.item_name]), indicator: "red" });
+			return;
+		}
+		if (PosState.voucher_code && !item_data.is_warranty && !item_data.is_vas) {
+			const item_group = (item_data.item_group || "").toLowerCase();
+			if (item_group !== "accessories") {
+				frappe.show_alert({ message: __("A voucher is active. Only Accessories can be added to this cart."), indicator: "orange" }, 5);
+				return;
+			}
+		}
+		const dup = PosState.cart.find((c) => c.serial_no === serial_no);
+		if (dup) {
+			frappe.show_alert({ message: __("Serial {0} is already in the cart", [serial_no]), indicator: "orange" });
+			return;
+		}
+
+		frappe.call({
+			method: "ch_pos.api.pos_api.validate_serial_for_sale",
+			args: { serial_no, item_code: item_data.item_code, warehouse: PosState.warehouse },
+			callback: (r) => {
+				const res = r.message || {};
+				if (res.valid) {
+					this._add_new_cart_item(item_data, serial_no);
+					frappe.show_alert({ message: __("{0} added with IMEI {1}", [item_data.item_name, serial_no]), indicator: "green" });
+				} else if (res.fifo_violation) {
+					// Shouldn't happen for the oldest serial, but handle gracefully
+					frappe.confirm(
+						`<div style="line-height:1.7">
+							<b style="color:#e67e22">&#9888; Older stock exists</b><br>
+							<b>${frappe.utils.escape_html(res.oldest_serial)}</b>
+							(received ${frappe.utils.escape_html(res.oldest_date || "")})
+							should be sold first.<br><br>
+							You selected <b>${frappe.utils.escape_html(serial_no)}</b>
+							(received ${frappe.utils.escape_html(res.selected_date || "")}).<br><br>
+							Do you still want to bill <b>${frappe.utils.escape_html(serial_no)}</b>?
+							This exception will be recorded.
+						</div>`,
+						() => {
+							frappe.call({
+								method: "ch_pos.api.pos_api.log_fifo_override",
+								args: { serial_no, item_code: item_data.item_code, warehouse: PosState.warehouse, oldest_serial: res.oldest_serial, oldest_date: res.oldest_date, pos_profile: PosState.pos_profile },
+							});
+							this._add_new_cart_item(item_data, serial_no);
+							frappe.show_alert({ message: __("{0} added (FIFO override recorded)", [serial_no]), indicator: "orange" });
+						}
+					);
+				} else {
+					frappe.show_alert({ message: res.reason || __("Invalid serial number"), indicator: "red" });
+				}
+			},
+		});
+	}
+
 	add_to_cart(item_data) {
 		if (item_data.stock_qty <= 0) {
 			frappe.show_alert({

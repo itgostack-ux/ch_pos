@@ -186,7 +186,20 @@ export class ContextualToolbar {
 			args: { barcode, pos_profile: PosState.pos_profile },
 			callback: (r) => {
 				if (r.message && r.message.item_code) {
-					EventBus.emit("cart:add_item", r.message);
+					const data = r.message;
+					if (data.serial_no) {
+						// Barcode was a serial number.
+						// If it is the FIFO-oldest (Sell First), add directly to cart.
+						// Otherwise open the IMEI selection dialog so the cashier sees
+						// the "Sell First" badge and can make a conscious choice.
+						if (cint(data.is_oldest_serial)) {
+							EventBus.emit("cart:scan_serial", data);
+						} else {
+							EventBus.emit("cart:add_item", data);
+						}
+					} else {
+						EventBus.emit("cart:add_item", data);
+					}
 				} else {
 					frappe.show_alert({
 						message: __("Barcode not found: {0}", [frappe.utils.escape_html(barcode)]),

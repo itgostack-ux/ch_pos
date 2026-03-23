@@ -957,12 +957,16 @@ def scan_barcode(barcode, pos_profile=None):
     item_code = frappe.db.get_value("Item Barcode", {"barcode": barcode}, "parent")
 
     # 2. Fallback: check Serial No
+    scanned_serial = None
+    scanned_serial_warehouse = None
     if not item_code:
         sn = frappe.db.get_value(
-            "Serial No", barcode, ["item_code", "status"], as_dict=True
+            "Serial No", barcode, ["item_code", "status", "warehouse"], as_dict=True
         )
         if sn and sn.status in ("Active", "Inactive"):
             item_code = sn.item_code
+            scanned_serial = barcode
+            scanned_serial_warehouse = sn.warehouse
 
     # 3. Fallback: exact item_code match
     if not item_code and frappe.db.exists("Item", barcode):
@@ -978,7 +982,17 @@ def scan_barcode(barcode, pos_profile=None):
         page_size=1,
     )
     items = (result or {}).get("items", [])
-    return items[0] if items else None
+    item = items[0] if items else None
+
+    # When the barcode was a serial number, tag the response so the frontend
+    # can decide whether to add directly (sell-first serial) or open the
+    # IMEI selection dialog (non-oldest serial).
+    if item and scanned_serial and scanned_serial_warehouse:
+        oldest_serial, _ = _get_oldest_fifo_serial(item_code, scanned_serial_warehouse)
+        item["serial_no"] = scanned_serial
+        item["is_oldest_serial"] = 1 if oldest_serial == scanned_serial else 0
+
+    return item
 
 
 @frappe.whitelist()
@@ -1254,11 +1268,10 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
             """, serial_no, as_dict=True)
             selected_date = selected_date_row[0].received_date if selected_date_row else None
 
-            # Warn whenever the selected serial is NOT the FIFO-oldest, even if
-            # both were received on the same day (same stock entry).  Strict
-            # greater-than was the previous check, which silently passed same-day
-            # serials without any warning.
-            if oldest_date and selected_date and selected_date >= oldest_date:
+            # Only warn when the selected serial was received STRICTLY AFTER the
+            # oldest one.  Same-day receipts belong to the same inward batch —
+            # any serial from that batch is equally valid (no FIFO violation).
+            if oldest_date and selected_date and selected_date > oldest_date:
                 # Soft FIFO violation — return warning so JS can confirm with user.
                 # Manager alert fires only when the cashier confirms the override
                 # (see log_fifo_override below).
@@ -4540,7 +4553,7 @@ def _get_oldest_fifo_serial(item_code, warehouse):
 			AND sbb_in.type_of_transaction = 'Inward'
 			AND sbb_in.docstatus = 1
 		GROUP BY available.serial_no
-		ORDER BY received_date ASC
+		ORDER BY received_date ASC, available.serial_no ASC
 		LIMIT 1
 	""", (item_code, warehouse), as_dict=True)
 
