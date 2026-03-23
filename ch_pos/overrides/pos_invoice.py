@@ -107,8 +107,18 @@ class CustomPOSInvoice(SalesInvoice):
             payments_sum = sum(flt(p.amount) for p in self.get("payments", []))
             self.paid_amount = payments_sum + flt(self.loyalty_amount)
         super().validate()
-        _ensure_gst_template(self)
-        _apply_margin_scheme(self)
+        # Returns carry taxes from the original invoice already computed by
+        # calculate_taxes_and_totals().  Replacing the tax template would zero
+        # out base_tax_amount_after_discount_amount, leaving grand_total higher
+        # than the sum of GL debits (margin scheme adjustments also don't apply
+        # to negative-qty return rows).
+        if not self.is_return:
+            _ensure_gst_template(self)
+            _apply_margin_scheme(self)
+        else:
+            # For returns ensure grand_total is consistent with the saved taxes
+            # in case any validate hook modified items/amounts.
+            self.run_method("calculate_taxes_and_totals")
 
     def on_submit(self):
         # Standard SalesInvoice.on_submit() already calls update_stock_ledger(),
@@ -330,6 +340,11 @@ class CustomPOSInvoice(SalesInvoice):
 
 def validate_margin_scheme(doc, method=None):
     """Hook: validate — apply margin scheme GST calculation if applicable."""
+    # Return invoices carry taxes from the original invoice.  Replacing the GST
+    # template would reset base_tax_amount_after_discount_amount to 0, making GL
+    # entries omit the tax reversal entry (→ "Debit and Credit not equal" -9900).
+    if doc.get("is_return"):
+        return
     _ensure_gst_template(doc)
     _apply_margin_scheme(doc)
 
@@ -666,6 +681,10 @@ def _ensure_gst_template(doc):
             "tax_amount_after_discount_amount": 0,
             "base_tax_amount_after_discount_amount": 0,
         })
+    # Recompute totals after replacing the tax template so that grand_total
+    # and base_tax_amount_after_discount_amount stay in sync.  Without this the
+    # GL entries would use the old grand_total while tax amounts are 0.
+    doc.run_method("calculate_taxes_and_totals")
 
 
 def _apply_margin_scheme(doc):
