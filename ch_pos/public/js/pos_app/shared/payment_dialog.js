@@ -1126,7 +1126,16 @@ export class PaymentDialog {
 						this._on_error(__("Return creation failed"));
 					}
 				},
-				error: () => this._on_error(__("Return creation failed")),
+				error: (xhr) => {
+					const resp = xhr && xhr.responseJSON;
+					const server_msg = resp && (resp.message || resp.exc_type);
+					const msg = server_msg
+						? frappe.utils.strip_html(server_msg)
+						: __("Return creation failed");
+					// Show as a dialog so it is clearly visible above the payment popup
+					frappe.msgprint({ title: __("Return Failed"), indicator: "red", message: msg });
+					this._on_error(msg);
+				},
 			});
 		} else {
 			do_create();

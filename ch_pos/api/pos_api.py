@@ -1114,19 +1114,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     if not ret.items:
         frappe.throw(frappe._("No items to return"))
 
-    # Payment (negative)
-    default_mode = "Cash"
-    for p in (orig.payments or []):
-        if p.default:
-            default_mode = p.mode_of_payment
-            break
-
-    ret.append("payments", {
-        "mode_of_payment": default_mode,
-        "amount": -1 * total_return_amount,
-    })
-
-    # Taxes from original
+    # Taxes from original — must be added BEFORE calculating grand_total
     for tax in (orig.taxes or []):
         ret.append("taxes", {
             "charge_type": tax.charge_type,
@@ -1145,13 +1133,49 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
                 "allocated_percentage": 100,
             })
 
-    # Set paid_amount before save so ERPNext's validate_change_amount
-    # doesn't hit a NoneType error on return invoices (grand_total < 0)
-    ret.paid_amount = -1 * total_return_amount
+    # Compute the correct grand_total AFTER applying taxes so the payment
+    # amount matches exactly and GL entries balance.  Previously this used
+    # `total_return_amount` (pre-tax sum) which left the GST portion
+    # unaccounted, producing "Debit and Credit not equal" errors.
+    ret.run_method("calculate_taxes_and_totals")
+    correct_payment = ret.grand_total  # negative, includes tax
+
+    # Payment (negative) — set AFTER tax calculation
+    default_mode = "Cash"
+    for p in (orig.payments or []):
+        if p.default:
+            default_mode = p.mode_of_payment
+            break
+
+    ret.append("payments", {
+        "mode_of_payment": default_mode,
+        "amount": correct_payment,
+    })
+    ret.paid_amount = correct_payment
 
     ret.flags.ignore_permissions = True
     ret.save()
-    ret.submit()
+    try:
+        ret.submit()
+    except Exception:
+        # Frappe commits docstatus=1 before on_submit runs, so if GL entry
+        # creation fails the invoice can be left in an inconsistent state.
+        # Attempt to cancel + delete it to keep the DB clean.
+        try:
+            doc = frappe.get_doc("Sales Invoice", ret.name)
+            if doc.docstatus == 1:
+                doc.flags.ignore_permissions = True
+                doc.flags.ignore_validate = True
+                if hasattr(doc, "custom_cancel_reason"):
+                    doc.custom_cancel_reason = "System: auto-rollback on submit failure"
+                doc.cancel()
+            frappe.delete_doc("Sales Invoice", ret.name, force=True, ignore_permissions=True)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Return invoice cleanup failed for {ret.name}",
+            )
+        raise
 
     # Create return incentive (clawback) entries
     incentive_clawback = 0
