@@ -188,16 +188,17 @@ export class ContextualToolbar {
 				if (r.message && r.message.item_code) {
 					const data = r.message;
 					if (data.serial_no) {
-						// Barcode was a serial number.
-						// If it is the FIFO-oldest (Sell First), add directly to cart.
-						// Otherwise open the IMEI selection dialog so the cashier sees
-						// the "Sell First" badge and can make a conscious choice.
-						if (cint(data.is_oldest_serial)) {
-							EventBus.emit("cart:scan_serial", data);
-						} else {
-							EventBus.emit("cart:add_item", data);
-						}
+						// The barcode resolved to a specific serial number — the
+						// cashier scanned or typed an exact IMEI.  Always take the
+						// direct-add path: _add_to_cart_direct_serial validates the
+						// serial (stock, warehouse, duplicate) and runs the FIFO check
+						// internally.  Same-date serials → added silently; a serial
+						// received later than the oldest → confirmation dialog.
+						// Opening the IMEI selection popup would be confusing here
+						// because the cashier already knows which unit they want.
+						EventBus.emit("cart:scan_serial", data);
 					} else {
+						// Product barcode (not a serial) — open item flow normally.
 						EventBus.emit("cart:add_item", data);
 					}
 				} else {
