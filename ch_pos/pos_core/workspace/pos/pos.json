@@ -259,6 +259,16 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "CH Device Master",
+   "link_count": 0,
+   "link_to": "CH Device Master",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Session Management",
    "link_count": 0,
    "link_type": "DocType",
@@ -331,6 +341,36 @@
    "label": "Business Audit Log",
    "link_count": 0,
    "link_to": "CH Business Audit Log",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Settlement",
+   "link_count": 0,
+   "link_to": "CH POS Settlement",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Free Sale Approval",
+   "link_count": 0,
+   "link_to": "CH Free Sale Approval",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "User Allocation",
+   "link_count": 0,
+   "link_to": "CH POS User Allocation",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"

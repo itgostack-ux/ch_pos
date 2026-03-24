@@ -797,7 +797,11 @@ def validate_eod_lock(doc, method=None):
 
     Once a CH POS Session for this pos_profile + business_date is Closed,
     no new invoices (or amendments) are allowed for that profile + date.
+
+    Set frappe.flags.ignore_eod_lock = True before insert to bypass (tests only).
     """
+    if frappe.flags.get("ignore_eod_lock"):
+        return
     if not doc.pos_profile or not doc.posting_date:
         return
 
