@@ -23,6 +23,24 @@ def pos_item_search(
     warehouse = profile_doc.warehouse if profile_doc else None
 
     conditions = ["i.disabled = 0", "i.is_sales_item = 1", "i.has_variants = 0"]
+    # Lifecycle status rules:
+    #   blank (draft/unconfigured) → never show
+    #   Active                     → always show
+    #   End of Life / Discontinued → show only if stock exists (any warehouse)
+    conditions.append(
+        "(IFNULL(i.ch_lifecycle_status, '') = 'Active'"
+        " OR (IFNULL(i.ch_lifecycle_status, '') IN ('End of Life', 'Discontinued')"
+        "   AND ("
+        "     (i.has_serial_no = 1 AND EXISTS ("
+        "       SELECT 1 FROM `tabSerial No` sn"
+        "       WHERE sn.item_code = i.name AND sn.status = 'Active'))"
+        "     OR"
+        "     (i.has_serial_no = 0 AND EXISTS ("
+        "       SELECT 1 FROM `tabBin` b"
+        "       WHERE b.item_code = i.name AND b.actual_qty > 0))"
+        "   )"
+        " ))"
+    )
     values = {}
 
     if search_term:

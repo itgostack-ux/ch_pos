@@ -46,7 +46,7 @@ def get_data(filters):
             pi.name,
             pi.posting_date,
             pi.customer,
-            pi.warehouse,
+            COALESCE(pi.set_warehouse, '') AS warehouse,
             pi.company,
             pi.grand_total,
             pi.discount_amount,

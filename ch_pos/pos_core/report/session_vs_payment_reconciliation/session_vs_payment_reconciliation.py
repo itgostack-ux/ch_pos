@@ -46,7 +46,7 @@ def execute(filters=None):
             ON pi.pos_profile = s.pos_profile
             AND pi.posting_date = s.business_date
             AND pi.docstatus = 1
-            AND IFNULL(pi.consolidated_invoice, '') = ''
+            AND pi.is_consolidated = 0
         JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         LEFT JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
         WHERE {conditions}

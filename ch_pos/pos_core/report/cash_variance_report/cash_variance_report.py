@@ -38,7 +38,9 @@ def execute(filters=None):
         SELECT
             s.name AS session, s.store, s.company, s.device, s.user,
             s.business_date, s.opening_cash, s.closing_cash_actual,
-            s.cash_variance, s.variance_reason, s.manager_approved
+            s.cash_variance, s.variance_reason,
+            CASE WHEN s.variance_reason IS NOT NULL AND s.variance_reason != ''
+                 THEN 'Yes' ELSE 'No' END AS manager_approved
         FROM `tabCH POS Session` s
         WHERE {conditions}
         ORDER BY ABS(s.cash_variance) DESC, s.business_date DESC

@@ -124,7 +124,19 @@ class CustomPOSInvoice(SalesInvoice):
         # Standard SalesInvoice.on_submit() already calls update_stock_ledger(),
         # make_gl_entries(), and repost_future_sle_and_gle() when update_stock=1.
         # Do NOT duplicate those calls — that would create 2× SLE and 2× GL entries.
+        #
+        # Policy: returns and exchanges do NOT earn or deduct loyalty points.
+        # ERPNext's on_submit would otherwise delete+recreate the original invoice's
+        # LPE (proportional to returned amount).  We suppress that by temporarily
+        # hiding loyalty_program from the SalesInvoice chain for return invoices.
+        _saved_lp = None
+        if self.is_return:
+            _saved_lp = self.loyalty_program
+            self.loyalty_program = None
         super().on_submit()
+        if _saved_lp:
+            self.loyalty_program = _saved_lp
+            self.db_set("loyalty_program", _saved_lp)
 
     def on_cancel(self):
         # Reimplements Sales Invoice on_cancel with SLE/GL reversal inserted
@@ -147,12 +159,10 @@ class CustomPOSInvoice(SalesInvoice):
         super(SalesInvoice, self).on_cancel()
 
         # Loyalty points cleanup (from Sales Invoice.on_cancel)
+        # Policy: returns never created any LPE on submit, so only non-returns
+        # need their LPE deleted on cancel.
         if not self.is_return and self.loyalty_program:
             self.delete_loyalty_point_entry()
-        elif self.is_return and self.return_against and self.loyalty_program:
-            against_psi_doc = frappe.get_doc("Sales Invoice", self.return_against)
-            against_psi_doc.delete_loyalty_point_entry()
-            against_psi_doc.make_loyalty_point_entry()
 
         # Reverse SLE/GL entries BEFORE delinking serial bundles
         if self.update_stock == 1:
@@ -188,7 +198,7 @@ class CustomPOSInvoice(SalesInvoice):
                 bundle_docstatus = frappe.db.get_value(
                     "Serial and Batch Bundle", row.serial_and_batch_bundle, "docstatus"
                 )
-                if not getattr(self, "consolidated_invoice", None):
+                if not getattr(self, "is_consolidated", None):
                     frappe.db.set_value(
                         "Serial and Batch Bundle",
                         row.serial_and_batch_bundle,

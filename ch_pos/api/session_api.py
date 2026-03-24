@@ -487,7 +487,7 @@ def get_x_report(session_name):
         filters={
             "pos_profile": session.pos_profile,
             "docstatus": 1,
-            "consolidated_invoice": ("in", [None, ""]),
+            "is_consolidated": 0,
             "posting_date": session.business_date,
         },
         fields=["name", "grand_total", "is_return", "total_taxes_and_charges",
@@ -542,13 +542,14 @@ def get_z_report(store, business_date):
         order_by="shift_start asc",
     )
 
-    # Aggregate payment modes across all sessions
+    # Aggregate payment modes across all sessions (sales only — returns tracked separately)
     payment_rows = frappe.db.sql("""
         SELECT sip.mode_of_payment, SUM(sip.amount) AS total
         FROM `tabSales Invoice` pi
         JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         WHERE pi.docstatus = 1
-          AND IFNULL(pi.consolidated_invoice, '') = ''
+          AND pi.is_consolidated = 0
+          AND pi.is_return = 0
           AND pi.posting_date = %(bd)s
           AND pi.pos_profile IN (
               SELECT pos_profile FROM `tabCH POS Session`
@@ -668,7 +669,7 @@ def _is_settlement_complete_for_store(store, business_date):
             JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
             WHERE pi.docstatus = 1
-              AND IFNULL(pi.consolidated_invoice, '') = ''
+              AND pi.is_consolidated = 0
               AND pi.posting_date = %(bd)s
               AND mop.type = 'Bank'
               AND pi.pos_profile IN (

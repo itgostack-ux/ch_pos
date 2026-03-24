@@ -362,7 +362,7 @@ def create_pos_invoice(pos_profile, customer, items,
             doc_name = coupon_code if frappe.db.exists("Coupon Code", coupon_code) else None
         if not doc_name:
             frappe.throw(frappe._("Coupon code '{0}' not found").format(coupon_code))
-        inv.coupon_code = doc_name
+        inv.custom_coupon_code = doc_name  # Sales Invoice in ERPNext 15 has no coupon_code field
 
     # Voucher — add voucher amount to the discount
     voucher_redeemed = 0
@@ -401,6 +401,34 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.flags.ignore_permissions = True
     try:
         inv.insert(ignore_permissions=True)
+        # After insert, ERPNext has computed rounded_total.  If the caller sent
+        # amount_paid = grand_total instead of rounded_total, the invoice would
+        # land as "Partly Paid" with a ₹0.xx rounding gap.  Fix via direct DB
+        # update + reload so the corrected values flow into the submit GL entries.
+        if not cint(is_free_sale) and not cint(is_credit_sale) and inv.rounded_total:
+            rt = flt(inv.rounded_total)
+            total_paid = sum(flt(p.amount) for p in inv.payments)
+            rounding_diff = rt - total_paid
+            if 0 < abs(rounding_diff) <= 0.50:
+                for p in inv.payments:
+                    if flt(p.amount) > 0:
+                        cr = flt(inv.conversion_rate or 1)
+                        frappe.db.set_value(
+                            "Sales Invoice Payment", p.name,
+                            {
+                                "amount": flt(p.amount) + rounding_diff,
+                                # base_amount is what make_pos_gl_entries uses for Cash/Debtors GL
+                                "base_amount": flt(p.base_amount or 0) + rounding_diff * cr,
+                            },
+                            update_modified=False,
+                        )
+                        break
+                frappe.db.set_value(
+                    "Sales Invoice", inv.name,
+                    {"paid_amount": rt, "base_paid_amount": rt},
+                    update_modified=False,
+                )
+                inv.reload()  # pick up corrected totals before GL creation
         inv.submit()
     except Exception as _submit_exc:
         # Re-raise with a cleaner message so the POS shows the actual reason
@@ -872,6 +900,87 @@ def validate_coupon(coupon_code, customer=None, cart_total=0):
 
 
 @frappe.whitelist()
+def apply_coupon_or_voucher(code, customer=None, company=None):
+    """Validate a coupon code or CH Voucher code and return discount details."""
+    if not code:
+        frappe.throw(frappe._("No code provided"))
+
+    code = code.strip()
+
+    # ── 1. Check CH Voucher first ──────────────────────────────────────────
+    voucher = frappe.db.get_value(
+        "CH Voucher",
+        {"voucher_code": code, "docstatus": 1},
+        ["name", "status", "original_amount", "balance",
+         "valid_from", "valid_upto", "issued_to"],
+        as_dict=True,
+    )
+    if voucher:
+        today = nowdate()
+        if voucher.status in ("Fully Used", "Cancelled"):
+            frappe.throw(frappe._("Voucher '{0}' has already been fully used").format(code))
+        if voucher.status == "Expired" or (voucher.valid_upto and str(voucher.valid_upto) < today):
+            frappe.throw(frappe._("Voucher '{0}' has expired").format(code))
+        if voucher.valid_from and str(voucher.valid_from) > today:
+            frappe.throw(frappe._("Voucher '{0}' is not yet active").format(code))
+        balance = flt(voucher.balance)
+        if balance <= 0:
+            frappe.throw(frappe._("Voucher '{0}' has no remaining balance").format(code))
+        return {
+            "is_voucher": True,
+            "voucher_name": voucher.name,
+            "amount": balance,
+            "balance": balance,
+        }
+
+    # ── 2. Fall back to Coupon Code ────────────────────────────────────────
+    coupon = frappe.db.get_value(
+        "Coupon Code",
+        {"coupon_code": code},
+        ["name", "coupon_name", "pricing_rule", "valid_from", "valid_upto",
+         "maximum_use", "used", "coupon_type"],
+        as_dict=True,
+    )
+    if not coupon:
+        frappe.throw(frappe._("Code '{0}' not found as a voucher or coupon").format(code))
+
+    today = nowdate()
+    if coupon.valid_from and str(coupon.valid_from) > today:
+        frappe.throw(frappe._("Coupon is not yet active"))
+    if coupon.valid_upto and str(coupon.valid_upto) < today:
+        frappe.throw(frappe._("Coupon has expired"))
+    if coupon.maximum_use and coupon.used >= coupon.maximum_use:
+        frappe.throw(frappe._("Coupon usage limit reached"))
+    if not coupon.pricing_rule:
+        frappe.throw(frappe._("No pricing rule linked to coupon"))
+
+    pr = frappe.get_cached_doc("Pricing Rule", coupon.pricing_rule)
+    discount_amount = 0
+    if flt(pr.discount_percentage) > 0:
+        # Return percentage info; caller computes actual amount against cart total
+        return {
+            "is_voucher": False,
+            "coupon_name": coupon.name,
+            "amount": flt(pr.discount_percentage),
+            "is_percentage": True,
+            "max_discount": flt(pr.max_discount) if pr.max_discount else 0,
+            "pricing_rule": coupon.pricing_rule,
+        }
+    elif flt(pr.discount_amount) > 0:
+        discount_amount = flt(pr.discount_amount)
+    else:
+        frappe.throw(frappe._("Coupon provides no discount"))
+
+    return {
+        "is_voucher": False,
+        "coupon_name": coupon.name,
+        "amount": discount_amount,
+        "is_percentage": False,
+        "pricing_rule": coupon.pricing_rule,
+    }
+
+
+@frappe.whitelist()
 def get_customer_credit_info(customer, company=None):
     """Return credit limit and outstanding for a customer."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
@@ -891,9 +1000,13 @@ def get_customer_credit_info(customer, company=None):
         if cl:
             credit_limit = flt(cl)
 
-    # Fallback to Customer's default credit limit
+    # Fallback: scan credit_limits child table without company filter (ERPNext v15 has no
+    # direct credit_limit column on tabCustomer — it lives in the child table only)
     if not credit_limit:
-        credit_limit = flt(frappe.db.get_value("Customer", customer, "credit_limit"))
+        for cl in (frappe.get_cached_doc("Customer", customer).get("credit_limits") or []):
+            if flt(cl.credit_limit):
+                credit_limit = flt(cl.credit_limit)
+                break
 
     if not credit_limit:
         return None
@@ -2310,21 +2423,26 @@ def customer_360(identifier, company=None):
     """, {"customer": customer}, as_dict=True)
 
     # Swap / exchange invoices (sale_type driven)
-    out["swap_invoices"] = frappe.db.sql("""
-        SELECT name, posting_date, grand_total, custom_ch_sale_type,
-               custom_ch_sale_sub_type, custom_exchange_assessment, status
-        FROM `tabSales Invoice`
-        WHERE customer = %(customer)s AND docstatus = 1
-          AND custom_exchange_assessment IS NOT NULL AND custom_exchange_assessment != ''
-        ORDER BY posting_date DESC LIMIT 20
-    """, {"customer": customer}, as_dict=True)
+    # Defensively handled: custom_ch_sale_type column requires bench migrate after
+    # first app install; fall back to empty list if column is not yet present.
+    try:
+        out["swap_invoices"] = frappe.db.sql("""
+            SELECT name, posting_date, grand_total, custom_ch_sale_type,
+                   custom_ch_sale_sub_type, custom_exchange_assessment, status
+            FROM `tabSales Invoice`
+            WHERE customer = %(customer)s AND docstatus = 1
+              AND custom_exchange_assessment IS NOT NULL AND custom_exchange_assessment != ''
+            ORDER BY posting_date DESC LIMIT 20
+        """, {"customer": customer}, as_dict=True)
+    except Exception:
+        out["swap_invoices"] = []
 
-    # Coupon usage
+    # Coupon usage (Sales Invoice in ERPNext 15 uses custom_coupon_code, not coupon_code)
     out["coupon_usage"] = frappe.db.sql("""
-        SELECT name, posting_date, coupon_code, grand_total
+        SELECT name, posting_date, custom_coupon_code AS coupon_code, grand_total
         FROM `tabSales Invoice`
         WHERE customer = %(customer)s AND docstatus = 1
-          AND coupon_code IS NOT NULL AND coupon_code != ''
+          AND custom_coupon_code IS NOT NULL AND custom_coupon_code != ''
         ORDER BY posting_date DESC LIMIT 20
     """, {"customer": customer}, as_dict=True)
 

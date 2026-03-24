@@ -53,6 +53,19 @@ export class PaymentDialog {
 		this._advance_amount = 0;
 		this._customer_advances = [];  // [{name, amount, balance}]
 
+		// ── Discount & Coupon (moved from cart panel) ────────────────────────
+		this._disc_pct     = 0;
+		this._disc_amt     = 0;
+		this._disc_reason  = "";
+		this._disc_reasons = [];
+		this._dlg_coupon_code      = "";
+		this._dlg_coupon_discount  = 0;
+		this._bank_offer           = null;  // { name, offer_name, value_type, value, discount }
+		this._dlg_voucher_code     = "";
+		this._dlg_voucher_amount   = 0;
+		this._dlg_voucher_name     = "";
+		this._dlg_voucher_balance  = 0;
+
 		this._bind_events();
 	}
 
@@ -86,6 +99,15 @@ export class PaymentDialog {
 			this._required_managers = saved.required_managers || [];
 			this._advance_amount = saved.advance_amount || 0;
 			this._customer_advances = saved.customer_advances || [];
+			this._disc_pct    = saved.disc_pct    || 0;
+			this._disc_amt    = saved.disc_amt    || 0;
+			this._disc_reason = saved.disc_reason || "";
+			this._dlg_coupon_code     = saved.dlg_coupon_code     || "";
+			this._dlg_coupon_discount = saved.dlg_coupon_discount || 0;
+			this._dlg_voucher_code    = saved.dlg_voucher_code    || "";
+			this._dlg_voucher_amount  = saved.dlg_voucher_amount  || 0;
+			this._dlg_voucher_name    = saved.dlg_voucher_name    || "";
+			this._dlg_voucher_balance = saved.dlg_voucher_balance || 0;
 		} else {
 			this._payments = [];
 			this._loyalty_amount = 0;
@@ -99,6 +121,25 @@ export class PaymentDialog {
 			this._required_managers = [];
 			this._advance_amount = 0;
 			this._customer_advances = [];
+			this._disc_pct    = 0;
+			this._disc_amt    = 0;
+			this._disc_reason = "";
+			this._dlg_coupon_code     = "";
+			this._dlg_coupon_discount = 0;
+			this._bank_offer          = null;
+			PosState.bank_offer_discount = 0;
+			this._dlg_voucher_code    = "";
+			this._dlg_voucher_amount  = 0;
+			this._dlg_voucher_name    = "";
+			this._dlg_voucher_balance = 0;
+			// Sync any stale PosState discount to zero for fresh transaction
+			PosState.additional_discount_pct = 0;
+			PosState.additional_discount_amt = 0;
+			PosState.discount_reason = "";
+			PosState.coupon_code = null;
+			PosState.coupon_discount = 0;
+			PosState.voucher_code = null;
+			PosState.voucher_amount = 0;
 
 			// Pre-seed with default MOP covering full amount
 			const total = this._calc_grand_total();
@@ -125,10 +166,27 @@ export class PaymentDialog {
 		requestAnimationFrame(() => this._overlay.addClass("ch-pay-visible"));
 		this._bind_overlay();
 		this._render_payments();
+		this._render_mop_buttons();   // ensure MOP buttons are populated even if build-time modes were empty
 		this._update_totals();
 		if (this._payments[0]) this._load_bank_offers(this._payments[0].mode);
 		this._load_sale_types();
 		this._restore_payment_ui();
+		this._load_disc_reasons();
+	}
+
+	/** Re-render the Add Payment buttons from PosState.payment_modes.
+	 *  Called after mount so the live (already-loaded) modes are always reflected. */
+	_render_mop_buttons() {
+		if (!this._overlay) return;
+		const container = this._overlay.find(".ch-pay-mop-btns");
+		if (!container.length) return;
+		const modes = PosState.payment_modes || [];
+		if (!modes.length) return;   // no change — template value stays
+		container.html(modes.map(p => `
+			<button class="ch-pay-mop-btn" data-mop="${frappe.utils.escape_html(p.mode_of_payment)}">
+				${_mop_icon(p.mode_of_payment)}
+				<span>${frappe.utils.escape_html(p.mode_of_payment)}</span>
+			</button>`).join(""));
 	}
 
 	/** Restore saved payment UI state (checkboxes, sections) after overlay mounts */
@@ -188,25 +246,19 @@ export class PaymentDialog {
 						<span class="input-group-addon">₹</span>
 						<input type="number" class="form-control" id="ch-pay-loyalty-amt"
 							value="${Math.min(max_loyalty, total).toFixed(2)}" min="0" max="${max_loyalty}" step="0.01">
-						<span class="input-group-addon">${__("max")} ₹${format_number(max_loyalty)}</span>
+						<span class="input-group-addon" id="ch-pay-loyalty-max">${__("max")} ₹${format_number(Math.min(max_loyalty, total))}</span>
 					</div>
 				</div>
 			</div>` : "";
 
-		// Sale mode toggles — Credit Sale / Free Sale (not for walk-in)
+		// Sale mode toggles — hidden, driven by sale type pills
 		const sale_modes_html = !is_walkin ? `
-			<div class="ch-pay-sale-modes">
-				<label class="ch-pay-mode-toggle" title="${__("Allow partial/zero payment — balance on credit")}">
+			<div class="ch-pay-sale-modes" style="display:none">
+				<label class="ch-pay-mode-toggle">
 					<input type="checkbox" id="ch-pay-credit-chk">
-					<span class="ch-pay-mode-tag ch-pay-mode-credit">
-						<i class="fa fa-handshake-o"></i> ${__("Credit Sale")}
-					</span>
 				</label>
-				<label class="ch-pay-mode-toggle" title="${__("Zero-value sale — requires manager approval")}">
+				<label class="ch-pay-mode-toggle">
 					<input type="checkbox" id="ch-pay-free-chk">
-					<span class="ch-pay-mode-tag ch-pay-mode-free">
-						<i class="fa fa-gift"></i> ${__("Free Sale")}
-					</span>
 				</label>
 			</div>` : "";
 
@@ -267,6 +319,55 @@ export class PaymentDialog {
 				</div>
 			</div>`;
 
+// ── Discount section (collapsed accordion) ────────────────────────────
+const disc_html = `
+<div class="ch-pay-section-block" id="ch-pay-disc-block">
+<button class="ch-pay-section-hdr" type="button" data-target="ch-pay-disc-body">
+<span><i class="fa fa-percent"></i> ${__("Discount")}</span>
+<i class="fa fa-chevron-right ch-pay-toggle-icon"></i>
+</button>
+<div id="ch-pay-disc-body" class="ch-pay-section-body" style="display:none">
+<div class="ch-pay-field-row">
+<select class="form-control form-control-sm" id="ch-pay-disc-reason">
+<option value="">${__("Reason (required)...")}</option>
+</select>
+</div>
+<div id="ch-pay-disc-manual" style="display:none">
+<div class="ch-pay-disc-split">
+<div class="input-group input-group-sm">
+<input type="number" class="form-control" id="ch-pay-disc-pct"
+placeholder="%" min="0" max="100" step="0.5">
+<span class="input-group-addon">%</span>
+</div>
+<span class="ch-pay-disc-or">${__("or")}</span>
+<div class="input-group input-group-sm">
+<span class="input-group-addon">₹</span>
+<input type="number" class="form-control" id="ch-pay-disc-amt"
+placeholder="0.00" min="0" step="1">
+</div>
+</div>
+</div>
+<div id="ch-pay-disc-info" class="ch-pay-field-hint" style="display:none"></div>
+</div>
+</div>`;
+// ── Coupon / Voucher section (collapsed accordion) ─────────────────────
+const coupon_html = `
+<div class="ch-pay-section-block" id="ch-pay-coupon-block">
+<button class="ch-pay-section-hdr" type="button" data-target="ch-pay-coupon-body">
+<span><i class="fa fa-ticket"></i> ${__("Coupon / Voucher")}</span>
+<i class="fa fa-chevron-right ch-pay-toggle-icon"></i>
+</button>
+<div id="ch-pay-coupon-body" class="ch-pay-section-body" style="display:none">
+<div class="ch-pay-coupon-row">
+<input type="text" class="form-control form-control-sm" id="ch-pay-coupon-code"
+placeholder="${__("Enter code...")}">
+<button class="btn btn-sm btn-outline-primary" id="ch-pay-coupon-apply">${__("Apply")}</button>
+</div>
+<div id="ch-pay-coupon-msg" class="ch-pay-field-hint"></div>
+</div>
+</div>`;
+
+
 		return `
 		<div id="ch-pos-payment-overlay" class="ch-pay-overlay">
 			<div class="ch-pay-screen">
@@ -305,37 +406,59 @@ export class PaymentDialog {
 						</span>
 					</div>
 
-					<!-- Sale mode toggles (Credit / Free) -->
-					${sale_modes_html}
+					<!-- ─ Pinned top: Sale type + MOP buttons + bank offers ─ -->
+					<div class="ch-pay-right-pinned">
 
-					<!-- Credit sale details -->
-					${credit_html}
+						<!-- Sale mode toggles (Credit / Free) -->
+						${sale_modes_html}
 
-					<!-- Free sale details -->
-					${free_html}
+						<!-- Credit sale details -->
+						${credit_html}
 
-					<!-- Sale type selector -->
-					${sale_type_html}
+						<!-- Free sale details -->
+						${free_html}
 
-					<!-- Advance adjustment -->
-					${advance_html}
+						<!-- Sale type selector -->
+						${sale_type_html}
 
-					<!-- MOP quick-add buttons -->
-					<div class="ch-pay-mop-section" id="ch-pay-mop-section">
-						<div class="ch-pay-mop-label">${__("Add Payment")}</div>
-						<div class="ch-pay-mop-btns">${mop_btns}</div>
+						<!-- MOP quick-add buttons -->
+						<div class="ch-pay-mop-section" id="ch-pay-mop-section">
+							<div class="ch-pay-mop-label">${__("Add Payment")}</div>
+							<div class="ch-pay-mop-btns">${mop_btns}</div>
+						</div>
+
+						<!-- Bank / card offers (loaded dynamically) -->
+						<div id="ch-pay-bank-offers" class="ch-pay-bank-offers"></div>
+
+					</div><!-- /.ch-pay-right-pinned -->
+
+					<!-- ─ Scrollable: payment rows + loyalty + quick cash ─ -->
+					<div class="ch-pay-right-scroll">
+
+						<!-- Payment rows -->
+						<div id="ch-pay-rows" class="ch-pay-rows"></div>
+
+						<!-- Loyalty -->
+						${loyalty_html}
+
+						<!-- Quick cash amounts -->
+						<div id="ch-pay-quick-cash" class="ch-pay-quick-cash" style="display:none">
+							<div class="ch-pay-quick-label">${__("Quick Cash")}</div>
+							<div id="ch-pay-quick-btns" class="ch-pay-quick-btns"></div>
+						</div>
+
+						<!-- Advance adjustment (walk-in hidden) -->
+						${advance_html}
+
+					</div><!-- /.ch-pay-right-scroll -->
+
+					<!-- ─ Pinned bottom: Discount + Coupon always visible ─ -->
+					<div class="ch-pay-right-discounts">
+						${disc_html}
+						${coupon_html}
 					</div>
 
-					<!-- Bank / card offers (loaded dynamically) -->
-					<div id="ch-pay-bank-offers" class="ch-pay-bank-offers"></div>
-
-					<!-- Payment rows -->
-					<div id="ch-pay-rows" class="ch-pay-rows"></div>
-
-					<!-- Loyalty -->
-					${loyalty_html}
-
-					<!-- Balance bar -->
+					<!-- Balance bar — always visible above submit -->
 					<div class="ch-pay-balance-bar">
 						<div class="ch-pay-bal-row">
 							<span>${__("Total Paid")}</span>
@@ -345,7 +468,7 @@ export class PaymentDialog {
 							<span>${__("Advance Applied")}</span>
 							<b id="ch-pay-advance-applied" style="color:#7c3aed">₹0</b>
 						</div>
-						<div class="ch-pay-bal-row">
+						<div class="ch-pay-bal-row ch-pay-bal-due-row">
 							<span id="ch-pay-balance-label">${__("Balance Due")}</span>
 							<b id="ch-pay-balance-due" class="ch-pay-bal-positive">₹${format_number(total)}</b>
 						</div>
@@ -355,16 +478,11 @@ export class PaymentDialog {
 						</div>
 					</div>
 
-					<!-- Quick cash amounts -->
-					<div id="ch-pay-quick-cash" class="ch-pay-quick-cash" style="display:none">
-						<div class="ch-pay-quick-label">${__("Quick Cash")}</div>
-						<div id="ch-pay-quick-btns" class="ch-pay-quick-btns"></div>
-					</div>
-
 					<!-- Submit -->
 					<button class="btn ch-pay-submit-btn btn-default" id="ch-pay-submit" disabled>
 						<i class="fa fa-check-circle"></i>
 						<span id="ch-pay-submit-label">${__("Confirm Payment")}</span>
+						<span class="ch-pay-kbd-hint">↵ Enter</span>
 					</button>
 				</div>
 			</div>
@@ -411,7 +529,8 @@ export class PaymentDialog {
 		const voucher  = flt(PosState.voucher_amount);
 		const exchange = flt(PosState.exchange_amount);
 		const pe_cr    = flt(PosState.product_exchange_credit);
-		const grand    = Math.max(0, net - add_disc - coupon - voucher - exchange - pe_cr);
+		const offer_d  = flt(this._bank_offer ? this._bank_offer.discount : 0);
+		const grand    = Math.max(0, net - add_disc - coupon - voucher - exchange - pe_cr - offer_d);
 
 		let rows = `<div class="ch-pay-total-row"><span>${__("Subtotal")}</span><span>₹${format_number(subtotal)}</span></div>`;
 		if (disc_total > 0)  rows += `<div class="ch-pay-total-row ch-pay-deduct"><span>${__("Item Discounts")}</span><span>-₹${format_number(disc_total)}</span></div>`;
@@ -420,6 +539,7 @@ export class PaymentDialog {
 		if (voucher > 0)     rows += `<div class="ch-pay-total-row ch-pay-deduct"><span>🎟️ ${__("Voucher")}</span><span>-₹${format_number(voucher)}</span></div>`;
 		if (exchange > 0)    rows += `<div class="ch-pay-total-row ch-pay-deduct" style="color:var(--pos-success,#16a34a)"><span><i class="fa fa-exchange"></i> ${__("Exchange Credit")}</span><span>-₹${format_number(exchange)}</span></div>`;
 		if (pe_cr > 0)       rows += `<div class="ch-pay-total-row ch-pay-deduct" style="color:var(--pos-success,#16a34a)"><span><i class="fa fa-retweet"></i> ${__("Swap Credit")}</span><span>-₹${format_number(pe_cr)}</span></div>`;
+		if (offer_d > 0)     rows += `<div class="ch-pay-total-row ch-pay-deduct"><span>🏦 ${__("Bank Offer")}</span><span>-₹${format_number(offer_d)}</span></div>`;
 		rows += `<div class="ch-pay-total-grand"><span>${__("Grand Total")}</span><span>₹${format_number(grand)}</span></div>`;
 		rows += `<div class="ch-pay-tax-note"><i class="fa fa-info-circle"></i> ${__("GST auto-applied per POS Profile")}</div>`;
 		return rows;
@@ -563,11 +683,16 @@ export class PaymentDialog {
 			this._redeem_loyalty = $(e.currentTarget).is(":checked");
 			ov.find("#ch-pay-loyalty-input").toggle(this._redeem_loyalty);
 			this._loyalty_amount = this._redeem_loyalty ? flt(ov.find("#ch-pay-loyalty-amt").val()) : 0;
+			// Auto-adjust cash row so total_paid stays equal to grand_total (not double)
+			this._set_cash_amount(this._calc_balance_due());
 			this._update_totals();
 		});
 		ov.on("input", "#ch-pay-loyalty-amt", e => {
 			const max = flt(PosState.loyalty_points) * flt(PosState.conversion_factor);
-			this._loyalty_amount = Math.min(flt($(e.currentTarget).val()) || 0, max);
+			const max_usable = Math.min(max, this._calc_grand_total());
+			this._loyalty_amount = Math.min(flt($(e.currentTarget).val()) || 0, max_usable);
+			// Auto-adjust cash row so total_paid stays equal to grand_total (not double)
+			this._set_cash_amount(this._calc_balance_due());
 			this._update_totals();
 		});
 
@@ -598,16 +723,23 @@ export class PaymentDialog {
 			// Sync checkboxes based on sale type properties
 			const st = this._sale_types.find(t => t.sale_type_name === type);
 			if (st) {
-				const is_free = st.requires_payment === 0 || st.requires_payment === false;
-				const is_credit = (st.code || "").toUpperCase() === "CS";
+				// requires_payment may come back as 0 (int) or false (bool)
+				const is_free   = !st.requires_payment;
+				const is_credit = !!(st.triggers_credit_sale ||
+					(st.code || "").toUpperCase() === "CS");
 
-				// Toggle free sale checkbox
+				// Toggle free sale (only if changed — avoids re-triggering)
 				if (is_free !== this._is_free_sale) {
 					ov.find("#ch-pay-free-chk").prop("checked", is_free).trigger("change");
 				}
-				// Toggle credit sale checkbox
+				// Toggle credit sale
 				if (is_credit !== this._is_credit_sale) {
 					ov.find("#ch-pay-credit-chk").prop("checked", is_credit).trigger("change");
+				}
+				// If neither, ensure both are off
+				if (!is_free && !is_credit) {
+					if (this._is_free_sale) ov.find("#ch-pay-free-chk").prop("checked", false).trigger("change");
+					if (this._is_credit_sale) ov.find("#ch-pay-credit-chk").prop("checked", false).trigger("change");
 				}
 			}
 		});
@@ -623,6 +755,181 @@ export class PaymentDialog {
 			PosState.sale_reference = $(e.currentTarget).val().trim() || null;
 		});
 
+// ── Bank offer chip click — toggle apply/remove ─────────────────────────
+ov.on("click", ".ch-pay-offer-chip", e => {
+	const $chip = $(e.currentTarget);
+	const offerName = $chip.data("offer-name");
+	// Toggle: clicking same offer removes it
+	if (this._bank_offer && this._bank_offer.name === offerName) {
+		this._bank_offer = null;
+		PosState.bank_offer_discount = 0;
+	} else {
+		const valueType = ($chip.data("value-type") || "").toLowerCase();
+		const value     = flt($chip.data("value"));
+		const grand     = this._calc_grand_total_before_offer();
+		const discount  = valueType === "percentage" ? (grand * value / 100) : value;
+		this._bank_offer = {
+			name: offerName,
+			offer_name: $chip.text().trim(),
+			value_type: valueType,
+			value,
+			discount: Math.min(discount, grand),
+		};
+		PosState.bank_offer_discount = this._bank_offer.discount;
+		frappe.show_alert({ message: `🏦 ${__('Offer applied')}: ₹${format_number(this._bank_offer.discount)} ${__('off')}`, indicator: 'green' }, 3);
+	}
+	// Re-render chips to update active state (use cached MOP)
+	const mop = this._payments[0] ? this._payments[0].mode : null;
+	if (mop) this._load_bank_offers(mop);
+	this._set_cash_amount(this._calc_balance_due());
+	this._update_totals();
+});
+
+// ── Accordion toggles (progressive disclosure) ─────────────────────────
+ov.on("click", ".ch-pay-section-hdr", function() {
+const targetId = $(this).data("target");
+const $body = ov.find("#" + targetId);
+const open = $body.is(":visible");
+$body.slideToggle(200);
+$(this).find(".ch-pay-toggle-icon").toggleClass("ch-pay-icon-open", !open);
+});
+
+// ── Discount reason ────────────────────────────────────────────────────
+ov.on("change", "#ch-pay-disc-reason", e => {
+this._disc_reason = $(e.currentTarget).val() || "";
+PosState.discount_reason = this._disc_reason;
+const reason = this._disc_reasons.find(r => r.name === this._disc_reason);
+const $manual = ov.find("#ch-pay-disc-manual");
+const $info   = ov.find("#ch-pay-disc-info");
+if (!reason) {
+this._disc_pct = 0;
+this._disc_amt = 0;
+PosState.additional_discount_pct = 0;
+PosState.additional_discount_amt = 0;
+$manual.hide();
+$info.hide();
+ov.find("#ch-pay-disc-pct, #ch-pay-disc-amt").val("");
+} else if (reason.allow_manual_entry) {
+this._disc_pct = 0;
+this._disc_amt = 0;
+PosState.additional_discount_pct = 0;
+PosState.additional_discount_amt = 0;
+ov.find("#ch-pay-disc-pct, #ch-pay-disc-amt").val("");
+$manual.show();
+$info.text(reason.max_manual_percent
+? __("Max {0}%", [reason.max_manual_percent])
+: __("Enter discount within your role limits")).show();
+} else {
+// Preset
+$manual.hide();
+if (reason.discount_type === "Percentage") {
+this._disc_pct = flt(reason.discount_value);
+this._disc_amt = 0;
+PosState.additional_discount_pct = this._disc_pct;
+PosState.additional_discount_amt = 0;
+$info.text(__("{0}% applied", [reason.discount_value])).show();
+} else {
+this._disc_amt = flt(reason.discount_value);
+this._disc_pct = 0;
+PosState.additional_discount_pct = 0;
+PosState.additional_discount_amt = this._disc_amt;
+$info.text(__("₹{0} applied", [reason.discount_value])).show();
+}
+}
+this._update_totals();
+});
+ov.on("change blur", "#ch-pay-disc-pct", e => {
+const pct = parseFloat($(e.currentTarget).val()) || 0;
+if (!$(e.currentTarget).val()) {
+this._disc_pct = 0;
+PosState.additional_discount_pct = 0;
+this._update_totals();
+return;
+}
+const reason = this._disc_reasons.find(r => r.name === this._disc_reason);
+if (reason && reason.max_manual_percent > 0 && pct > reason.max_manual_percent) {
+frappe.show_alert({ message: __("Max {0}% for this reason", [reason.max_manual_percent]), indicator: "orange" });
+$(e.currentTarget).val("");
+return;
+}
+this._disc_pct = pct;
+this._disc_amt = 0;
+PosState.additional_discount_pct = pct;
+PosState.additional_discount_amt = 0;
+ov.find("#ch-pay-disc-amt").val("");
+this._update_totals();
+});
+ov.on("change blur", "#ch-pay-disc-amt", e => {
+const amt = parseFloat($(e.currentTarget).val()) || 0;
+if (!$(e.currentTarget).val()) {
+this._disc_amt = 0;
+PosState.additional_discount_amt = 0;
+this._update_totals();
+return;
+}
+this._disc_amt = amt;
+this._disc_pct = 0;
+PosState.additional_discount_pct = 0;
+PosState.additional_discount_amt = amt;
+ov.find("#ch-pay-disc-pct").val("");
+this._update_totals();
+});
+
+// ── Coupon / Voucher apply ────────────────────────────────────────────
+ov.on("click", "#ch-pay-coupon-apply", () => {
+const code = ov.find("#ch-pay-coupon-code").val().trim();
+if (!code) return;
+frappe.xcall("ch_pos.api.pos_api.apply_coupon_or_voucher", {
+code,
+customer: PosState.customer,
+company:  PosState.company,
+}).then(data => {
+const $msg = ov.find("#ch-pay-coupon-msg");
+if (data.is_voucher) {
+this._dlg_voucher_code    = code;
+this._dlg_voucher_amount  = flt(data.amount);
+this._dlg_voucher_name    = data.voucher_name || "";
+this._dlg_voucher_balance = flt(data.balance);
+this._dlg_coupon_code     = "";
+this._dlg_coupon_discount = 0;
+PosState.voucher_code    = code;
+PosState.voucher_amount  = this._dlg_voucher_amount;
+PosState.voucher_name    = data.voucher_name || "";
+PosState.voucher_balance = this._dlg_voucher_balance;
+PosState.coupon_code     = null;
+PosState.coupon_discount = 0;
+$msg.html(`<span style="color:var(--pos-success)">🎟️ ${__("Voucher")} — ₹${format_number(data.amount)} ${__("off")} (${__("Bal")}: ₹${format_number(data.balance)})</span>`).show();
+} else {
+this._dlg_coupon_code     = code;
+this._dlg_coupon_discount = flt(data.amount);
+this._dlg_voucher_code    = "";
+this._dlg_voucher_amount  = 0;
+PosState.coupon_code     = code;
+PosState.coupon_discount = this._dlg_coupon_discount;
+PosState.voucher_code    = null;
+PosState.voucher_amount  = 0;
+$msg.html(`<span style="color:var(--pos-success)">🏷️ ${__("Coupon")} — ₹${format_number(data.amount)} ${__("off")}</span>`).show();
+}
+this._update_totals();
+}).catch(err => {
+const msg = err && err.message ? frappe.utils.strip_html(err.message) : __("Invalid code");
+ov.find("#ch-pay-coupon-msg")
+.html(`<span style="color:var(--pos-danger)">${frappe.utils.escape_html(msg)}</span>`).show();
+});
+});
+ov.on("keydown", "#ch-pay-coupon-code", e => {
+if (e.key === "Enter") ov.find("#ch-pay-coupon-apply").trigger("click");
+});
+
+// ── Confirm on Enter when balance == 0 ───────────────────────────────
+ov.on("keydown", e => {
+if (e.key === "Enter" && !$(e.target).is("input, textarea, select, button")) {
+const $btn = ov.find("#ch-pay-submit");
+if (!$btn.prop("disabled")) $btn.trigger("click");
+}
+});
+
+// Escape to close
 		// Escape to close
 		$(document).one("keydown.ch_pay_overlay", e => {
 			if (e.key === "Escape") this._close();
@@ -635,6 +942,36 @@ export class PaymentDialog {
 		this._payments[cash_idx].amount = amt;
 		this._overlay.find(`.ch-pay-row-amount[data-idx="${cash_idx}"]`).val(amt.toFixed(2));
 		this._update_totals();
+	}
+
+	// ───────────────────────────────────── Discount Reasons ──
+
+	_load_disc_reasons() {
+		this._disc_reasons = [];
+		if (!PosState.company) return;
+		frappe.xcall("ch_pos.api.pos_api.get_discount_reasons", {
+			company: PosState.company,
+		}).then((reasons) => {
+			this._disc_reasons = reasons || [];
+			const sel = this._overlay?.find("#ch-pay-disc-reason");
+			if (!sel) return;
+			sel.find("option:not(:first)").remove();
+			(reasons || []).forEach((r) => {
+				const label = r.allow_manual_entry
+					? r.reason_name
+					: `${r.reason_name} (${r.discount_type === "Percentage" ? r.discount_value + "%" : "₹" + r.discount_value})`;
+				sel.append(`<option value="${frappe.utils.escape_html(r.name)}">${frappe.utils.escape_html(label)}</option>`);
+			});
+		if (this._disc_reason) {
+			sel.val(this._disc_reason);
+			sel.trigger("change");
+			if (this._disc_pct) this._overlay?.find("#ch-pay-disc-pct").val(this._disc_pct);
+			if (this._disc_amt) this._overlay?.find("#ch-pay-disc-amt").val(this._disc_amt);
+			// Open the accordion to show the restored discount
+			this._overlay?.find("#ch-pay-disc-body").show();
+			this._overlay?.find("#ch-pay-disc-block .ch-pay-toggle-icon").addClass("ch-pay-icon-open");
+		}
+		});
 	}
 
 	// ───────────────────────────────────── Sale type pills ──
@@ -664,6 +1001,23 @@ export class PaymentDialog {
 		pills.html(btns);
 		if (PosState.sale_type) {
 			this._update_sale_sub_type(PosState.sale_type);
+		}
+
+		// Sync free/credit toggles with the actual current sale type.
+		// This corrects any stale _is_free_sale/_is_credit_sale state that
+		// was restored from a previous dialog session (e.g. user went Back
+		// while in Free Sale mode, then re-opened with a normal sale type).
+		const cur = this._sale_types.find(t => t.sale_type_name === PosState.sale_type);
+		if (cur) {
+			const should_free   = !cur.requires_payment;
+			const should_credit = !!(cur.triggers_credit_sale ||
+				(cur.code || "").toUpperCase() === "CS");
+			if (should_free !== this._is_free_sale) {
+				this._overlay.find("#ch-pay-free-chk").prop("checked", should_free).trigger("change");
+			}
+			if (should_credit !== this._is_credit_sale) {
+				this._overlay.find("#ch-pay-credit-chk").prop("checked", should_credit).trigger("change");
+			}
 		}
 	}
 
@@ -781,6 +1135,16 @@ export class PaymentDialog {
 
 	_update_totals() {
 		const grand      = this._is_free_sale ? 0 : this._calc_grand_total();
+
+		// Sync loyalty amount — clamp to current payable grand
+		if (this._redeem_loyalty && this._loyalty_amount > grand) {
+			this._loyalty_amount = grand;
+			this._overlay.find("#ch-pay-loyalty-amt").val(grand.toFixed(2));
+		}
+		// Dynamic max label: min(points_value, grand)
+		const _loy_pts_max = flt(PosState.loyalty_points) * flt(PosState.conversion_factor || 0);
+		this._overlay.find("#ch-pay-loyalty-max").text(`${__("max")} ₹${format_number(Math.min(_loy_pts_max, grand))}`);
+
 		const loyalty    = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
 		const advance    = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
 		const net_due    = Math.max(0, grand - loyalty - advance);
@@ -880,9 +1244,18 @@ export class PaymentDialog {
 			const container = this._overlay?.find("#ch-pay-bank-offers");
 			if (!container) return;
 			if (!offers || !offers.length) { container.empty(); return; }
+			const active = this._bank_offer ? this._bank_offer.name : null;
 			container.html(
 				`<div class="ch-pay-offers-header"><i class="fa fa-tag"></i> ${__("Offers for")} <b>${frappe.utils.escape_html(mop)}</b></div>` +
-				offers.map(o => `<div class="ch-pay-offer-chip">🏦 ${frappe.utils.escape_html(o.offer_name)} — ${frappe.utils.escape_html(o.conditions_text || "")}</div>`).join("")
+				`<div class="ch-pay-offer-chips-wrap">` +
+				offers.map(o => {
+					const applied = (active === o.name) ? " ch-pay-offer-chip-active" : "";
+					const fullLabel = o.offer_name + (o.conditions_text ? " \u2014 " + o.conditions_text : "");
+					return `<div class="ch-pay-offer-chip${applied}" data-offer-name="${frappe.utils.escape_html(o.name)}" data-value-type="${frappe.utils.escape_html(o.value_type || "")}" data-value="${flt(o.value)}" title="${frappe.utils.escape_html(fullLabel)}">
+						🏦 ${frappe.utils.escape_html(o.offer_name)}${active === o.name ? ` <span class="ch-pay-offer-applied">✓</span>` : ""}
+					</div>`;
+				}).join("") +
+				`</div>`
 			);
 		}).catch(() => {});
 	}
@@ -954,6 +1327,15 @@ export class PaymentDialog {
 			required_managers: this._required_managers,
 			advance_amount: this._advance_amount,
 			customer_advances: this._customer_advances,
+			disc_pct:    this._disc_pct,
+			disc_amt:    this._disc_amt,
+			disc_reason: this._disc_reason,
+			dlg_coupon_code:     this._dlg_coupon_code,
+			dlg_coupon_discount: this._dlg_coupon_discount,
+			dlg_voucher_code:    this._dlg_voucher_code,
+			dlg_voucher_amount:  this._dlg_voucher_amount,
+			dlg_voucher_name:    this._dlg_voucher_name,
+			dlg_voucher_balance: this._dlg_voucher_balance,
 		};
 
 		if (this._overlay) {
@@ -1233,7 +1615,7 @@ export class PaymentDialog {
 		});
 	}
 
-	_calc_grand_total() {
+	_calc_grand_total_before_offer() {
 		let subtotal = 0, disc_total = 0;
 		PosState.cart.forEach(c => {
 			subtotal   += flt(c.qty) * flt(c.rate);
@@ -1246,6 +1628,12 @@ export class PaymentDialog {
 		net -= flt(PosState.voucher_amount);
 		net -= flt(PosState.exchange_amount);
 		net -= flt(PosState.product_exchange_credit);
+		return Math.max(0, net);
+	}
+
+	_calc_grand_total() {
+		let net = this._calc_grand_total_before_offer();
+		net -= flt(this._bank_offer ? this._bank_offer.discount : 0);
 		return Math.max(0, net);
 	}
 

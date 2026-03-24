@@ -149,7 +149,7 @@
 }
 .ch-pos-items-grid.card-view {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: var(--pos-space-md);
 }
 
@@ -516,7 +516,7 @@
 
 /* Customer Header */
 .ch-pos-customer-bar {
-  padding: 20px 20px 14px;
+  padding: 12px 16px 8px;
   position: relative;
   z-index: 5;
 }
@@ -533,7 +533,7 @@
   z-index: 100;
 }
 .ch-pos-customer-bar .ch-pos-customer-select input {
-  height: 50px !important;
+  height: 40px !important;
   border-radius: var(--pos-radius) !important;
   border: 2px solid var(--pos-border) !important;
   font-size: var(--pos-fs-md) !important;
@@ -548,11 +548,18 @@
   background: var(--pos-surface) !important;
   box-shadow: 0 0 0 3px rgba(79,110,247,0.1) !important;
 }
+.ch-pos-customer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  flex-wrap: wrap;
+}
 .ch-pos-customer-tag {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-top: 8px;
+  margin-top: 0;
   padding: 4px 12px;
   border-radius: var(--pos-radius-pill);
   font-size: var(--pos-fs-2xs);
@@ -2700,8 +2707,8 @@
   display: flex;
   width: 96vw;
   max-width: 1140px;
-  height: 92vh;
-  max-height: 840px;
+  height: 96vh;
+  max-height: 920px;
   background: #fff;
   border-radius: 16px;
   overflow: hidden;
@@ -2850,8 +2857,22 @@
   display: flex;
   flex-direction: column;
   padding: 0;
+  min-height: 0;
+  background: #fff;
+}
+/* ── Pinned top: Sale type + MOP + bank offers ───────────────────────── */
+.ch-pay-right-pinned {
+  flex-shrink: 0;
+  border-bottom: 2px solid #e2e8f0;
+  background: #fff;
+}
+/* ── Scrollable middle: payment rows + loyalty + quick cash ─────────── */
+.ch-pay-right-scroll {
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
   background: #fff;
+  padding-bottom: 8px;
 }
 
 /* ── Right header (amount due) ───────────────────────────────────────── */
@@ -2878,8 +2899,7 @@
 
 /* ── MOP buttons section ─────────────────────────────────────────────── */
 .ch-pay-mop-section {
-  padding: 14px 20px 10px;
-  border-bottom: 1px solid #f1f5f9;
+  padding: 8px 16px 10px;
 }
 .ch-pay-mop-label {
   font-size: 11px;
@@ -2897,12 +2917,12 @@
 .ch-pay-mop-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
+  gap: 5px;
+  padding: 5px 11px;
   border: 1.5px solid #e2e8f0;
   border-radius: 24px;
   background: #f8fafc;
-  font-size: 13px;
+  font-size: 12px;
   color: #334155;
   cursor: pointer;
   transition: all 0.15s;
@@ -2919,8 +2939,8 @@
 
 /* ── Bank/card offers ────────────────────────────────────────────────── */
 .ch-pay-bank-offers {
-  padding: 0 20px;
-  min-height: 0;
+  padding: 0 16px;
+  overflow: hidden;
 }
 .ch-pay-offers-header {
   font-size: 11px;
@@ -2930,8 +2950,18 @@
   letter-spacing: 0.05em;
   margin: 10px 0 6px;
 }
+.ch-pay-offer-chips-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .ch-pay-offer-chip {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   background: #fffbeb;
   border: 1px solid #fcd34d;
   border-radius: 20px;
@@ -2939,20 +2969,37 @@
   font-size: 12px;
   color: #92400e;
   margin: 3px 4px 3px 0;
-  cursor: default;
+  cursor: pointer;
+  transition: all 0.15s;
+  user-select: none;
+}
+.ch-pay-offer-chip:hover {
+  background: #fef3c7;
+  border-color: #f59e0b;
+}
+.ch-pay-offer-chip.ch-pay-offer-chip-active {
+  background: #d1fae5;
+  border-color: #10b981;
+  color: #065f46;
+  font-weight: 600;
+}
+.ch-pay-offer-applied {
+  color: #059669;
+  font-weight: 700;
+  margin-left: 4px;
 }
 
 /* ── Payment rows ────────────────────────────────────────────────────── */
 .ch-pay-rows {
-  padding: 10px 20px 4px;
+  padding: 6px 16px 4px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 .ch-pay-row {
   border: 1.5px solid #e2e8f0;
-  border-radius: 12px;
-  padding: 12px 14px;
+  border-radius: 10px;
+  padding: 9px 12px;
   background: #fafafa;
   transition: border-color 0.2s;
 }
@@ -2964,7 +3011,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .ch-pay-mop-label,
 .ch-pay-row-mop-label {
@@ -3005,8 +3052,8 @@
 .ch-pay-row-amount {
   border: 1px solid #cbd5e1;
   border-radius: 0 8px 8px 0;
-  padding: 6px 10px;
-  font-size: 16px;
+  padding: 5px 10px;
+  font-size: 15px;
   font-weight: 600;
   color: #0f172a;
   width: 100%;
@@ -3023,8 +3070,22 @@
   flex-direction: column;
   gap: 6px;
 }
+/* Card refs container (RRN + last 4) */
+.ch-pay-card-refs {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ch-pay-card-refs .ch-pay-row-rrn {
+  flex: 1;
+}
+.ch-pay-card-refs .ch-pay-row-card4 {
+  width: 110px;
+  flex-shrink: 0;
+}
 .ch-pay-row-utr input,
 .ch-pay-row-rrn,
+.ch-pay-row-card4,
 .ch-pay-row-card input {
   width: 100%;
   border: 1px solid #e2e8f0;
@@ -3035,8 +3096,11 @@
   outline: none;
 }
 .ch-pay-row-utr input:focus,
+.ch-pay-row-rrn:focus,
+.ch-pay-row-card4:focus,
 .ch-pay-row-card input:focus {
   border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59,130,246,0.12);
 }
 .ch-pay-row-card {
   flex-direction: row;
@@ -3048,8 +3112,8 @@
 
 /* ── Loyalty row ─────────────────────────────────────────────────────── */
 .ch-pay-loyalty-row {
-  margin: 6px 20px;
-  padding: 10px 14px;
+  margin: 4px 16px;
+  padding: 8px 12px;
   background: #fdf4ff;
   border: 1px solid #e9d5ff;
   border-radius: 10px;
@@ -3071,20 +3135,40 @@
   margin-top: 8px;
 }
 
-/* ── Balance bar ─────────────────────────────────────────────────────── */
+/* ── Pinned bottom: Discount + Coupon always visible ────────── */
+.ch-pay-right-discounts {
+  flex-shrink: 0;
+  border-top: 1.5px solid #e2e8f0;
+  padding: 4px 0 2px;
+  background: #fff;
+}
+.ch-pay-right-discounts .ch-pay-section-block {
+  margin: 3px 12px;
+}
+.ch-pay-right-discounts .ch-pay-section-hdr {
+  padding: 8px 12px;
+}
+
+/* ── Balance bar — sticky footer above submit ───────────────────────── */
 .ch-pay-balance-bar {
-  margin: 10px 20px 6px;
-  padding: 12px 16px;
-  background: #f1f5f9;
-  border-radius: 12px;
-  border: 1px solid #e2e8f0;
+  flex-shrink: 0;
+  padding: 8px 16px 6px;
+  background: #f8fafc;
+  border-top: 2px solid #e2e8f0;
+}
+.ch-pay-bal-due-row {
+  border-top: 1px solid #e2e8f0;
+  margin-top: 4px;
+  padding-top: 6px !important;
+  font-size: 15px !important;
+  font-weight: 700;
 }
 .ch-pay-bal-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 4px 0;
-  font-size: 14px;
+  padding: 2px 0;
+  font-size: 13px;
   color: #334155;
 }
 .ch-pay-bal-positive {
@@ -3103,7 +3187,7 @@
 
 /* ── Quick cash ──────────────────────────────────────────────────────── */
 .ch-pay-quick-cash {
-  padding: 2px 20px 8px;
+  padding: 2px 16px 8px;
 }
 .ch-pay-quick-label {
   font-size: 11px;
@@ -3137,9 +3221,9 @@
 
 /* ── Submit button ───────────────────────────────────────────────────── */
 .ch-pay-submit-btn {
-  margin: 8px 20px 20px;
-  padding: 14px 20px;
-  font-size: 16px;
+  margin: 8px 16px 12px;
+  padding: 12px 20px;
+  font-size: 15px;
   font-weight: 700;
   border-radius: 12px;
   border: none;
@@ -3298,7 +3382,7 @@
 .ch-pay-sale-modes {
   display: flex;
   gap: 10px;
-  padding: 10px 20px 6px;
+  padding: 6px 16px;
   border-bottom: 1px solid #f1f5f9;
 }
 .ch-pay-mode-toggle {
@@ -3348,7 +3432,7 @@
 
 /* ── Sale Type in Payment Dialog ─────────────────────────── */
 .ch-pay-sale-type-section {
-  padding: 8px 20px;
+  padding: 6px 16px 8px;
   border-bottom: 1px solid #f1f5f9;
 }
 .ch-pay-sale-type-label {
@@ -3889,3 +3973,165 @@
   .ch-session-bar { height: 36px; font-size: 10px; }
 }
 /* ── end payment overlay ─────────────────────────────────────────────── */
+
+/* ══════════════════════════════════════════════════════════════════════
+   CH POS v3 — Enterprise Redesign: Cart Panel + Payment Overlay
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Keyboard shortcut hints ─────────────────────────────────────────── */
+.ch-pos-kbd-hint,
+.ch-pay-kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  line-height: 1.4;
+  background: rgba(255,255,255,0.18);
+  color: inherit;
+  border: 1px solid rgba(255,255,255,0.25);
+  vertical-align: middle;
+  opacity: 0.85;
+  pointer-events: none;
+  user-select: none;
+}
+/* On primary (Pay) button the hint must stay visible */
+.ch-pos-btn-pay .ch-pos-kbd-hint {
+  background: rgba(255,255,255,0.2);
+  border-color: rgba(255,255,255,0.35);
+}
+/* On dark confirm button */
+.ch-pay-submit-btn.btn-success .ch-pay-kbd-hint {
+  background: rgba(255,255,255,0.2);
+  border-color: rgba(255,255,255,0.35);
+  color: #fff;
+}
+.ch-pay-submit-btn.btn-default .ch-pay-kbd-hint {
+  background: rgba(0,0,0,0.06);
+  border-color: rgba(0,0,0,0.12);
+  color: var(--pos-text-muted);
+}
+
+/* ── Cart panel — remove legacy discount bar spacing artefacts ───────── */
+.ch-pos-cart-panel .ch-pos-discount-bar { display: none !important; }
+
+/* ── Cart panel grand total — make amount very prominent ───────────────  */
+.ch-pos-cart-summary .summary-row.grand-total {
+  padding: 14px 0 8px;
+  margin-top: 10px;
+  border-top: 2px solid var(--pos-text);
+  font-size: var(--pos-fs-2xl) !important;
+  font-weight: 800;
+}
+.ch-pos-cart-summary .summary-row.grand-total .value {
+  font-size: 32px !important;
+  font-weight: 800;
+  color: var(--pos-primary);
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Accordion section blocks (Discount / Coupon) — card style ────────── */
+.ch-pay-section-block {
+  margin: 5px 16px;
+  border: 1.5px solid #c8d5e0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+.ch-pay-section-hdr {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 14px;
+  background: #f1f5f9;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  text-align: left;
+  transition: background 0.15s;
+  outline: none;
+  box-shadow: none;
+  user-select: none;
+}
+.ch-pay-section-hdr:hover {
+  background: #e8eef6;
+  color: #1e293b;
+}
+.ch-pay-section-hdr span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ch-pay-section-hdr i.fa-percent { color: #f59e0b; }
+.ch-pay-section-hdr i.fa-ticket   { color: #3b82f6; }
+.ch-pay-toggle-icon {
+  font-size: 11px;
+  color: #7c8fa8;
+  transition: transform 0.22s ease;
+  display: inline-block;
+}
+.ch-pay-toggle-icon.ch-pay-icon-open {
+  transform: rotate(90deg);
+}
+.ch-pay-section-body {
+  padding: 12px 14px 14px;
+  background: #f8fafc;
+  border-top: 1.5px solid #c8d5e0;
+}
+
+/* Discount split input row */
+.ch-pay-disc-split {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ch-pay-disc-split .input-group { flex: 1; }
+.ch-pay-disc-or {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+/* Coupon row */
+.ch-pay-coupon-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ch-pay-coupon-row .form-control { flex: 1; }
+.ch-pay-coupon-row .btn {
+  white-space: nowrap;
+  font-weight: 600;
+  padding: 5px 14px;
+  font-size: 12px;
+}
+
+/* Field hint / inline feedback */
+.ch-pay-field-hint {
+  font-size: 11px;
+  margin-top: 6px;
+  line-height: 1.4;
+  color: #64748b;
+}
+.ch-pay-field-row { margin-bottom: 6px; }
+
+/* ── Submit — flex-shrink keeps it always visible at bottom ───────────── */
+/* ── India phone validation error state ─────────────────────────────── */
+.ch-phone-invalid {
+  border-color: #ef4444 !important;
+  background: #fee2e2 !important;
+  box-shadow: 0 0 0 2px rgba(239,68,68,0.15) !important;
+}

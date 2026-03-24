@@ -88,3 +88,57 @@ export function show_empty_state(container, opts = {}) {
 
 // Make format_number available globally for templates that use it
 window.format_number = format_number;
+
+/**
+ * Validate an Indian phone number (mobile or landline).
+ *
+ * Accepts:
+ *   Mobile  : 10-digit numbers starting with 6-9
+ *             with optional prefix: +91, 0091, or 0
+ *   Landline: STD code (2-4 digits) + subscriber (6-8 digits)
+ *             with optional 0/+91 prefix, total 10–11 digits
+ *
+ * @param {string} val
+ * @returns {boolean}
+ */
+export function validate_india_phone(val) {
+	const clean = (val || "").replace(/[\s\-().]/g, "");
+	// Strip +91 or 0091 or leading 0
+	const stripped = clean
+		.replace(/^\+91/, "")
+		.replace(/^0091/, "")
+		.replace(/^0(?=[6-9])/, "")   // leading 0 only before mobile digits
+		.replace(/^0(?=\d{9,10}$)/, ""); // leading 0 for landlines
+
+	// Mobile: exactly 10 digits starting with 6-9
+	if (/^[6-9]\d{9}$/.test(stripped)) return true;
+
+	// Landline: STD(2-5 digits) + subscriber(5-8 digits) = 7-11 total, allow full with 0 prefix
+	// Common: 011-XXXXXXXX (10 total sans prefix), 0XXXXXXXXXX (11 with leading 0)
+	const withZero = clean.replace(/^\+91|^0091/, "");
+	if (/^0[1-9]\d{8,9}$/.test(withZero)) return true;   // 11-digit with leading 0
+	if (/^[1-9][1-9]\d{6,8}$/.test(stripped)) return true; // 8-10 digits bare landline
+
+	return false;
+}
+
+/**
+ * Show an inline error and return false, or clear error and return true.
+ * @param {jQuery|HTMLElement} input
+ * @param {string} val
+ * @returns {boolean}
+ */
+export function assert_india_phone(input, val) {
+	const $el = $(input);
+	if (!val) { // allow empty (use reqd for mandatory)
+		$el.removeClass("ch-phone-invalid");
+		return true;
+	}
+	if (validate_india_phone(val)) {
+		$el.removeClass("ch-phone-invalid").attr("title", "");
+		return true;
+	}
+	$el.addClass("ch-phone-invalid").attr("title", __("Enter a valid Indian phone number"));
+	frappe.show_alert({ message: __("Enter a valid Indian phone number (mobile or landline)"), indicator: "orange" });
+	return false;
+}

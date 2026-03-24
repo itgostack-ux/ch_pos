@@ -53,7 +53,7 @@ def _replenish_stock_if_needed():
             JOIN `tabSales Invoice` p ON pi.parent = p.name
             WHERE pi.item_code = %s AND pi.warehouse = %s
               AND p.docstatus = 1 AND p.is_return = 0
-              AND IFNULL(p.consolidated_invoice, '') = ''
+              AND p.is_consolidated = 0
         """, (item_code, warehouse), as_dict=True)
         reserved = frappe.utils.flt((pos_reserved[0].qty if pos_reserved else 0))
         available = frappe.utils.flt(bin_qty) - reserved

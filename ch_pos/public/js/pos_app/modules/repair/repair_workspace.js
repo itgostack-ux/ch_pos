@@ -6,6 +6,7 @@
  * Creates GoFix Service Requests directly.
  */
 import { PosState, EventBus } from "../../state.js";
+import { assert_india_phone } from "../../shared/helpers.js";
 
 export class RepairWorkspace {
 	constructor() {
@@ -196,6 +197,7 @@ export class RepairWorkspace {
 				frappe.show_alert({ message: __("Customer, phone, device, and issue description are required"), indicator: "orange" });
 				return;
 			}
+			if (!assert_india_phone(panel.find(".ch-rep-phone")[0], phone)) return;
 
 			frappe.xcall("frappe.client.insert", {
 				doc: {
@@ -333,6 +335,7 @@ export class RepairWorkspace {
 				frappe.show_alert({ message: __("Customer, phone, device, and issue description are required"), indicator: "orange" });
 				return;
 			}
+			if (!assert_india_phone(panel.find(".ch-rep-phone")[0], phone)) return;
 
 			const btn = panel.find(".ch-rep-quick-job");
 			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating Job Card...")}`);

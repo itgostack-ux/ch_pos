@@ -28,9 +28,15 @@ export class ReportsWorkspace {
 						</h4>
 						<span class="ch-mode-hint">${__("Today's performance at a glance")}</span>
 					</div>
+<div style="display:flex;gap:8px">
+					<button class="btn btn-outline-secondary ch-rpt-z-report" style="border-radius:var(--pos-radius);font-weight:700"
+						title="${__("End-of-day store summary across all sessions")}">
+						<i class="fa fa-file-text"></i> ${__("Z Report")}
+					</button>
 					<button class="btn btn-outline-secondary ch-rpt-refresh" style="border-radius:var(--pos-radius);font-weight:700">
 						<i class="fa fa-refresh"></i> ${__("Refresh")}
 					</button>
+				</div>
 				</div>
 
 				<div class="ch-rpt-loading" style="padding:40px;text-align:center">
@@ -230,6 +236,7 @@ export class ReportsWorkspace {
 			panel.find(".ch-rpt-loading").show();
 			this._load_data(panel);
 		});
+		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
 		// Update footfall row when walk-in is logged from sidebar
 		EventBus.on("walkin:logged", (d) => {
 			panel.find(".ch-rpt-walkins").text(d.walkin_count || 0);
@@ -382,6 +389,117 @@ export class ReportsWorkspace {
 					st_list.html(`<div class="text-muted text-center" style="padding:20px">${__("No recent transfers")}</div>`);
 				}
 			},
+		});
+	}
+
+	_show_z_report() {
+		const store = PosState.store;
+		const business_date = PosState.business_date;
+		if (!store || !business_date) {
+			frappe.msgprint(__("No active session — store and business date required for Z Report."));
+			return;
+		}
+
+		frappe.xcall("ch_pos.api.session_api.get_z_report", {
+			store,
+			business_date,
+		}).then((d) => {
+			const status_badge = d.all_sessions_closed
+				? `<span class="badge" style="background:#16a34a;color:#fff">✔ ${__("All Sessions Closed")}</span>`
+				: `<span class="badge" style="background:#d97706;color:#fff">⚠ ${__("Shift(s) Still Open")}</span>`;
+
+			// Payment modes table
+			const payment_rows = (d.payment_modes || [])
+				.map((p) => {
+					const cls = flt(p.total) < 0 ? "color:#dc2626" : "";
+					return `<tr>
+						<td>${frappe.utils.escape_html(p.mode)}</td>
+						<td class="text-right" style="${cls}">${frappe.format(p.total, { fieldtype: "Currency" })}</td>
+					</tr>`;
+				})
+				.join("");
+
+			// Sessions breakdown table
+			const session_rows = (d.sessions || []).map((s) => {
+				const status_cls = s.status === "Closed" ? "color:#16a34a" : "color:#d97706";
+				const shift_end = s.shift_end ? frappe.datetime.str_to_user(s.shift_end) : __("Open");
+				const variance = flt(s.cash_variance);
+				const var_cls = variance === 0 ? "" : variance > 0 ? "color:#16a34a" : "color:#dc2626";
+				return `<tr>
+					<td style="font-size:0.8rem">${frappe.utils.escape_html(s.name)}</td>
+					<td>${frappe.utils.escape_html(s.user || "")}</td>
+					<td style="${status_cls}">${frappe.utils.escape_html(s.status)}</td>
+					<td class="text-right">${s.total_invoices || 0}</td>
+					<td class="text-right">${frappe.format(s.net_sales || 0, { fieldtype: "Currency" })}</td>
+					<td class="text-right" style="${var_cls}">${frappe.format(variance, { fieldtype: "Currency" })}</td>
+				</tr>`;
+			}).join("");
+
+			frappe.msgprint({
+				title: __("Z Report — {0}", [d.business_date]),
+				message: `
+				<div style="font-size:0.9rem">
+					<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+						<div>
+							<strong>${frappe.utils.escape_html(d.store)}</strong>
+							<span class="text-muted" style="margin-left:8px">${d.business_date}</span>
+						</div>
+						${status_badge}
+					</div>
+
+					<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px">
+						<div style="background:#f0fdf4;border-radius:6px;padding:10px;text-align:center">
+							<div style="font-size:1.2rem;font-weight:700;color:#16a34a">
+								${frappe.format(d.total_net_sales, { fieldtype: "Currency" })}
+							</div>
+							<div class="text-muted" style="font-size:0.78rem">${__("Net Sales")}</div>
+						</div>
+						<div style="background:#eff6ff;border-radius:6px;padding:10px;text-align:center">
+							<div style="font-size:1.2rem;font-weight:700;color:#2563eb">${d.total_invoices}</div>
+							<div class="text-muted" style="font-size:0.78rem">${__("Invoices")}</div>
+						</div>
+						<div style="background:#fefce8;border-radius:6px;padding:10px;text-align:center">
+							<div style="font-size:1.2rem;font-weight:700;color:#d97706">${d.total_sessions}</div>
+							<div class="text-muted" style="font-size:0.78rem">${__("Sessions")}</div>
+						</div>
+						<div style="background:${flt(d.total_variance) !== 0 ? "#fef2f2" : "#f0fdf4"};border-radius:6px;padding:10px;text-align:center">
+							<div style="font-size:1.2rem;font-weight:700;color:${flt(d.total_variance) !== 0 ? "#dc2626" : "#16a34a"}">
+								${frappe.format(d.total_variance, { fieldtype: "Currency" })}
+							</div>
+							<div class="text-muted" style="font-size:0.78rem">${__("Cash Variance")}</div>
+						</div>
+					</div>
+
+					<h6 style="margin-bottom:6px">${__("Payment Modes")}</h6>
+					<table class="table table-sm table-bordered" style="margin-bottom:16px">
+						<thead><tr>
+							<th>${__("Mode")}</th>
+							<th class="text-right">${__("Total")}</th>
+						</tr></thead>
+						<tbody>${payment_rows || `<tr><td colspan="2" class="text-muted text-center">${__("No payments")}</td></tr>`}</tbody>
+					</table>
+
+					<h6 style="margin-bottom:6px">${__("Sessions Breakdown")}</h6>
+					<table class="table table-sm table-bordered">
+						<thead><tr>
+							<th>${__("Session")}</th>
+							<th>${__("Cashier")}</th>
+							<th>${__("Status")}</th>
+							<th class="text-right">${__("Bills")}</th>
+							<th class="text-right">${__("Net Sales")}</th>
+							<th class="text-right">${__("Variance")}</th>
+						</tr></thead>
+						<tbody>${session_rows || `<tr><td colspan="6" class="text-muted text-center">${__("No sessions found")}</td></tr>`}</tbody>
+					</table>
+				</div>`,
+				wide: true,
+			});
+		}).catch((err) => {
+			frappe.msgprint({
+				title: __("Z Report Error"),
+				message: err.message || err.exc || __("Failed to load Z Report"),
+				indicator: "red",
+			});
 		});
 	}
 }

@@ -9,6 +9,7 @@
  * - Track pending claims pipeline
  */
 import { PosState, EventBus } from "../../state.js";
+import { assert_india_phone } from "../../shared/helpers.js";
 
 export class ClaimsWorkspace {
 	constructor() {
@@ -419,6 +420,8 @@ export class ClaimsWorkspace {
 			frappe.show_alert({ message: __("Issue description is required"), indicator: "orange" });
 			return;
 		}
+		const claimPhone = panel.find(".ch-claim-phone").val().trim();
+		if (claimPhone && !assert_india_phone(panel.find(".ch-claim-phone")[0], claimPhone)) return;
 
 		const btn = panel.find(".ch-claim-submit");
 		btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Submitting...")}`);

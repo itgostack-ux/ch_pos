@@ -53,7 +53,7 @@ def execute(filters=None):
             WHERE pos_profile = %(pp)s
               AND posting_date = %(bd)s
               AND docstatus = 1
-              AND IFNULL(consolidated_invoice, '') = ''
+              AND is_consolidated = 0
         """, {"pp": s.pos_profile, "bd": s.business_date}, as_dict=True)[0]
 
         s["pos_invoice_total"] = flt(inv_data.total)

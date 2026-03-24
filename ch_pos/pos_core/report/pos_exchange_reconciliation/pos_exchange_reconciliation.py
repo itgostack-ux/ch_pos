@@ -55,7 +55,7 @@ def get_data(filters):
             pi.posting_date,
             pi.name AS invoice,
             pi.customer,
-            pi.warehouse,
+            COALESCE(pi.set_warehouse, '') AS warehouse,
             pi.custom_exchange_assessment AS exchange_assessment,
             pi.custom_exchange_amount AS exchange_amount
         FROM `tabSales Invoice` pi

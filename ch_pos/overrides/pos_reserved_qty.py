@@ -41,7 +41,7 @@ def _get_pos_reserved_qty_from_table(child_table, item_code, warehouse):
             SELECT COALESCE(SUM(p_item.`{qty_column}`), 0) AS stock_qty
             FROM `tabPOS Invoice` p_inv
             JOIN `tab{child_table}` p_item ON p_item.parent = p_inv.name
-            WHERE IFNULL(p_inv.consolidated_invoice, '') = ''
+            WHERE p_inv.is_consolidated = 0
               AND p_item.item_code = %(item_code)s
               AND p_item.warehouse = %(warehouse)s
               AND (

@@ -47,7 +47,7 @@ def get_data(filters):
         SELECT
             pi.posting_date,
             pi.name AS invoice,
-            pi.warehouse,
+            COALESCE(pi.set_warehouse, '') AS warehouse,
             pii.item_code,
             pii.item_name,
             pii.qty,

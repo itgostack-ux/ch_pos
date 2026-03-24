@@ -24,8 +24,9 @@ def build_settlement_snapshot(session):
         JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
         WHERE pi.pos_profile = %(pp)s
           AND pi.docstatus = 1
-          AND IFNULL(pi.consolidated_invoice, '') = ''
+          AND pi.is_consolidated = 0
           AND pi.posting_date = %(bd)s
+          AND pi.is_return = 0
         GROUP BY mop.type, sip.mode_of_payment
     """, {"pp": session.pos_profile, "bd": session.business_date}, as_dict=True)
 
@@ -59,7 +60,7 @@ def build_settlement_snapshot(session):
         JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
         WHERE pi.pos_profile = %(pp)s
           AND pi.docstatus = 1
-          AND IFNULL(pi.consolidated_invoice, '') = ''
+          AND pi.is_consolidated = 0
           AND pi.posting_date = %(bd)s
           AND pi.is_return = 1
           AND mop.type = 'Cash'
