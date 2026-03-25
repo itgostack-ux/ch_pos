@@ -106,6 +106,22 @@ def get_discount_reasons(company=None):
 
 
 @frappe.whitelist()
+def get_finance_partners():
+    """Return enabled finance partners with their tenure options for POS dropdown."""
+    partners = frappe.get_all(
+        "CH Finance Partner",
+        filters={"enabled": 1},
+        fields=["name", "partner_name", "short_code", "tenure_options"],
+        order_by="partner_name asc",
+    )
+    for p in partners:
+        # Parse comma-separated tenure options into list of integers
+        raw = (p.get("tenure_options") or "").strip()
+        p["tenures"] = sorted([cint(t.strip()) for t in raw.split(",") if t.strip()]) if raw else []
+    return partners
+
+
+@frappe.whitelist()
 def create_pos_invoice(pos_profile, customer, items,
                        mode_of_payment=None, amount_paid=0,
                        payments=None,
@@ -252,7 +268,7 @@ def create_pos_invoice(pos_profile, customer, items,
             if p.get("finance_provider"):
                 row["custom_finance_provider"] = p["finance_provider"]
             if p.get("finance_tenure"):
-                row["custom_finance_tenure"] = p["finance_tenure"]
+                row["custom_finance_tenure"] = cint(p["finance_tenure"])
             if p.get("finance_approval_id"):
                 row["custom_finance_approval_id"] = p["finance_approval_id"]
             if flt(p.get("finance_down_payment")):

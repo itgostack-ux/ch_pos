@@ -331,18 +331,19 @@ CUSTOM_FIELDS = {
         # Finance / EMI payment fields
         {
             "fieldname": "custom_finance_provider",
-            "fieldtype": "Data",
-            "label": "Finance Provider",
+            "fieldtype": "Link",
+            "options": "CH Finance Partner",
+            "label": "Finance Partner",
             "insert_after": "custom_card_last_four",
-            "description": "Finance company name (Bajaj, HDFC, TVS, etc.)",
+            "description": "Third-party finance partner (Bajaj Finserv, HDFC, TVS Credit, etc.)",
             "module": "POS Core",
         },
         {
             "fieldname": "custom_finance_tenure",
-            "fieldtype": "Data",
-            "label": "Finance Tenure",
+            "fieldtype": "Int",
+            "label": "EMI Tenure (Months)",
             "insert_after": "custom_finance_provider",
-            "description": "EMI tenure (e.g. 6M, 12M, 18M)",
+            "description": "EMI tenure in months",
             "module": "POS Core",
         },
         {

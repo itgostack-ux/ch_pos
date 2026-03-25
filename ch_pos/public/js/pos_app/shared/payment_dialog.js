@@ -173,6 +173,7 @@ export class PaymentDialog {
 		this._load_sale_types();
 		this._restore_payment_ui();
 		this._load_disc_reasons();
+		this._load_finance_partners();
 	}
 
 	/** Re-render the Add Payment buttons from PosState.payment_modes.
@@ -599,12 +600,21 @@ placeholder="${__("Enter code...")}">
 		});
 
 		// Finance/EMI fields
-		ov.on("input", ".ch-pay-row-fin-provider", e => {
-			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_provider = $(e.currentTarget).val().trim();
+		ov.on("change", ".ch-pay-row-fin-provider", e => {
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			const partner_name = $(e.currentTarget).val();
+			this._payments[idx].finance_provider = partner_name;
+			// Populate tenure dropdown based on selected partner
+			const partner = (this._finance_partners || []).find(fp => fp.partner_name === partner_name);
+			const tenures = partner ? partner.tenures : [];
+			const $tenure = this._overlay.find(`.ch-pay-row-fin-tenure[data-idx="${idx}"]`);
+			$tenure.empty().append(`<option value="">${__('Select Tenure')}</option>`);
+			tenures.forEach(t => $tenure.append(`<option value="${t}">${t} Months</option>`));
+			this._payments[idx].finance_tenure = "";
 			this._update_totals();
 		});
-		ov.on("input", ".ch-pay-row-fin-tenure", e => {
-			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_tenure = $(e.currentTarget).val().trim();
+		ov.on("change", ".ch-pay-row-fin-tenure", e => {
+			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_tenure = $(e.currentTarget).val();
 		});
 		ov.on("input", ".ch-pay-row-fin-approval", e => {
 			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_approval_id = $(e.currentTarget).val().trim();
@@ -988,6 +998,18 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		});
 	}
 
+	_load_finance_partners() {
+		this._finance_partners = [];
+		frappe.xcall("ch_pos.api.pos_api.get_finance_partners").then(partners => {
+			this._finance_partners = partners || [];
+			// Re-render payment rows to populate finance dropdowns if any finance row exists
+			if (this._payments.some(p => this._mop_type(p.mode) === "finance")) {
+				this._render_payments();
+				this._update_totals();
+			}
+		});
+	}
+
 	// ───────────────────────────────────── Sale type pills ──
 
 	_load_sale_types() {
@@ -1078,13 +1100,20 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 							placeholder="${__("Last 4 digits")}" maxlength="4" value="${frappe.utils.escape_html(p.card_last_four || "")}">
 					</div>`;
 			} else if (type === "finance") {
+				const partners = this._finance_partners || [];
+				const sel_partner = partners.find(fp => fp.partner_name === p.finance_provider);
+				const tenures = sel_partner ? sel_partner.tenures : [];
 				ref_html = `
 					<div class="ch-pay-finance-refs mt-1">
 						<div class="ch-pay-fin-row">
-							<input type="text" class="form-control form-control-sm ch-pay-row-fin-provider" data-idx="${idx}"
-								placeholder="${__("Finance Provider (Bajaj, HDFC, TVS...)")}" value="${frappe.utils.escape_html(p.finance_provider || "")}">
-							<input type="text" class="form-control form-control-sm ch-pay-row-fin-tenure" data-idx="${idx}"
-								placeholder="${__("Tenure (e.g. 6M, 12M)")}" value="${frappe.utils.escape_html(p.finance_tenure || "")}">
+							<select class="form-control form-control-sm ch-pay-row-fin-provider" data-idx="${idx}">
+								<option value="">${__("Select Finance Partner")}</option>
+								${partners.map(fp => `<option value="${frappe.utils.escape_html(fp.partner_name)}" ${fp.partner_name === p.finance_provider ? 'selected' : ''}>${frappe.utils.escape_html(fp.partner_name)}</option>`).join('')}
+							</select>
+							<select class="form-control form-control-sm ch-pay-row-fin-tenure" data-idx="${idx}">
+								<option value="">${__("Select Tenure")}</option>
+								${tenures.map(t => `<option value="${t}" ${String(p.finance_tenure) === String(t) ? 'selected' : ''}>${t} Months</option>`).join('')}
+							</select>
 						</div>
 						<div class="ch-pay-fin-row">
 							<input type="text" class="form-control form-control-sm ch-pay-row-fin-approval" data-idx="${idx}"
@@ -1300,14 +1329,18 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			}
 			if (type === "finance" && has_amount) {
 				const prov_valid = !!(p.finance_provider || "").trim();
+				const tenure_valid = !!(p.finance_tenure);
 				const appr_valid = !!(p.finance_approval_id || "").trim();
 				this._overlay?.find(`.ch-pay-row-fin-provider[data-idx="${i}"]`)
 					.toggleClass("ch-pay-ref-invalid", !prov_valid)
 					.toggleClass("ch-pay-ref-valid", prov_valid);
+				this._overlay?.find(`.ch-pay-row-fin-tenure[data-idx="${i}"]`)
+					.toggleClass("ch-pay-ref-invalid", !tenure_valid)
+					.toggleClass("ch-pay-ref-valid", tenure_valid);
 				this._overlay?.find(`.ch-pay-row-fin-approval[data-idx="${i}"]`)
 					.toggleClass("ch-pay-ref-invalid", !appr_valid)
 					.toggleClass("ch-pay-ref-valid", appr_valid);
-				if (!prov_valid || !appr_valid) all_valid = false;
+				if (!prov_valid || !tenure_valid || !appr_valid) all_valid = false;
 			}
 		}
 		return all_valid;
