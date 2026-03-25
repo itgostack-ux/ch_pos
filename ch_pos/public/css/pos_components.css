@@ -2702,6 +2702,17 @@
   pointer-events: all;
 }
 
+/* Ensure Frappe modals & alerts appear above payment overlay */
+body > .modal-backdrop {
+  z-index: 9995 !important;
+}
+body > .modal {
+  z-index: 9996 !important;
+}
+body > .desk-alert-container {
+  z-index: 100000 !important;
+}
+
 /* ── Modal screen container ───────────────────────────────────────────── */
 .ch-pay-screen {
   display: flex;

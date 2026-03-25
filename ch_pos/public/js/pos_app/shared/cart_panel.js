@@ -376,7 +376,7 @@ export class CartPanel {
 			this.wrapper.find(".ch-pos-customer-info").hide().find(".ch-pos-cust-badges").empty();
 			this.wrapper.find(".ch-pos-credit-warning").hide();
 			// Reset sale type to default
-			this._render_sale_type_bar();
+			PosState.sale_type = null;
 		});
 
 		// Re-render executive bar when access data arrives

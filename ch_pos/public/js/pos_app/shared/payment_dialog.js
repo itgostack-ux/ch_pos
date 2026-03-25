@@ -13,6 +13,7 @@
  */
 import { PosState, EventBus } from "../state.js";
 import { format_number } from "./helpers.js";
+import { pos_warning, pos_info } from "./toast.js";
 
 // ── MOP icon lookup ────────────────────────────────────────────────────────
 function _mop_icon(mop) {
@@ -764,6 +765,11 @@ ov.on("click", ".ch-pay-offer-chip", e => {
 		this._bank_offer = null;
 		PosState.bank_offer_discount = 0;
 	} else {
+		// Mutual exclusion: bank offer cannot be combined with additional discount
+		if (flt(PosState.additional_discount_pct) > 0 || flt(PosState.additional_discount_amt) > 0) {
+			pos_warning(__("Bank offers cannot be combined with additional discounts. Remove the discount first."), 5000);
+			return;
+		}
 		const valueType = ($chip.data("value-type") || "").toLowerCase();
 		const value     = flt($chip.data("value"));
 		const grand     = this._calc_grand_total_before_offer();
@@ -799,6 +805,14 @@ ov.on("change", "#ch-pay-disc-reason", e => {
 this._disc_reason = $(e.currentTarget).val() || "";
 PosState.discount_reason = this._disc_reason;
 const reason = this._disc_reasons.find(r => r.name === this._disc_reason);
+// Mutual exclusion: clear bank offer when applying a discount reason
+if (reason && this._bank_offer) {
+	this._bank_offer = null;
+	PosState.bank_offer_discount = 0;
+	pos_warning(__("Bank offer removed — cannot combine with additional discount"), 4000);
+	const mop = this._payments[0] ? this._payments[0].mode : null;
+	if (mop) this._load_bank_offers(mop);
+}
 const $manual = ov.find("#ch-pay-disc-manual");
 const $info   = ov.find("#ch-pay-disc-info");
 if (!reason) {
@@ -1445,6 +1459,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			redeem_loyalty_points:          this._redeem_loyalty ? 1 : 0,
 			loyalty_points:                 this._redeem_loyalty ? cint(loyalty / (PosState.conversion_factor || 1)) : 0,
 			loyalty_amount:                 this._redeem_loyalty ? loyalty : 0,
+			bank_offer_discount:            flt(this._bank_offer ? this._bank_offer.discount : 0),
+			bank_offer_name:                this._bank_offer ? this._bank_offer.name : null,
 			sales_executive:                PosState.sales_executive || null,
 			sale_type:                      this._is_free_sale ? "Free Sale" : (PosState.sale_type || null),
 			sale_sub_type:                  PosState.sale_sub_type || null,

@@ -25,12 +25,28 @@ export class SessionOpeningScreen {
 	show(open_entries) {
 		return new Promise((resolve, reject) => {
 			this._resolve = resolve;
-			// Check if there's an active CH POS Session to resume
-			if (open_entries && open_entries.length === 1) {
-				this._check_existing_session(open_entries[0], resolve);
-			} else {
-				this._show_profile_and_opening(open_entries, resolve);
-			}
+			// Always check POS context first (handles admin store picker)
+			frappe.call({
+				method: "ch_pos.api.isolation_api.get_pos_context",
+				callback: (r) => {
+					const ctx = r.message || {};
+					if (ctx.status === "select_store") {
+						this._show_store_picker(ctx.stores || [], resolve, ctx.default_store);
+					} else if (open_entries && open_entries.length === 1) {
+						this._check_existing_session(open_entries[0], resolve);
+					} else {
+						this._show_profile_and_opening(open_entries, resolve);
+					}
+				},
+				error: () => {
+					// Fallback if isolation API fails
+					if (open_entries && open_entries.length === 1) {
+						this._check_existing_session(open_entries[0], resolve);
+					} else {
+						this._show_profile_and_opening(open_entries, resolve);
+					}
+				},
+			});
 		});
 	}
 
@@ -40,7 +56,16 @@ export class SessionOpeningScreen {
 			method: "ch_pos.api.isolation_api.get_pos_context",
 			callback: (r) => {
 				const ctx = r.message || {};
-				if (ctx.existing_session) {
+				if (ctx.status === "no_allocation") {
+					frappe.msgprint({
+						title: __("POS Setup Required"),
+						indicator: "red",
+						message: ctx.message || __("You are not allocated to any store for POS operations."),
+					});
+				} else if (ctx.status === "select_store") {
+					// Admin / System Manager — show store picker first
+					this._show_store_picker(ctx.stores || [], resolve, ctx.default_store);
+				} else if (ctx.existing_session) {
 					// Active session exists — auto resume
 					resolve({
 						session_name: ctx.existing_session,
@@ -143,6 +168,94 @@ export class SessionOpeningScreen {
 				},
 			},
 		});
+	}
+
+	_show_store_picker(stores, resolve, defaultStore) {
+		stores = stores || [];
+		const storeOptions = stores.map(
+			s => `${s.name} — ${s.store_name || s.name}`
+		);
+		const defaultOption = defaultStore
+			? storeOptions.find(o => o.startsWith(defaultStore + " — ")) || ""
+			: "";
+
+		const dlg = new frappe.ui.Dialog({
+			title: __("Select Store"),
+			fields: [
+				{
+					fieldname: "info",
+					fieldtype: "HTML",
+					options: `<div class="alert alert-info" style="margin-bottom:10px">
+						${__("You have System Manager access. Select a store to continue.")}
+					</div>`,
+				},
+				{
+					fieldname: "store",
+					fieldtype: "Select",
+					label: __("Store"),
+					options: ["", ...storeOptions],
+					reqd: 1,
+					default: defaultOption,
+				},
+			],
+			primary_action_label: __("Continue"),
+			primary_action: (values) => {
+				const selectedLabel = values.store;
+				const storeName = selectedLabel.split(" — ")[0];
+				dlg.disable_primary_action();
+				frappe.call({
+					method: "ch_pos.api.isolation_api.get_pos_context_for_store",
+					args: { store: storeName },
+					callback: (r) => {
+						const ctx = r.message || {};
+						dlg.hide();
+						if (ctx.day_closed) {
+							this._show_day_closed_message({
+								message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]),
+							});
+							return;
+						}
+						const profile = ctx.pos_profile;
+						if (!profile) {
+							frappe.msgprint({
+								title: __("No POS Profile"),
+								indicator: "red",
+								message: __("No POS Profile found for store {0}. Configure a POS Profile Extension.", [storeName]),
+							});
+							return;
+						}
+						// Check if session already exists for this store
+						frappe.call({
+							method: "ch_pos.api.session_api.get_session_status",
+							args: { pos_profile: profile },
+							callback: (r2) => {
+								const data = r2.message || {};
+								if (data.has_session) {
+									resolve({
+										session_name: data.session_name,
+										business_date: data.business_date,
+										store: storeName,
+										company: ctx.company,
+										device: ctx.device,
+										pos_profile: profile,
+										opening_entry: { pos_profile: profile, company: ctx.company },
+									});
+								} else if (data.unclosed_session) {
+									this._show_must_close(data, profile, resolve);
+								} else {
+									this._show_opening_form(profile, ctx.company, resolve, ctx);
+								}
+							},
+						});
+					},
+					error: () => {
+						dlg.enable_primary_action();
+					},
+				});
+			},
+		});
+		dlg.show();
+		this._dialog = dlg;
 	}
 
 	_show_profile_and_opening(open_entries, resolve) {

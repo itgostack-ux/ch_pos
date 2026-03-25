@@ -27,12 +27,25 @@ def get_pos_context():
     """Called on POS launch. Auto-detects user→company→store→device→session.
 
     Returns everything the POS frontend needs to render the correct UI.
+    System Manager users without an allocation get a store picker instead of
+    being blocked.
     """
     frappe.has_permission("Sales Invoice", "read", throw=True)
     user = frappe.session.user
 
     # Get user allocation
     alloc = get_user_allocation(user)
+
+    # System Managers / Administrators always get a store picker
+    is_system_manager = "System Manager" in frappe.get_roles(user) or user == "Administrator"
+    if is_system_manager:
+        return {
+            "status": "select_store",
+            "message": _("You have System Manager access. Select a store to continue."),
+            "stores": _get_all_active_stores(),
+            "default_store": alloc.store if alloc else None,
+        }
+
     if not alloc:
         return {
             "status": "no_allocation",
@@ -103,6 +116,72 @@ def get_pos_context():
         } if existing_session else None,
     }
 
+
+@frappe.whitelist()
+def get_pos_context_for_store(store):
+    """Admin/System Manager endpoint: get POS context for a specific store.
+
+    Builds a synthetic allocation so the admin can operate any store.
+    """
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    user = frappe.session.user
+
+    if "System Manager" not in frappe.get_roles(user) and user != "Administrator":
+        frappe.throw(_("Only System Managers can use store override."))
+
+    store_doc = frappe.db.get_value(
+        "CH Store", store,
+        ["name", "store_name", "company", "warehouse"],
+        as_dict=True,
+    )
+    if not store_doc:
+        frappe.throw(_("Store {0} not found.").format(store))
+
+    company = store_doc.company
+
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
+    business_date = get_store_business_date(store)
+
+    # Check if day is closed
+    day_closed = False
+    bd_status = frappe.db.get_value("CH Business Date", {"store": store}, "status")
+    if bd_status == "Closed":
+        day_closed = True
+
+    # Find POS Profile for this store
+    pos_profile = frappe.db.get_value(
+        "POS Profile Extension", {"store": store}, "pos_profile"
+    )
+
+    return {
+        "status": "ok",
+        "user": user,
+        "company": company,
+        "store": store,
+        "device": None,
+        "business_date": str(business_date) if business_date else None,
+        "day_closed": day_closed,
+        "pos_profile": pos_profile,
+        "allocation": {
+            "can_open_session": 1,
+            "can_close_session": 1,
+            "can_approve_variance": 1,
+            "can_do_cash_drop": 1,
+        },
+        "existing_session": None,
+        "admin_override": True,
+    }
+
+
+def _get_all_active_stores():
+    """Return list of active stores for System Manager store picker."""
+    stores = frappe.get_all(
+        "CH Store",
+        filters={"disabled": 0},
+        fields=["name", "store_name", "store_code", "company", "warehouse"],
+        order_by="store_name asc",
+    )
+    return stores
 
 # ── Lock / Unlock ────────────────────────────────────────────────────────────
 

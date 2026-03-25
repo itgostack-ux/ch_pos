@@ -314,9 +314,14 @@ export class BuybackWorkspace {
 			action_btn = `
 				<div class="ch-bb-info-note">
 					<i class="fa fa-info-circle"></i>
-					${__("Assessment is in Draft. Open the form to review and submit it before starting inspection.")}
+					${__("Assessment is in Draft. Submit it to proceed with inspection.")}
 				</div>
-				<button class="btn btn-outline-primary btn-lg ch-bb-act ch-bb-open-assessment"
+				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-submit-assessment"
+					data-name="${data.name}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px;margin-bottom:8px">
+					<i class="fa fa-check"></i> ${__("Submit Assessment")}
+				</button>
+				<button class="btn btn-outline-secondary ch-bb-act ch-bb-open-assessment"
 					data-name="${data.name}"
 					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700">
 					<i class="fa fa-external-link"></i> ${__("Open Assessment Form")}
@@ -656,6 +661,23 @@ export class BuybackWorkspace {
 
 	// ─────────────────────────────── stage action wiring ──
 	_bind_stage_actions(el, data, stage) {
+		// ── ASSESS: Submit assessment from POS ─────────
+		el.on("click", ".ch-bb-submit-assessment", (e) => {
+			const btn = $(e.currentTarget);
+			const name = btn.data("name");
+			btn.prop("disabled", true)
+				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Submitting...")}`);
+			frappe.xcall("ch_pos.api.pos_api.pos_submit_assessment", { assessment_name: name })
+				.then(() => {
+					frappe.show_alert({ message: __("Assessment submitted"), indicator: "green" });
+					this._reload();
+				})
+				.catch(() => {
+					btn.prop("disabled", false)
+						.html(`<i class="fa fa-check"></i> ${__("Submit Assessment")}`);
+				});
+		});
+
 		// ── ASSESS: Open assessment in desk ────────────
 		el.on("click", ".ch-bb-open-assessment", (e) => {
 			frappe.set_route("Form", "Buyback Assessment", $(e.currentTarget).data("name"));

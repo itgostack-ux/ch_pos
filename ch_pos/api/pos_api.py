@@ -113,6 +113,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        additional_discount_amount=0, coupon_code=None,
                        voucher_code=None, voucher_amount=0,
                        redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
+                       bank_offer_discount=0, bank_offer_name=None,
                        sales_executive=None, sale_type=None, sale_sub_type=None,
                        sale_reference=None, discount_reason=None,
                        client_request_id=None,
@@ -375,6 +376,12 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.loyalty_points = cint(loyalty_points)
         inv.loyalty_amount = flt(loyalty_amount)
 
+    # Bank offer discount — mutually exclusive with additional discount
+    if flt(bank_offer_discount) > 0:
+        if flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
+            frappe.throw(frappe._("Bank offer cannot be combined with additional discounts"))
+        inv.discount_amount = flt(inv.discount_amount or 0) + flt(bank_offer_discount)
+
     # Sales executive attribution
     if sales_executive:
         inv.custom_sales_executive = sales_executive
@@ -401,15 +408,14 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.flags.ignore_permissions = True
     try:
         inv.insert(ignore_permissions=True)
-        # After insert, ERPNext has computed rounded_total.  If the caller sent
-        # amount_paid = grand_total instead of rounded_total, the invoice would
-        # land as "Partly Paid" with a ₹0.xx rounding gap.  Fix via direct DB
-        # update + reload so the corrected values flow into the submit GL entries.
-        if not cint(is_free_sale) and not cint(is_credit_sale) and inv.rounded_total:
-            rt = flt(inv.rounded_total)
+        # After insert, ERPNext has computed rounded_total including taxes.
+        # The POS frontend sends pre-tax totals, so adjust the primary payment
+        # row to cover the full amount (tax gap + rounding).
+        if not cint(is_free_sale) and not cint(is_credit_sale):
+            rt = flt(inv.rounded_total or inv.grand_total)
             total_paid = sum(flt(p.amount) for p in inv.payments)
             rounding_diff = rt - total_paid
-            if 0 < abs(rounding_diff) <= 0.50:
+            if abs(rounding_diff) > 0.001:
                 for p in inv.payments:
                     if flt(p.amount) > 0:
                         cr = flt(inv.conversion_rate or 1)
@@ -4001,6 +4007,11 @@ def get_pos_buyback_detail(assessment_name):
 	"""
 	a = frappe.get_doc("Buyback Assessment", assessment_name)
 
+	# Fix status stuck at Draft when already Frappe-submitted
+	if a.docstatus == 1 and a.status == "Draft":
+		a.db_set("status", "Submitted")
+		a.status = "Submitted"
+
 	# Linked Buyback Order (if any)
 	order = None
 	order_name = frappe.db.get_value(
@@ -4105,7 +4116,20 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
 		order.remarks = str(inspector_notes)[:500]
 
 	order.flags.ignore_permissions = True
-	order.insert()
+	try:
+		order.insert()
+	except frappe.UniqueValidationError:
+		# Race condition: another request created an order for this assessment
+		existing = frappe.db.get_value(
+			"Buyback Order",
+			{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+			"name",
+		)
+		if existing:
+			if final_price:
+				frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
+			return {"order_name": existing, "created": False}
+		raise
 	order.submit()
 
 	return {"order_name": order.name, "created": True}
@@ -4284,6 +4308,26 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 
 
 @frappe.whitelist()
+def pos_submit_assessment(assessment_name):
+	"""Submit a Draft Buyback Assessment from POS."""
+	doc = frappe.get_doc("Buyback Assessment", assessment_name)
+
+	# If already Frappe-submitted (docstatus=1) but status stuck at Draft,
+	# just update the status field directly.
+	if doc.docstatus == 1 and doc.status == "Draft":
+		doc.db_set("status", "Submitted")
+		frappe.db.commit()
+		return {"name": doc.name, "status": "Submitted"}
+
+	if doc.docstatus == 1 and doc.status != "Draft":
+		return {"name": doc.name, "status": doc.status}
+
+	doc.submit_assessment()
+	frappe.db.commit()
+	return {"name": doc.name, "status": doc.status}
+
+
+@frappe.whitelist()
 def pos_create_inspection(assessment_name):
 	"""Create or retrieve a Buyback Inspection from an assessment.
 
@@ -4382,7 +4426,26 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 			order.remarks = str(remarks)[:500]
 
 		order.flags.ignore_permissions = True
-		order.insert()
+		try:
+			order.insert()
+		except frappe.UniqueValidationError:
+			# Race condition: another request created an order concurrently
+			existing_order = frappe.db.get_value(
+				"Buyback Order",
+				{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+				"name",
+			)
+			if existing_order:
+				order_name = existing_order
+				order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+				return {
+					"inspection_name": inspection_name,
+					"status": result.get("status"),
+					"order_name": order_name,
+					"order_status": order_status,
+					"assessment_name": assessment_name,
+				}
+			raise
 		order.submit()
 
 		order_name = order.name
