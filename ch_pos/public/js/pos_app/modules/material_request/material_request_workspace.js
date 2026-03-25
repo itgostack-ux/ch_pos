@@ -51,7 +51,7 @@ export class MaterialRequestWorkspace {
 							</div>
 						</div>
 						<!-- Item + qty row -->
-						<div class="ch-mr-add-row" style="display:flex;gap:8px;margin-bottom:12px">
+						<div class="ch-mr-add-row" style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
 							<div class="ch-mr-item-field" style="flex:2"></div>
 							<input type="number" class="form-control ch-mr-qty-input" placeholder="${__("Qty")}" min="1" value="1" style="flex:0 0 80px;border-radius:var(--pos-radius-sm);text-align:center">
 							<button class="btn btn-primary ch-mr-add-btn" style="border-radius:var(--pos-radius-sm);white-space:nowrap">
@@ -107,6 +107,7 @@ export class MaterialRequestWorkspace {
 			render_input: true,
 		});
 		this.item_field.$input.css({ "border-radius": "var(--pos-radius-sm)" });
+		el.find(".frappe-control").css({ "margin-bottom": "0" });
 	}
 
 	_init_source_wh(panel) {

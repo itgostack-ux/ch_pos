@@ -203,8 +203,8 @@ def create_pos_invoice(pos_profile, customer, items,
             "warehouse": profile.warehouse,
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
-        # Set warranty_plan on the invoice item if custom field exists
-        if item.get("warranty_plan"):
+        # Set warranty_plan on warranty/VAS invoice items only (not device items)
+        if item.get("warranty_plan") and (item.get("is_warranty") or item.get("is_vas")):
             row["custom_warranty_plan"] = item.get("warranty_plan")
 
         # Manager approval fields for exception tracking
@@ -737,6 +737,13 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
     sp.sold_by = frappe.session.user
     sp.insert(ignore_permissions=True)
     sp.submit()
+
+    # Link sold plan back to CH Customer Device
+    if serial_no:
+        cd_name = frappe.db.get_value("CH Customer Device", {"serial_no": serial_no})
+        if cd_name:
+            frappe.db.set_value("CH Customer Device", cd_name, "active_warranty_plan", sp.name)
+
     return sp
 
 
@@ -3299,6 +3306,7 @@ def get_vas_plans_with_rules(cart_items=None):
 
     If a plan has requires_device=1 (or plan_type is 'Protection Plan'),
     it can only be added when the cart has at least one device item.
+    Plans with applicable_categories are restricted to matching device categories.
     """
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
@@ -3307,16 +3315,16 @@ def get_vas_plans_with_rules(cart_items=None):
     # Check if cart has any device (non-service, non-warranty item)
     has_device = False
     device_item_codes = []
-    device_brands = set()
+    device_categories = set()
     for ci in cart_items:
         if ci.get("is_warranty") or ci.get("is_vas"):
             continue
         has_device = True
-        device_item_codes.append(ci.get("item_code"))
-        # Get brand for filtering
-        brand = frappe.db.get_value("Item", ci.get("item_code"), "brand")
-        if brand:
-            device_brands.add(brand)
+        ic = ci.get("item_code")
+        device_item_codes.append(ic)
+        ch_category = frappe.db.get_value("Item", ic, "ch_category")
+        if ch_category:
+            device_categories.add(ch_category)
 
     today = nowdate()
     plans = frappe.get_all(
@@ -3351,10 +3359,22 @@ def get_vas_plans_with_rules(cart_items=None):
             plan["blocked"] = False
             plan["blocked_reason"] = ""
 
-        # Brand filtering: if plan specifies a brand, only show if cart has that brand
-        if plan.brand and device_brands and plan.brand not in device_brands:
-            plan["blocked"] = True
-            plan["blocked_reason"] = frappe._("Only for {0} devices").format(plan.brand)
+        # Category filtering: if plan has applicable_categories, only show if cart has matching category
+        if not plan.get("blocked"):
+            plan_categories = frappe.get_all(
+                "CH Warranty Plan Category",
+                filters={"parent": plan.name},
+                pluck="category",
+            )
+            if plan_categories:
+                plan["applicable_categories"] = plan_categories
+                if device_categories:
+                    if not device_categories.intersection(set(plan_categories)):
+                        plan["blocked"] = True
+                        plan["blocked_reason"] = frappe._("Not applicable for {0}").format(
+                            ", ".join(device_categories)
+                        )
+                # If no device in cart, plan stays unblocked — manual IMEI will be validated later
 
         applicable.append(plan)
 
@@ -4491,12 +4511,48 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 # ═══════════════════════════════════════════════════════════════════════════
 
 @frappe.whitelist()
-def get_todays_invoices(pos_profile, date=None):
-	"""Return POS invoices for a profile on a given date (default: today).
+def get_todays_invoices(pos_profile, date=None, phone=None):
+	"""Return POS invoices for a profile filtered by date or customer phone.
 
 	Used by the Reprint dialog in the POS frontend.
 	"""
 	from frappe.utils import getdate
+
+	if phone:
+		# Search by customer phone number — find matching customers first
+		phone_clean = phone.strip()
+		customers = frappe.get_all(
+			"Customer",
+			filters={"mobile_no": ["like", f"%{phone_clean}"]},
+			pluck="name",
+			limit=50,
+		)
+		if not customers:
+			return []
+
+		cust_placeholders = ", ".join(["%s"] * len(customers))
+		rows = frappe.db.sql(f"""
+			SELECT
+				pi.name,
+				pi.customer,
+				pi.grand_total,
+				pi.posting_date,
+				pi.posting_time,
+				pi.is_return,
+				pi.status,
+				GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+			FROM `tabSales Invoice` pi
+			JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
+			WHERE pi.pos_profile = %s
+			  AND pi.customer IN ({cust_placeholders})
+			  AND pi.docstatus = 1
+			GROUP BY pi.name
+			ORDER BY pi.posting_date DESC, pi.posting_time DESC
+			LIMIT 50
+		""", [pos_profile] + customers, as_dict=True)
+		return rows
+
+	# Default: search by date
 	filter_date = getdate(date) if date else getdate(nowdate())
 
 	rows = frappe.db.sql("""

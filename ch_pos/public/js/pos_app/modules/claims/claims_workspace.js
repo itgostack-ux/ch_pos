@@ -167,6 +167,7 @@ export class ClaimsWorkspace {
 
 	_render_dashboard(panel, data) {
 		const { customer, customer_name, customer_phone, devices, summary } = data;
+		const unlinked_plans = data.unlinked_plans || [];
 		panel.find(".ch-claim-form-area").hide();
 
 		let html = `
@@ -194,12 +195,17 @@ export class ClaimsWorkspace {
 			</div>`;
 
 		// Devices
-		if (!devices.length) {
+		if (!devices.length && !unlinked_plans.length) {
 			html += `<div class="text-muted text-center" style="padding:16px">${__("No devices found")}</div>`;
 		} else {
 			devices.forEach((dev, idx) => {
 				html += this._render_device_card(dev, idx);
 			});
+		}
+
+		// Unlinked plans (not attached to any device)
+		if (unlinked_plans.length) {
+			html += this._render_unlinked_plans(unlinked_plans);
 		}
 
 		panel.find(".ch-claim-dashboard").html(html).show();
@@ -327,6 +333,62 @@ export class ClaimsWorkspace {
 			</div>`;
 	}
 
+	_render_unlinked_plans(plans) {
+		let rows = "";
+		for (const p of plans) {
+			const sc = this._plan_status_style(p.display_status);
+			const claims_text = p.claims_remaining === -1
+				? `${p.claims_used || 0} / ∞`
+				: `${p.claims_used || 0} / ${p.max_claims}`;
+			const days_text = p.display_status === "active" && p.days_remaining > 0
+				? ` (${p.days_remaining}d)` : "";
+
+			rows += `
+				<tr style="border-bottom:1px solid #f3f4f6">
+					<td style="padding:4px 6px"><b>${p.plan_title || p.warranty_plan}</b></td>
+					<td style="padding:4px 6px;color:#6b7280">${p.plan_type || ""}</td>
+					<td style="padding:4px 6px">${p.end_date || "—"}${days_text}</td>
+					<td style="padding:4px 6px">${claims_text}</td>
+					<td style="padding:4px 6px">
+						<span class="badge" style="background:${sc.bg};color:${sc.fg};font-size:10px;padding:1px 6px">${sc.label}</span>
+					</td>
+				</tr>`;
+		}
+
+		return `
+			<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-sm)">
+				<div class="section-header" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px">
+					<span style="font-size:13px">
+						<i class="fa fa-shield"></i>
+						<b>${__("Plans Not Linked to a Device")}</b>
+					</span>
+					<span class="badge" style="background:#fef3c7;color:#92400e;padding:3px 8px;font-size:11px">
+						${__("No Device")}
+					</span>
+				</div>
+				<div class="section-body" style="padding:6px 12px 10px">
+					<div style="margin-top:4px;padding:6px 8px;background:#fef9c3;border-radius:4px;font-size:11px;color:#854d0e">
+						<i class="fa fa-info-circle"></i>
+						${__("These plans were purchased but not linked to a device serial number. They cannot be used for claims until a device IMEI is assigned.")}
+					</div>
+					<div style="margin-top:8px">
+						<table style="width:100%;font-size:11px;border-collapse:collapse">
+							<thead>
+								<tr style="border-bottom:2px solid #e5e7eb;text-align:left">
+									<th style="padding:4px 6px">${__("Plan")}</th>
+									<th style="padding:4px 6px">${__("Type")}</th>
+									<th style="padding:4px 6px">${__("Valid Till")}</th>
+									<th style="padding:4px 6px">${__("Claims")}</th>
+									<th style="padding:4px 6px">${__("Status")}</th>
+								</tr>
+							</thead>
+							<tbody>${rows}</tbody>
+						</table>
+					</div>
+				</div>
+			</div>`;
+	}
+
 	// ── Claim Form ──────────────────────────────────────────────────
 
 	_show_claim_form(panel, device_idx) {
@@ -337,6 +399,9 @@ export class ClaimsWorkspace {
 		const has_active = dev.has_active_warranty;
 		this._selected_device = dev;
 
+		const cust_phone = data.customer_phone || "";
+		const cust_email = data.customer_email || "";
+
 		panel.find(".ch-claim-form-area").html(`
 			<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md);border:2px solid ${has_active ? "#86efac" : "#fca5a5"}">
 				<div class="section-header" style="background:${has_active ? "#f0fdf4" : "#fef2f2"};display:flex;justify-content:space-between;align-items:center">
@@ -346,18 +411,51 @@ export class ClaimsWorkspace {
 					</button>
 				</div>
 				<div class="section-body">
-					<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md)">
-						<div class="ch-pos-field-group">
-							<label>${__("Issue Category")}</label>
-							<div class="ch-claim-issue-cat"></div>
+					<!-- Customer Contact (read-only from Customer master) -->
+					<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--pos-space-md);
+						padding:8px 12px;background:var(--subtle-fg);border-radius:6px;font-size:13px">
+						<div>
+							<span class="text-muted">${__("Phone")}:</span>
+							<b>${cust_phone ? frappe.utils.escape_html(cust_phone) : '<span class="text-danger">Not set</span>'}</b>
 						</div>
-						<div class="ch-pos-field-group">
-							<label>${__("Customer Phone")}</label>
-							<input type="text" class="form-control ch-claim-phone"
-								value="${data.customer_phone || ""}"
-								placeholder="${__("Contact number")}">
+						<div>
+							<span class="text-muted">${__("Email")}:</span>
+							<b>${cust_email ? frappe.utils.escape_html(cust_email) : '<span class="text-muted">N/A</span>'}</b>
 						</div>
 					</div>
+
+					<!-- Claim Against Plan -->
+					${(dev.active_plans && dev.active_plans.length > 0) ? `
+					<div class="ch-pos-field-group" style="margin-bottom:var(--pos-space-md)">
+						<label>${__("Claim Against Plan")} <span style="color:var(--pos-danger)">*</span></label>
+						<div class="ch-claim-plan-options" style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
+							${dev.active_plans.map((p, i) => `
+								<label class="ch-claim-plan-opt" data-plan="${frappe.utils.escape_html(p.name)}" style="
+									display:flex;align-items:center;gap:10px;padding:8px 12px;
+									border:2px solid var(--border-color);border-radius:8px;cursor:pointer;
+									background:var(--fg-color);transition:all 0.15s;font-weight:normal;margin:0">
+									<input type="radio" name="ch_claim_plan" value="${frappe.utils.escape_html(p.name)}"
+										${dev.active_plans.length === 1 ? 'checked' : ''} style="margin:0;flex-shrink:0">
+									<div style="flex:1;min-width:0">
+										<div style="font-weight:600;font-size:13px">${frappe.utils.escape_html(p.plan_title || p.warranty_plan)}</div>
+										<div class="text-muted" style="font-size:11px">${frappe.utils.escape_html(p.plan_type)}
+											— Valid till ${p.end_date || 'N/A'}
+											${p.deductible_amount > 0 ? ' — Deductible: ₹' + format_number(p.deductible_amount) : ''}
+										</div>
+									</div>
+									<span class="badge" style="background:#dcfce7;color:#166534;font-size:10px;padding:2px 6px">Active</span>
+								</label>
+							`).join("")}
+						</div>
+					</div>
+					` : ''}
+
+					<!-- Issue Categories (multi-select) -->
+					<div class="ch-pos-field-group">
+						<label>${__("Issue Categories")} <span style="color:var(--pos-danger)">*</span></label>
+						<div class="ch-claim-issue-cats-wrap"></div>
+					</div>
+
 					<div class="ch-pos-field-group" style="margin-top:var(--pos-space-sm)">
 						<label>${__("Estimated Repair Cost")} (₹)</label>
 						<input type="number" class="form-control ch-claim-est-cost" min="0" step="100"
@@ -368,6 +466,27 @@ export class ClaimsWorkspace {
 						<textarea class="form-control ch-claim-issue-desc" rows="3"
 							style="min-height:70px;resize:vertical"
 							placeholder="${__("Describe what's wrong with the device...")}"></textarea>
+					</div>
+
+					<!-- Device Images (6 slots) -->
+					<div class="ch-pos-field-group" style="margin-top:var(--pos-space-md)">
+						<label>${__("Device Images")} <span class="text-muted">(${__("at least 4 required")})</span></label>
+						<div class="ch-claim-images" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px">
+							${["Front", "Back", "Left Side", "Right Side", "Top", "Bottom"].map((label, i) => `
+								<div class="ch-claim-img-slot" data-idx="${i}" style="
+									display:flex;flex-direction:column;align-items:center;justify-content:center;
+									border:2px dashed var(--border-color);border-radius:8px;padding:12px 4px;
+									cursor:pointer;min-height:90px;text-align:center;position:relative;
+									background:var(--fg-color);transition:border-color 0.2s">
+									<i class="fa fa-camera" style="font-size:20px;color:var(--text-muted);margin-bottom:4px"></i>
+									<span style="font-size:11px;color:var(--text-muted)">${__(label)}</span>
+									<input type="file" accept="image/*" capture="environment" class="ch-claim-img-input"
+										data-idx="${i}" data-label="${label}" style="display:none">
+									<img class="ch-claim-img-preview" style="display:none;max-width:100%;max-height:70px;
+										border-radius:4px;margin-top:4px;object-fit:cover">
+								</div>
+							`).join("")}
+						</div>
 					</div>
 
 					${dev.manufacturer_warranty_active ? `
@@ -396,12 +515,74 @@ export class ClaimsWorkspace {
 		// Scroll to form
 		panel.find(".ch-claim-form-area")[0]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
-		// Issue category link field
-		frappe.ui.form.make_control({
-			df: { fieldname: "issue_category", fieldtype: "Link", options: "Issue Category",
-			      placeholder: __("Select issue category") },
-			parent: panel.find(".ch-claim-issue-cat"),
-			render_input: true,
+		// ── Issue Categories multi-select ──
+		// Fetch categories list, render as selectable chips
+		frappe.xcall("frappe.client.get_list", {
+			doctype: "Issue Category",
+			filters: { is_active: 1 },
+			fields: ["name"],
+			limit_page_length: 0,
+			order_by: "name asc",
+		}).then((cats) => {
+			const wrap = panel.find(".ch-claim-issue-cats-wrap");
+			if (!cats || !cats.length) {
+				wrap.html(`<span class="text-muted">${__("No issue categories defined")}</span>`);
+				return;
+			}
+			let chips = `<div class="ch-claim-cat-chips" style="display:flex;flex-wrap:wrap;gap:6px">`;
+			for (const c of cats) {
+				chips += `<span class="ch-claim-cat-chip" data-cat="${frappe.utils.escape_html(c.name)}" style="
+					padding:4px 10px;border:1px solid var(--border-color);border-radius:14px;
+					cursor:pointer;font-size:12px;user-select:none;transition:all 0.15s;
+					background:var(--fg-color);color:var(--text-color)">${frappe.utils.escape_html(c.name)}</span>`;
+			}
+			chips += `</div>`;
+			wrap.html(chips);
+
+			// Toggle selection on click
+			wrap.on("click", ".ch-claim-cat-chip", function () {
+				$(this).toggleClass("ch-cat-selected");
+				if ($(this).hasClass("ch-cat-selected")) {
+					$(this).css({ background: "var(--primary)", color: "#fff", "border-color": "var(--primary)" });
+				} else {
+					$(this).css({ background: "var(--fg-color)", color: "var(--text-color)", "border-color": "var(--border-color)" });
+				}
+			});
+		});
+
+		// ── Plan selection highlight ──
+		panel.find('.ch-claim-plan-opt input[type="radio"]').on("change", function () {
+			panel.find(".ch-claim-plan-opt").css({ "border-color": "var(--border-color)", background: "var(--fg-color)" });
+			$(this).closest(".ch-claim-plan-opt").css({ "border-color": "var(--primary)", background: "var(--subtle-accent)" });
+		});
+		// Trigger initial highlight if single plan auto-checked
+		panel.find('.ch-claim-plan-opt input[type="radio"]:checked').trigger("change");
+
+		// ── Image slot handlers ──
+		panel.find(".ch-claim-img-slot").on("click", function () {
+			$(this).find(".ch-claim-img-input").trigger("click");
+		});
+		panel.find(".ch-claim-img-input").on("click", function (e) {
+			e.stopPropagation();
+		});
+		panel.find(".ch-claim-img-input").on("change", function () {
+			const file = this.files && this.files[0];
+			const slot = $(this).closest(".ch-claim-img-slot");
+			const preview = slot.find(".ch-claim-img-preview");
+			const icon = slot.find(".fa-camera");
+			if (file) {
+				const reader = new FileReader();
+				reader.onload = (e) => {
+					preview.attr("src", e.target.result).show();
+					icon.hide();
+				};
+				reader.readAsDataURL(file);
+				slot.css("border-color", "var(--primary)");
+			} else {
+				preview.hide().attr("src", "");
+				icon.show();
+				slot.css("border-color", "var(--border-color)");
+			}
 		});
 	}
 
@@ -415,13 +596,51 @@ export class ClaimsWorkspace {
 			return;
 		}
 
+		// ── Validations ──
+
+		// Selected plan (required if device has active plans)
+		let selected_sold_plan = "";
+		if (dev.active_plans && dev.active_plans.length > 0) {
+			const checked = panel.find('input[name="ch_claim_plan"]:checked');
+			if (!checked.length) {
+				frappe.show_alert({ message: __("Select a plan to claim against"), indicator: "orange" });
+				return;
+			}
+			selected_sold_plan = checked.val();
+		}
+
+		// Issue categories (required, at least 1)
+		const selected_cats = [];
+		panel.find(".ch-claim-cat-chip.ch-cat-selected").each(function () {
+			selected_cats.push($(this).data("cat"));
+		});
+		if (!selected_cats.length) {
+			frappe.show_alert({ message: __("Select at least one issue category"), indicator: "orange" });
+			return;
+		}
+
+		// Issue description (required)
 		const issue_desc = panel.find(".ch-claim-issue-desc").val().trim();
 		if (!issue_desc) {
 			frappe.show_alert({ message: __("Issue description is required"), indicator: "orange" });
+			panel.find(".ch-claim-issue-desc").focus();
 			return;
 		}
-		const claimPhone = panel.find(".ch-claim-phone").val().trim();
-		if (claimPhone && !assert_india_phone(panel.find(".ch-claim-phone")[0], claimPhone)) return;
+
+		// Images (at least 4)
+		const img_fields = ["device_image_front", "device_image_back", "device_image_left",
+			"device_image_right", "device_image_top", "device_image_bottom"];
+		const img_inputs = panel.find(".ch-claim-img-input");
+		const img_files = [];
+		img_inputs.each(function (i) {
+			const f = this.files && this.files[0];
+			img_files.push({ field: img_fields[i], file: f || null });
+		});
+		const filled = img_files.filter(f => f.file);
+		if (filled.length < 4) {
+			frappe.show_alert({ message: __("Please upload at least 4 device images"), indicator: "orange" });
+			return;
+		}
 
 		const btn = panel.find(".ch-claim-submit");
 		btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Submitting...")}`);
@@ -434,13 +653,21 @@ export class ClaimsWorkspace {
 				item_code: dev.item_code,
 				company: PosState.company,
 				issue_description: issue_desc,
-				issue_category: panel.find(".ch-claim-issue-cat .link-field input").val() || "",
+				issue_categories: JSON.stringify(selected_cats),
 				reported_at_company: PosState.company,
 				reported_at_store: PosState.store || "",
 				estimated_repair_cost: parseFloat(panel.find(".ch-claim-est-cost").val()) || 0,
-				customer_phone: panel.find(".ch-claim-phone").val().trim() || "",
+				sold_plan: selected_sold_plan || undefined,
 			}
-		).then((result) => {
+		).then(async (result) => {
+			// Upload images to the created claim
+			if (result.claim_name && filled.length) {
+				try {
+					await this._upload_claim_images(result.claim_name, img_files);
+				} catch (e) {
+					frappe.show_alert({ message: __("Claim created but some images failed to upload"), indicator: "orange" });
+				}
+			}
 			this._show_claim_result(panel, result);
 			this._load_claims_pipeline(panel);
 			// Re-search to refresh dashboard
@@ -451,6 +678,45 @@ export class ClaimsWorkspace {
 		}).finally(() => {
 			btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Submit Claim")}`);
 		});
+	}
+
+	/**
+	 * Upload device images to an existing warranty claim document.
+	 * Uploads each file, collects URLs, then sets all field values at once.
+	 */
+	async _upload_claim_images(claim_name, img_files) {
+		const field_urls = {};
+
+		for (const { field, file } of img_files) {
+			if (!file) continue;
+			const form_data = new FormData();
+			form_data.append("file", file, file.name);
+			form_data.append("doctype", "CH Warranty Claim");
+			form_data.append("docname", claim_name);
+			form_data.append("fieldname", field);
+			form_data.append("is_private", "1");
+
+			const resp = await fetch("/api/method/upload_file", {
+				method: "POST",
+				body: form_data,
+				headers: {
+					"X-Frappe-CSRF-Token": frappe.csrf_token,
+				},
+			});
+			if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
+			const result = await resp.json();
+			const file_url = result.message && result.message.file_url;
+			if (file_url) field_urls[field] = file_url;
+		}
+
+		// Set all image field values on the submitted claim
+		if (Object.keys(field_urls).length) {
+			await frappe.xcall("frappe.client.set_value", {
+				doctype: "CH Warranty Claim",
+				name: claim_name,
+				fieldname: field_urls,
+			});
+		}
 	}
 
 	_show_claim_result(panel, result) {

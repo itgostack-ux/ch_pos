@@ -453,7 +453,6 @@ export class CartService {
 					return;
 				}
 
-				cart_item.warranty_plan = sel_plan.name;
 				PosState.cart.push({
 					item_code: sel_plan.service_item || sel_plan.name,
 					item_name: `🛡 ${sel_plan.plan_name} (${sel_plan.duration_months}m)`,
@@ -849,17 +848,21 @@ export class CartService {
 			const blocked_html = blocked
 				? `<div class="text-danger" style="font-size:11px;margin-top:4px"><i class="fa fa-ban"></i> ${frappe.utils.escape_html(p.blocked_reason)}</div>`
 				: "";
-			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}"
-				style="padding:10px 12px;border:1.5px solid ${blocked ? '#fecaca' : 'var(--border-color)'};border-radius:8px;margin-bottom:8px;cursor:${blocked ? 'not-allowed' : 'pointer'};opacity:${blocked ? '0.6' : '1'};transition:all .15s">
-				<div style="display:flex;justify-content:space-between;align-items:center">
-					<div>
-						<b>${frappe.utils.escape_html(p.plan_name)}</b>
-						<span style="margin-left:6px">${type_badge} ${brand_badge}</span>
+			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}">
+				<div class="ch-vas-card-body">
+					<div class="ch-vas-card-check"><i class="fa fa-check"></i></div>
+					<div style="flex:1;min-width:0">
+						<div style="display:flex;justify-content:space-between;align-items:center">
+							<div>
+								<b>${frappe.utils.escape_html(p.plan_name)}</b>
+								<span style="margin-left:6px">${type_badge} ${brand_badge}</span>
+							</div>
+							<span style="font-weight:700;color:var(--primary)">₹${format_number(p.price)}</span>
+						</div>
+						<div class="text-muted" style="font-size:12px">${p.duration_months || 0} months${p.coverage_description ? ' — ' + frappe.utils.escape_html(p.coverage_description) : ''}</div>
+						${blocked_html}
 					</div>
-					<span style="font-weight:700;color:var(--primary)">₹${format_number(p.price)}</span>
 				</div>
-				<div class="text-muted" style="font-size:12px">${p.duration_months || 0} months${p.coverage_description ? ' — ' + frappe.utils.escape_html(p.coverage_description) : ''}</div>
-				${blocked_html}
 			</div>`;
 		}).join("");
 
@@ -883,8 +886,17 @@ export class CartService {
 					options: [
 						"",
 						...device_items.map((c) => c.item_code + (c.serial_no ? ` (${c.serial_no})` : "")),
+						"── Enter IMEI manually ──",
 					].join("\n"),
-					description: __("Select which device this plan covers"),
+					description: __("Select a device from the cart, or enter IMEI for external / previously sold device"),
+				},
+				{
+					fieldname: "manual_imei",
+					fieldtype: "Data",
+					label: __("IMEI / Serial Number"),
+					depends_on: "eval:doc.for_item === '── Enter IMEI manually ──' || (doc.for_item && !doc.for_item.includes('('))",
+					mandatory_depends_on: "eval:doc.for_item === '── Enter IMEI manually ──' || (doc.for_item && !doc.for_item.includes('('))",
+					description: __("Enter IMEI or serial number for the device"),
 				},
 			],
 			size: "large",
@@ -898,53 +910,97 @@ export class CartService {
 				const plan = plans.find((p) => p.name === sel);
 				if (!plan || plan.blocked) return;
 
-				const for_raw = values.for_item || "";
-				const for_item_code = for_raw.split(" (")[0] || null;
-				const serial_match = for_raw.match(/\(([^)]+)\)/);
-				const for_serial_no = serial_match ? serial_match[1] : "";
+				const is_manual = values.for_item === "── Enter IMEI manually ──";
+				let for_item_code = null;
+				let for_serial_no = "";
 
-				// Prevent duplicate: same plan on same device/IMEI
-				const dup = PosState.cart.find(
-					(c) => c.is_vas && c.warranty_plan === plan.name
-						&& c.for_item_code === for_item_code
-						&& (c.for_serial_no || "") === for_serial_no
-				);
-				if (dup) {
-					frappe.show_alert({ message: __("This plan is already added for this device"), indicator: "orange" });
-					return;
+				if (is_manual) {
+					const imei = (values.manual_imei || "").trim();
+					if (!imei) {
+						frappe.show_alert({ message: __("Enter IMEI / Serial Number"), indicator: "orange" });
+						return;
+					}
+					for_serial_no = imei;
+					for_item_code = null; // external device — no item in cart
+
+					// Validate category for manual IMEI if plan has category restriction
+					if (plan.applicable_categories && plan.applicable_categories.length) {
+						frappe.xcall(
+							"ch_item_master.ch_item_master.warranty_api.validate_vas_category",
+							{ serial_no: imei, warranty_plan: plan.name }
+						).then((res) => {
+							if (!res.valid) {
+								frappe.show_alert({ message: res.message, indicator: "red" });
+								return;
+							}
+							if (res.item_code) for_item_code = res.item_code;
+							this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
+						});
+						return; // async — don't fall through
+					}
+				} else {
+					const for_raw = values.for_item || "";
+					for_item_code = for_raw.split(" (")[0] || null;
+					const serial_match = for_raw.match(/\(([^)]+)\)/);
+					for_serial_no = serial_match ? serial_match[1] : "";
+
+					// Device in cart has no serial — use manual IMEI input
+					if (!for_serial_no) {
+						const imei = (values.manual_imei || "").trim();
+						if (!imei) {
+							frappe.show_alert({ message: __("Enter IMEI / Serial Number for this device"), indicator: "orange" });
+							return;
+						}
+						for_serial_no = imei;
+					}
 				}
 
-				dialog.hide();
-				PosState.cart.push({
-					item_code: plan.service_item || plan.name,
-					item_name: `✦ ${plan.plan_name}`,
-					qty: 1,
-					rate: flt(plan.price),
-					mrp: flt(plan.price),
-					uom: "Nos",
-					discount_percentage: 0,
-					discount_amount: 0,
-					offers: [],
-					applied_offer: null,
-					warranty_plan: plan.name,
-					for_item_code,
-					for_serial_no,
-					is_warranty: false,
-					is_vas: true,
-				});
-				EventBus.emit("cart:updated");
-				frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
+				this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
 			},
 		});
 
 		// Click to select plan card
 		dialog.$wrapper.on("click", ".ch-vas-card:not(.ch-vas-blocked)", function () {
-			dialog.$wrapper.find(".ch-vas-card").css("border-color", "").css("background", "");
-			$(this).css("border-color", "var(--primary)").css("background", "var(--control-bg)");
+			dialog.$wrapper.find(".ch-vas-card").removeClass("ch-vas-selected");
+			$(this).addClass("ch-vas-selected");
 			dialog.set_value("selected_plan", $(this).data("plan"));
 		});
 
 		dialog.show();
+	}
+
+	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no) {
+		// Prevent duplicate: same plan on same device/IMEI
+		const dup = PosState.cart.find(
+			(c) => c.is_vas && c.warranty_plan === plan.name
+				&& c.for_item_code === for_item_code
+				&& (c.for_serial_no || "") === for_serial_no
+		);
+		if (dup) {
+			frappe.show_alert({ message: __("This plan is already added for this device"), indicator: "orange" });
+			return;
+		}
+
+		dialog.hide();
+		PosState.cart.push({
+			item_code: plan.service_item || plan.name,
+			item_name: `✦ ${plan.plan_name}`,
+			qty: 1,
+			rate: flt(plan.price),
+			mrp: flt(plan.price),
+			uom: "Nos",
+			discount_percentage: 0,
+			discount_amount: 0,
+			offers: [],
+			applied_offer: null,
+			warranty_plan: plan.name,
+			for_item_code,
+			for_serial_no,
+			is_warranty: false,
+			is_vas: true,
+		});
+		EventBus.emit("cart:updated");
+		frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
 	}
 
 	// ── Product Exchange (Swap) Dialog ──────────────────
@@ -1222,16 +1278,17 @@ export class CartService {
 		// Use input date; default today
 		const today = frappe.datetime.get_today();
 
-		const build_invoice_list = (date, container) => {
+		const build_invoice_list = (date, phone, container) => {
 			container.html(`<div class="text-center text-muted" style="padding:20px">
 				<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}
 			</div>`);
-			frappe.xcall("ch_pos.api.pos_api.get_todays_invoices", {
-				pos_profile: PosState.pos_profile,
-				date,
-			}).then((invoices) => {
+			const args = { pos_profile: PosState.pos_profile };
+			if (phone) args.phone = phone;
+			else args.date = date;
+			frappe.xcall("ch_pos.api.pos_api.get_todays_invoices", args).then((invoices) => {
 				if (!invoices || !invoices.length) {
-					container.html(`<div class="text-center text-muted" style="padding:20px">${__("No invoices for this date")}</div>`);
+					const msg = phone ? __("No invoices found for this phone number") : __("No invoices for this date");
+					container.html(`<div class="text-center text-muted" style="padding:20px">${msg}</div>`);
 					return;
 				}
 				const rows = invoices.map(inv => {
@@ -1240,7 +1297,7 @@ export class CartService {
 					return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
 						<div style="flex:1">
 							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${is_ret}</div>
-							<div class="text-muted" style="font-size:12px">${frappe.utils.escape_html(inv.customer || "")} · ${sign}₹${format_number(flt(inv.grand_total))} · ${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
+							<div class="text-muted" style="font-size:12px">${frappe.utils.escape_html(inv.customer || "")} · ${sign}₹${format_number(flt(inv.grand_total))} · ${phone ? frappe.utils.escape_html(inv.posting_date || "") + " " : ""}${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
 							${inv.items_summary ? `<div class="text-muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">${frappe.utils.escape_html(inv.items_summary)}</div>` : ""}
 						</div>
 						<button class="btn btn-xs btn-default ch-reprint-btn" data-name="${frappe.utils.escape_html(inv.name)}">
@@ -1258,10 +1315,25 @@ export class CartService {
 			title: __("Reprint Invoice"),
 			fields: [
 				{
+					fieldname: "search_by",
+					fieldtype: "Select",
+					label: __("Search By"),
+					options: "Date\nPhone Number",
+					default: "Date",
+				},
+				{
 					fieldname: "date",
 					fieldtype: "Date",
 					label: __("Date"),
 					default: today,
+					depends_on: "eval:doc.search_by==='Date'",
+				},
+				{
+					fieldname: "phone",
+					fieldtype: "Data",
+					label: __("Customer Phone"),
+					depends_on: "eval:doc.search_by==='Phone Number'",
+					description: __("Enter phone number to find invoices"),
 				},
 				{
 					fieldname: "invoices_html",
@@ -1276,12 +1348,37 @@ export class CartService {
 
 		// Initial load
 		const container = dlg.$wrapper.find(".ch-reprint-container");
-		build_invoice_list(today, container);
+		build_invoice_list(today, null, container);
 
 		// Reload when date changes
 		dlg.fields_dict.date.$input.on("change", () => {
 			const d = dlg.get_value("date");
-			if (d) build_invoice_list(d, container);
+			if (d) build_invoice_list(d, null, container);
+		});
+
+		// Search when phone is entered (on Enter key or blur)
+		const phone_input = dlg.fields_dict.phone.$input;
+		phone_input.on("keydown", (e) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				const p = dlg.get_value("phone");
+				if (p && p.length >= 4) build_invoice_list(null, p, container);
+			}
+		});
+		phone_input.on("blur", () => {
+			const p = dlg.get_value("phone");
+			if (p && p.length >= 4) build_invoice_list(null, p, container);
+		});
+
+		// Clear results when switching search mode
+		dlg.fields_dict.search_by.$input.on("change", () => {
+			const mode = dlg.get_value("search_by");
+			if (mode === "Date") {
+				const d = dlg.get_value("date");
+				if (d) build_invoice_list(d, null, container);
+			} else {
+				container.html(`<div class="text-center text-muted" style="padding:20px">${__("Enter a phone number and press Enter")}</div>`);
+			}
 		});
 
 		// Print button

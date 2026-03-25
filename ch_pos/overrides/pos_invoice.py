@@ -394,15 +394,15 @@ def create_customer_device_records(doc, method=None):
                 if pf and pf.options == "Sales Invoice":
                     device_kwargs["purchase_invoice"] = doc.name
 
-            # Attach warranty plan if selected
+            # Attach warranty info if selected (don't set active_warranty_plan —
+            # that's a Link to CH Sold Plan which is created separately)
             if item.get("custom_warranty_plan"):
                 plan = frappe.get_cached_doc("CH Warranty Plan", item.custom_warranty_plan)
                 device_kwargs.update({
-                    "active_warranty_plan": plan.name,
                     "warranty_plan_name": plan.plan_name,
                     "warranty_months": plan.duration_months,
                     "warranty_expiry": frappe.utils.add_months(doc.posting_date, plan.duration_months),
-                    "warranty_status": "Active",
+                    "warranty_status": "In Warranty",
                 })
 
             _create_or_update_device(sn, doc.customer, **device_kwargs)
