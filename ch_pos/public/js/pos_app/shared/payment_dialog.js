@@ -316,6 +316,7 @@ export class PaymentDialog {
 				<div class="ch-pay-sale-type-pills" id="ch-pay-sale-type-pills"></div>
 				<div class="ch-pay-sale-sub-row" id="ch-pay-sale-sub-row" style="display:none">
 					<select class="form-control form-control-sm" id="ch-pay-sale-sub-select"></select>
+					<select class="form-control form-control-sm" id="ch-pay-sale-fin-tenure" style="display:none;max-width:140px"></select>
 					<input type="text" class="form-control form-control-sm" id="ch-pay-sale-ref-input"
 						placeholder="${__("Reference No...")}" style="display:none;max-width:180px">
 				</div>
@@ -758,12 +759,40 @@ placeholder="${__("Enter code...")}">
 			const val = $(e.currentTarget).val();
 			PosState.sale_sub_type = val || null;
 			PosState.sale_reference = null;
-			const opt = $(e.currentTarget).find(":selected");
 			const ref = ov.find("#ch-pay-sale-ref-input");
-			if (opt.data("ref")) { ref.show().val(""); } else { ref.hide().val(""); }
+			const tenure_sel = ov.find("#ch-pay-sale-fin-tenure");
+
+			// Finance sale type — show tenure dropdown and reference input from partner
+			if (this._is_finance_sale_type(PosState.sale_type)) {
+				const partner = (this._finance_partners || []).find(fp => fp.partner_name === val);
+				if (partner && partner.tenures && partner.tenures.length) {
+					let topts = `<option value="">${__("Tenure...")}</option>`;
+					partner.tenures.forEach(t => topts += `<option value="${t}">${t} Months</option>`);
+					tenure_sel.html(topts).show();
+				} else {
+					tenure_sel.hide();
+				}
+				PosState.finance_tenure = null;
+				if (val) { ref.attr("placeholder", __("Approval / Loan ID")).show().val(""); } else { ref.hide().val(""); }
+				// Auto-populate payment row finance fields
+				this._sync_finance_to_payment(val, null, null);
+				return;
+			}
+
+			tenure_sel.hide();
+			const opt = $(e.currentTarget).find(":selected");
+			if (opt.data("ref")) { ref.attr("placeholder", __("Reference No...")).show().val(""); } else { ref.hide().val(""); }
+		});
+		ov.on("change", "#ch-pay-sale-fin-tenure", e => {
+			PosState.finance_tenure = $(e.currentTarget).val() || null;
+			this._sync_finance_to_payment(PosState.sale_sub_type, PosState.finance_tenure, PosState.sale_reference);
 		});
 		ov.on("change", "#ch-pay-sale-ref-input", e => {
 			PosState.sale_reference = $(e.currentTarget).val().trim() || null;
+			// Sync approval ID to payment row if finance sale
+			if (this._is_finance_sale_type(PosState.sale_type)) {
+				this._sync_finance_to_payment(PosState.sale_sub_type, PosState.finance_tenure, PosState.sale_reference);
+			}
 		});
 
 // ── Bank offer chip click — toggle apply/remove ─────────────────────────
@@ -1007,7 +1036,27 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				this._render_payments();
 				this._update_totals();
 			}
+			// If FS sale type is already selected, refresh its sub-type dropdown
+			if (this._is_finance_sale_type(PosState.sale_type)) {
+				this._update_sale_sub_type(PosState.sale_type);
+			}
 		});
+	}
+
+	/** Sync finance sale type selections into the payment row's finance fields */
+	_sync_finance_to_payment(provider, tenure, approval_id) {
+		for (let i = 0; i < this._payments.length; i++) {
+			const p = this._payments[i];
+			// Set on all payment rows (the finance fields will be stored on the primary payment)
+			p.finance_provider = provider || "";
+			p.finance_tenure = tenure || "";
+			p.finance_approval_id = approval_id || "";
+		}
+		// Re-render if any finance-type payment row has dropdowns
+		if (this._payments.some(p => this._mop_type(p.mode) === "finance")) {
+			this._render_payments();
+		}
+		this._update_totals();
 	}
 
 	// ───────────────────────────────────── Sale type pills ──
@@ -1057,11 +1106,42 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		}
 	}
 
+	_is_finance_sale_type(type_name) {
+		const st = this._sale_types.find(t => t.sale_type_name === type_name);
+		if (!st) return false;
+		const code = (st.code || "").toUpperCase();
+		return code === "FS" || type_name.toLowerCase().includes("finance") || type_name.toLowerCase().includes("emi");
+	}
+
 	_update_sale_sub_type(type_name) {
 		const st = this._sale_types.find(t => t.sale_type_name === type_name);
 		const row = this._overlay.find("#ch-pay-sale-sub-row");
 		const sel = row.find("#ch-pay-sale-sub-select");
 		const ref = row.find("#ch-pay-sale-ref-input");
+		const tenure_sel = row.find("#ch-pay-sale-fin-tenure");
+
+		// Reset finance tenure state
+		PosState.finance_tenure = null;
+		tenure_sel.hide();
+
+		// Finance sale type — populate from CH Finance Partner master
+		if (this._is_finance_sale_type(type_name)) {
+			const partners = this._finance_partners || [];
+			if (!partners.length) {
+				row.hide();
+				PosState.sale_sub_type = null;
+				PosState.sale_reference = null;
+				return;
+			}
+			let options = `<option value="">${__("Select Finance Partner...")}</option>`;
+			for (const fp of partners) {
+				options += `<option value="${frappe.utils.escape_html(fp.partner_name)}">${frappe.utils.escape_html(fp.partner_name)}</option>`;
+			}
+			sel.html(options);
+			ref.hide().val("");
+			row.show();
+			return;
+		}
 
 		if (!st || !st.sub_types || !st.sub_types.length) {
 			row.hide();
@@ -1436,11 +1516,31 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 						frappe.show_alert({ message: __("Enter Finance Provider for {0}", [p.mode]), indicator: "orange" });
 						return;
 					}
+					if (!p.finance_tenure) {
+						frappe.show_alert({ message: __("Select EMI Tenure for {0}", [p.mode]), indicator: "orange" });
+						return;
+					}
 					if (!p.finance_approval_id) {
 						frappe.show_alert({ message: __("Enter Approval/Loan ID for {0}", [p.mode]), indicator: "orange" });
 						return;
 					}
 				}
+			}
+		}
+
+		// Finance Sale type validations
+		if (!this._is_free_sale && this._is_finance_sale_type(PosState.sale_type)) {
+			if (!PosState.sale_sub_type) {
+				frappe.show_alert({ message: __("Select a Finance Partner"), indicator: "orange" });
+				return;
+			}
+			if (!PosState.finance_tenure) {
+				frappe.show_alert({ message: __("Select EMI Tenure"), indicator: "orange" });
+				return;
+			}
+			if (!PosState.sale_reference) {
+				frappe.show_alert({ message: __("Enter Approval / Loan ID"), indicator: "orange" });
+				return;
 			}
 		}
 
@@ -1498,6 +1598,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			sale_type:                      this._is_free_sale ? "Free Sale" : (PosState.sale_type || null),
 			sale_sub_type:                  PosState.sale_sub_type || null,
 			sale_reference:                 PosState.sale_reference || null,
+			finance_tenure:                 PosState.finance_tenure || null,
 			discount_reason:                PosState.discount_reason || null,
 			client_request_id:              this._gen_uuid(),
 			// New payment type fields

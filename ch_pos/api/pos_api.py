@@ -131,7 +131,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
                        bank_offer_discount=0, bank_offer_name=None,
                        sales_executive=None, sale_type=None, sale_sub_type=None,
-                       sale_reference=None, discount_reason=None,
+                       sale_reference=None, finance_tenure=None, discount_reason=None,
                        client_request_id=None,
                        is_credit_sale=0, credit_days=0,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
@@ -416,6 +416,16 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.custom_ch_sale_sub_type = sale_sub_type
     if sale_reference:
         inv.custom_ch_sale_reference = sale_reference
+
+    # For Finance Sale: ensure payment rows carry finance fields from sale type
+    if sale_type and "finance" in (sale_type or "").lower() and sale_sub_type:
+        for pay_row in inv.payments:
+            if not pay_row.get("custom_finance_provider"):
+                pay_row.custom_finance_provider = sale_sub_type
+            if not pay_row.get("custom_finance_tenure") and finance_tenure:
+                pay_row.custom_finance_tenure = cint(finance_tenure)
+            if not pay_row.get("custom_finance_approval_id") and sale_reference:
+                pay_row.custom_finance_approval_id = sale_reference
 
     # Store client request ID for idempotency
     if client_request_id:
