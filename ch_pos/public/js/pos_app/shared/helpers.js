@@ -142,3 +142,51 @@ export function assert_india_phone(input, val) {
 	frappe.show_alert({ message: __("Enter a valid Indian phone number (mobile or landline)"), indicator: "orange" });
 	return false;
 }
+
+/**
+ * Validate a PAN card number.
+ * Format: 5 uppercase letters + 4 digits + 1 uppercase letter (e.g. ABCDE1234F)
+ */
+export function validate_pan(val) {
+	if (!val) return false;
+	return /^[A-Z]{5}[0-9]{4}[A-Z]$/.test(val.trim().toUpperCase());
+}
+
+/**
+ * Validate an Aadhaar number.
+ * Must be exactly 12 digits, cannot start with 0 or 1.
+ */
+export function validate_aadhaar(val) {
+	if (!val) return false;
+	const clean = val.replace(/[\s\-]/g, "");
+	return /^[2-9]\d{11}$/.test(clean);
+}
+
+/**
+ * Validate ID number based on ID type. Returns true if valid or empty.
+ * Shows alert on invalid input.
+ */
+export function validate_id_number(id_type, id_number) {
+	if (!id_number || !id_type) return true;
+	const val = id_number.trim();
+	if (!val) return true;
+
+	if (id_type === "PAN Card" || id_type === "PAN") {
+		if (!validate_pan(val)) {
+			frappe.show_alert({
+				message: __("Invalid PAN. Format: ABCDE1234F (5 letters + 4 digits + 1 letter)"),
+				indicator: "orange",
+			});
+			return false;
+		}
+	} else if (id_type === "Aadhar Card" || id_type === "Aadhaar") {
+		if (!validate_aadhaar(val)) {
+			frappe.show_alert({
+				message: __("Invalid Aadhaar. Must be exactly 12 digits, not starting with 0 or 1"),
+				indicator: "orange",
+			});
+			return false;
+		}
+	}
+	return true;
+}

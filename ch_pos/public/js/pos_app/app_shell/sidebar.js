@@ -11,6 +11,7 @@
  * - Shared (always): Lookup, Insights
  */
 import { PosState, EventBus } from "../state.js";
+import { validate_india_phone } from "../shared/helpers.js";
 
 /**
  * Company-to-mode mapping.
@@ -236,6 +237,10 @@ export class Sidebar {
 				],
 				primary_action_label: __("Log Walk-in"),
 				primary_action: (values) => {
+					if (values.customer_phone && !validate_india_phone(values.customer_phone)) {
+						frappe.show_alert({ message: __("Enter a valid Indian phone number (10 digits starting with 6-9)"), indicator: "orange" });
+						return;
+					}
 					d.hide();
 					frappe.call({
 						method: "ch_pos.api.token_api.log_counter_walkin",

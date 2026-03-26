@@ -2110,6 +2110,26 @@ def create_buyback_assessment_with_grading(
 
     mobile_no = validate_indian_phone(mobile_no, "Mobile No")
 
+    # Validate KYC ID number format
+    if kyc_id_type and kyc_id_number:
+        kyc_id_number = kyc_id_number.strip()
+        if kyc_id_type in ("PAN", "PAN Card"):
+            pan_upper = kyc_id_number.upper()
+            import re as _re
+            if not _re.match(r"^[A-Z]{5}[0-9]{4}[A-Z]$", pan_upper):
+                frappe.throw(
+                    _("Invalid PAN '{0}'. Format: ABCDE1234F (5 letters + 4 digits + 1 letter).").format(kyc_id_number)
+                )
+            kyc_id_number = pan_upper
+        elif kyc_id_type in ("Aadhaar", "Aadhar Card"):
+            aadhaar_clean = kyc_id_number.replace(" ", "").replace("-", "")
+            import re as _re
+            if not _re.match(r"^[2-9]\d{11}$", aadhaar_clean):
+                frappe.throw(
+                    _("Invalid Aadhaar '{0}'. Must be exactly 12 digits, not starting with 0 or 1.").format(kyc_id_number)
+                )
+            kyc_id_number = aadhaar_clean
+
     # Calculate valuation
     valuation = calculate_buyback_valuation(item_code, condition_checks)
 
@@ -2381,6 +2401,10 @@ def customer_360(identifier, company=None):
         "customer_name": cust_doc.customer_name,
         "mobile_no": cust_doc.mobile_no or "",
         "email_id": cust_doc.email_id or "",
+        "membership_id": cust_doc.get("ch_membership_id") or "",
+        "alternate_phone": cust_doc.get("ch_alternate_phone") or "",
+        "whatsapp_number": cust_doc.get("ch_whatsapp_number") or "",
+        "previous_phones": cust_doc.get("ch_previous_phones") or "",
     }
 
     # Invoices
@@ -3826,6 +3850,73 @@ def _create_return_incentive_entries(return_invoice, pos_executive):
     return total_clawback
 
 
+# ── Update Customer Details (from POS) ───────────────────────────
+@frappe.whitelist()
+def update_customer_details(customer, mobile_no=None, email_id=None,
+                           customer_name=None, alternate_phone=None,
+                           whatsapp_number=None):
+    """Update customer details from POS Customer 360 view.
+
+    Only updates fields that are explicitly passed (non-None).
+    Phone number changes trigger dedup check and audit trail via
+    customer.py validate hooks.
+    """
+    frappe.has_permission("Customer", "write", throw=True)
+
+    if not customer or not frappe.db.exists("Customer", customer):
+        frappe.throw(frappe._("Customer {0} not found").format(customer))
+
+    cust = frappe.get_doc("Customer", customer)
+    changed = False
+
+    if customer_name is not None and customer_name.strip():
+        cust.customer_name = customer_name.strip()
+        changed = True
+
+    if mobile_no is not None:
+        mobile_no = mobile_no.strip()
+        if mobile_no != (cust.mobile_no or ""):
+            cust.mobile_no = mobile_no
+            changed = True
+
+    if email_id is not None:
+        email_id = email_id.strip()
+        if email_id != (cust.email_id or ""):
+            cust.email_id = email_id
+            changed = True
+
+    if alternate_phone is not None:
+        alternate_phone = alternate_phone.strip()
+        if alternate_phone != (cust.get("ch_alternate_phone") or ""):
+            cust.ch_alternate_phone = alternate_phone
+            changed = True
+
+    if whatsapp_number is not None:
+        whatsapp_number = whatsapp_number.strip()
+        if whatsapp_number != (cust.get("ch_whatsapp_number") or ""):
+            cust.ch_whatsapp_number = whatsapp_number
+            changed = True
+
+    if not changed:
+        return {"ok": True, "message": "No changes detected"}
+
+    # Save triggers validate hooks: phone format, dedup, phone change tracking
+    cust.flags.ignore_permissions = True
+    cust.save()
+
+    return {
+        "ok": True,
+        "customer": cust.name,
+        "customer_name": cust.customer_name,
+        "mobile_no": cust.mobile_no or "",
+        "email_id": cust.email_id or "",
+        "membership_id": cust.get("ch_membership_id") or "",
+        "alternate_phone": cust.get("ch_alternate_phone") or "",
+        "whatsapp_number": cust.get("ch_whatsapp_number") or "",
+        "previous_phones": cust.get("ch_previous_phones") or "",
+    }
+
+
 # ── Quick Customer Creation ──────────────────────────────────────
 @frappe.whitelist()
 def quick_create_customer(customer_name, mobile_no="", email_id="",
@@ -3839,6 +3930,11 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
     cust.territory = frappe.db.get_single_value("Selling Settings", "territory") or "India"
     if company:
         cust.company = company
+    # Set phone/email directly on Customer so dedup and lookups work
+    if mobile_no:
+        cust.mobile_no = mobile_no.strip()
+    if email_id:
+        cust.email_id = email_id.strip()
     cust.flags.ignore_permissions = True
     cust.flags.ignore_mandatory = True
     cust.save()

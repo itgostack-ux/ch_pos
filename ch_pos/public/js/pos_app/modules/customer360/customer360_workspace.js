@@ -119,10 +119,15 @@ export class Customer360Workspace {
 							<div style="font-weight:700;font-size:var(--pos-fs-lg);color:var(--pos-text)">${frappe.utils.escape_html(d.customer_name || d.customer)}</div>
 							<div style="font-size:var(--pos-fs-sm);color:var(--pos-text-muted);display:flex;gap:8px;flex-wrap:wrap">
 								<span>${frappe.utils.escape_html(d.customer)}</span>
+								${d.membership_id ? `<span>· <b>${frappe.utils.escape_html(d.membership_id)}</b></span>` : ""}
 								${d.mobile_no ? `<span>· ${frappe.utils.escape_html(d.mobile_no)}</span>` : ""}
 								${d.email_id ? `<span>· ${frappe.utils.escape_html(d.email_id)}</span>` : ""}
 							</div>
+							${d.previous_phones ? `<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:2px"><i class="fa fa-history"></i> Previous: ${frappe.utils.escape_html(d.previous_phones.split("\\n")[0])}</div>` : ""}
 						</div>
+						<button class="btn btn-sm btn-default ch-c360-edit-btn" style="align-self:flex-start;border-radius:var(--pos-radius);font-weight:600">
+							<i class="fa fa-pencil"></i> ${__("Edit")}
+						</button>
 					</div>
 					<div class="ch-c360-stats">
 						<div class="ch-c360-stat">
@@ -247,5 +252,90 @@ export class Customer360Workspace {
 		el.find(".ch-c360-link").on("click", function () {
 			frappe.set_route("Form", $(this).data("doctype"), $(this).data("name"));
 		});
+
+		el.find(".ch-c360-edit-btn").on("click", () => {
+			this._open_edit_dialog(panel, d);
+		});
+	}
+
+	_open_edit_dialog(panel, d) {
+		const dlg = new frappe.ui.Dialog({
+			title: __("Edit Customer Details"),
+			fields: [
+				{
+					fieldname: "customer_name",
+					fieldtype: "Data",
+					label: __("Customer Name"),
+					default: d.customer_name || "",
+					reqd: 1,
+				},
+				{
+					fieldname: "mobile_no",
+					fieldtype: "Data",
+					label: __("Mobile Number"),
+					default: d.mobile_no || "",
+					description: __("10-digit Indian mobile number"),
+				},
+				{
+					fieldname: "email_id",
+					fieldtype: "Data",
+					label: __("Email"),
+					default: d.email_id || "",
+					options: "Email",
+				},
+				{
+					fieldname: "alternate_phone",
+					fieldtype: "Data",
+					label: __("Alternate Phone"),
+					default: d.alternate_phone || "",
+				},
+				{
+					fieldname: "whatsapp_number",
+					fieldtype: "Data",
+					label: __("WhatsApp Number"),
+					default: d.whatsapp_number || "",
+				},
+				{
+					fieldname: "info_section",
+					fieldtype: "Section Break",
+				},
+				{
+					fieldname: "membership_id",
+					fieldtype: "Data",
+					label: __("Membership ID"),
+					default: d.membership_id || "",
+					read_only: 1,
+				},
+			],
+			primary_action_label: __("Save"),
+			primary_action: (values) => {
+				frappe.call({
+					method: "ch_pos.api.pos_api.update_customer_details",
+					args: {
+						customer: d.customer,
+						customer_name: values.customer_name,
+						mobile_no: values.mobile_no || "",
+						email_id: values.email_id || "",
+						alternate_phone: values.alternate_phone || "",
+						whatsapp_number: values.whatsapp_number || "",
+					},
+					freeze: true,
+					freeze_message: __("Updating customer..."),
+					callback: (r) => {
+						if (r.message && r.message.ok) {
+							dlg.hide();
+							frappe.show_alert({ message: __("Customer details updated"), indicator: "green" });
+							// Refresh the 360 view with updated data
+							Object.assign(d, r.message);
+							this._render_360(panel, d);
+						}
+					},
+					error: () => {
+						// Error toast shown by Frappe automatically (validation errors etc.)
+					},
+				});
+			},
+		});
+		dlg.show();
 	}
 }

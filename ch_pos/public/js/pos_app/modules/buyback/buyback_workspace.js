@@ -12,7 +12,7 @@
  *  - Settlement: Cashback (record payment) or Exchange (apply credit + go to Sell)
  */
 import { PosState, EventBus } from "../../state.js";
-import { format_number } from "../../shared/helpers.js";
+import { format_number, validate_india_phone, validate_id_number } from "../../shared/helpers.js";
 
 // ──────────────────────────────────────────── Stage helpers ──────────
 const STAGE = {
@@ -910,6 +910,11 @@ export class BuybackWorkspace {
 			primary_action_label: __("Create Assessment"),
 			primary_action: (values) => {
 				if (!values.item || !values.mobile_no) return;
+				if (!validate_india_phone(values.mobile_no)) {
+					frappe.show_alert({ message: __("Enter a valid Indian mobile number (10 digits starting with 6-9)"), indicator: "orange" });
+					return;
+				}
+				if (!validate_id_number(values.kyc_id_type, values.kyc_id_number)) return;
 				const checks = {};
 				condition_keys.forEach(k => { checks[k] = values[`cond_${k}`] ? true : false; });
 				dlg.disable_primary_action();
