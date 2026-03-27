@@ -2732,22 +2732,19 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
     elif urgency == "Low":
         required_by_date = frappe.utils.add_days(nowdate(), 7)
 
-    normalized_notes = notes or ""
-    if source_warehouse:
-        normalized_notes = (f"Preferred Source: {source_warehouse} | {normalized_notes}").strip(" |")
-
     return create_store_material_request(
         pos_profile=pos_profile,
         items=items,
         priority=urgency or "Standard",
-        notes=normalized_notes or None,
+        notes=notes or None,
         required_by_date=required_by_date,
+        preferred_source_warehouse=source_warehouse or None,
     )
 
 
 @frappe.whitelist()
 def get_pending_material_requests(pos_profile):
-    """Get recent Material Requests for this POS store."""
+    """Get recent Material Requests for this POS store with unified tracking."""
     from ch_erp15.ch_erp15.store_request_api import get_store_material_requests
 
     requests = get_store_material_requests(pos_profile=pos_profile, include_closed=0)
@@ -2767,12 +2764,20 @@ def get_pending_material_requests(pos_profile):
 
     out = []
     for req in requests:
-        out.append({
-            "name": req.name,
-            "transaction_date": req.required_by_date or req.creation,
-            "status": req.status,
-            "item_count": item_counts.get(req.name, 0),
-        })
+        entry = {
+            "name": req["name"],
+            "transaction_date": req.get("required_by_date") or req.get("creation"),
+            "status": req.get("status"),
+            "approval_status": req.get("approval_status", ""),
+            "priority": req.get("priority", ""),
+            "sla_breached": req.get("sla_breached", 0),
+            "item_count": item_counts.get(req["name"], 0),
+            "purchase_requests": req.get("purchase_requests", []),
+            "stock_entries": req.get("stock_entries", []),
+            "per_ordered": req.get("per_ordered", 0),
+            "per_received": req.get("per_received", 0),
+        }
+        out.append(entry)
     return out
 
 
