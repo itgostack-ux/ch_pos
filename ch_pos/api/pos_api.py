@@ -2723,79 +2723,57 @@ def store_dashboard(pos_profile):
 
 @frappe.whitelist()
 def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None):
-    """Create a Material Request from POS for stock replenishment."""
-    frappe.has_permission("Material Request", "create", throw=True)
-    import json
-    if isinstance(items, str):
-        items = json.loads(items)
+    """Create a Store Material Request from POS for stock replenishment."""
+    from ch_erp15.ch_erp15.store_request_api import create_store_material_request
 
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company or frappe.defaults.get_global_default("company")
-    warehouse = profile.warehouse
-
-    mr = frappe.new_doc("Material Request")
-    mr.material_request_type = "Material Transfer"
-    mr.company = company
-    mr.schedule_date = nowdate()
-
-    # Urgency → schedule_date offset
-    if urgency == "Urgent":
-        mr.schedule_date = nowdate()
-    elif urgency == "Standard":
-        mr.schedule_date = frappe.utils.add_days(nowdate(), 3)
+    required_by_date = nowdate()
+    if urgency == "Standard":
+        required_by_date = frappe.utils.add_days(nowdate(), 3)
     elif urgency == "Low":
-        mr.schedule_date = frappe.utils.add_days(nowdate(), 7)
+        required_by_date = frappe.utils.add_days(nowdate(), 7)
 
-    for item in items:
-        row = {
-            "item_code": item.get("item_code"),
-            "qty": flt(item.get("qty", 1)),
-            "uom": item.get("uom", "Nos"),
-            "warehouse": warehouse,
-            "schedule_date": mr.schedule_date,
-        }
-        # If source warehouse specified, set it on each item
-        if source_warehouse:
-            row["from_warehouse"] = source_warehouse
-        mr.append("items", row)
+    normalized_notes = notes or ""
+    if source_warehouse:
+        normalized_notes = (f"Preferred Source: {source_warehouse} | {normalized_notes}").strip(" |")
 
-    # Store notes in remarks
-    remark_parts = []
-    if urgency:
-        remark_parts.append(f"Urgency: {urgency}")
-    if notes:
-        remark_parts.append(str(notes))
-    if remark_parts:
-        mr.description = " | ".join(remark_parts)
-
-    mr.insert()
-    mr.submit()
-    return mr.name
+    return create_store_material_request(
+        pos_profile=pos_profile,
+        items=items,
+        priority=urgency or "Standard",
+        notes=normalized_notes or None,
+        required_by_date=required_by_date,
+    )
 
 
 @frappe.whitelist()
 def get_pending_material_requests(pos_profile):
     """Get recent Material Requests for this POS store."""
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    warehouse = profile.warehouse
+    from ch_erp15.ch_erp15.store_request_api import get_store_material_requests
 
-    requests = frappe.db.sql(
-        """SELECT mr.name, mr.transaction_date, mr.status,
-                  (SELECT COUNT(*) FROM `tabMaterial Request Item` mri
-                   WHERE mri.parent = mr.name) AS item_count
-           FROM `tabMaterial Request` mr
-           WHERE mr.docstatus = 1
-             AND EXISTS (
-                 SELECT 1 FROM `tabMaterial Request Item` mri
-                 WHERE mri.parent = mr.name AND mri.warehouse = %s
-             )
-             AND mr.status NOT IN ('Stopped', 'Cancelled')
-           ORDER BY mr.creation DESC
-           LIMIT 20""",
-        (warehouse,),
+    requests = get_store_material_requests(pos_profile=pos_profile, include_closed=0)
+    if not requests:
+        return []
+
+    names = [r["name"] for r in requests]
+    rows = frappe.db.sql(
+        """SELECT parent, COUNT(*) AS item_count
+           FROM `tabMaterial Request Item`
+           WHERE parent IN %(names)s
+           GROUP BY parent""",
+        {"names": tuple(names)},
         as_dict=True,
     )
-    return requests
+    item_counts = {r.parent: r.item_count for r in rows}
+
+    out = []
+    for req in requests:
+        out.append({
+            "name": req.name,
+            "transaction_date": req.required_by_date or req.creation,
+            "status": req.status,
+            "item_count": item_counts.get(req.name, 0),
+        })
+    return out
 
 
 @frappe.whitelist()

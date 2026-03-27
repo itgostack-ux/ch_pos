@@ -265,10 +265,10 @@ export class MaterialRequestWorkspace {
 					return;
 				}
 				list.html(requests.map(mr => {
-					const status_cls = mr.status === "Pending" ? "ch-pos-badge-warning"
-						: mr.status === "Partially Ordered" ? "ch-pos-badge-info"
-						: mr.status === "Ordered" ? "ch-pos-badge-success"
-						: mr.status === "Transferred" ? "ch-pos-badge-success"
+					const status_cls = ["Draft", "Under Review", "Partially Allocated"].includes(mr.status) ? "ch-pos-badge-warning"
+						: ["Allocation Planned", "Procurement Initiated", "In Transit", "Partially Received"].includes(mr.status) ? "ch-pos-badge-info"
+						: ["Fulfilled"].includes(mr.status) ? "ch-pos-badge-success"
+						: ["Closed With Reason", "Cancelled"].includes(mr.status) ? "ch-pos-badge-muted"
 						: "ch-pos-badge-muted";
 					return `
 						<div class="ch-mr-request-row" style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--pos-border-light)">
