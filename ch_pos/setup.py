@@ -205,6 +205,27 @@ CUSTOM_FIELDS = {
             "depends_on": "eval:doc.custom_advance_adjusted",
             "module": "POS Core",
         },
+        # Exception & Warranty links (applied during POS billing)
+        {
+            "fieldname": "custom_exception_request",
+            "fieldtype": "Link",
+            "label": "Exception Request",
+            "options": "CH Exception Request",
+            "insert_after": "custom_advance_adjusted",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_exception_request",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_warranty_claim",
+            "fieldtype": "Link",
+            "label": "Warranty Claim",
+            "options": "CH Warranty Claim",
+            "insert_after": "custom_exception_request",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_warranty_claim",
+            "module": "POS Core",
+        },
     ],
     "Sales Invoice Item": [
         {
@@ -385,6 +406,7 @@ def after_install():
 
 
 def after_migrate():
+    create_custom_fields(CUSTOM_FIELDS, update=True)
     sync_margin_receipt_format()
 
 

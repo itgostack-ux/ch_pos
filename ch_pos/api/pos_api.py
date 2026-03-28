@@ -135,7 +135,8 @@ def create_pos_invoice(pos_profile, customer, items,
                        client_request_id=None,
                        is_credit_sale=0, credit_days=0,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
-                       advance_amount=0, kiosk_token=None):
+                       advance_amount=0, kiosk_token=None,
+                       exception_request=None, warranty_claim=None):
     """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
@@ -197,6 +198,30 @@ def create_pos_invoice(pos_profile, customer, items,
     # Kiosk token link (from queue panel billing)
     if kiosk_token:
         inv.custom_kiosk_token = kiosk_token
+
+    # Exception request link — validate it's still valid before billing
+    if exception_request:
+        exc = frappe.get_doc("CH Exception Request", exception_request)
+        if not exc.is_valid():
+            frappe.throw(frappe._("Exception Request {0} is no longer valid (status: {1})").format(
+                exception_request, exc.status))
+        if exc.pos_invoice:
+            frappe.throw(frappe._("Exception Request {0} was already used in invoice {1}").format(
+                exception_request, exc.pos_invoice))
+        inv.custom_exception_request = exception_request
+
+    # Warranty claim link — validate processing fee is pending
+    if warranty_claim:
+        wc = frappe.get_doc("CH Warranty Claim", warranty_claim)
+        if wc.docstatus != 1:
+            frappe.throw(frappe._("Warranty Claim {0} is not submitted").format(warranty_claim))
+        if wc.processing_fee_status != "Pending":
+            frappe.throw(frappe._("Warranty Claim {0} processing fee is {1}, not Pending").format(
+                warranty_claim, wc.processing_fee_status))
+        if wc.processing_fee_invoice:
+            frappe.throw(frappe._("Warranty Claim {0} already has a processing fee invoice {1}").format(
+                warranty_claim, wc.processing_fee_invoice))
+        inv.custom_warranty_claim = warranty_claim
 
     # Track warranty items to create CH Sold Plans after submit
     warranty_items = []
@@ -496,6 +521,22 @@ def create_pos_invoice(pos_profile, customer, items,
             update_modified=False,
         )
 
+    # Back-link exception request to this invoice (marks it as consumed)
+    if exception_request:
+        frappe.db.set_value(
+            "CH Exception Request", exception_request,
+            "pos_invoice", inv.name,
+            update_modified=False,
+        )
+
+    # Back-link warranty claim — mark processing fee as paid
+    if warranty_claim:
+        frappe.db.set_value(
+            "CH Warranty Claim", warranty_claim,
+            {"processing_fee_invoice": inv.name, "processing_fee_status": "Paid"},
+            update_modified=False,
+        )
+
     # Redeem voucher after successful submit
     if voucher_code and flt(voucher_amount) > 0:
         from ch_item_master.ch_item_master.voucher_api import redeem_voucher
@@ -639,6 +680,26 @@ def create_pos_invoice(pos_profile, customer, items,
                 ref_doctype="Sales Invoice", ref_name=inv.name,
                 before=voucher_code,
                 after=f"₹{voucher_redeemed} redeemed",
+                store=_store, company=_company,
+            )
+
+        # Exception applied audit
+        if exception_request:
+            log_business_event(
+                event_type="Exception Applied",
+                ref_doctype="Sales Invoice", ref_name=inv.name,
+                before=exception_request,
+                after="Linked to invoice",
+                store=_store, company=_company,
+            )
+
+        # Warranty claim processing fee audit
+        if warranty_claim:
+            log_business_event(
+                event_type="Warranty Fee Collected",
+                ref_doctype="Sales Invoice", ref_name=inv.name,
+                before=warranty_claim,
+                after="Processing fee invoiced",
                 store=_store, company=_company,
             )
     except Exception:

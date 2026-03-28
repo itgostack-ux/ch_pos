@@ -58,8 +58,16 @@ export class CartPanel {
 				<button class="btn btn-outline-secondary ch-pos-btn-product-exchange">
 					<i class="fa fa-retweet"></i> ${__("Swap")}
 				</button>
+				<button class="btn btn-outline-warning ch-pos-btn-exception">
+					<i class="fa fa-exclamation-triangle"></i> ${__("Exception")}
+				</button>
+				<button class="btn btn-outline-dark ch-pos-btn-warranty-claim">
+					<i class="fa fa-wrench"></i> ${__("Warranty")}
+				</button>
 				<div class="ch-pos-exchange-banner" style="display:none"></div>
 				<div class="ch-pos-product-exchange-banner" style="display:none"></div>
+				<div class="ch-pos-exception-banner" style="display:none"></div>
+				<div class="ch-pos-warranty-claim-banner" style="display:none"></div>
 				<div class="ch-pos-credit-warning" style="display:none"></div>
 			</div>
 
@@ -359,6 +367,8 @@ export class CartPanel {
 		w.on("click", ".ch-pos-btn-exchange", () => EventBus.emit("exchange:open"));
 		w.on("click", ".ch-pos-btn-vas", () => EventBus.emit("vas:open"));
 		w.on("click", ".ch-pos-btn-product-exchange", () => EventBus.emit("product_exchange:open"));
+		w.on("click", ".ch-pos-btn-exception", () => this._show_exception_dialog());
+		w.on("click", ".ch-pos-btn-warranty-claim", () => this._show_warranty_claim_dialog());
 
 		// Cart line qty / remove
 		w.on("click", ".ch-pos-qty-plus", function () {
@@ -390,6 +400,20 @@ export class CartPanel {
 		EventBus.on("mode:switch", () => this._update_token_banner());
 		EventBus.on("state:transaction_reset", () => this._update_token_banner());
 		this._update_token_banner();
+
+		// Exception & Warranty banners
+		w.on("click", ".ch-pos-unlink-exception", () => {
+			PosState.exception_request = null;
+			this._update_exception_banner();
+		});
+		w.on("click", ".ch-pos-unlink-warranty-claim", () => {
+			PosState.warranty_claim = null;
+			this._update_warranty_claim_banner();
+		});
+		EventBus.on("state:transaction_reset", () => {
+			this._update_exception_banner();
+			this._update_warranty_claim_banner();
+		});
 
 		EventBus.on("customer:set", (cust) => {
 			if (cust) {
@@ -622,6 +646,146 @@ export class CartPanel {
 			badge.text(count).show();
 		} else {
 			badge.hide();
+		}
+	}
+
+	// ── Exception Request ───────────────────────────────────────────────
+
+	_show_exception_dialog() {
+		const d = new frappe.ui.Dialog({
+			title: __("Apply Exception"),
+			fields: [
+				{
+					fieldname: "exception_request",
+					fieldtype: "Link",
+					options: "CH Exception Request",
+					label: __("Exception Request"),
+					reqd: 1,
+					get_query: () => ({
+						filters: {
+							status: "Approved",
+							docstatus: 1,
+							pos_invoice: ["in", ["", null]],
+							company: PosState.company || undefined,
+						},
+					}),
+				},
+			],
+			size: "small",
+			primary_action_label: __("Apply"),
+			primary_action: (values) => {
+				frappe.xcall(
+					"ch_item_master.ch_item_master.exception_api.check_exception_valid",
+					{ exception_name: values.exception_request },
+				).then((r) => {
+					if (!r || !r.valid) {
+						frappe.msgprint(__("Exception {0} is no longer valid (status: {1}). It may have expired.", [values.exception_request, r?.status || "Unknown"]));
+						return;
+					}
+					PosState.exception_request = values.exception_request;
+					d.hide();
+					frappe.show_alert({ message: __("Exception {0} applied", [values.exception_request]), indicator: "green" });
+					this._update_exception_banner();
+				});
+			},
+		});
+		d.show();
+	}
+
+	_update_exception_banner() {
+		const banner = this.wrapper.find(".ch-pos-exception-banner");
+		if (PosState.exception_request) {
+			banner.html(`
+				<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;
+					background:rgba(255,193,7,0.12);border-radius:var(--pos-radius-sm,6px);
+					margin-top:6px;font-size:12px;font-weight:600;color:#b45309">
+					<i class="fa fa-exclamation-triangle"></i>
+					<span>${__("Exception")}: ${frappe.utils.escape_html(PosState.exception_request)}</span>
+					<button class="btn btn-link btn-xs ch-pos-unlink-exception" style="margin-left:auto;padding:0;font-size:11px;color:var(--pos-text-muted)"
+						title="${__("Remove exception")}">
+						<i class="fa fa-times"></i>
+					</button>
+				</div>
+			`).show();
+		} else {
+			banner.hide().empty();
+		}
+	}
+
+	// ── Warranty Claim ──────────────────────────────────────────────────
+
+	_show_warranty_claim_dialog() {
+		const d = new frappe.ui.Dialog({
+			title: __("Apply Warranty Claim"),
+			fields: [
+				{
+					fieldname: "warranty_claim",
+					fieldtype: "Link",
+					options: "CH Warranty Claim",
+					label: __("Warranty Claim"),
+					reqd: 1,
+					get_query: () => ({
+						filters: {
+							docstatus: 1,
+							processing_fee_status: "Pending",
+							processing_fee_invoice: ["in", ["", null]],
+						},
+					}),
+				},
+			],
+			size: "small",
+			primary_action_label: __("Apply"),
+			primary_action: (values) => {
+				frappe.xcall("frappe.client.get_value", {
+					doctype: "CH Warranty Claim",
+					filters: { name: values.warranty_claim },
+					fieldname: ["processing_fee_status", "processing_fee_amount", "processing_fee_invoice",
+					            "customer", "customer_name", "serial_no", "item_code"],
+				}).then((wc) => {
+					if (!wc) {
+						frappe.msgprint(__("Warranty Claim {0} not found", [values.warranty_claim]));
+						return;
+					}
+					if (wc.processing_fee_status !== "Pending") {
+						frappe.msgprint(__("Processing fee is {0}, not Pending", [wc.processing_fee_status]));
+						return;
+					}
+					if (wc.processing_fee_invoice) {
+						frappe.msgprint(__("Processing fee already invoiced via {0}", [wc.processing_fee_invoice]));
+						return;
+					}
+					PosState.warranty_claim = values.warranty_claim;
+					d.hide();
+					frappe.show_alert({
+						message: __("Warranty Claim {0} applied — ₹{1} processing fee", [
+							values.warranty_claim, wc.processing_fee_amount || 0,
+						]),
+						indicator: "green",
+					});
+					this._update_warranty_claim_banner();
+				});
+			},
+		});
+		d.show();
+	}
+
+	_update_warranty_claim_banner() {
+		const banner = this.wrapper.find(".ch-pos-warranty-claim-banner");
+		if (PosState.warranty_claim) {
+			banner.html(`
+				<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;
+					background:rgba(108,117,125,0.1);border-radius:var(--pos-radius-sm,6px);
+					margin-top:6px;font-size:12px;font-weight:600;color:#495057">
+					<i class="fa fa-wrench"></i>
+					<span>${__("Warranty")}: ${frappe.utils.escape_html(PosState.warranty_claim)}</span>
+					<button class="btn btn-link btn-xs ch-pos-unlink-warranty-claim" style="margin-left:auto;padding:0;font-size:11px;color:var(--pos-text-muted)"
+						title="${__("Remove warranty claim")}">
+						<i class="fa fa-times"></i>
+					</button>
+				</div>
+			`).show();
+		} else {
+			banner.hide().empty();
 		}
 	}
 }

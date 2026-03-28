@@ -95,6 +95,10 @@ export const PosState = {
 	// ── Kiosk Token ────────────────────────────────────
 	kiosk_token: null,          // linked POS Kiosk Token name (for billing from queue)
 
+	// ── Exception & Warranty ───────────────────────────
+	exception_request: null,    // linked CH Exception Request name (approved, within validity)
+	warranty_claim: null,       // linked CH Warranty Claim name (approved, processing fee billing)
+
 	// ── Customer Summary (enriched) ─────────────────────
 	customer_summary: null,     // { order_count, active_warranties, active_service_jobs }
 
@@ -132,6 +136,8 @@ export const PosState = {
 		this.service_job_items = [];
 		this.customer_summary = null;
 		this.kiosk_token = null;
+		this.exception_request = null;
+		this.warranty_claim = null;
 		// Keep executive and company selection across transactions
 		EventBus.emit("state:transaction_reset");
 	},
