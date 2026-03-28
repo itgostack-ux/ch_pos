@@ -2928,6 +2928,7 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
         se.remarks = " | ".join(remark_parts)
 
     se.insert()
+    se.submit()
     return se.name
 
 
@@ -2971,10 +2972,14 @@ def receive_stock_transfer(stock_entry, received_items):
         received_items = json.loads(received_items)
 
     se = frappe.get_doc("Stock Entry", stock_entry)
-    if se.docstatus != 0:
-        frappe.throw(frappe._("Stock Entry {0} is not in Draft state").format(stock_entry))
+    if se.docstatus == 2:
+        frappe.throw(frappe._("Stock Entry {0} is cancelled").format(stock_entry))
     if se.stock_entry_type != "Material Transfer":
         frappe.throw(frappe._("Not a Material Transfer"))
+
+    # Already submitted — stock already moved; receive is just an acknowledgment
+    if se.docstatus == 1:
+        return {"name": se.name, "partial": False}
 
     # Build a lookup: item_code → received qty
     recv_map = {r["item_code"]: flt(r.get("received_qty", 0)) for r in received_items}
@@ -3016,6 +3021,41 @@ def receive_stock_transfer(stock_entry, received_items):
 
     se.submit()
     return {"name": se.name, "partial": is_partial}
+
+
+@frappe.whitelist()
+def backfill_draft_documents():
+    """One-time patch: submit all existing Draft POS Kiosk Tokens and Service Requests
+    that were created from POS but left unsubmitted."""
+    submitted = {"POS Kiosk Token": 0, "Service Request": 0}
+
+    # POS Kiosk Tokens
+    draft_tokens = frappe.get_all("POS Kiosk Token", filters={"docstatus": 0}, pluck="name")
+    for name in draft_tokens:
+        try:
+            doc = frappe.get_doc("POS Kiosk Token", name)
+            doc.flags.ignore_permissions = True
+            doc.submit()
+            submitted["POS Kiosk Token"] += 1
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Backfill submit failed: POS Kiosk Token {name}")
+
+    # Service Requests created from POS queue (have referral_code = token name)
+    draft_srs = frappe.get_all("Service Request", filters={
+        "docstatus": 0,
+        "referral_code": ["is", "set"],
+    }, pluck="name")
+    for name in draft_srs:
+        try:
+            doc = frappe.get_doc("Service Request", name)
+            doc.flags.ignore_permissions = True
+            doc.submit()
+            submitted["Service Request"] += 1
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Backfill submit failed: Service Request {name}")
+
+    frappe.db.commit()
+    return submitted
 
 
 # ── Model Comparison ──────────────────────────────────────

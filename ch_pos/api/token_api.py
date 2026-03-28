@@ -299,6 +299,7 @@ def create_token(
         )
         doc.flags.ignore_permissions = True
         doc.insert()
+        doc.submit()
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
@@ -423,13 +424,11 @@ def assign_token(token_name: str, technician: str):
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
         frappe.throw(_("Not permitted"), frappe.PermissionError)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
-    doc.flags.ignore_permissions = True
-    doc.technician = technician
-    doc.assigned_at = now_datetime()
+    updates = {"technician": technician, "assigned_at": now_datetime()}
     if doc.status == "Waiting":
-        doc.status = "In Progress"
-    doc.save()
-    return {"status": "ok", "token_status": doc.status}
+        updates["status"] = "In Progress"
+    frappe.db.set_value("POS Kiosk Token", token_name, updates)
+    return {"status": "ok", "token_status": updates.get("status", doc.status)}
 
 
 @frappe.whitelist()
@@ -437,11 +436,10 @@ def start_token(token_name: str):
     """Mark service as started."""
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
         frappe.throw(_("Not permitted"), frappe.PermissionError)
-    doc = frappe.get_doc("POS Kiosk Token", token_name)
-    doc.flags.ignore_permissions = True
-    doc.started_at = now_datetime()
-    doc.status = "In Progress"
-    doc.save()
+    frappe.db.set_value("POS Kiosk Token", token_name, {
+        "started_at": now_datetime(),
+        "status": "In Progress",
+    })
     return {"status": "ok"}
 
 
@@ -450,11 +448,10 @@ def complete_token(token_name: str):
     """Mark token as completed."""
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
         frappe.throw(_("Not permitted"), frappe.PermissionError)
-    doc = frappe.get_doc("POS Kiosk Token", token_name)
-    doc.flags.ignore_permissions = True
-    doc.completed_at = now_datetime()
-    doc.status = "Completed"
-    doc.save()
+    frappe.db.set_value("POS Kiosk Token", token_name, {
+        "completed_at": now_datetime(),
+        "status": "Completed",
+    })
     return {"status": "ok"}
 
 
@@ -466,9 +463,7 @@ def cancel_token(token_name: str):
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted"):
         frappe.throw(_("Cannot cancel a {0} token").format(doc.status))
-    doc.flags.ignore_permissions = True
-    doc.status = "Cancelled"
-    doc.save()
+    frappe.db.set_value("POS Kiosk Token", token_name, "status", "Cancelled")
     return {"status": "ok"}
 
 
@@ -483,13 +478,13 @@ def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = ""
         frappe.throw(_("Cannot drop a {0} token").format(doc.status))
     if not drop_reason:
         frappe.throw(_("Drop reason is mandatory when marking a token as Dropped"))
-    doc.flags.ignore_permissions = True
-    doc.status = "Dropped"
-    doc.drop_reason = drop_reason
-    doc.drop_sub_reason = drop_sub_reason
-    doc.drop_remarks = drop_remarks
-    doc.exit_at = now_datetime()
-    doc.save()
+    frappe.db.set_value("POS Kiosk Token", token_name, {
+        "status": "Dropped",
+        "drop_reason": drop_reason,
+        "drop_sub_reason": drop_sub_reason,
+        "drop_remarks": drop_remarks,
+        "exit_at": now_datetime(),
+    })
     return {"status": "ok", "drop_reason": drop_reason}
 
 
@@ -502,14 +497,15 @@ def engage_token(token_name: str, sales_executive: str = ""):
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status not in ("Waiting",):
         frappe.throw(_("Can only engage a Waiting token, current status is {0}").format(doc.status))
-    doc.flags.ignore_permissions = True
-    doc.status = "Engaged"
-    doc.engaged_at = now_datetime()
+    updates = {
+        "status": "Engaged",
+        "engaged_at": now_datetime(),
+    }
     if sales_executive:
-        doc.sales_executive = sales_executive
+        updates["sales_executive"] = sales_executive
     elif not doc.technician:
-        doc.technician = frappe.session.user
-    doc.save()
+        updates["technician"] = frappe.session.user
+    frappe.db.set_value("POS Kiosk Token", token_name, updates)
     return {"status": "ok", "token_status": "Engaged"}
 
 
@@ -565,6 +561,7 @@ def quick_walkin(
         })
         doc.flags.ignore_permissions = True
         doc.insert()
+        doc.submit()
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
@@ -824,6 +821,7 @@ def log_counter_walkin(
         })
         doc.flags.ignore_permissions = True
         doc.insert()
+        doc.submit()
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
@@ -1124,6 +1122,7 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
     })
     sr.flags.ignore_permissions = True
     sr.insert()
+    sr.submit()
 
     # Mark token as Converted and link back to SR
     frappe.db.set_value("POS Kiosk Token", token_name, {
