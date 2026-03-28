@@ -18,17 +18,18 @@ export class ReportsWorkspace {
 	render(panel) {
 		const today = frappe.datetime.get_today();
 		const pp = encodeURIComponent(PosState.pos_profile || "");
+		const wh = encodeURIComponent(PosState.warehouse || "");
 		const enc = (v) => encodeURIComponent(JSON.stringify(v));
 
 		/* KPI definitions — { cls, icon, color, bg, label, link? } */
 		const footfall = [
-			{ cls: "walkins",   icon: "fa-sign-in",    color: "#4f46e5", bg: "#e0e7ff", label: __("Walk-ins"),   link: `/app/pos-kiosk-token?visit_source=Counter&creation=${enc([">=", today])}&status=${enc(["!=", "Cancelled"])}` },
-			{ cls: "kiosk",     icon: "fa-tablet",     color: "#7c3aed", bg: "#f3e8ff", label: __("Kiosk"),      link: `/app/pos-kiosk-token?visit_source=Kiosk&creation=${enc([">=", today])}&status=${enc(["!=", "Cancelled"])}` },
+{ cls: "walkins",   icon: "fa-sign-in",    color: "#4f46e5", bg: "#e0e7ff", label: __("Walk-ins"),   link: `/app/pos-kiosk-token?pos_profile=${pp}&visit_source=Counter&creation=${enc([">", today])}&status=${enc(["!=", "Cancelled"])}` },
+{ cls: "kiosk",     icon: "fa-tablet",     color: "#7c3aed", bg: "#f3e8ff", label: __("Kiosk"),      link: `/app/pos-kiosk-token?pos_profile=${pp}&visit_source=Kiosk&creation=${enc([">", today])}&status=${enc(["!=", "Cancelled"])}` },
 			{ cls: "conversion",icon: "fa-percent",    color: "#16a34a", bg: "#dcfce7", label: __("Conversion") },
-			{ cls: "repairs",   icon: "fa-wrench",     color: "#d97706", bg: "#fef3c7", label: __("Repairs"),    link: `/app/pos-kiosk-token?visit_purpose=Repair&creation=${enc([">=", today])}` },
-			{ cls: "buybacks",  icon: "fa-exchange",   color: "#dc2626", bg: "#fef2f2", label: __("Buybacks"),   link: `/app/pos-kiosk-token?visit_purpose=Buyback&creation=${enc([">=", today])}` },
-			{ cls: "cancelled", icon: "fa-ban",        color: "#ef4444", bg: "#fee2e2", label: __("Cancelled"),  link: `/app/pos-kiosk-token?status=Cancelled&creation=${enc([">=", today])}` },
-			{ cls: "dropped",   icon: "fa-user-times", color: "#f97316", bg: "#fff7ed", label: __("Dropped"),    link: `/app/pos-kiosk-token?status=Dropped&creation=${enc([">=", today])}` },
+{ cls: "repairs",   icon: "fa-wrench",     color: "#d97706", bg: "#fef3c7", label: __("Repairs"),    link: `/app/pos-kiosk-token?pos_profile=${pp}&visit_purpose=Repair&creation=${enc([">", today])}` },
+{ cls: "buybacks",  icon: "fa-exchange",   color: "#dc2626", bg: "#fef2f2", label: __("Buybacks"),   link: `/app/pos-kiosk-token?pos_profile=${pp}&visit_purpose=Buyback&creation=${enc([">", today])}` },
+{ cls: "cancelled", icon: "fa-ban",        color: "#ef4444", bg: "#fee2e2", label: __("Cancelled"),  link: `/app/pos-kiosk-token?pos_profile=${pp}&status=Cancelled&creation=${enc([">", today])}` },
+{ cls: "dropped",   icon: "fa-user-times", color: "#f97316", bg: "#fff7ed", label: __("Dropped"),    link: `/app/pos-kiosk-token?pos_profile=${pp}&status=Dropped&creation=${enc([">", today])}` },
 		];
 		const sales = [
 			{ cls: "revenue",    icon: "fa-inr",         color: "#2563eb", bg: "#dbeafe", label: __("Revenue"),    link: `/app/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=0` },
@@ -142,7 +143,7 @@ export class ReportsWorkspace {
 						<div class="ch-rpt-section">
 							<div class="ch-rpt-section-head">
 								<span><i class="fa fa-clipboard"></i> ${__("Material Requests")}</span>
-								<a class="ch-rpt-view-all" href="/app/material-request" target="_blank">${__("View All")} →</a>
+								<a class="ch-rpt-view-all" href="/app/material-request?set_warehouse=${wh}" target="_blank">${__("View All")} →</a>
 							</div>
 							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<div class="ch-rpt-mr-list"></div>
@@ -151,7 +152,7 @@ export class ReportsWorkspace {
 						<div class="ch-rpt-section">
 							<div class="ch-rpt-section-head">
 								<span><i class="fa fa-truck"></i> ${__("Stock Transfers")}</span>
-								<a class="ch-rpt-view-all" href="/app/stock-entry?stock_entry_type=Material+Transfer" target="_blank">${__("View All")} →</a>
+								<a class="ch-rpt-view-all" href="/app/stock-entry?stock_entry_type=Material+Transfer&from_warehouse=${wh}" target="_blank">${__("View All")} →</a>
 							</div>
 							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<div class="ch-rpt-st-list"></div>
