@@ -109,7 +109,7 @@ def _build_conditions(filters):
     if filters.get("company"):
         conditions.append("pi.company = %(company)s")
     if filters.get("store"):
-        conditions.append("pi.warehouse = %(store)s")
+        conditions.append("pi.set_warehouse = %(store)s")
     if filters.get("tax_scheme") == "Margin Scheme":
         conditions.append("pi.custom_is_margin_scheme = 1")
     elif filters.get("tax_scheme") == "Regular":

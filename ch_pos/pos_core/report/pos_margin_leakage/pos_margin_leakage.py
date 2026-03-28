@@ -121,7 +121,7 @@ def _build_conditions(filters):
     if filters.get("company"):
         conditions.append("pi.company = %(company)s")
     if filters.get("store"):
-        conditions.append("pi.warehouse = %(store)s")
+        conditions.append("pi.set_warehouse = %(store)s")
     if filters.get("item_group"):
         conditions.append("pii.item_code IN (SELECT name FROM tabItem WHERE item_group = %(item_group)s)")
     return ("AND " + " AND ".join(conditions)) if conditions else ""

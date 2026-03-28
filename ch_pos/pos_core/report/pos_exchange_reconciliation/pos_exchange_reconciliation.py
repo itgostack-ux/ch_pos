@@ -116,7 +116,7 @@ def _build_conditions(filters):
     if filters.get("company"):
         conditions.append("pi.company = %(company)s")
     if filters.get("store"):
-        conditions.append("pi.warehouse = %(store)s")
+        conditions.append("pi.set_warehouse = %(store)s")
     return ("AND " + " AND ".join(conditions)) if conditions else ""
 
 

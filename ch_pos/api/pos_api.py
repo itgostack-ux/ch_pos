@@ -1626,7 +1626,7 @@ def get_store_repairs(pos_profile):
             {"description": ["like", f"%{sr.name}%"], "docstatus": 1},
             "parent",
         ) or frappe.db.get_value(
-            "Service Request", sr.name, "custom_repair_invoice"
+            "Service Request", sr.name, "service_invoice"
         ))
 
     return service_requests
@@ -1691,7 +1691,7 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
 
     # Mark service request as billed
     try:
-        frappe.db.set_value("Service Request", service_request, "custom_repair_invoice", inv.name, update_modified=False)
+        frappe.db.set_value("Service Request", service_request, "service_invoice", inv.name, update_modified=False)
     except Exception:
         pass  # custom field may not exist yet
 
