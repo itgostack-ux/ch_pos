@@ -77,7 +77,7 @@ export class SessionOpeningScreen {
 						opening_entry: entry,
 					});
 				} else if (ctx.day_closed) {
-					this._show_day_closed_message({ message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
+				this._show_day_closed_message({ store: ctx.store, business_date: ctx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
 				} else if (ctx.error) {
 					frappe.msgprint({
 						title: __("POS Setup Required"),
@@ -211,6 +211,8 @@ export class SessionOpeningScreen {
 						dlg.hide();
 						if (ctx.day_closed) {
 							this._show_day_closed_message({
+								store: storeName,
+								business_date: ctx.business_date,
 								message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]),
 							});
 							return;
@@ -357,13 +359,82 @@ export class SessionOpeningScreen {
 	}
 
 	_show_day_closed_message(data) {
-		frappe.msgprint({
+		const store = data.store;
+		const business_date = data.business_date;
+		const today = frappe.datetime.get_today();
+		const next_date = business_date
+			? frappe.datetime.add_days(business_date, 1)
+			: today;
+		const suggested_date = next_date > today ? next_date : today;
+
+		const dlg = new frappe.ui.Dialog({
 			title: __("Business Date Closed"),
-			indicator: "orange",
-			message: data.message || __(
-				"Store day is already closed. Complete settlement and advance business date before opening a new session."
-			),
+			fields: [
+				{
+					fieldname: "info",
+					fieldtype: "HTML",
+					options: `<div class="alert alert-warning" style="margin-bottom:12px">
+						<i class="fa fa-exclamation-triangle"></i>
+						${data.message || __("Store day is already closed. Advance business date to start a new session.")}
+					</div>`,
+				},
+				{
+					fieldname: "new_date",
+					fieldtype: "Date",
+					label: __("New Business Date"),
+					reqd: 1,
+					default: suggested_date,
+					description: __("Typically the next operating day"),
+				},
+				{ fieldtype: "Column Break" },
+				{
+					fieldname: "reason",
+					fieldtype: "Small Text",
+					label: __("Reason"),
+					default: __("Advance to next business day"),
+				},
+				{ fieldtype: "Section Break", label: __("Manager Authorization") },
+				{
+					fieldname: "manager_pin",
+					fieldtype: "Password",
+					label: __("Manager PIN"),
+					reqd: 1,
+					description: __("Manager PIN required to advance business date"),
+				},
+			],
+			primary_action_label: __("Advance Date & Start New Day"),
+			primary_action: (values) => {
+				if (!store) {
+					frappe.msgprint(__("Store information not available. Please reload and try again."));
+					return;
+				}
+				dlg.disable_primary_action();
+				frappe.call({
+					method: "ch_pos.api.session_api.override_business_date",
+					args: {
+						store: store,
+						new_date: values.new_date,
+						reason: values.reason || "Advance to next business day",
+						manager_pin: values.manager_pin,
+					},
+					callback: (r) => {
+						if (r.message) {
+							dlg.hide();
+							frappe.show_alert({
+								message: __("Business date advanced to {0}. Reloading…", [r.message.business_date]),
+								indicator: "green",
+							});
+							setTimeout(() => window.location.reload(), 1200);
+						}
+					},
+					error: () => {
+						dlg.enable_primary_action();
+					},
+				});
+			},
 		});
+		dlg.show();
+		this._dialog = dlg;
 	}
 
 	_show_opening_form(pos_profile, company, resolve, ctx) {

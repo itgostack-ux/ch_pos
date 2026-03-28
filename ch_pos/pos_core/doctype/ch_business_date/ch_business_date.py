@@ -30,6 +30,11 @@ def advance_business_date(store, new_date, reason=None, manager_user=None):
         doc.override_reason = reason or ""
         doc.set_by = manager_user or frappe.session.user
         doc.set_at = now_datetime()
+        doc.status = "Open"
+        doc.opened_on = now_datetime()
+        doc.opened_by = manager_user or frappe.session.user
+        doc.closed_on = None
+        doc.closed_by = None
         doc.save(ignore_permissions=True)
     else:
         doc = frappe.get_doc({
