@@ -196,20 +196,20 @@ export class QueueWorkspace {
 		if (is_svc) {
 			const device = [t.device_brand, t.device_model].filter(Boolean).join(" ") || t.device_type || "";
 			detail_html = `
-				<div class="ch-q-card-detail">
-					${device ? `<span class="ch-q-detail-chip"><i class="fa fa-mobile"></i> ${frappe.utils.escape_html(device)}</span>` : ""}
-					${t.issue_category ? `<span class="ch-q-detail-chip"><i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.issue_category)}</span>` : ""}
+				<div class="ch-q-tags">
+					${device ? `<span class="ch-q-tag"><i class="fa fa-mobile"></i> ${frappe.utils.escape_html(device)}</span>` : ""}
+					${t.issue_category ? `<span class="ch-q-tag"><i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.issue_category)}</span>` : ""}
 				</div>
-				${t.issue_description ? `<div class="ch-q-card-note">${frappe.utils.escape_html(t.issue_description.substring(0, 80))}${t.issue_description.length > 80 ? "…" : ""}</div>` : ""}`;
+				${t.issue_description ? `<p class="ch-q-note">${frappe.utils.escape_html(t.issue_description.substring(0, 80))}${t.issue_description.length > 80 ? "…" : ""}</p>` : ""}`;
 		} else {
 			const purpose = t.visit_purpose || "Sales";
 			const purposeClsMap = { Sales: "ch-q-purpose--sales", Repair: "ch-q-purpose--repair", Buyback: "ch-q-purpose--buyback" };
 			const purposeCls = purposeClsMap[purpose] || "ch-q-purpose--other";
 			const tags = [t.category_interest, t.brand_interest, t.budget_range].filter(Boolean);
 			detail_html = `
-				<div class="ch-q-card-detail">
-					<span class="ch-q-purpose-tag ${purposeCls}">${frappe.utils.escape_html(purpose)}</span>
-					${tags.map(tag => `<span class="ch-q-detail-chip">${frappe.utils.escape_html(tag)}</span>`).join("")}
+				<div class="ch-q-tags">
+					<span class="ch-q-purpose ${purposeCls}">${frappe.utils.escape_html(purpose)}</span>
+					${tags.map(tag => `<span class="ch-q-tag">${frappe.utils.escape_html(tag)}</span>`).join("")}
 				</div>`;
 		}
 
@@ -217,39 +217,40 @@ export class QueueWorkspace {
 		let actions_html = "";
 		if (is_svc) {
 			actions_html = `
-				<button class="btn ch-q-btn ch-q-btn--primary ch-queue-convert-btn"
+				<button class="btn btn-sm btn-primary ch-queue-convert-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
-					<i class="fa fa-plus-circle"></i> ${__("GoFix Request")}
+					<i class="fa fa-plus"></i> ${__("GoFix Request")}
 				</button>`;
 		} else {
 			actions_html = `
-				<button class="btn ch-q-btn ch-q-btn--bill ch-queue-bill-btn"
+				<button class="btn btn-sm btn-primary ch-queue-bill-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
-					<i class="fa fa-shopping-bag"></i> ${__("Bill")}
+					${__("Bill")}
 				</button>
-				<button class="btn ch-q-btn ch-q-btn--drop ch-queue-drop-btn"
+				<button class="btn btn-sm btn-default ch-queue-drop-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
-					<i class="fa fa-times-circle"></i> ${__("Drop")}
+					${__("Drop")}
 				</button>`;
 		}
 
 		return `
 			<div class="ch-q-card ch-q-card--${st.cls}">
-				<div class="ch-q-card-head">
-					<span class="ch-q-token-id">${frappe.utils.escape_html(t.token_display || t.name)}</span>
-					<span class="ch-q-status ch-q-status--${st.cls}">
-						<i class="fa ${st.icon}"></i> ${st.label}
-					</span>
-					<span class="ch-q-time">${timeAgo}</span>
-				</div>
-				<div class="ch-q-card-body">
-					<div class="ch-q-customer">
+				<div class="ch-q-indicator"></div>
+				<div class="ch-q-content">
+					<div class="ch-q-row-top">
+						<span class="ch-q-token-id">${frappe.utils.escape_html(t.token_display || t.name)}</span>
+						<span class="ch-q-status ch-q-status--${st.cls}">
+							<span class="ch-q-status-dot"></span> ${st.label}
+						</span>
+						<span class="ch-q-time">${timeAgo}</span>
+					</div>
+					<div class="ch-q-row-mid">
 						<span class="ch-q-customer-name">${cust_name}</span>
 						${cust_phone ? `<span class="ch-q-customer-phone">${cust_phone}</span>` : ""}
 					</div>
 					${detail_html}
 				</div>
-				<div class="ch-q-card-actions">
+				<div class="ch-q-actions">
 					${actions_html}
 				</div>
 			</div>
