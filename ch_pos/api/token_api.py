@@ -475,7 +475,8 @@ def cancel_token(token_name: str):
 @frappe.whitelist()
 def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = "", drop_remarks: str = ""):
     """Mark a token as Dropped (customer left / no-show) with mandatory reason capture."""
-    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+    user_roles = frappe.get_roles()
+    if "POS User" not in user_roles and "POS Manager" not in user_roles:
         frappe.throw(_("Not permitted"), frappe.PermissionError)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted", "Dropped"):
@@ -495,7 +496,8 @@ def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = ""
 @frappe.whitelist()
 def engage_token(token_name: str, sales_executive: str = ""):
     """Mark a token as Engaged — staff has started interacting with the customer."""
-    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+    user_roles = frappe.get_roles()
+    if "POS User" not in user_roles and "POS Manager" not in user_roles:
         frappe.throw(_("Not permitted"), frappe.PermissionError)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status not in ("Waiting",):
