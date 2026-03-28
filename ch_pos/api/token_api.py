@@ -1045,12 +1045,14 @@ def get_pos_waiting_tokens(pos_profile: str):
         """SELECT name, token_display, customer_name, customer_phone,
                   device_type, device_brand, device_model,
                   issue_category, issue_description, status,
+                  visit_purpose, category_interest, brand_interest,
+                  budget_range, sales_executive, engaged_at,
                   technician, creation
            FROM `tabPOS Kiosk Token`
            WHERE pos_profile = %s
-             AND status IN ('Waiting', 'In Progress')
+             AND status IN ('Waiting', 'Engaged', 'In Progress')
              AND DATE(creation) = %s
-           ORDER BY creation ASC""",
+           ORDER BY FIELD(status, 'Waiting', 'Engaged', 'In Progress'), creation ASC""",
         (pos_profile, today),
         as_dict=True,
     )

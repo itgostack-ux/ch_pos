@@ -1,16 +1,36 @@
 /**
- * CH POS — Queue Workspace
+ * CH POS — Queue Workspace (Universal)
  *
- * Shows all Waiting / In-Progress tokens for the current store.
- * The executive can create a GoFix Service Request from any token
- * with one click, pre-filling all device and issue details.
+ * Company-aware token queue panel:
+ * - GoFix (service): "GoFix Request" conversion (existing flow)
+ * - GoGizmo (retail): "Start Billing" + "Drop" actions
+ *
+ * Shows Waiting / Engaged / In-Progress tokens for the current store.
+ * Auto-refreshes every 30 seconds while the queue tab is active.
  */
 import { PosState, EventBus } from "../../state.js";
+
+/** Heuristic: service company? */
+function _is_service() {
+	const c = (PosState.company || "").toLowerCase();
+	return c.includes("gofix") || c.includes("service");
+}
+
+const DROP_REASONS = [
+	"Price Too High",
+	"Item Not Available",
+	"Just Browsing",
+	"Found Elsewhere",
+	"Will Come Back Later",
+	"Long Wait Time",
+	"Other",
+];
 
 export class QueueWorkspace {
 	constructor() {
 		this._panel = null;
 		this._refreshTimer = null;
+		this._tokens = [];
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "queue") return;
 			this._panel = ctx.panel;
@@ -35,16 +55,24 @@ export class QueueWorkspace {
 	}
 
 	_render(panel) {
+		const is_svc = _is_service();
+		const title = is_svc ? __("Service Queue") : __("Store Queue");
+		const hint = is_svc
+			? __("Waiting tokens from the kiosk — create a GoFix request in one click")
+			: __("Walk-in tokens — start billing or drop from here");
+		const icon_bg = is_svc ? "#fce7f3" : "#ede9fe";
+		const icon_fg = is_svc ? "#be185d" : "#6d28d9";
+
 		panel.html(`
 			<div class="ch-pos-mode-panel">
 				<div class="ch-mode-header">
 					<h4>
-						<span class="mode-icon" style="background:#fce7f3;color:#be185d">
+						<span class="mode-icon" style="background:${icon_bg};color:${icon_fg}">
 							<i class="fa fa-ticket"></i>
 						</span>
-						${__("Service Queue")}
+						${title}
 					</h4>
-					<span class="ch-mode-hint">${__("Waiting tokens from the kiosk — create a GoFix request in one click")}</span>
+					<span class="ch-mode-hint">${hint}</span>
 					<button class="btn btn-sm btn-default ch-queue-refresh-btn" style="margin-left:auto">
 						<i class="fa fa-refresh"></i> ${__("Refresh")}
 					</button>
@@ -66,7 +94,6 @@ export class QueueWorkspace {
 		const pos_profile = PosState.pos_profile;
 		if (!pos_profile) return;
 
-		// Show loading indicator while fetching
 		if (this._panel) {
 			this._panel.find(".ch-queue-token-list").html(
 				`<div style="text-align:center;padding:40px;color:var(--text-muted)">
@@ -76,7 +103,10 @@ export class QueueWorkspace {
 		}
 
 		frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile })
-			.then((tokens) => this._renderTokenList(tokens))
+			.then((tokens) => {
+				this._tokens = tokens || [];
+				this._renderTokenList(this._tokens);
+			})
 			.catch(() => {
 				if (this._panel) {
 					this._panel.find(".ch-queue-token-list").html(
@@ -106,7 +136,7 @@ export class QueueWorkspace {
 		const cards = tokens.map((t) => this._tokenCard(t)).join("");
 		list.html(`
 			<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--pos-space-sm)">
-				<span style="font-size:.85rem;color:var(--text-muted)">${tokens.length} ${__("token(s) waiting")}</span>
+				<span style="font-size:.85rem;color:var(--text-muted)">${tokens.length} ${__("token(s)")}</span>
 				<span style="font-size:.85rem;color:var(--text-muted)">${__("Auto-refreshes every 30s")}</span>
 			</div>
 			<div class="ch-queue-cards" style="display:flex;flex-direction:column;gap:var(--pos-space-sm)">
@@ -114,19 +144,88 @@ export class QueueWorkspace {
 			</div>
 		`);
 
-		// Bind convert buttons
+		// Bind action buttons
 		list.find(".ch-queue-convert-btn").on("click", (e) => {
 			const name = $(e.currentTarget).data("token");
-			const token = tokens.find((t) => t.name === name);
+			const token = this._tokens.find((t) => t.name === name);
 			if (token) this._showConvertDialog(token);
+		});
+		list.find(".ch-queue-bill-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._startBilling(token);
+		});
+		list.find(".ch-queue-drop-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._showDropDialog(token);
 		});
 	}
 
+	// ── Token Card ──────────────────────────────────────────────
+
 	_tokenCard(t) {
-		const statusColor = t.status === "Waiting" ? "#f59e0b" : "#3b82f6";
-		const statusIcon  = t.status === "Waiting" ? "fa-clock-o" : "fa-cogs";
+		const is_svc = _is_service();
+		const statusColors = { Waiting: "#f59e0b", Engaged: "#3b82f6", "In Progress": "#8b5cf6" };
+		const statusIcons  = { Waiting: "fa-clock-o", Engaged: "fa-handshake-o", "In Progress": "fa-cogs" };
+		const statusColor = statusColors[t.status] || "#6b7280";
+		const statusIcon  = statusIcons[t.status] || "fa-circle";
 		const timeAgo     = frappe.datetime.comment_when(t.creation);
-		const device      = [t.device_brand, t.device_model].filter(Boolean).join(" ") || t.device_type || "—";
+
+		// Build detail lines based on company type
+		let detail_html = "";
+		if (is_svc) {
+			const device = [t.device_brand, t.device_model].filter(Boolean).join(" ") || t.device_type || "—";
+			detail_html = `
+				<div style="color:var(--text-muted);font-size:.85rem;margin-bottom:2px">
+					<i class="fa fa-mobile"></i> ${frappe.utils.escape_html(device)}
+				</div>
+				<div style="color:var(--text-muted);font-size:.82rem">
+					<i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.issue_category || "—")}
+					${t.issue_description ? `<span style="margin-left:6px;font-style:italic">${frappe.utils.escape_html(t.issue_description.substring(0, 60))}${t.issue_description.length > 60 ? "…" : ""}</span>` : ""}
+				</div>`;
+		} else {
+			// Retail: show purpose, category, brand, budget
+			const purpose = t.visit_purpose || "Sales";
+			const tags = [t.category_interest, t.brand_interest, t.budget_range].filter(Boolean);
+			detail_html = `
+				<div style="color:var(--text-muted);font-size:.85rem;margin-bottom:2px">
+					<i class="fa fa-tag"></i> ${frappe.utils.escape_html(purpose)}
+				</div>`;
+			if (tags.length) {
+				detail_html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">
+					${tags.map(tag => `<span style="font-size:.72rem;background:${statusColor}15;color:${statusColor};
+						padding:2px 8px;border-radius:10px;font-weight:600">${frappe.utils.escape_html(tag)}</span>`).join("")}
+				</div>`;
+			}
+		}
+
+		// Action buttons
+		let actions_html = "";
+		if (is_svc) {
+			actions_html = `
+				<button class="btn btn-primary btn-sm ch-queue-convert-btn"
+					data-token="${frappe.utils.escape_html(t.name)}"
+					style="white-space:nowrap">
+					<i class="fa fa-plus"></i> ${__("GoFix Request")}
+				</button>`;
+		} else {
+			// Retail: Bill + Drop
+			const bill_disabled = t.status === "In Progress" ? "disabled" : "";
+			actions_html = `
+				<div style="display:flex;gap:6px">
+					<button class="btn btn-primary btn-sm ch-queue-bill-btn"
+						data-token="${frappe.utils.escape_html(t.name)}"
+						style="white-space:nowrap" ${bill_disabled}>
+						<i class="fa fa-shopping-bag"></i> ${__("Bill")}
+					</button>
+					<button class="btn btn-outline-danger btn-sm ch-queue-drop-btn"
+						data-token="${frappe.utils.escape_html(t.name)}"
+						style="white-space:nowrap">
+						<i class="fa fa-times"></i> ${__("Drop")}
+					</button>
+				</div>`;
+		}
 
 		return `
 			<div class="ch-pos-section-card" style="border-left:4px solid ${statusColor}">
@@ -147,26 +246,119 @@ export class QueueWorkspace {
 								${frappe.utils.escape_html(t.customer_phone || "")}
 							</span>
 						</div>
-						<div style="color:var(--text-muted);font-size:.85rem;margin-bottom:2px">
-							<i class="fa fa-mobile"></i> ${frappe.utils.escape_html(device)}
-						</div>
-						<div style="color:var(--text-muted);font-size:.82rem">
-							<i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.issue_category || "—")}
-							${t.issue_description ? `<span style="margin-left:6px;font-style:italic">${frappe.utils.escape_html(t.issue_description.substring(0, 60))}${t.issue_description.length > 60 ? "…" : ""}</span>` : ""}
-						</div>
+						${detail_html}
 					</div>
 					<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
 						<span style="font-size:.75rem;color:var(--text-muted)">${timeAgo}</span>
-						<button class="btn btn-primary btn-sm ch-queue-convert-btn"
-							data-token="${frappe.utils.escape_html(t.name)}"
-							style="white-space:nowrap">
-							<i class="fa fa-plus"></i> ${__("GoFix Request")}
-						</button>
+						${actions_html}
 					</div>
 				</div>
 			</div>
 		`;
 	}
+
+	// ── Retail: Start Billing ───────────────────────────────────
+
+	_startBilling(token) {
+		const _proceed = () => {
+			// Store token reference in state — will be passed to Sales Invoice
+			PosState.kiosk_token = token.name;
+
+			// Switch to sell mode
+			PosState.active_mode = "sell";
+			EventBus.emit("mode:set", "sell");
+			EventBus.emit("mode:switch", "sell");
+
+			frappe.show_alert({
+				message: __("Billing started for token {0} — {1}", [
+					token.token_display || token.name,
+					token.customer_name,
+				]),
+				indicator: "blue",
+			}, 5);
+		};
+
+		if (token.status === "Waiting") {
+			// Engage first
+			frappe.xcall("ch_pos.api.token_api.engage_token", {
+				token_name: token.name,
+				sales_executive: PosState.sales_executive || "",
+			}).then(() => _proceed()).catch((err) => {
+				frappe.show_alert({
+					message: err.message || __("Failed to engage token"),
+					indicator: "red",
+				});
+			});
+		} else {
+			// Already Engaged — just proceed
+			_proceed();
+		}
+	}
+
+	// ── Retail: Drop Token ──────────────────────────────────────
+
+	_showDropDialog(token) {
+		const d = new frappe.ui.Dialog({
+			title: `${__("Drop Token")} — ${token.token_display || token.name}`,
+			fields: [
+				{
+					label: __("Customer"),
+					fieldtype: "Data",
+					fieldname: "customer_name",
+					default: token.customer_name,
+					read_only: 1,
+				},
+				{
+					label: __("Drop Reason"),
+					fieldtype: "Select",
+					fieldname: "drop_reason",
+					options: DROP_REASONS.join("\n"),
+					reqd: 1,
+				},
+				{
+					label: __("Sub-reason / Detail"),
+					fieldtype: "Data",
+					fieldname: "drop_sub_reason",
+					depends_on: "drop_reason",
+				},
+				{
+					label: __("Remarks"),
+					fieldtype: "Small Text",
+					fieldname: "drop_remarks",
+					placeholder: __("Any additional notes…"),
+				},
+			],
+			primary_action_label: `<i class="fa fa-times-circle"></i> ${__("Drop Token")}`,
+			primary_action: (values) => {
+				d.disable_primary_action();
+				frappe.xcall("ch_pos.api.token_api.drop_token", {
+					token_name: token.name,
+					drop_reason: values.drop_reason,
+					drop_sub_reason: values.drop_sub_reason || "",
+					drop_remarks: values.drop_remarks || "",
+				}).then(() => {
+					d.hide();
+					frappe.show_alert({
+						message: __("Token {0} dropped — {1}", [
+							token.token_display || token.name,
+							values.drop_reason,
+						]),
+						indicator: "orange",
+					});
+					this._loadTokens();
+				}).catch((err) => {
+					d.enable_primary_action();
+					frappe.show_alert({
+						message: err.message || __("Failed to drop token"),
+						indicator: "red",
+					});
+				});
+			},
+		});
+		d.show();
+	}
+
+	// ── Service: GoFix Request ──────────────────────────────────
 
 	_showConvertDialog(token) {
 		const device_display = [token.device_brand, token.device_model].filter(Boolean).join(" ") || token.device_type || "";
@@ -293,7 +485,6 @@ export class QueueWorkspace {
 						`,
 						indicator: "green",
 					}, 8);
-					// Refresh the queue
 					this._loadTokens();
 				}).catch((err) => {
 					d.get_primary_btn().prop("disabled", false)

@@ -135,7 +135,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        client_request_id=None,
                        is_credit_sale=0, credit_days=0,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
-                       advance_amount=0):
+                       advance_amount=0, kiosk_token=None):
     """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
@@ -193,6 +193,10 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.posting_date = nowdate()
     inv.is_pos = 1
     inv.update_stock = 1
+
+    # Kiosk token link (from queue panel billing)
+    if kiosk_token:
+        inv.custom_kiosk_token = kiosk_token
 
     # Track warranty items to create CH Sold Plans after submit
     warranty_items = []

@@ -19,7 +19,7 @@ import { validate_india_phone } from "../shared/helpers.js";
  */
 const COMPANY_MODE_MAP = {
 	// Retail company modes (GoGizmo or any retail company)
-	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "model_compare", "claims", "exceptions"],
+	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "model_compare", "claims", "exceptions", "queue"],
 	// Service company modes (GoFix or any service company)
 	service: ["sell", "returns", "buyback", "repair", "queue", "service", "claims", "exceptions"],
 };

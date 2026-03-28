@@ -1609,6 +1609,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			free_sale_approved_by:          this._is_free_sale ? this._free_sale_approved_by : "",
 			free_sale_approval_name:        this._is_free_sale ? (this._free_sale_approval_name || "") : "",
 			advance_amount:                 advance > 0 ? advance : 0,
+			kiosk_token:                    PosState.kiosk_token || null,
 		};
 
 		if (!navigator.onLine) {

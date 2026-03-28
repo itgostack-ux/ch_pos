@@ -92,6 +92,9 @@ export const PosState = {
 	active_service_job: null,   // current service job being worked on
 	service_job_items: [],      // items linked to active service job
 
+	// ── Kiosk Token ────────────────────────────────────
+	kiosk_token: null,          // linked POS Kiosk Token name (for billing from queue)
+
 	// ── Customer Summary (enriched) ─────────────────────
 	customer_summary: null,     // { order_count, active_warranties, active_service_jobs }
 
@@ -128,6 +131,7 @@ export const PosState = {
 		this.active_service_job = null;
 		this.service_job_items = [];
 		this.customer_summary = null;
+		this.kiosk_token = null;
 		// Keep executive and company selection across transactions
 		EventBus.emit("state:transaction_reset");
 	},

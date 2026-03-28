@@ -34,6 +34,7 @@ export class CartPanel {
 
 			<!-- A. Customer Header -->
 			<div class="ch-pos-customer-bar">
+				<div class="ch-pos-token-banner" style="display:none"></div>
 				<div class="ch-pos-customer-select"></div>
 				<div class="ch-pos-customer-row">
 					<div class="ch-pos-customer-tag walk-in">
@@ -182,6 +183,30 @@ export class CartPanel {
 				PosState.sales_executive = execs[0].name;
 				PosState.sales_executive_name = execs[0].executive_name;
 			}
+		}
+	}
+
+	_update_token_banner() {
+		const banner = this.wrapper.find(".ch-pos-token-banner");
+		if (PosState.kiosk_token) {
+			banner.html(`
+				<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;
+					background:rgba(79,110,247,0.1);border-radius:var(--pos-radius-sm,6px);
+					margin-bottom:6px;font-size:12px;font-weight:600;color:var(--pos-primary,#4f6ef7)">
+					<i class="fa fa-ticket"></i>
+					<span>${__("Token")}: ${frappe.utils.escape_html(PosState.kiosk_token)}</span>
+					<button class="btn btn-link btn-xs ch-pos-unlink-token" style="margin-left:auto;padding:0;font-size:11px;color:var(--pos-text-muted)"
+						title="${__("Unlink token")}">
+						<i class="fa fa-times"></i>
+					</button>
+				</div>
+			`).show();
+			banner.find(".ch-pos-unlink-token").on("click", () => {
+				PosState.kiosk_token = null;
+				this._update_token_banner();
+			});
+		} else {
+			banner.hide().empty();
 		}
 	}
 
@@ -360,6 +385,12 @@ export class CartPanel {
 		EventBus.on("cart:updated", () => this.refresh());
 		EventBus.on("exchange:applied", () => this.refresh());
 		EventBus.on("product_exchange:applied", () => this.refresh());
+
+		// Token banner — show when billing from queue
+		EventBus.on("mode:switch", () => this._update_token_banner());
+		EventBus.on("state:transaction_reset", () => this._update_token_banner());
+		this._update_token_banner();
+
 		EventBus.on("customer:set", (cust) => {
 			if (cust) {
 				if (this.customer_field) this.customer_field.set_value(cust);
