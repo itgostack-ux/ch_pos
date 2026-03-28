@@ -242,6 +242,8 @@ export class SessionOpeningScreen {
 										pos_profile: profile,
 										opening_entry: { pos_profile: profile, company: ctx.company },
 									});
+								} else if (data.day_closed) {
+									this._show_day_closed_message(data);
 								} else if (data.unclosed_session) {
 									this._show_must_close(data, profile, resolve);
 								} else {

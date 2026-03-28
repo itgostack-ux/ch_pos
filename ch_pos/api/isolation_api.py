@@ -10,7 +10,7 @@ This module provides:
 
 import frappe
 from frappe import _
-from frappe.utils import flt, cint, now_datetime, getdate
+from frappe.utils import flt, cint, now_datetime, getdate, nowdate
 
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 from ch_pos.pos_core.doctype.ch_pos_user_allocation.ch_pos_user_allocation import (
@@ -92,6 +92,14 @@ def get_pos_context():
         bd_status = frappe.db.get_value("CH Business Date", {"store": store}, "status")
         if bd_status == "Closed":
             day_closed = True
+        elif getdate(business_date) < getdate(nowdate()):
+            # Stale date: business date is in the past — check if a closed session exists
+            has_closed = frappe.db.exists(
+                "CH POS Session",
+                {"store": store, "business_date": business_date, "status": "Closed", "docstatus": 1},
+            )
+            if has_closed:
+                day_closed = True
 
     return {
         "status": "ok",
@@ -147,6 +155,14 @@ def get_pos_context_for_store(store):
     bd_status = frappe.db.get_value("CH Business Date", {"store": store}, "status")
     if bd_status == "Closed":
         day_closed = True
+    elif getdate(business_date) < getdate(nowdate()):
+        # Stale date: business date is in the past — check if a closed session exists
+        has_closed = frappe.db.exists(
+            "CH POS Session",
+            {"store": store, "business_date": business_date, "status": "Closed", "docstatus": 1},
+        )
+        if has_closed:
+            day_closed = True
 
     # Find POS Profile for this store
     pos_profile = frappe.db.get_value(
