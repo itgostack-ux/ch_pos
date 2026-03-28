@@ -108,9 +108,9 @@ class CHPOSSession(Document):
                         existing, self.pos_profile
                     )
                 )
-
+              
     def _validate_no_duplicate_open_for_store(self):
-        """Ensure only one active session exists per store at any point in time."""
+        """Auto-close existing session instead of blocking."""
         if self.docstatus != 0:
             return
 
@@ -122,15 +122,25 @@ class CHPOSSession(Document):
                 "docstatus": 1,
                 "name": ("!=", self.name),
             },
-            ["name", "pos_profile", "user"],
+            ["name"],
             as_dict=True,
         )
+
         if existing:
-            frappe.throw(
-                _(
-                    "Store already has an active session {0} (Profile: {1}, Cashier: {2}). "
-                    "Close it before opening a new session."
-                ).format(existing.name, existing.pos_profile, existing.user)
+            old_doc = frappe.get_doc("CH POS Session", existing.name)
+
+            old_doc.flags.ignore_validate = True
+            old_doc.auto_closed = 1
+
+            old_doc.close_session(
+                closing_cash=0,
+                variance_reason="Auto-closed while opening new session"
+            )
+
+            frappe.db.commit()
+
+            frappe.msgprint(
+                _("Previous session {0} was automatically closed.").format(existing.name)
             )
 
     def _validate_no_duplicate_device_date(self):

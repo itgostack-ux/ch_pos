@@ -793,35 +793,51 @@ def _apply_margin_scheme(doc):
 
 
 def validate_eod_lock(doc, method=None):
-    """Hook: validate — block Sales Invoice creation/amendment after session close.
-
-    Once a CH POS Session for this pos_profile + business_date is Closed,
-    no new invoices (or amendments) are allowed for that profile + date.
-
-    Set frappe.flags.ignore_eod_lock = True before insert to bypass (tests only).
     """
+    Hook: validate — allow billing only when an active POS session exists.
+
+    - If an active CH POS Session exists → allow billing
+    - If no active session → block billing
+    - Closed sessions are ignored if an active session exists
+    """
+
+    # Skip for testing / overrides
     if frappe.flags.get("ignore_eod_lock"):
         return
-    if not doc.pos_profile or not doc.posting_date:
+
+    if not doc.pos_profile:
         return
 
-    closed = frappe.db.exists(
-        "CH POS Session",
-        {
-            "pos_profile": doc.pos_profile,
-            "business_date": doc.posting_date,
-            "status": "Closed",
-            "docstatus": 1,
-        },
-    )
-    if closed:
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+
+    # Get active session
+    active = get_active_session(doc.pos_profile)
+
+    if not active:
         frappe.throw(
             frappe._(
-                "POS Session for {0} on {1} is already closed. "
-                "No new invoices can be created. Contact your manager to reopen."
-            ).format(doc.pos_profile, doc.posting_date)
+                "No active POS Session for {0}. Open a session before billing."
+            ).format(doc.pos_profile)
         )
 
+    if active.get("status") != "Open":
+        frappe.throw(
+            frappe._(
+                "POS Session {0} is not open. Current status: {1}"
+            ).format(active.get("name"), active.get("status"))
+        )
+
+    if doc.posting_date and active.get("business_date"):
+        if str(active.get("business_date")) != str(doc.posting_date):
+            frappe.throw(
+                frappe._(
+                    "Active session {0} is for {1}, but invoice date is {2}."
+                ).format(
+                    active.get("name"),
+                    active.get("business_date"),
+                    doc.posting_date,
+                )
+            )
 
 def _get_incoming_rate(item):
     """Get purchase cost (incoming rate) for a Sales Invoice item.
