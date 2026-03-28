@@ -37,6 +37,22 @@
   "total_estimate",
   "column_break_totals",
   "comparison_request",
+  "retail_section",
+  "category_interest",
+  "brand_interest",
+  "column_break_retail",
+  "budget_range",
+  "engagement_section",
+  "sales_executive",
+  "engaged_at",
+  "column_break_engage",
+  "exit_at",
+  "handling_duration",
+  "drop_section",
+  "drop_reason",
+  "drop_sub_reason",
+  "column_break_drop",
+  "drop_remarks",
   "links_section",
   "linked_customer",
   "linked_service_request",
@@ -91,7 +107,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Waiting\nIn Progress\nCompleted\nCancelled\nConverted\nDropped\nExpired",
+   "options": "Waiting\nEngaged\nIn Progress\nCompleted\nCancelled\nConverted\nDropped\nExpired",
    "read_only": 1
   },
   {
@@ -238,6 +254,101 @@
    "options": "POS Comparison Request"
   },
   {
+   "fieldname": "retail_section",
+   "fieldtype": "Section Break",
+   "label": "Retail Interest",
+   "collapsible": 1,
+   "depends_on": "eval:doc.visit_purpose=='Sales' || doc.visit_purpose=='Enquiry'"
+  },
+  {
+   "fieldname": "category_interest",
+   "fieldtype": "Select",
+   "label": "Category",
+   "options": "\nMobile\nLaptop\nTablet\nAccessories\nSmart Watch\nAudio\nOther"
+  },
+  {
+   "fieldname": "brand_interest",
+   "fieldtype": "Data",
+   "label": "Brand Interest"
+  },
+  {
+   "fieldname": "column_break_retail",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "budget_range",
+   "fieldtype": "Select",
+   "label": "Budget Range",
+   "options": "\nUnder 10K\n10K-20K\n20K-35K\n35K-50K\n50K-75K\n75K-1L\nAbove 1L"
+  },
+  {
+   "fieldname": "engagement_section",
+   "fieldtype": "Section Break",
+   "label": "Engagement Tracking"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "sales_executive",
+   "fieldtype": "Link",
+   "label": "Sales Executive",
+   "options": "POS Executive"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "engaged_at",
+   "fieldtype": "Datetime",
+   "label": "Engaged At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_engage",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "exit_at",
+   "fieldtype": "Datetime",
+   "label": "Exit At",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "handling_duration",
+   "fieldtype": "Int",
+   "label": "Handling Duration (mins)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "drop_section",
+   "fieldtype": "Section Break",
+   "label": "Drop Details",
+   "depends_on": "eval:doc.status=='Dropped'",
+   "collapsible": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "drop_reason",
+   "fieldtype": "Select",
+   "label": "Drop Reason",
+   "options": "\nPrice Too High\nProduct Not Available\nCompetitor Better Deal\nJust Browsing\nWill Return Later\nService Wait Too Long\nPoor Experience\nOther"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "drop_sub_reason",
+   "fieldtype": "Data",
+   "label": "Sub Reason"
+  },
+  {
+   "fieldname": "column_break_drop",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "drop_remarks",
+   "fieldtype": "Small Text",
+   "label": "Drop Remarks"
+  },
+  {
    "fieldname": "links_section",
    "fieldtype": "Section Break",
    "label": "Linked Documents"
@@ -278,7 +389,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-03-16 12:00:00.000000",
+ "modified": "2026-03-28 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Kiosk",
  "name": "POS Kiosk Token",

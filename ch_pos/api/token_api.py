@@ -473,17 +473,301 @@ def cancel_token(token_name: str):
 
 
 @frappe.whitelist()
-def drop_token(token_name: str):
-    """Mark a token as Dropped (customer left / no-show)."""
+def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = "", drop_remarks: str = ""):
+    """Mark a token as Dropped (customer left / no-show) with mandatory reason capture."""
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
         frappe.throw(_("Not permitted"), frappe.PermissionError)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted", "Dropped"):
         frappe.throw(_("Cannot drop a {0} token").format(doc.status))
+    if not drop_reason:
+        frappe.throw(_("Drop reason is mandatory when marking a token as Dropped"))
     doc.flags.ignore_permissions = True
     doc.status = "Dropped"
+    doc.drop_reason = drop_reason
+    doc.drop_sub_reason = drop_sub_reason
+    doc.drop_remarks = drop_remarks
+    doc.exit_at = now_datetime()
     doc.save()
-    return {"status": "ok"}
+    return {"status": "ok", "drop_reason": drop_reason}
+
+
+@frappe.whitelist()
+def engage_token(token_name: str, sales_executive: str = ""):
+    """Mark a token as Engaged — staff has started interacting with the customer."""
+    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+        frappe.throw(_("Not permitted"), frappe.PermissionError)
+    doc = frappe.get_doc("POS Kiosk Token", token_name)
+    if doc.status not in ("Waiting",):
+        frappe.throw(_("Can only engage a Waiting token, current status is {0}").format(doc.status))
+    doc.flags.ignore_permissions = True
+    doc.status = "Engaged"
+    doc.engaged_at = now_datetime()
+    if sales_executive:
+        doc.sales_executive = sales_executive
+    elif not doc.technician:
+        doc.technician = frappe.session.user
+    doc.save()
+    return {"status": "ok", "token_status": "Engaged"}
+
+
+@frappe.whitelist()
+def quick_walkin(
+    pos_profile: str,
+    visit_purpose: str = "Sales",
+    category_interest: str = "",
+    brand_interest: str = "",
+    budget_range: str = "",
+    customer_name: str = "",
+    customer_phone: str = "",
+    sales_executive: str = "",
+):
+    """
+    2-second retail walk-in entry — button-driven, no typing needed.
+    Creates a token already in Engaged state with retail interest fields populated.
+    """
+    profile = frappe.db.get_value(
+        "POS Profile", pos_profile, ["name", "company", "warehouse"], as_dict=True
+    )
+    if not profile:
+        frappe.throw(_("Invalid POS Profile"))
+
+    company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
+
+    if customer_phone and customer_phone.strip():
+        customer_phone = validate_indian_phone(customer_phone.strip(), "Phone number")
+
+    today = frappe.utils.today()
+    lock_key = f"pos_seq_{pos_profile}_{today}"
+    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    try:
+        token_display = _generate_token_display(pos_profile, company_abbr)
+        doc = frappe.get_doc({
+            "doctype": "POS Kiosk Token",
+            "pos_profile": pos_profile,
+            "company": profile.company,
+            "store": profile.warehouse,
+            "status": "Engaged",
+            "token_display": token_display,
+            "customer_name": customer_name.strip() or "Walk-in",
+            "customer_phone": customer_phone.strip() or "",
+            "visit_source": "Counter",
+            "visit_purpose": visit_purpose,
+            "category_interest": category_interest,
+            "brand_interest": brand_interest,
+            "budget_range": budget_range,
+            "sales_executive": sales_executive or "",
+            "engaged_at": now_datetime(),
+            "technician": frappe.session.user,
+            "expires_at": frappe.utils.add_days(now_datetime(), 1),
+        })
+        doc.flags.ignore_permissions = True
+        doc.insert()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
+
+    return {
+        "status": "ok",
+        "token": token_display,
+        "name": doc.name,
+        "visit_purpose": visit_purpose,
+    }
+
+
+@frappe.whitelist()
+def audit_orphan_invoices(pos_profile: str = "", date: str = ""):
+    """
+    Daily audit: find POS invoices that have no linked kiosk token.
+    Returns list of orphan invoices for compliance review.
+    """
+    target_date = date or frappe.utils.today()
+    filters = {
+        "is_pos": 1,
+        "docstatus": 1,
+        "posting_date": target_date,
+        "custom_kiosk_token": ("in", ["", None]),
+    }
+    if pos_profile:
+        filters["pos_profile"] = pos_profile
+
+    orphans = frappe.get_all(
+        "Sales Invoice",
+        filters=filters,
+        fields=["name", "pos_profile", "customer_name", "grand_total", "posting_date", "owner"],
+        order_by="creation asc",
+    )
+    return {
+        "date": target_date,
+        "total_orphans": len(orphans),
+        "invoices": orphans,
+    }
+
+
+@frappe.whitelist()
+def get_walkin_insights(pos_profile: str = "", days: int = 30):
+    """
+    AI-style insights derived from token data — actionable observations for store managers.
+    Returns structured insights with severity and recommendations.
+    """
+    from frappe.utils import getdate, add_days
+    end_date = frappe.utils.today()
+    start_date = str(add_days(getdate(end_date), -(int(days) - 1)))
+
+    base_filters = {"creation": [">=", start_date + " 00:00:00"]}
+    if pos_profile:
+        base_filters["pos_profile"] = pos_profile
+
+    tokens = frappe.get_all(
+        "POS Kiosk Token",
+        filters=base_filters,
+        fields=[
+            "name", "status", "visit_purpose", "visit_source",
+            "category_interest", "brand_interest", "budget_range",
+            "drop_reason", "sales_executive", "handling_duration",
+            "creation", "engaged_at", "exit_at", "converted_invoice",
+            "pos_profile",
+        ],
+    )
+
+    if not tokens:
+        return {"insights": [], "summary": "No token data for the selected period."}
+
+    total = len(tokens)
+    converted = [t for t in tokens if t.status == "Converted"]
+    dropped = [t for t in tokens if t.status == "Dropped"]
+    waiting = [t for t in tokens if t.status in ("Waiting", "Expired")]
+
+    conversion_rate = round(len(converted) / total * 100, 1) if total else 0
+    drop_rate = round(len(dropped) / total * 100, 1) if total else 0
+
+    insights = []
+
+    # 1. Conversion rate alert
+    if conversion_rate < 30:
+        insights.append({
+            "type": "warning",
+            "title": "Low Conversion Rate",
+            "metric": f"{conversion_rate}%",
+            "detail": f"Only {len(converted)} of {total} walk-ins converted to sales. Industry benchmark is 35-45%.",
+            "action": "Review drop reasons and staff training. Check if high-demand products are in stock.",
+        })
+    elif conversion_rate > 50:
+        insights.append({
+            "type": "success",
+            "title": "Strong Conversion",
+            "metric": f"{conversion_rate}%",
+            "detail": f"{len(converted)} of {total} walk-ins converted — above benchmark.",
+            "action": "Maintain momentum. Consider upsell training to increase basket size.",
+        })
+
+    # 2. Top drop reasons
+    drop_reasons = {}
+    for t in dropped:
+        r = t.drop_reason or "Not Specified"
+        drop_reasons[r] = drop_reasons.get(r, 0) + 1
+    if drop_reasons:
+        top_reason = max(drop_reasons, key=drop_reasons.get)
+        top_count = drop_reasons[top_reason]
+        insights.append({
+            "type": "info",
+            "title": "Top Drop Reason",
+            "metric": f"{top_reason} ({top_count}x)",
+            "detail": f"'{top_reason}' is the #1 reason customers leave without buying ({round(top_count / len(dropped) * 100)}% of drops).",
+            "action": {
+                "Price Too High": "Review pricing vs. competitors. Push finance/EMI options.",
+                "Product Not Available": "Check stock availability for requested items. Improve procurement.",
+                "Competitor Better Deal": "Activate price match or bundle offers.",
+                "Just Browsing": "Train staff on engagement techniques to convert browsers.",
+            }.get(top_reason, "Investigate and address the root cause."),
+        })
+
+    # 3. Unengaged visitors (went from Waiting to Expired without engagement)
+    unengaged = [t for t in waiting if not t.engaged_at]
+    if unengaged and len(unengaged) > total * 0.15:
+        insights.append({
+            "type": "warning",
+            "title": "High Unengaged Walk-ins",
+            "metric": f"{len(unengaged)} ({round(len(unengaged) / total * 100)}%)",
+            "detail": f"{len(unengaged)} customers left without any staff interaction.",
+            "action": "Ensure adequate floor staff during peak hours. Consider greeting protocol within 60 seconds.",
+        })
+
+    # 4. Brand demand without sales
+    brand_demand = {}
+    brand_converted = set()
+    for t in tokens:
+        if t.brand_interest:
+            brand_demand[t.brand_interest] = brand_demand.get(t.brand_interest, 0) + 1
+        if t.status == "Converted" and t.brand_interest:
+            brand_converted.add(t.brand_interest)
+    missed_brands = {b: c for b, c in brand_demand.items() if b not in brand_converted and c >= 3}
+    if missed_brands:
+        top_missed = max(missed_brands, key=missed_brands.get)
+        insights.append({
+            "type": "opportunity",
+            "title": "Missed Brand Opportunity",
+            "metric": f"{top_missed} ({missed_brands[top_missed]} requests, 0 sales)",
+            "detail": f"Customers asked for {top_missed} {missed_brands[top_missed]} times but none converted.",
+            "action": f"Check {top_missed} stock levels and pricing. Consider adding models if not stocked.",
+        })
+
+    # 5. Staff performance variance
+    exec_data = {}
+    for t in tokens:
+        ex = t.sales_executive or t.get("technician") or ""
+        if not ex:
+            continue
+        if ex not in exec_data:
+            exec_data[ex] = {"total": 0, "converted": 0}
+        exec_data[ex]["total"] += 1
+        if t.status == "Converted":
+            exec_data[ex]["converted"] += 1
+    if len(exec_data) >= 2:
+        rates = {e: round(d["converted"] / d["total"] * 100, 1) for e, d in exec_data.items() if d["total"] >= 5}
+        if rates:
+            best = max(rates, key=rates.get)
+            worst = min(rates, key=rates.get)
+            if rates[best] - rates[worst] > 20:
+                best_name = frappe.db.get_value("User", best, "full_name") or best
+                worst_name = frappe.db.get_value("User", worst, "full_name") or worst
+                insights.append({
+                    "type": "info",
+                    "title": "Staff Conversion Gap",
+                    "metric": f"{rates[best]}% vs {rates[worst]}%",
+                    "detail": f"{best_name} converts at {rates[best]}% while {worst_name} is at {rates[worst]}%.",
+                    "action": "Pair low-performers with high-performers for shadowing. Review approach differences.",
+                })
+
+    # 6. Budget range analysis
+    budget_counts = {}
+    for t in tokens:
+        if t.budget_range:
+            budget_counts[t.budget_range] = budget_counts.get(t.budget_range, 0) + 1
+    if budget_counts:
+        top_budget = max(budget_counts, key=budget_counts.get)
+        insights.append({
+            "type": "info",
+            "title": "Most Requested Budget Segment",
+            "metric": top_budget,
+            "detail": f"{budget_counts[top_budget]} walk-ins asked for {top_budget} range ({round(budget_counts[top_budget] / total * 100)}%).",
+            "action": f"Ensure strong assortment and display in the {top_budget} range.",
+        })
+
+    return {
+        "insights": insights,
+        "summary": {
+            "period_days": days,
+            "total_footfall": total,
+            "converted": len(converted),
+            "dropped": len(dropped),
+            "conversion_rate": conversion_rate,
+            "drop_rate": drop_rate,
+            "drop_reasons": drop_reasons,
+            "top_categories": dict(sorted(
+                {t.category_interest: 0 for t in tokens if t.category_interest}.items()
+            )),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

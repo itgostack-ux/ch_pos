@@ -574,13 +574,50 @@ def _cancel_return_serial_lifecycle(doc):
 
 
 def update_kiosk_token_status(doc, method=None):
-    """Hook: on_submit — mark kiosk token as Converted if linked."""
+    """Hook: on_submit — mark kiosk token as Converted if linked, record exit time."""
     token = doc.get("custom_kiosk_token")
+    if not token:
+        # Auto-create token if POS invoice submitted without one (enforcement fallback)
+        if cint(doc.get("is_pos")) and doc.get("pos_profile"):
+            token = _auto_create_token_for_invoice(doc)
+            if token:
+                frappe.db.set_value("Sales Invoice", doc.name, "custom_kiosk_token", token)
     if token:
         frappe.db.set_value("POS Kiosk Token", token, {
             "status": "Converted",
             "converted_invoice": doc.name,
+            "exit_at": now_datetime(),
         })
+
+
+def _auto_create_token_for_invoice(doc):
+    """Create a retroactive token for a POS invoice submitted without one."""
+    try:
+        from ch_pos.api.token_api import _generate_token_display
+        company_abbr = frappe.db.get_value("Company", doc.company, "abbr") or "CH"
+        token_display = _generate_token_display(doc.pos_profile, company_abbr)
+        token_doc = frappe.get_doc({
+            "doctype": "POS Kiosk Token",
+            "pos_profile": doc.pos_profile,
+            "company": doc.company,
+            "store": doc.get("set_warehouse") or "",
+            "status": "Converted",
+            "token_display": token_display,
+            "customer_name": doc.customer_name or "Walk-in",
+            "visit_source": "Counter",
+            "visit_purpose": "Sales",
+            "engaged_at": doc.posting_date,
+            "exit_at": now_datetime(),
+            "converted_invoice": doc.name,
+            "sales_executive": doc.get("custom_sales_executive") or "",
+            "expires_at": now_datetime(),
+        })
+        token_doc.flags.ignore_permissions = True
+        token_doc.insert()
+        return token_doc.name
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Auto-create token for POS invoice failed")
+        return None
 
 
 def deactivate_customer_devices(doc, method=None):

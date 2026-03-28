@@ -1,6 +1,7 @@
 import frappe
 from frappe.model.document import Document
-from frappe.utils import add_to_date, flt, now_datetime
+from frappe.utils import add_to_date, cint, flt, get_datetime, now_datetime, time_diff_in_seconds
+
 
 from buyback.utils import validate_indian_phone
 
@@ -12,6 +13,7 @@ class POSKioskToken(Document):
         for row in self.items:
             row.amount = flt(row.qty or 0) * flt(row.rate or 0)
         self._calculate_total()
+        self._calculate_handling_duration()
 
     def before_submit(self):
         if not self.expires_at:
@@ -38,12 +40,19 @@ class POSKioskToken(Document):
     def _calculate_total(self):
         self.total_estimate = sum(row.amount or 0 for row in self.items)
 
+    def _calculate_handling_duration(self):
+        """Calculate handling duration in minutes from engaged_at or creation to exit_at or now."""
+        start = get_datetime(self.engaged_at) if self.engaged_at else get_datetime(self.creation)
+        end = get_datetime(self.exit_at) if self.exit_at else None
+        if end and start:
+            self.handling_duration = max(0, cint(time_diff_in_seconds(end, start) / 60))
+
 
 def expire_old_tokens():
     """Scheduler job: mark expired tokens."""
     tokens = frappe.get_all(
         "POS Kiosk Token",
-        filters={"status": "Active", "expires_at": ("<", now_datetime()), "docstatus": 1},
+        filters={"status": ("in", ["Waiting", "Engaged"]), "expires_at": ("<", now_datetime()), "docstatus": 1},
         pluck="name",
     )
     for name in tokens:
