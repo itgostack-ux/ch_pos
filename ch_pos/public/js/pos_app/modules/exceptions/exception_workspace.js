@@ -76,7 +76,7 @@ export class ExceptionWorkspace {
 				</div>
 				<div class="col-sm-6" style="margin-top:8px">
 					<label class="control-label">${__("Original Value")}</label>
-					<input type="number" class="form-control ch-exc-original" placeholder="Current price / limit" step="any">
+					<input type="number" class="form-control ch-exc-original" placeholder="Current price / limit" step="any" readonly>
 				</div>
 				<div class="col-sm-6" style="margin-top:8px">
 					<label class="control-label">${__("Requested Value")}</label>
@@ -121,6 +121,8 @@ export class ExceptionWorkspace {
 			parent: panel.find(".ch-exc-item-link"),
 			render_input: true,
 		});
+
+		
 		this._item_control.$input.addClass("form-control");
 
 		// Customer link control

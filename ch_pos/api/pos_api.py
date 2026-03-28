@@ -1,7 +1,7 @@
 import frappe
 from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money
 from buyback.utils import validate_indian_phone
-
+from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
 @frappe.whitelist()
 def get_pos_profile_data(pos_profile):
@@ -159,9 +159,11 @@ def create_pos_invoice(pos_profile, customer, items,
     # ── Session guard — no billing without active session ─────────────────────
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
     active = get_active_session(pos_profile) if pos_profile else None
+
     if not active:
         frappe.throw(frappe._("No active POS session. Open a session before billing."))
 
+    session_name = active.get("name")
     # ── Duplicate-submit guard ────────────────────────────────────────────────
     if client_request_id:
         existing = frappe.db.sql(
@@ -181,6 +183,7 @@ def create_pos_invoice(pos_profile, customer, items,
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
 
     inv = frappe.new_doc("Sales Invoice")
+    inv.custom_pos_session = session_name
     inv.pos_profile = pos_profile
     inv.customer = customer
     inv.company = profile.company
@@ -2497,17 +2500,20 @@ def customer_360(identifier, company=None):
               AND custom_exchange_assessment IS NOT NULL AND custom_exchange_assessment != ''
             ORDER BY posting_date DESC LIMIT 20
         """, {"customer": customer}, as_dict=True)
-    except Exception:
+    except Exception: 
         out["swap_invoices"] = []
 
     # Coupon usage (Sales Invoice in ERPNext 15 uses custom_coupon_code, not coupon_code)
-    out["coupon_usage"] = frappe.db.sql("""
-        SELECT name, posting_date, custom_coupon_code AS coupon_code, grand_total
-        FROM `tabSales Invoice`
+# Coupon usage (safe handling)
+    if frappe.db.has_column("Sales Invoice", "custom_coupon_code"):
+         out["coupon_usage"] = frappe.db.sql("""
+             SELECT name, posting_date, custom_coupon_code AS coupon_code, grand_total FROM `tabSales Invoice`
         WHERE customer = %(customer)s AND docstatus = 1
           AND custom_coupon_code IS NOT NULL AND custom_coupon_code != ''
         ORDER BY posting_date DESC LIMIT 20
     """, {"customer": customer}, as_dict=True)
+    else:
+         out["coupon_usage"] = []
 
     # Exception requests
     out["exceptions"] = frappe.db.sql("""
