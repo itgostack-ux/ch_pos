@@ -58,29 +58,34 @@ export class QueueWorkspace {
 		const is_svc = _is_service();
 		const title = is_svc ? __("Service Queue") : __("Store Queue");
 		const hint = is_svc
-			? __("Waiting tokens from the kiosk — create a GoFix request in one click")
-			: __("Walk-in tokens — start billing or drop from here");
-		const icon_bg = is_svc ? "#fce7f3" : "#ede9fe";
-		const icon_fg = is_svc ? "#be185d" : "#6d28d9";
+			? __("Waiting tokens from the kiosk — accept or convert to service requests")
+			: __("Manage walk-in customers — start billing or close out tokens");
 
 		panel.html(`
 			<div class="ch-pos-mode-panel">
 				<div class="ch-mode-header">
 					<h4>
-						<span class="mode-icon" style="background:${icon_bg};color:${icon_fg}">
-							<i class="fa fa-ticket"></i>
+						<span class="mode-icon ch-queue-icon ${is_svc ? "ch-queue-icon--service" : "ch-queue-icon--retail"}">
+							<i class="fa fa-${is_svc ? "stethoscope" : "users"}"></i>
 						</span>
 						${title}
 					</h4>
 					<span class="ch-mode-hint">${hint}</span>
-					<button class="btn btn-sm btn-default ch-queue-refresh-btn" style="margin-left:auto">
+				</div>
+
+				<div class="ch-queue-toolbar">
+					<div class="ch-queue-stats">
+						<span class="ch-queue-count"></span>
+					</div>
+					<button class="btn btn-xs btn-default ch-queue-refresh-btn">
 						<i class="fa fa-refresh"></i> ${__("Refresh")}
 					</button>
 				</div>
 
-				<div class="ch-queue-token-list" style="margin-top:var(--pos-space-md)">
-					<div class="ch-queue-loading" style="text-align:center;padding:40px;color:var(--text-muted)">
-						<i class="fa fa-spinner fa-spin"></i> ${__("Loading tokens…")}
+				<div class="ch-queue-token-list">
+					<div class="ch-queue-empty-state ch-queue-loading-state">
+						<i class="fa fa-spinner fa-spin fa-2x"></i>
+						<span>${__("Loading tokens…")}</span>
 					</div>
 				</div>
 			</div>
@@ -96,8 +101,9 @@ export class QueueWorkspace {
 
 		if (this._panel) {
 			this._panel.find(".ch-queue-token-list").html(
-				`<div style="text-align:center;padding:40px;color:var(--text-muted)">
-					<i class="fa fa-spinner fa-spin"></i> ${__("Loading tokens…")}
+				`<div class="ch-queue-empty-state ch-queue-loading-state">
+					<i class="fa fa-spinner fa-spin fa-2x"></i>
+					<span>${__("Loading tokens…")}</span>
 				</div>`
 			);
 		}
@@ -110,8 +116,10 @@ export class QueueWorkspace {
 			.catch(() => {
 				if (this._panel) {
 					this._panel.find(".ch-queue-token-list").html(
-						`<div style="text-align:center;padding:40px;color:var(--pos-danger)">
-							<i class="fa fa-exclamation-circle"></i> ${__("Failed to load queue")}
+						`<div class="ch-queue-empty-state ch-queue-error-state">
+							<i class="fa fa-exclamation-circle fa-2x"></i>
+							<span>${__("Failed to load queue")}</span>
+							<span class="ch-queue-empty-hint">${__("Check your connection and try refreshing")}</span>
 						</div>`
 					);
 				}
@@ -122,27 +130,32 @@ export class QueueWorkspace {
 		if (!this._panel) return;
 		const list = this._panel.find(".ch-queue-token-list");
 
+		// Update stats bar
+		const stats = this._panel.find(".ch-queue-stats");
+		const waiting = (tokens || []).filter((t) => t.status === "Waiting").length;
+		const engaged = (tokens || []).filter((t) => t.status === "Engaged" || t.status === "In Progress").length;
+
 		if (!tokens || !tokens.length) {
+			stats.html(`<span class="ch-queue-count-text">${__("No tokens")}</span>`);
 			list.html(`
-				<div style="text-align:center;padding:60px 20px;color:var(--text-muted)">
-					<div style="font-size:3rem;margin-bottom:12px">🎉</div>
-					<div style="font-size:1.1rem;font-weight:600">${__("Queue is clear!")}</div>
-					<div style="font-size:.85rem;margin-top:6px">${__("No waiting or in-progress tokens right now.")}</div>
+				<div class="ch-queue-empty-state">
+					<div class="ch-queue-empty-icon">
+						<i class="fa fa-check-circle"></i>
+					</div>
+					<span class="ch-queue-empty-title">${__("All clear!")}</span>
+					<span class="ch-queue-empty-hint">${__("No waiting or in-progress tokens right now")}</span>
 				</div>
 			`);
 			return;
 		}
 
+		let stats_html = `<span class="ch-queue-count-text">${tokens.length} ${__("token(s)")}</span>`;
+		if (waiting > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${waiting} ${__("waiting")}</span>`;
+		if (engaged > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--active">${engaged} ${__("active")}</span>`;
+		stats.html(stats_html);
+
 		const cards = tokens.map((t) => this._tokenCard(t)).join("");
-		list.html(`
-			<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--pos-space-sm)">
-				<span style="font-size:.85rem;color:var(--text-muted)">${tokens.length} ${__("token(s)")}</span>
-				<span style="font-size:.85rem;color:var(--text-muted)">${__("Auto-refreshes every 30s")}</span>
-			</div>
-			<div class="ch-queue-cards" style="display:flex;flex-direction:column;gap:var(--pos-space-sm)">
-				${cards}
-			</div>
-		`);
+		list.html(`<div class="ch-queue-cards">${cards}</div>`);
 
 		// Bind action buttons
 		list.find(".ch-queue-convert-btn").on("click", (e) => {
@@ -166,92 +179,78 @@ export class QueueWorkspace {
 
 	_tokenCard(t) {
 		const is_svc = _is_service();
-		const statusColors = { Waiting: "#f59e0b", Engaged: "#3b82f6", "In Progress": "#8b5cf6" };
-		const statusIcons  = { Waiting: "fa-clock-o", Engaged: "fa-handshake-o", "In Progress": "fa-cogs" };
-		const statusColor = statusColors[t.status] || "#6b7280";
-		const statusIcon  = statusIcons[t.status] || "fa-circle";
-		const timeAgo     = frappe.datetime.comment_when(t.creation);
+		const statusMap = {
+			Waiting:       { cls: "waiting",  icon: "fa-clock-o",     label: __("Waiting") },
+			Engaged:       { cls: "engaged",  icon: "fa-handshake-o", label: __("Engaged") },
+			"In Progress": { cls: "progress", icon: "fa-cogs",        label: __("In Progress") },
+		};
+		const st = statusMap[t.status] || { cls: "default", icon: "fa-circle", label: t.status };
+		const timeAgo = frappe.datetime.comment_when(t.creation);
 
-		// Build detail lines based on company type
+		// Customer display
+		const cust_name  = frappe.utils.escape_html(t.customer_name || __("Walk-in"));
+		const cust_phone = t.customer_phone ? frappe.utils.escape_html(t.customer_phone) : "";
+
+		// Detail — purpose / device based on company type
 		let detail_html = "";
 		if (is_svc) {
-			const device = [t.device_brand, t.device_model].filter(Boolean).join(" ") || t.device_type || "—";
+			const device = [t.device_brand, t.device_model].filter(Boolean).join(" ") || t.device_type || "";
 			detail_html = `
-				<div style="color:var(--text-muted);font-size:.85rem;margin-bottom:2px">
-					<i class="fa fa-mobile"></i> ${frappe.utils.escape_html(device)}
+				<div class="ch-q-card-detail">
+					${device ? `<span class="ch-q-detail-chip"><i class="fa fa-mobile"></i> ${frappe.utils.escape_html(device)}</span>` : ""}
+					${t.issue_category ? `<span class="ch-q-detail-chip"><i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.issue_category)}</span>` : ""}
 				</div>
-				<div style="color:var(--text-muted);font-size:.82rem">
-					<i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.issue_category || "—")}
-					${t.issue_description ? `<span style="margin-left:6px;font-style:italic">${frappe.utils.escape_html(t.issue_description.substring(0, 60))}${t.issue_description.length > 60 ? "…" : ""}</span>` : ""}
-				</div>`;
+				${t.issue_description ? `<div class="ch-q-card-note">${frappe.utils.escape_html(t.issue_description.substring(0, 80))}${t.issue_description.length > 80 ? "…" : ""}</div>` : ""}`;
 		} else {
-			// Retail: show purpose, category, brand, budget
 			const purpose = t.visit_purpose || "Sales";
+			const purposeClsMap = { Sales: "ch-q-purpose--sales", Repair: "ch-q-purpose--repair", Buyback: "ch-q-purpose--buyback" };
+			const purposeCls = purposeClsMap[purpose] || "ch-q-purpose--other";
 			const tags = [t.category_interest, t.brand_interest, t.budget_range].filter(Boolean);
 			detail_html = `
-				<div style="color:var(--text-muted);font-size:.85rem;margin-bottom:2px">
-					<i class="fa fa-tag"></i> ${frappe.utils.escape_html(purpose)}
+				<div class="ch-q-card-detail">
+					<span class="ch-q-purpose-tag ${purposeCls}">${frappe.utils.escape_html(purpose)}</span>
+					${tags.map(tag => `<span class="ch-q-detail-chip">${frappe.utils.escape_html(tag)}</span>`).join("")}
 				</div>`;
-			if (tags.length) {
-				detail_html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">
-					${tags.map(tag => `<span style="font-size:.72rem;background:${statusColor}15;color:${statusColor};
-						padding:2px 8px;border-radius:10px;font-weight:600">${frappe.utils.escape_html(tag)}</span>`).join("")}
-				</div>`;
-			}
 		}
 
 		// Action buttons
 		let actions_html = "";
 		if (is_svc) {
 			actions_html = `
-				<button class="btn btn-primary btn-sm ch-queue-convert-btn"
-					data-token="${frappe.utils.escape_html(t.name)}"
-					style="white-space:nowrap">
-					<i class="fa fa-plus"></i> ${__("GoFix Request")}
+				<button class="btn ch-q-btn ch-q-btn--primary ch-queue-convert-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-plus-circle"></i> ${__("GoFix Request")}
 				</button>`;
 		} else {
-			// Retail: Bill + Drop
-			const bill_disabled = t.status === "In Progress" ? "disabled" : "";
 			actions_html = `
-				<div style="display:flex;gap:6px">
-					<button class="btn btn-primary btn-sm ch-queue-bill-btn"
-						data-token="${frappe.utils.escape_html(t.name)}"
-						style="white-space:nowrap" ${bill_disabled}>
-						<i class="fa fa-shopping-bag"></i> ${__("Bill")}
-					</button>
-					<button class="btn btn-outline-danger btn-sm ch-queue-drop-btn"
-						data-token="${frappe.utils.escape_html(t.name)}"
-						style="white-space:nowrap">
-						<i class="fa fa-times"></i> ${__("Drop")}
-					</button>
-				</div>`;
+				<button class="btn ch-q-btn ch-q-btn--bill ch-queue-bill-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-shopping-bag"></i> ${__("Bill")}
+				</button>
+				<button class="btn ch-q-btn ch-q-btn--drop ch-queue-drop-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-times-circle"></i> ${__("Drop")}
+				</button>`;
 		}
 
 		return `
-			<div class="ch-pos-section-card" style="border-left:4px solid ${statusColor}">
-				<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
-					<div style="flex:1;min-width:0">
-						<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-							<span style="font-size:1.15rem;font-weight:700;color:${statusColor};letter-spacing:.5px">
-								${frappe.utils.escape_html(t.token_display || t.name)}
-							</span>
-							<span style="font-size:.72rem;background:${statusColor}22;color:${statusColor};
-								padding:2px 8px;border-radius:12px;font-weight:600">
-								<i class="fa ${statusIcon}"></i> ${__(t.status)}
-							</span>
-						</div>
-						<div style="font-weight:600;font-size:.95rem;margin-bottom:2px">
-							${frappe.utils.escape_html(t.customer_name)}
-							<span style="font-weight:400;color:var(--text-muted);font-size:.85rem;margin-left:6px">
-								${frappe.utils.escape_html(t.customer_phone || "")}
-							</span>
-						</div>
-						${detail_html}
+			<div class="ch-q-card ch-q-card--${st.cls}">
+				<div class="ch-q-card-head">
+					<span class="ch-q-token-id">${frappe.utils.escape_html(t.token_display || t.name)}</span>
+					<span class="ch-q-status ch-q-status--${st.cls}">
+						<i class="fa ${st.icon}"></i> ${st.label}
+					</span>
+					<span class="ch-q-time">${timeAgo}</span>
+				</div>
+				<div class="ch-q-card-body">
+					<div class="ch-q-customer">
+						<span class="ch-q-customer-name">${cust_name}</span>
+						${cust_phone ? `<span class="ch-q-customer-phone">${cust_phone}</span>` : ""}
 					</div>
-					<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
-						<span style="font-size:.75rem;color:var(--text-muted)">${timeAgo}</span>
-						${actions_html}
-					</div>
+					${detail_html}
+				</div>
+				<div class="ch-q-card-actions">
+					${actions_html}
 				</div>
 			</div>
 		`;
