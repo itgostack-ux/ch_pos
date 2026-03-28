@@ -16,9 +16,46 @@ export class ReportsWorkspace {
 	}
 
 	render(panel) {
+		const today = frappe.datetime.get_today();
+		const pp = encodeURIComponent(PosState.pos_profile || "");
+		const enc = (v) => encodeURIComponent(JSON.stringify(v));
+
+		/* KPI definitions — { cls, icon, color, bg, label, link? } */
+		const footfall = [
+			{ cls: "walkins",   icon: "fa-sign-in",    color: "#4f46e5", bg: "#e0e7ff", label: __("Walk-ins"),   link: `/app/pos-kiosk-token?visit_source=Counter&creation=${enc([">=", today])}&status=${enc(["!=", "Cancelled"])}` },
+			{ cls: "kiosk",     icon: "fa-tablet",     color: "#7c3aed", bg: "#f3e8ff", label: __("Kiosk"),      link: `/app/pos-kiosk-token?visit_source=Kiosk&creation=${enc([">=", today])}&status=${enc(["!=", "Cancelled"])}` },
+			{ cls: "conversion",icon: "fa-percent",    color: "#16a34a", bg: "#dcfce7", label: __("Conversion") },
+			{ cls: "repairs",   icon: "fa-wrench",     color: "#d97706", bg: "#fef3c7", label: __("Repairs"),    link: `/app/pos-kiosk-token?visit_purpose=Repair&creation=${enc([">=", today])}` },
+			{ cls: "buybacks",  icon: "fa-exchange",   color: "#dc2626", bg: "#fef2f2", label: __("Buybacks"),   link: `/app/pos-kiosk-token?visit_purpose=Buyback&creation=${enc([">=", today])}` },
+			{ cls: "cancelled", icon: "fa-ban",        color: "#ef4444", bg: "#fee2e2", label: __("Cancelled"),  link: `/app/pos-kiosk-token?status=Cancelled&creation=${enc([">=", today])}` },
+			{ cls: "dropped",   icon: "fa-user-times", color: "#f97316", bg: "#fff7ed", label: __("Dropped"),    link: `/app/pos-kiosk-token?status=Dropped&creation=${enc([">=", today])}` },
+		];
+		const sales = [
+			{ cls: "revenue",    icon: "fa-inr",         color: "#2563eb", bg: "#dbeafe", label: __("Revenue"),    link: `/app/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=0` },
+			{ cls: "invoices",   icon: "fa-file-text-o", color: "#16a34a", bg: "#dcfce7", label: __("Invoices"),   link: `/app/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=0` },
+			{ cls: "items-sold", icon: "fa-shopping-bag", color: "#d97706", bg: "#fef3c7", label: __("Items Sold") },
+			{ cls: "avg-basket", icon: "fa-calculator",  color: "#4f46e5", bg: "#e0e7ff", label: __("Avg Basket") },
+			{ cls: "returns",    icon: "fa-undo",        color: "#dc2626", bg: "#fef2f2", label: __("Returns"),    link: `/app/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=1` },
+		];
+
+		const kpiCard = (k, def) => {
+			const clickable = k.link ? " ch-rpt-kpi--link" : "";
+			const href = k.link ? ` data-href="${frappe.utils.escape_html(k.link)}"` : "";
+			return `<div class="ch-rpt-kpi${clickable}"${href}>
+				<div class="ch-rpt-kpi-accent" style="background:${k.color}"></div>
+				<div class="ch-rpt-kpi-body">
+					<div class="ch-rpt-kpi-icon" style="background:${k.bg};color:${k.color}"><i class="fa ${k.icon}"></i></div>
+					<div class="ch-rpt-kpi-info">
+						<div class="ch-rpt-kpi-value ch-rpt-${k.cls}">${def || "0"}</div>
+						<div class="ch-rpt-kpi-label">${k.label}</div>
+					</div>
+				</div>
+			</div>`;
+		};
+
 		panel.html(`
 			<div class="ch-pos-mode-panel">
-				<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--pos-space-xl)">
+				<div class="ch-rpt-header">
 					<div class="ch-mode-header" style="margin-bottom:0">
 						<h4>
 							<span class="mode-icon" style="background:#e0e7ff;color:#4f46e5">
@@ -28,156 +65,49 @@ export class ReportsWorkspace {
 						</h4>
 						<span class="ch-mode-hint">${__("Today's performance at a glance")}</span>
 					</div>
-<div style="display:flex;gap:8px">
-					<button class="btn btn-outline-secondary ch-rpt-z-report" style="border-radius:var(--pos-radius);font-weight:700"
-						title="${__("End-of-day store summary across all sessions")}">
-						<i class="fa fa-file-text"></i> ${__("Z Report")}
-					</button>
-					<button class="btn btn-outline-secondary ch-rpt-refresh" style="border-radius:var(--pos-radius);font-weight:700">
-						<i class="fa fa-refresh"></i> ${__("Refresh")}
-					</button>
-				</div>
+					<div class="ch-rpt-header-actions">
+						<button class="btn btn-sm btn-default ch-rpt-z-report"
+							title="${__("End-of-day store summary across all sessions")}">
+							<i class="fa fa-file-text"></i> ${__("Z Report")}
+						</button>
+						<button class="btn btn-sm btn-default ch-rpt-refresh">
+							<i class="fa fa-refresh"></i> ${__("Refresh")}
+						</button>
+					</div>
 				</div>
 
-				<div class="ch-rpt-loading" style="padding:40px;text-align:center">
+				<div class="ch-rpt-loading">
 					<i class="fa fa-spinner fa-spin fa-2x" style="opacity:0.3"></i>
 				</div>
 
 				<div class="ch-rpt-content" style="display:none;">
-					<div class="ch-rpt-kpi-row" style="margin-bottom:var(--pos-space-md)" id="ch-rpt-footfall-row">
-					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #4f46e5">
-						<div class="section-body" style="display:flex;gap:12px;align-items:center">
-							<div class="ch-rpt-kpi-icon" style="background:#e0e7ff;color:#4f46e5;"><i class="fa fa-sign-in"></i></div>
-							<div>
-								<div class="ch-rpt-kpi-value ch-rpt-walkins">0</div>
-								<div class="ch-rpt-kpi-label">${__("Walk-ins")}</div>
-							</div>
-						</div>
+					<div class="ch-rpt-kpi-row">
+						${footfall.map(k => kpiCard(k)).join("")}
 					</div>
-					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #7c3aed">
-						<div class="section-body" style="display:flex;gap:12px;align-items:center">
-							<div class="ch-rpt-kpi-icon" style="background:#f3e8ff;color:#7c3aed;"><i class="fa fa-tablet"></i></div>
-							<div>
-								<div class="ch-rpt-kpi-value ch-rpt-kiosk">0</div>
-								<div class="ch-rpt-kpi-label">${__("Kiosk")}</div>
-							</div>
-						</div>
-					</div>
-					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #16a34a">
-						<div class="section-body" style="display:flex;gap:12px;align-items:center">
-							<div class="ch-rpt-kpi-icon" style="background:#dcfce7;color:#16a34a;"><i class="fa fa-percent"></i></div>
-							<div>
-								<div class="ch-rpt-kpi-value ch-rpt-conversion">0%</div>
-								<div class="ch-rpt-kpi-label">${__("Conversion")}</div>
-							</div>
-						</div>
-					</div>
-					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #d97706">
-						<div class="section-body" style="display:flex;gap:12px;align-items:center">
-							<div class="ch-rpt-kpi-icon" style="background:#fef3c7;color:#d97706;"><i class="fa fa-wrench"></i></div>
-							<div>
-								<div class="ch-rpt-kpi-value ch-rpt-repairs">0</div>
-								<div class="ch-rpt-kpi-label">${__("Repairs")}</div>
-							</div>
-						</div>
-					</div>
-					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #dc2626">
-						<div class="section-body" style="display:flex;gap:12px;align-items:center">
-							<div class="ch-rpt-kpi-icon" style="background:#fef2f2;color:#dc2626;"><i class="fa fa-exchange"></i></div>
-							<div>
-								<div class="ch-rpt-kpi-value ch-rpt-buybacks">0</div>
-								<div class="ch-rpt-kpi-label">${__("Buybacks")}</div>
-							</div>
-						</div>
-					</div>
-					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #ef4444">
-						<div class="section-body" style="display:flex;gap:12px;align-items:center">
-							<div class="ch-rpt-kpi-icon" style="background:#fee2e2;color:#ef4444;"><i class="fa fa-ban"></i></div>
-							<div>
-								<div class="ch-rpt-kpi-value ch-rpt-cancelled">0</div>
-								<div class="ch-rpt-kpi-label">${__("Cancelled")}</div>
-							</div>
-						</div>
-					</div>
-					<div class="ch-rpt-kpi ch-pos-section-card" style="border-top:3px solid #f97316">
-						<div class="section-body" style="display:flex;gap:12px;align-items:center">
-							<div class="ch-rpt-kpi-icon" style="background:#fff7ed;color:#f97316;"><i class="fa fa-user-times"></i></div>
-							<div>
-								<div class="ch-rpt-kpi-value ch-rpt-dropped">0</div>
-								<div class="ch-rpt-kpi-label">${__("Dropped")}</div>
-							</div>
-						</div>
-					</div>
-				</div>
-
-				<div class="ch-rpt-kpi-row">
-						<div class="ch-rpt-kpi ch-pos-section-card">
-							<div class="section-body" style="display:flex;gap:12px;align-items:center">
-								<div class="ch-rpt-kpi-icon" style="background:#dbeafe;color:#2563eb;"><i class="fa fa-inr"></i></div>
-								<div>
-									<div class="ch-rpt-kpi-value ch-rpt-revenue">₹0</div>
-									<div class="ch-rpt-kpi-label">${__("Revenue")}</div>
-								</div>
-							</div>
-						</div>
-						<div class="ch-rpt-kpi ch-pos-section-card">
-							<div class="section-body" style="display:flex;gap:12px;align-items:center">
-								<div class="ch-rpt-kpi-icon" style="background:#dcfce7;color:#16a34a;"><i class="fa fa-file-text-o"></i></div>
-								<div>
-									<div class="ch-rpt-kpi-value ch-rpt-invoices">0</div>
-									<div class="ch-rpt-kpi-label">${__("Invoices")}</div>
-								</div>
-							</div>
-						</div>
-						<div class="ch-rpt-kpi ch-pos-section-card">
-							<div class="section-body" style="display:flex;gap:12px;align-items:center">
-								<div class="ch-rpt-kpi-icon" style="background:#fef3c7;color:#d97706;"><i class="fa fa-shopping-bag"></i></div>
-								<div>
-									<div class="ch-rpt-kpi-value ch-rpt-items-sold">0</div>
-									<div class="ch-rpt-kpi-label">${__("Items Sold")}</div>
-								</div>
-							</div>
-						</div>
-						<div class="ch-rpt-kpi ch-pos-section-card">
-							<div class="section-body" style="display:flex;gap:12px;align-items:center">
-								<div class="ch-rpt-kpi-icon" style="background:#e0e7ff;color:#4f46e5;"><i class="fa fa-calculator"></i></div>
-								<div>
-									<div class="ch-rpt-kpi-value ch-rpt-avg-basket">₹0</div>
-									<div class="ch-rpt-kpi-label">${__("Avg Basket")}</div>
-								</div>
-							</div>
-						</div>
-						<div class="ch-rpt-kpi ch-pos-section-card">
-							<div class="section-body" style="display:flex;gap:12px;align-items:center">
-								<div class="ch-rpt-kpi-icon" style="background:#fef2f2;color:#dc2626;"><i class="fa fa-undo"></i></div>
-								<div>
-									<div class="ch-rpt-kpi-value ch-rpt-returns">0</div>
-									<div class="ch-rpt-kpi-label">${__("Returns")}</div>
-								</div>
-							</div>
-						</div>
+					<div class="ch-rpt-kpi-row">
+						${sales.map(k => kpiCard(k, k.cls === "revenue" || k.cls === "avg-basket" ? "₹0" : "0")).join("")}
 					</div>
 
-					<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
-						<div class="section-header"><i class="fa fa-area-chart"></i> ${__("Hourly Sales")}</div>
-						<div class="section-body">
+					<div class="ch-rpt-section">
+						<div class="ch-rpt-section-head"><i class="fa fa-area-chart"></i> ${__("Hourly Sales")}</div>
+						<div class="ch-rpt-section-body">
 							<div class="ch-rpt-chart" data-chart="hourly"></div>
 							<div class="ch-rpt-chart-empty" style="display:none;">
-								<div class="ch-pos-empty-state" style="padding:20px 0">
-									<div class="empty-icon" style="width:48px;height:48px;font-size:18px"><i class="fa fa-bar-chart"></i></div>
-									<div class="empty-title" style="font-size:var(--pos-fs-sm)">${__("No sales recorded yet today")}</div>
+								<div class="ch-rpt-empty">
+									<i class="fa fa-bar-chart"></i>
+									<span>${__("No sales recorded yet today")}</span>
 								</div>
 							</div>
 						</div>
 					</div>
 
-					<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md);margin-bottom:var(--pos-space-md)">
-						<div class="ch-pos-section-card">
-							<div class="section-header"><i class="fa fa-trophy"></i> ${__("Top Sellers")}</div>
-							<div class="section-body" style="padding:0">
+					<div class="ch-rpt-two-col">
+						<div class="ch-rpt-section">
+							<div class="ch-rpt-section-head"><i class="fa fa-trophy"></i> ${__("Top Sellers")}</div>
+							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<table class="ch-rpt-table">
 									<thead><tr>
-										<th>${__("#")}</th>
+										<th style="width:32px">#</th>
 										<th>${__("Item")}</th>
 										<th class="text-right">${__("Qty")}</th>
 										<th class="text-right">${__("Revenue")}</th>
@@ -186,9 +116,9 @@ export class ReportsWorkspace {
 								</table>
 							</div>
 						</div>
-						<div class="ch-pos-section-card">
-							<div class="section-header"><i class="fa fa-users"></i> ${__("Staff")}</div>
-							<div class="section-body" style="padding:0">
+						<div class="ch-rpt-section">
+							<div class="ch-rpt-section-head"><i class="fa fa-users"></i> ${__("Staff")}</div>
+							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<table class="ch-rpt-table">
 									<thead><tr>
 										<th>${__("Cashier")}</th>
@@ -201,23 +131,29 @@ export class ReportsWorkspace {
 						</div>
 					</div>
 
-					<div class="ch-pos-section-card">
-						<div class="section-header"><i class="fa fa-exclamation-triangle"></i> ${__("Low Stock Alerts")}</div>
-						<div class="section-body">
+					<div class="ch-rpt-section">
+						<div class="ch-rpt-section-head"><i class="fa fa-exclamation-triangle"></i> ${__("Low Stock Alerts")}</div>
+						<div class="ch-rpt-section-body">
 							<div class="ch-rpt-inventory-grid"></div>
 						</div>
 					</div>
 
-					<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md);margin-top:var(--pos-space-md)">
-						<div class="ch-pos-section-card">
-							<div class="section-header"><i class="fa fa-clipboard"></i> ${__("Material Requests")}</div>
-							<div class="section-body" style="padding:0">
+					<div class="ch-rpt-two-col">
+						<div class="ch-rpt-section">
+							<div class="ch-rpt-section-head">
+								<span><i class="fa fa-clipboard"></i> ${__("Material Requests")}</span>
+								<a class="ch-rpt-view-all" href="/app/material-request" target="_blank">${__("View All")} →</a>
+							</div>
+							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<div class="ch-rpt-mr-list"></div>
 							</div>
 						</div>
-						<div class="ch-pos-section-card">
-							<div class="section-header"><i class="fa fa-truck"></i> ${__("Stock Transfers")}</div>
-							<div class="section-body" style="padding:0">
+						<div class="ch-rpt-section">
+							<div class="ch-rpt-section-head">
+								<span><i class="fa fa-truck"></i> ${__("Stock Transfers")}</span>
+								<a class="ch-rpt-view-all" href="/app/stock-entry?stock_entry_type=Material+Transfer" target="_blank">${__("View All")} →</a>
+							</div>
+							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<div class="ch-rpt-st-list"></div>
 							</div>
 						</div>
@@ -237,7 +173,20 @@ export class ReportsWorkspace {
 			this._load_data(panel);
 		});
 		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
-		// Update footfall row when walk-in is logged from sidebar
+
+		// KPI cards → open filtered list in new tab
+		panel.on("click", ".ch-rpt-kpi--link", function () {
+			const href = $(this).attr("data-href");
+			if (href) window.open(href, "_blank");
+		});
+		// MR / STE / inventory pill clicks
+		panel.on("click", ".ch-rpt-doc-row[data-href]", function () {
+			window.open($(this).attr("data-href"), "_blank");
+		});
+		panel.on("click", ".ch-rpt-inv-pill[data-item]", function () {
+			window.open(`/app/item/${encodeURIComponent($(this).attr("data-item"))}`, "_blank");
+		});
+
 		EventBus.on("walkin:logged", (d) => {
 			panel.find(".ch-rpt-walkins").text(d.walkin_count || 0);
 			panel.find(".ch-rpt-kiosk").text(d.kiosk_count || 0);
@@ -245,7 +194,6 @@ export class ReportsWorkspace {
 	}
 
 	_load_data(panel) {
-		// Load footfall separately (fast, always visible)
 		frappe.call({
 			method: "ch_pos.api.pos_api.get_today_footfall",
 			args: { pos_profile: PosState.pos_profile },
@@ -308,10 +256,10 @@ export class ReportsWorkspace {
 				(d.top_items || []).forEach((item, idx) => {
 					const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : (idx + 1);
 					top_body.append(`<tr>
-						<td style="width:30px;text-align:center">${medal}</td>
+						<td style="width:32px;text-align:center">${medal}</td>
 						<td>${frappe.utils.escape_html(item.item_name)}</td>
 						<td class="text-right">${item.qty}</td>
-						<td class="text-right font-weight-bold">₹${format_number(item.revenue)}</td>
+						<td class="text-right" style="font-weight:600">₹${format_number(item.revenue)}</td>
 					</tr>`);
 				});
 				if (!(d.top_items || []).length) {
@@ -324,69 +272,70 @@ export class ReportsWorkspace {
 					staff_body.append(`<tr>
 						<td>${frappe.utils.escape_html(s.cashier)}</td>
 						<td class="text-right">${s.invoices}</td>
-						<td class="text-right font-weight-bold">₹${format_number(s.revenue)}</td>
+						<td class="text-right" style="font-weight:600">₹${format_number(s.revenue)}</td>
 					</tr>`);
 				});
 				if (!(d.staff_performance || []).length) {
 					staff_body.append(`<tr><td colspan="3" class="text-muted text-center" style="padding:20px">${__("No staff data")}</td></tr>`);
 				}
 
-				// Inventory alerts
+				// Inventory alerts — clickable pills
 				const inv_grid = content.find(".ch-rpt-inventory-grid").empty();
 				(d.inventory_alerts || []).forEach((item) => {
 					const is_oos = item.qty <= 0;
-					const cls = is_oos ? "ch-rpt-inv-pill-oos" : "ch-rpt-inv-pill-low";
-					inv_grid.append(`<span class="ch-rpt-inv-pill ${cls}">
+					const cls = is_oos ? "ch-rpt-inv-pill--oos" : "ch-rpt-inv-pill--low";
+					const item_code = item.item_code || item.item_name;
+					inv_grid.append(`<span class="ch-rpt-inv-pill ${cls}" data-item="${frappe.utils.escape_html(item_code)}">
 						${frappe.utils.escape_html(item.item_name)} <b>${Math.floor(item.qty)}</b>
 					</span>`);
 				});
 				if (!(d.inventory_alerts || []).length) {
-					inv_grid.html(`<div class="text-muted" style="padding:16px;text-align:center;">
-						<i class="fa fa-check-circle" style="color:#16a34a;margin-right:4px;"></i>
-						${__("All stock levels healthy")}
+					inv_grid.html(`<div class="ch-rpt-empty">
+						<i class="fa fa-check-circle" style="color:#16a34a"></i>
+						<span>${__("All stock levels healthy")}</span>
 					</div>`);
 				}
 
-				// Material Requests
+				// Material Requests — clickable rows
 				const mr_list = content.find(".ch-rpt-mr-list").empty();
 				(d.material_requests || []).forEach((mr) => {
-					const cls = mr.status === "Pending" ? "ch-pos-badge-warning"
-						: mr.status === "Partially Ordered" ? "ch-pos-badge-info"
-						: mr.status === "Ordered" || mr.status === "Transferred" ? "ch-pos-badge-success"
-						: "ch-pos-badge-muted";
+					const cls = mr.status === "Pending" ? "ch-rpt-badge--warning"
+						: mr.status === "Partially Ordered" ? "ch-rpt-badge--info"
+						: mr.status === "Ordered" || mr.status === "Transferred" ? "ch-rpt-badge--success"
+						: "ch-rpt-badge--muted";
 					mr_list.append(`
-						<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid var(--pos-border-light)">
+						<div class="ch-rpt-doc-row" data-href="/app/material-request/${encodeURIComponent(mr.name)}">
 							<div>
-								<div style="font-weight:600;font-size:var(--pos-fs-sm)">${frappe.utils.escape_html(mr.name)}</div>
-								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
+								<div class="ch-rpt-doc-id">${frappe.utils.escape_html(mr.name)}</div>
+								<div class="ch-rpt-doc-meta">
 									${frappe.datetime.str_to_user(mr.transaction_date)} · ${mr.item_count} ${__("items")}
 								</div>
 							</div>
-							<span class="ch-pos-badge ${cls}">${frappe.utils.escape_html(mr.status)}</span>
+							<span class="ch-rpt-badge ${cls}">${frappe.utils.escape_html(mr.status)}</span>
 						</div>`);
 				});
 				if (!(d.material_requests || []).length) {
-					mr_list.html(`<div class="text-muted text-center" style="padding:20px">${__("No pending requests")}</div>`);
+					mr_list.html(`<div class="ch-rpt-empty" style="padding:20px">${__("No pending requests")}</div>`);
 				}
 
-				// Stock Transfers
+				// Stock Transfers — clickable rows
 				const st_list = content.find(".ch-rpt-st-list").empty();
 				(d.stock_transfers || []).forEach((se) => {
 					const status_label = se.docstatus === 0 ? __("Draft") : __("Completed");
-					const cls = se.docstatus === 0 ? "ch-pos-badge-warning" : "ch-pos-badge-success";
+					const cls = se.docstatus === 0 ? "ch-rpt-badge--warning" : "ch-rpt-badge--success";
 					st_list.append(`
-						<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid var(--pos-border-light)">
+						<div class="ch-rpt-doc-row" data-href="/app/stock-entry/${encodeURIComponent(se.name)}">
 							<div>
-								<div style="font-weight:600;font-size:var(--pos-fs-sm)">${frappe.utils.escape_html(se.name)}</div>
-								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
+								<div class="ch-rpt-doc-id">${frappe.utils.escape_html(se.name)}</div>
+								<div class="ch-rpt-doc-meta">
 									${frappe.datetime.str_to_user(se.posting_date)} · ${se.item_count} ${__("items")}
 								</div>
 							</div>
-							<span class="ch-pos-badge ${cls}">${status_label}</span>
+							<span class="ch-rpt-badge ${cls}">${status_label}</span>
 						</div>`);
 				});
 				if (!(d.stock_transfers || []).length) {
-					st_list.html(`<div class="text-muted text-center" style="padding:20px">${__("No recent transfers")}</div>`);
+					st_list.html(`<div class="ch-rpt-empty" style="padding:20px">${__("No recent transfers")}</div>`);
 				}
 			},
 		});

@@ -2698,7 +2698,7 @@ def store_dashboard(pos_profile):
             (warehouse,),
             as_dict=True,
         )
-        inventory_alerts = [{"item_name": r.item_name, "qty": flt(r.qty)} for r in low_stock]
+        inventory_alerts = [{"item_code": r.item_code, "item_name": r.item_name, "qty": flt(r.qty)} for r in low_stock]
 
         # Also include stock items that have NO Bin entry at all (effectively 0 stock)
         remaining = 15 - len(inventory_alerts)
@@ -2718,7 +2718,7 @@ def store_dashboard(pos_profile):
                 as_dict=True,
             )
             inventory_alerts.extend(
-                [{"item_name": r.item_name, "qty": 0} for r in no_bin_items]
+                [{"item_code": r.item_code, "item_name": r.item_name, "qty": 0} for r in no_bin_items]
             )
 
     # Hourly sales breakdown for bar chart
