@@ -401,82 +401,195 @@ export class CartService {
 	// ── Warranty Prompt ─────────────────────────────────
 	_prompt_warranty(item_data, cart_item) {
 		frappe.call({
-			method: "ch_pos.api.pos_api.get_warranty_plans",
+			method: "ch_pos.api.attach_api.get_attach_offers",
 			args: {
 				item_code: item_data.item_code,
-				item_group: item_data.item_group,
-				brand: item_data.brand,
+				pos_profile: PosState.pos_profile,
 			},
 			callback: (r) => {
-				const plans = r.message || [];
-				if (!plans.length) return;
-				this._show_warranty_dialog(plans, cart_item);
+				const data = r.message || {};
+				const plans = data.warranty_plans || [];
+				const rules = data.attach_rules || [];
+				if (!plans.length && !rules.length) return;
+				this._show_attach_panel(plans, rules, item_data, cart_item);
 			},
 		});
 	}
 
-	_show_warranty_dialog(plans, cart_item) {
-		const options = plans.map(
-			(p) => `${p.name} — ${p.plan_name} (${p.duration_months}m) ₹${format_number(p.price)}`
-		);
-		const dialog = new frappe.ui.Dialog({
-			title: __("Add Extended Warranty?"),
-			fields: [
-				{
-					fieldtype: "HTML",
-					options: `<p class="text-muted">${__("Warranty plans for")} <b>${frappe.utils.escape_html(cart_item.item_name)}</b></p>`,
-				},
-				{
-					fieldname: "plan",
-					fieldtype: "Select",
-					label: __("Warranty Plan"),
-					options: ["None", ...options].join("\n"),
-					default: "None",
-				},
-			],
-			primary_action_label: __("Add"),
-			primary_action: (values) => {
-				dialog.hide();
-				if (values.plan === "None") return;
-				const sel_name = values.plan.split(" — ")[0];
-				const sel_plan = plans.find((p) => p.name === sel_name);
-				if (!sel_plan) return;
+	_show_attach_panel(plans, rules, item_data, cart_item) {
+		const vas_rules = rules.filter(r => r.attach_type === "VAS");
+		const acc_rules = rules.filter(r => r.attach_type === "Accessory");
+		const item_name = frappe.utils.escape_html(cart_item.item_name);
 
-				// Prevent duplicate: same warranty plan on same device/IMEI
+		// Build sections
+		let sections_html = `<p class="text-muted" style="margin-bottom:12px">${__("Offers for")} <b>${item_name}</b></p>`;
+
+		// Warranty Plans
+		if (plans.length) {
+			sections_html += `<div class="ch-attach-section">
+				<h6 style="margin:0 0 8px 0;font-weight:600">🛡 ${__("Warranty Plans")}</h6>`;
+			plans.forEach((p, i) => {
+				const label = frappe.utils.escape_html(`${p.plan_name} (${p.duration_months}m) — ₹${format_number(p.price)}`);
+				sections_html += `<div class="ch-attach-row" data-type="Warranty" data-idx="${i}">
+					<span class="ch-attach-name">${label}</span>
+					<span class="ch-attach-actions">
+						<button class="btn btn-xs btn-success ch-attach-accept" data-type="Warranty" data-idx="${i}">${__("Add")}</button>
+						<button class="btn btn-xs btn-default ch-attach-skip" data-type="Warranty" data-idx="${i}">${__("Skip")}</button>
+					</span>
+				</div>`;
+			});
+			sections_html += `</div>`;
+		}
+
+		// VAS Rules
+		if (vas_rules.length) {
+			sections_html += `<div class="ch-attach-section">
+				<h6 style="margin:0 0 8px 0;font-weight:600">✨ ${__("Value Added Services")}</h6>`;
+			vas_rules.forEach((r, i) => {
+				(r.attach_items || []).forEach((ai, j) => {
+					const name = frappe.utils.escape_html(ai.item_name || ai.item_code);
+					const mandatory = ai.is_mandatory_offer ? `<span class="badge badge-warning" style="font-size:10px;margin-left:4px">${__("Recommended")}</span>` : "";
+					sections_html += `<div class="ch-attach-row" data-type="VAS" data-rule="${frappe.utils.escape_html(r.name)}" data-item="${frappe.utils.escape_html(ai.item_code)}">
+						<span class="ch-attach-name">${name}${mandatory}</span>
+						<span class="ch-attach-actions">
+							<button class="btn btn-xs btn-success ch-attach-accept" data-type="VAS" data-rule="${frappe.utils.escape_html(r.name)}" data-item="${frappe.utils.escape_html(ai.item_code)}">${__("Add")}</button>
+							<button class="btn btn-xs btn-default ch-attach-skip" data-type="VAS" data-rule="${frappe.utils.escape_html(r.name)}" data-item="${frappe.utils.escape_html(ai.item_code)}" ${r.skip_reason_required ? 'data-reason-required="1"' : ""}>${__("Skip")}</button>
+						</span>
+					</div>`;
+				});
+			});
+			sections_html += `</div>`;
+		}
+
+		// Accessory Rules
+		if (acc_rules.length) {
+			sections_html += `<div class="ch-attach-section">
+				<h6 style="margin:0 0 8px 0;font-weight:600">🔌 ${__("Accessories")}</h6>`;
+			acc_rules.forEach((r, i) => {
+				(r.attach_items || []).forEach((ai, j) => {
+					const name = frappe.utils.escape_html(ai.item_name || ai.item_code);
+					const mandatory = ai.is_mandatory_offer ? `<span class="badge badge-warning" style="font-size:10px;margin-left:4px">${__("Recommended")}</span>` : "";
+					sections_html += `<div class="ch-attach-row" data-type="Accessory" data-rule="${frappe.utils.escape_html(r.name)}" data-item="${frappe.utils.escape_html(ai.item_code)}">
+						<span class="ch-attach-name">${name}${mandatory}</span>
+						<span class="ch-attach-actions">
+							<button class="btn btn-xs btn-success ch-attach-accept" data-type="Accessory" data-rule="${frappe.utils.escape_html(r.name)}" data-item="${frappe.utils.escape_html(ai.item_code)}">${__("Add")}</button>
+							<button class="btn btn-xs btn-default ch-attach-skip" data-type="Accessory" data-rule="${frappe.utils.escape_html(r.name)}" data-item="${frappe.utils.escape_html(ai.item_code)}" ${r.skip_reason_required ? 'data-reason-required="1"' : ""}>${__("Skip")}</button>
+						</span>
+					</div>`;
+				});
+			});
+			sections_html += `</div>`;
+		}
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Attach Offers — {0}", [item_name]),
+			fields: [
+				{ fieldtype: "HTML", fieldname: "attach_panel", options: `<div class="ch-attach-panel">${sections_html}</div>` },
+			],
+			size: "large",
+			primary_action_label: __("Done"),
+			primary_action: () => dialog.hide(),
+		});
+
+		// Bind accept/skip events
+		dialog.$wrapper.on("click", ".ch-attach-accept", (e) => {
+			const $btn = $(e.currentTarget);
+			const type = $btn.data("type");
+			const $row = $btn.closest(".ch-attach-row");
+
+			if (type === "Warranty") {
+				const idx = $btn.data("idx");
+				const plan = plans[idx];
+				if (!plan) return;
+
+				// Duplicate check
 				const dup = PosState.cart.find(
-					(c) => c.is_warranty && c.warranty_plan === sel_plan.name
+					(c) => c.is_warranty && c.warranty_plan === plan.name
 						&& c.for_item_code === cart_item.item_code
 						&& (c.for_serial_no || "") === (cart_item.serial_no || "")
 				);
 				if (dup) {
-					frappe.show_alert({ message: __("This warranty is already added for this device"), indicator: "orange" });
+					frappe.show_alert({ message: __("Already added"), indicator: "orange" });
 					return;
 				}
 
 				PosState.cart.push({
-					item_code: sel_plan.service_item || sel_plan.name,
-					item_name: `🛡 ${sel_plan.plan_name} (${sel_plan.duration_months}m)`,
-					qty: 1,
-					rate: flt(sel_plan.price),
-					mrp: flt(sel_plan.price),
-					uom: "Nos",
-					discount_percentage: 0,
-					discount_amount: 0,
-					offers: [],
-					applied_offer: null,
-					warranty_plan: sel_plan.name,
-					for_item_code: cart_item.item_code,
-					for_serial_no: cart_item.serial_no || "",
-					is_warranty: true,
-					is_vas: false,
+					item_code: plan.service_item || plan.name,
+					item_name: `🛡 ${plan.plan_name} (${plan.duration_months}m)`,
+					qty: 1, rate: flt(plan.price), mrp: flt(plan.price),
+					uom: "Nos", discount_percentage: 0, discount_amount: 0,
+					offers: [], applied_offer: null, warranty_plan: plan.name,
+					for_item_code: cart_item.item_code, for_serial_no: cart_item.serial_no || "",
+					is_warranty: true, is_vas: false,
 				});
 				EventBus.emit("cart:updated");
-				frappe.show_alert({ message: __("{0} added", [sel_plan.plan_name]), indicator: "green" });
-			},
-			secondary_action_label: __("Skip"),
-			secondary_action: () => dialog.hide(),
+				frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
+				$row.addClass("ch-attach-done");
+				this._log_attach("Warranty", "Accepted", item_data.item_code, plan.name);
+			} else {
+				// VAS or Accessory — add item to cart
+				const attach_item_code = $btn.data("item");
+				const rule_name = $btn.data("rule");
+				frappe.xcall("ch_pos.api.pos_api.get_item_details_for_pos", {
+					item_code: attach_item_code, pos_profile: PosState.pos_profile,
+				}).then((item_det) => {
+					if (item_det) {
+						this._add_new_cart_item({
+							...item_det, item_code: attach_item_code,
+							is_warranty: false, is_vas: type === "VAS",
+						});
+					}
+					$row.addClass("ch-attach-done");
+					this._log_attach(type, "Accepted", item_data.item_code, attach_item_code);
+				});
+			}
 		});
+
+		dialog.$wrapper.on("click", ".ch-attach-skip", (e) => {
+			const $btn = $(e.currentTarget);
+			const type = $btn.data("type");
+			const $row = $btn.closest(".ch-attach-row");
+			const reason_required = $btn.data("reason-required");
+			const plan_code = type === "Warranty"
+				? (plans[$btn.data("idx")] || {}).name
+				: $btn.data("item");
+
+			if (reason_required) {
+				frappe.prompt(
+					{ fieldname: "reason", fieldtype: "Small Text", label: __("Skip Reason"), reqd: 1 },
+					(values) => {
+						$row.addClass("ch-attach-skipped");
+						this._log_attach(type, "Skipped", item_data.item_code, plan_code, values.reason);
+					},
+					__("Reason for Skipping"),
+					__("Submit")
+				);
+			} else {
+				$row.addClass("ch-attach-skipped");
+				this._log_attach(type, "Skipped", item_data.item_code, plan_code);
+			}
+		});
+
 		dialog.show();
+
+		// Also log all offers as "Offered"
+		plans.forEach(p => this._log_attach("Warranty", "Offered", item_data.item_code, p.name));
+		[...vas_rules, ...acc_rules].forEach(r => {
+			(r.attach_items || []).forEach(ai => {
+				this._log_attach(r.attach_type, "Offered", item_data.item_code, ai.item_code);
+			});
+		});
+	}
+
+	_log_attach(attach_type, action, item_code, plan_code, skip_reason) {
+		frappe.xcall("ch_pos.api.attach_api.log_attach_event", {
+			pos_profile: PosState.pos_profile,
+			item_code: item_code,
+			attach_type: attach_type,
+			action: action,
+			plan_code: plan_code || "",
+			skip_reason: skip_reason || "",
+		}).catch(() => {});  // Non-blocking
 	}
 
 	// ── Coupon / Voucher ────────────────────────────────

@@ -182,10 +182,115 @@ def validate_pos_commercial_policy(doc, method=None):
 					title=_("Commercial Policy Violation"),
 				)
 
+	# ── Store Discount Budget check ───────────────────────────────────
+	_check_discount_budget(doc)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _check_discount_budget(doc):
+	"""Check store-level discount budget from POS Profile Extension.
+
+	Warns at 80% utilization, blocks at 100% unless manager approved.
+	"""
+	if not doc.pos_profile:
+		return
+
+	ext = frappe.db.get_value(
+		"POS Profile Extension",
+		{"pos_profile": doc.pos_profile},
+		"name",
+	)
+	if not ext:
+		return
+
+	budgets = frappe.get_all(
+		"CH Store Discount Budget",
+		filters={"parent": ext, "parenttype": "POS Profile Extension"},
+		fields=["period", "max_discount_amount"],
+	)
+	if not budgets:
+		return
+
+	# Calculate total discount on this invoice
+	invoice_discount = sum(
+		flt(item.price_list_rate - item.rate) * flt(item.qty)
+		for item in doc.items
+		if flt(item.price_list_rate) > flt(item.rate) and flt(item.rate) > 0
+	) + flt(doc.discount_amount)
+
+	if invoice_discount <= 0:
+		return
+
+	from frappe.utils import getdate, get_first_day, get_last_day
+	today = getdate()
+
+	for budget in budgets:
+		max_amt = flt(budget.max_discount_amount)
+		if max_amt <= 0:
+			continue
+
+		# Determine period boundaries
+		if budget.period == "Daily":
+			start = today
+			end = today
+		elif budget.period == "Weekly":
+			start = today - __import__("datetime").timedelta(days=today.weekday())
+			end = start + __import__("datetime").timedelta(days=6)
+		else:  # Monthly
+			start = get_first_day(today)
+			end = get_last_day(today)
+
+		# Sum discounts already given in this period
+		utilized = flt(frappe.db.sql("""
+			SELECT COALESCE(SUM(
+				si.discount_amount + COALESCE(item_disc.total_item_discount, 0)
+			), 0) as total
+			FROM `tabSales Invoice` si
+			LEFT JOIN (
+				SELECT parent,
+					SUM((price_list_rate - rate) * qty) as total_item_discount
+				FROM `tabSales Invoice Item`
+				WHERE price_list_rate > rate AND rate > 0
+				GROUP BY parent
+			) item_disc ON item_disc.parent = si.name
+			WHERE si.pos_profile = %(pos_profile)s
+				AND si.posting_date BETWEEN %(start)s AND %(end)s
+				AND si.docstatus = 1
+				AND si.is_pos = 1
+				AND si.name != %(current)s
+		""", {
+			"pos_profile": doc.pos_profile,
+			"start": start,
+			"end": end,
+			"current": doc.name or "",
+		})[0][0])
+
+		new_total = utilized + invoice_discount
+
+		if new_total > max_amt:
+			frappe.throw(
+				_("{0} discount budget exhausted: ₹{1} / ₹{2} utilized. "
+				  "This invoice adds ₹{3}. Manager override required.").format(
+					budget.period, frappe.format_value(utilized, "Currency"),
+					frappe.format_value(max_amt, "Currency"),
+					frappe.format_value(invoice_discount, "Currency"),
+				),
+				title=_("Discount Budget Exceeded"),
+			)
+		elif new_total > max_amt * 0.8:
+			frappe.msgprint(
+				_("{0} discount budget at {1}%: ₹{2} / ₹{3} utilized.").format(
+					budget.period,
+					round(new_total / max_amt * 100),
+					frappe.format_value(new_total, "Currency"),
+					frappe.format_value(max_amt, "Currency"),
+				),
+				title=_("Discount Budget Warning"),
+				indicator="orange",
+			)
 
 def _log_exception_request(exception_type, company, reason, requested_value=0,
                            original_value=0, item_code=None, serial_no=None,

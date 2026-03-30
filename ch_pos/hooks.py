@@ -78,6 +78,10 @@ scheduler_events = {
         "0 6 * * *": [
             "ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session.auto_close_overnight_sessions",
         ],
+        # Calculate attach rate bonuses on the 1st of each month for the previous month
+        "0 2 1 * *": [
+            "ch_pos.api.pos_api.calculate_attach_rate_bonus",
+        ],
     },
 }
 

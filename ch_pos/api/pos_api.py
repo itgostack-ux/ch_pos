@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money
+from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day
 from buyback.utils import validate_indian_phone
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
@@ -2960,6 +2960,110 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     return se.name
 
 
+CROSS_STORE_TRANSFER_ROLES = {"Store Manager", "Stock Manager", "System Manager"}
+
+
+@frappe.whitelist()
+def check_nearby_stock(pos_profile, item_code):
+    """Check stock availability at other store warehouses for cross-store transfer."""
+    if not pos_profile or not item_code:
+        frappe.throw(frappe._("POS Profile and Item Code are required"))
+
+    my_warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
+    if not my_warehouse:
+        return []
+
+    company = frappe.db.get_value("Warehouse", my_warehouse, "company")
+    # Get all POS Profile warehouses in the same company
+    other_profiles = frappe.get_all(
+        "POS Profile",
+        filters={"disabled": 0, "warehouse": ["!=", my_warehouse], "company": company},
+        fields=["name", "warehouse"],
+    )
+
+    results = []
+    for p in other_profiles:
+        qty = flt(frappe.db.get_value("Bin",
+            {"item_code": item_code, "warehouse": p.warehouse}, "actual_qty"))
+        if qty > 0:
+            results.append({
+                "pos_profile": p.name,
+                "warehouse": p.warehouse,
+                "available_qty": qty,
+            })
+    return results
+
+
+@frappe.whitelist()
+def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=None):
+    """Create a Material Request for inter-store stock transfer.
+
+    Restricted to Store Manager and above roles only.
+    """
+    user_roles = set(frappe.get_roles())
+    if not user_roles.intersection(CROSS_STORE_TRANSFER_ROLES):
+        frappe.throw(
+            frappe._("Cross-store transfers require Store Manager or above role."),
+            title=frappe._("Insufficient Permissions"),
+            exc=frappe.PermissionError,
+        )
+
+    import json as _json
+    if isinstance(items, str):
+        items = _json.loads(items)
+
+    if not items:
+        frappe.throw(frappe._("At least one item is required"))
+
+    my_warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
+    source_warehouse = frappe.db.get_value("POS Profile", source_pos_profile, "warehouse")
+    if not my_warehouse or not source_warehouse:
+        frappe.throw(frappe._("Invalid POS Profile warehouse configuration"))
+    if my_warehouse == source_warehouse:
+        frappe.throw(frappe._("Source and destination warehouses must be different"))
+
+    company = frappe.db.get_value("Warehouse", my_warehouse, "company")
+
+    mr = frappe.new_doc("Material Request")
+    mr.material_request_type = "Material Transfer"
+    mr.company = company
+    mr.set_warehouse = my_warehouse
+    mr.transaction_date = nowdate()
+    mr.schedule_date = frappe.utils.add_days(nowdate(), 1)
+
+    for item in items:
+        mr.append("items", {
+            "item_code": item.get("item_code"),
+            "qty": flt(item.get("qty", 1)),
+            "warehouse": my_warehouse,
+            "from_warehouse": source_warehouse,
+        })
+
+    # Custom fields for tracking
+    if mr.meta.has_field("custom_store"):
+        store = frappe.db.get_value("POS Profile Extension",
+            {"pos_profile": pos_profile}, "store")
+        mr.custom_store = store
+    if mr.meta.has_field("custom_pos_profile"):
+        mr.custom_pos_profile = pos_profile
+    if mr.meta.has_field("custom_priority"):
+        mr.custom_priority = "Standard"
+
+    if notes:
+        mr.custom_remarks = 1
+        mr.remarks = str(notes)[:500]
+
+    mr.flags.ignore_permissions = True
+    mr.insert()
+
+    return {
+        "name": mr.name,
+        "source_warehouse": source_warehouse,
+        "destination_warehouse": my_warehouse,
+        "status": mr.status,
+    }
+
+
 @frappe.whitelist()
 def get_stock_transfer_items(stock_entry):
     """Return line items of a Stock Entry for the receive dialog."""
@@ -3970,6 +4074,116 @@ def _create_return_incentive_entries(return_invoice, pos_executive):
         total_clawback += flt(clawback, 2)
 
     return total_clawback
+
+
+def calculate_attach_rate_bonus(company=None, payout_month=None):
+    """Calculate monthly attach-rate bonus for POS executives.
+
+    For each executive, computes their warranty/VAS/accessory attach rates
+    from CH Attach Log vs total device sales. Awards bonus incentive entries
+    based on POS Incentive Slab with applicable_on = 'Attach Rate'.
+
+    Called from daily digest or month-end scheduler.
+    Returns list of {executive, attach_pct, bonus_amount}.
+    """
+    if not payout_month:
+        payout_month = str(getdate(nowdate()))[:7]  # YYYY-MM
+
+    year, month = payout_month.split("-")
+    from_date = f"{year}-{month}-01"
+    to_date = str(get_last_day(getdate(from_date)))
+
+    executives = frappe.get_all("POS Executive",
+        filters={"is_active": 1, "company": company} if company else {"is_active": 1},
+        fields=["name", "executive_name", "store", "company", "user"],
+    )
+
+    results = []
+    for exec_doc in executives:
+        user = exec_doc.user
+        if not user:
+            continue
+
+        # Count device sales (items offered for attach)
+        total_offered = frappe.db.count("CH Attach Log", filters={
+            "offered_by": user,
+            "action": "Offered",
+            "offered_at": ["between", [from_date, to_date]],
+        })
+
+        if total_offered == 0:
+            continue
+
+        total_accepted = frappe.db.count("CH Attach Log", filters={
+            "offered_by": user,
+            "action": "Accepted",
+            "offered_at": ["between", [from_date, to_date]],
+        })
+
+        attach_pct = flt(total_accepted / total_offered * 100, 1)
+
+        # Find matching Attach Rate incentive slab
+        slab = _find_incentive_slab(
+            company=exec_doc.company,
+            item_group="",
+            brand="",
+            billing_amount=attach_pct,  # Use attach % as the slab range
+            transaction_type="Attach Rate",
+        )
+
+        bonus = 0
+        if slab:
+            if slab.incentive_type == "Percentage":
+                # % of total sales amount for the month
+                monthly_sales = flt(frappe.db.sql("""
+                    SELECT COALESCE(SUM(si.grand_total), 0)
+                    FROM `tabSales Invoice` si
+                    WHERE si.docstatus = 1 AND si.is_pos = 1
+                        AND si.owner = %(user)s
+                        AND si.posting_date BETWEEN %(from)s AND %(to)s
+                """, {"user": user, "from": from_date, "to": to_date})[0][0])
+                bonus = monthly_sales * flt(slab.incentive_value) / 100
+            else:
+                bonus = flt(slab.incentive_value)
+
+        if bonus <= 0:
+            continue
+
+        # Check if already created for this month
+        existing = frappe.db.exists("POS Incentive Ledger", {
+            "pos_executive": exec_doc.name,
+            "transaction_type": "Attach Rate",
+            "payout_month": payout_month,
+        })
+        if existing:
+            continue
+
+        ledger = frappe.new_doc("POS Incentive Ledger")
+        ledger.pos_executive = exec_doc.name
+        ledger.executive_name = exec_doc.executive_name
+        ledger.store = exec_doc.store
+        ledger.company = exec_doc.company
+        ledger.posting_date = to_date
+        ledger.transaction_type = "Attach Rate"
+        ledger.item_code = ""
+        ledger.item_name = f"Attach Rate Bonus ({attach_pct}%)"
+        ledger.billing_amount = 0
+        ledger.incentive_slab = slab.name
+        ledger.incentive_type = slab.incentive_type
+        ledger.incentive_value = flt(slab.incentive_value)
+        ledger.incentive_amount = flt(bonus, 2)
+        ledger.status = "Pending"
+        ledger.payout_month = payout_month
+        ledger.flags.ignore_permissions = True
+        ledger.save()
+
+        results.append({
+            "executive": exec_doc.executive_name,
+            "attach_pct": attach_pct,
+            "bonus_amount": flt(bonus, 2),
+        })
+
+    return results
 
 
 # ── Update Customer Details (from POS) ───────────────────────────

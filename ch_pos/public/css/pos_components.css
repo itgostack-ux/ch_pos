@@ -4622,3 +4622,14 @@ body > .desk-alert-container {
   border-color: #fca5a5;
   color: #dc2626;
 }
+
+/* ── Attach Panel ─────────────────────────────────────── */
+.ch-attach-panel { padding: 4px 0; }
+.ch-attach-section { margin-bottom: 16px; padding: 12px; background: var(--card-bg, #fff); border: 1px solid var(--border-color, #e5e7eb); border-radius: 8px; }
+.ch-attach-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-bottom: 1px solid var(--border-color, #f1f1f1); transition: opacity 0.3s; }
+.ch-attach-row:last-child { border-bottom: none; }
+.ch-attach-row.ch-attach-done { background: #f0fdf4; opacity: 0.7; pointer-events: none; }
+.ch-attach-row.ch-attach-skipped { background: #fef2f2; opacity: 0.5; pointer-events: none; }
+.ch-attach-name { font-size: 13px; font-weight: 500; flex: 1; }
+.ch-attach-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.ch-attach-actions .btn { min-width: 50px; }

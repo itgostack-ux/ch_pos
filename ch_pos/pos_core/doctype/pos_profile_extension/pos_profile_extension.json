@@ -30,7 +30,9 @@
   "session_section",
   "default_float",
   "column_break_session",
-  "idle_timeout_minutes"
+  "idle_timeout_minutes",
+  "discount_budget_section",
+  "discount_budget"
  ],
  "fields": [
   {
@@ -194,6 +196,19 @@
    "label": "Require Token Linkage",
    "default": "0",
    "description": "If enabled, every POS invoice must be linked to a walk-in kiosk token."
+  },
+  {
+   "fieldname": "discount_budget_section",
+   "fieldtype": "Section Break",
+   "label": "Discount Budget",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "discount_budget",
+   "fieldtype": "Table",
+   "label": "Store Discount Budget",
+   "options": "CH Store Discount Budget",
+   "description": "Define max discount amount per period. Soft warn at 80%, hard block at 100%."
   }
  ],
  "index_web_pages_for_search": 0,
