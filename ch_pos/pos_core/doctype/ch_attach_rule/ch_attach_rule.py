@@ -13,8 +13,16 @@ class CHAttachRule(Document):
 		"Item": "Item",
 	}
 
-	def validate(self):
+	def before_validate(self):
 		self._set_trigger_doctype()
+
+	def _validate_links(self):
+		"""Override to set trigger_doctype before Frappe validates dynamic links."""
+		self._set_trigger_doctype()
+		super()._validate_links()
+
+	def validate(self):
+		pass
 
 	def _set_trigger_doctype(self):
 		"""Map trigger_type select value to the actual DocType for Dynamic Link."""
