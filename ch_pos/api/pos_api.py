@@ -3,6 +3,31 @@ from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money
 from buyback.utils import validate_indian_phone
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
+
+def _enforce_token_linkage(pos_profile, kiosk_token):
+    """Block billing without a linked kiosk token when enforcement is enabled."""
+    if kiosk_token:
+        return  # token already linked — nothing to check
+
+    # Check global override first
+    global_enforce = cint(frappe.db.get_single_value(
+        "CH POS Control Settings", "enforce_token_linkage_globally"))
+    if global_enforce:
+        frappe.throw(
+            frappe._("Walk-in token must be linked before billing. "
+                     "Use Quick Walk-in or select from queue."),
+            title=frappe._("Token Required"))
+
+    # Check store-level setting
+    require = frappe.db.get_value(
+        "POS Profile Extension", {"pos_profile": pos_profile},
+        "require_token_linkage")
+    if cint(require):
+        frappe.throw(
+            frappe._("Walk-in token must be linked before billing. "
+                     "Use Quick Walk-in or select from queue."),
+            title=frappe._("Token Required"))
+
 @frappe.whitelist()
 def get_pos_profile_data(pos_profile):
     """Return POS profile configuration needed by the CH POS frontend."""
@@ -182,6 +207,9 @@ def create_pos_invoice(pos_profile, customer, items,
         items = frappe.parse_json(items)
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
+
+    # ── Token linkage enforcement ─────────────────────────────────────────
+    _enforce_token_linkage(pos_profile, kiosk_token)
 
     inv = frappe.new_doc("Sales Invoice")
     inv.custom_pos_session = session_name

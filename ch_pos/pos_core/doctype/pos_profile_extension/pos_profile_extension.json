@@ -16,6 +16,7 @@
   "column_break_features",
   "enable_repair_intake",
   "enable_buyback_intake",
+  "require_token_linkage",
   "max_comparison_items",
   "display_section",
   "show_cost_price",
@@ -169,7 +170,7 @@
   },
   {
    "default": "0",
-   "description": "Default opening float amount (₹) for new sessions. 0 means cashier must enter manually.",
+   "description": "Default opening float amount (\u20b9) for new sessions. 0 means cashier must enter manually.",
    "fieldname": "default_float",
    "fieldtype": "Currency",
    "label": "Default Float",
@@ -186,11 +187,18 @@
    "fieldtype": "Int",
    "label": "Idle Timeout (minutes)",
    "non_negative": 1
+  },
+  {
+   "fieldname": "require_token_linkage",
+   "fieldtype": "Check",
+   "label": "Require Token Linkage",
+   "default": "0",
+   "description": "If enabled, every POS invoice must be linked to a walk-in kiosk token."
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-03-08 10:00:00.000000",
+ "modified": "2026-03-30 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "POS Profile Extension",

@@ -1,0 +1,127 @@
+{
+ "actions": [],
+ "autoname": "format:ATR-{####}",
+ "creation": "2025-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "rule_name",
+  "is_active",
+  "company",
+  "column_break_1",
+  "trigger_type",
+  "trigger_doctype",
+  "trigger_value",
+  "attach_type",
+  "section_break_items",
+  "attach_items",
+  "section_break_options",
+  "skip_reason_required"
+ ],
+ "fields": [
+  {
+   "fieldname": "rule_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Rule Name",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Active"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "trigger_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Trigger Type",
+   "options": "\nCategory\nSubcategory\nBrand\nItem",
+   "reqd": 1
+  },
+  {
+   "depends_on": "trigger_type",
+   "fieldname": "trigger_doctype",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Trigger DocType",
+   "read_only": 1
+  },
+  {
+   "fieldname": "trigger_value",
+   "fieldtype": "Dynamic Link",
+   "label": "Trigger Value",
+   "options": "trigger_doctype",
+   "reqd": 1
+  },
+  {
+   "fieldname": "attach_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Attach Type",
+   "options": "\nWarranty\nVAS\nAccessory",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_items",
+   "fieldtype": "Section Break",
+   "label": "Items to Attach"
+  },
+  {
+   "fieldname": "attach_items",
+   "fieldtype": "Table",
+   "label": "Attach Items",
+   "options": "CH Attach Rule Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_options",
+   "fieldtype": "Section Break",
+   "label": "Options"
+  },
+  {
+   "default": "1",
+   "fieldname": "skip_reason_required",
+   "fieldtype": "Check",
+   "label": "Skip Reason Required"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2025-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH Attach Rule",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Store Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

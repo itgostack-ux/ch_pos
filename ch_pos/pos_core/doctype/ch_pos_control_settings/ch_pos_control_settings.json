@@ -20,7 +20,11 @@
   "enforce_device_company_isolation",
   "enforce_user_company_isolation",
   "column_break_isolation",
-  "block_cross_company_transactions"
+  "block_cross_company_transactions",
+  "sales_enforcement_section",
+  "enforce_attach_rules",
+  "column_break_attach",
+  "enforce_token_linkage_globally"
  ],
  "fields": [
   {
@@ -32,7 +36,7 @@
    "default": "100",
    "fieldname": "variance_approval_threshold",
    "fieldtype": "Currency",
-   "label": "Variance Approval Threshold (₹)",
+   "label": "Variance Approval Threshold (\u20b9)",
    "description": "Manager approval required if cash variance exceeds this amount"
   },
   {
@@ -50,14 +54,14 @@
    "default": "0",
    "fieldname": "require_manager_on_opening_balance_above",
    "fieldtype": "Currency",
-   "label": "Require Manager for Opening Above (₹)",
+   "label": "Require Manager for Opening Above (\u20b9)",
    "description": "Manager PIN required if opening balance exceeds this. 0 = no limit."
   },
   {
    "default": "0",
    "fieldname": "require_manager_on_cash_drop_above",
    "fieldtype": "Currency",
-   "label": "Require Manager for Cash Drop Above (₹)",
+   "label": "Require Manager for Cash Drop Above (\u20b9)",
    "description": "Manager PIN required if cash drop exceeds this. 0 = always require."
   },
   {
@@ -124,12 +128,35 @@
    "fieldtype": "Check",
    "label": "Block Cross-Company Transactions",
    "description": "Prevent transactions where company on invoice differs from session company"
+  },
+  {
+   "fieldname": "sales_enforcement_section",
+   "fieldtype": "Section Break",
+   "label": "Sales Process Enforcement"
+  },
+  {
+   "fieldname": "enforce_attach_rules",
+   "fieldtype": "Check",
+   "label": "Enforce Attach Selling Rules",
+   "default": "0",
+   "description": "Block invoice submission unless all attach selling prompts (warranty/VAS/accessories) have been answered."
+  },
+  {
+   "fieldname": "column_break_attach",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "enforce_token_linkage_globally",
+   "fieldtype": "Check",
+   "label": "Enforce Token Linkage Globally",
+   "default": "0",
+   "description": "Override per-store setting \u2014 require kiosk token on ALL stores."
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-03-19 10:00:00.000000",
+ "modified": "2026-03-30 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "CH POS Control Settings",
