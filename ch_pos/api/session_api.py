@@ -86,15 +86,24 @@ def get_session_status(pos_profile):
     # If the day is already closed for this store, don't allow reopening.
     if store:
         business_date = get_store_business_date(store)
-        day_closed = frappe.db.exists(
-            "CH POS Session",
-            {
-                "store": store,
-                "business_date": business_date,
-                "status": "Closed",
-                "docstatus": 1,
-            },
-        )
+        day_closed = False
+        bd_status = frappe.db.get_value("CH Business Date", {"store": store}, "status")
+        if bd_status == "Closed":
+            day_closed = True
+        elif getdate(business_date) < getdate(nowdate()):
+            # Stale date: business date is in the past — day is unusable
+            day_closed = True
+        else:
+            # Check for a closed session on this business date
+            day_closed = frappe.db.exists(
+                "CH POS Session",
+                {
+                    "store": store,
+                    "business_date": business_date,
+                    "status": "Closed",
+                    "docstatus": 1,
+                },
+            )
         if day_closed:
             return {
                 "has_session": False,

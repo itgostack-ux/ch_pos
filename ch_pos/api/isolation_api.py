@@ -93,13 +93,8 @@ def get_pos_context():
         if bd_status == "Closed":
             day_closed = True
         elif getdate(business_date) < getdate(nowdate()):
-            # Stale date: business date is in the past — check if a closed session exists
-            has_closed = frappe.db.exists(
-                "CH POS Session",
-                {"store": store, "business_date": business_date, "status": "Closed", "docstatus": 1},
-            )
-            if has_closed:
-                day_closed = True
+            # Stale date: business date is in the past — day is unusable
+            day_closed = True
 
     return {
         "status": "ok",
@@ -156,13 +151,8 @@ def get_pos_context_for_store(store):
     if bd_status == "Closed":
         day_closed = True
     elif getdate(business_date) < getdate(nowdate()):
-        # Stale date: business date is in the past — check if a closed session exists
-        has_closed = frappe.db.exists(
-            "CH POS Session",
-            {"store": store, "business_date": business_date, "status": "Closed", "docstatus": 1},
-        )
-        if has_closed:
-            day_closed = True
+        # Stale date: business date is in the past — day is unusable
+        day_closed = True
 
     # Find POS Profile for this store
     pos_profile = frappe.db.get_value(
