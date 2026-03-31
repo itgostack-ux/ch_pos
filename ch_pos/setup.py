@@ -410,12 +410,12 @@ CUSTOM_FIELDS = {
 
 def after_install():
     _ensure_module_defs()
-    create_custom_fields(CUSTOM_FIELDS, update=True)
+    create_custom_fields(CUSTOM_FIELDS, update=False)
     sync_margin_receipt_format()
 
 
 def after_migrate():
-    create_custom_fields(CUSTOM_FIELDS, update=True)
+    create_custom_fields(CUSTOM_FIELDS, update=False)
     sync_margin_receipt_format()
 
 

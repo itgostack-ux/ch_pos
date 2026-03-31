@@ -109,6 +109,21 @@ export class ClaimsWorkspace {
 			panel.find(".ch-claim-form-area").hide();
 		});
 
+		panel.on("change", ".ch-claim-mode", (e) => {
+			const mode = $(e.currentTarget).val();
+			const needs_pickup = ["Pickup", "Courier"].includes(mode);
+			panel.find(".ch-claim-pickup-fields").toggle(needs_pickup);
+		});
+
+		panel.on("click", ".ch-claim-log-action", (e) => {
+			const $btn = $(e.currentTarget);
+			const claim_name = $btn.data("claim");
+			const action = $btn.data("action");
+			if (claim_name && action) {
+				this._handle_logistics_action(panel, claim_name, action);
+			}
+		});
+
 		// Claim detail
 		panel.on("click", ".ch-claim-track", (e) => {
 			const name = $(e.currentTarget).data("claim");
@@ -411,6 +426,28 @@ export class ClaimsWorkspace {
 					</button>
 				</div>
 				<div class="section-body">
+					<div class="ch-pos-field-group" style="margin-bottom:var(--pos-space-sm)">
+						<label>${__("Service Mode")} <span style="color:var(--pos-danger)">*</span></label>
+						<select class="form-control ch-claim-mode">
+							<option value="Walk-in">${__("Walk-in")}</option>
+							<option value="Pickup">${__("Pickup")}</option>
+							<option value="Courier">${__("Courier")}</option>
+							<option value="On-site">${__("On-site")}</option>
+						</select>
+					</div>
+
+					<div class="ch-claim-pickup-fields" style="display:none;margin-bottom:var(--pos-space-md)">
+						<div class="ch-pos-field-group" style="margin-top:var(--pos-space-sm)">
+							<label>${__("Pickup Address")} <span style="color:var(--pos-danger)">*</span></label>
+							<textarea class="form-control ch-claim-pickup-address" rows="2"
+								placeholder="${__("Door number, street, area, city, pincode")}"></textarea>
+						</div>
+						<div class="ch-pos-field-group" style="margin-top:var(--pos-space-sm)">
+							<label>${__("Preferred Pickup Slot")}</label>
+							<input type="datetime-local" class="form-control ch-claim-pickup-slot">
+						</div>
+					</div>
+
 					<!-- Customer Contact (read-only from Customer master) -->
 					<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--pos-space-md);
 						padding:8px 12px;background:var(--subtle-fg);border-radius:6px;font-size:13px">
@@ -643,6 +680,14 @@ export class ClaimsWorkspace {
 		}
 
 		const btn = panel.find(".ch-claim-submit");
+		const mode_of_service = panel.find(".ch-claim-mode").val() || "Walk-in";
+		const pickup_address = panel.find(".ch-claim-pickup-address").val().trim();
+		const pickup_slot = panel.find(".ch-claim-pickup-slot").val() || null;
+		if (["Pickup", "Courier"].includes(mode_of_service) && !pickup_address) {
+			frappe.show_alert({ message: __("Pickup address is required for {0}", [mode_of_service]), indicator: "orange" });
+			panel.find(".ch-claim-pickup-address").focus();
+			return;
+		}
 		btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Submitting...")}`);
 
 		frappe.xcall(
@@ -657,6 +702,9 @@ export class ClaimsWorkspace {
 				reported_at_company: PosState.company,
 				reported_at_store: PosState.store || "",
 				estimated_repair_cost: parseFloat(panel.find(".ch-claim-est-cost").val()) || 0,
+				mode_of_service,
+				pickup_address: pickup_address || undefined,
+				pickup_slot: pickup_slot || undefined,
 				sold_plan: selected_sold_plan || undefined,
 			}
 		).then(async (result) => {
@@ -724,6 +772,8 @@ export class ClaimsWorkspace {
 		const is_mfr = result.coverage_type === "Manufacturer Warranty";
 		const is_sent_mfr = result.claim_status === "Sent to Manufacturer";
 		const needs_approval = result.requires_approval;
+		const pickup_flow = ["Pickup Requested", "Pickup Scheduled"].includes(result.claim_status)
+			|| ["Pickup", "Courier"].includes(result.mode_of_service);
 
 		let html;
 		if (is_sent_mfr || is_mfr) {
@@ -743,6 +793,14 @@ export class ClaimsWorkspace {
 					<p>${__("Claim")}: <b>${result.claim_name}</b></p>
 					<p>${__("GoFix Ticket")}: <b>${result.service_request}</b></p>
 					<p style="font-size:12px;color:#6b7280">${__("Customer pays")}: ₹${result.customer_share || 0}</p>
+				</div>`;
+		} else if (pickup_flow) {
+			html = `
+				<div style="text-align:center;padding:20px;color:#0f766e">
+					<i class="fa fa-map-marker fa-3x"></i>
+					<h5 style="margin-top:10px">${__("Pickup Flow Started")}</h5>
+					<p>${__("Claim")}: <b>${result.claim_name}</b></p>
+					<p style="font-size:12px;color:#6b7280">${__("Device pickup will be scheduled before repair processing")}</p>
 				</div>`;
 		} else if (needs_approval) {
 			html = `
@@ -770,6 +828,8 @@ export class ClaimsWorkspace {
 			cust_msg = __("Your device is under manufacturer warranty. We are sending it to the brand for repair. Reference: ") + result.claim_name;
 		} else if (needs_approval) {
 			cust_msg = __("Your claim is under review. We will update you once approved.");
+		} else if (pickup_flow) {
+			cust_msg = __("Your claim is created. We will schedule pickup and share tracking details shortly.");
 		} else if (result.service_request) {
 			cust_msg = __("Your device has been sent for repair. Reference: ") + result.claim_name;
 		}
@@ -807,6 +867,8 @@ export class ClaimsWorkspace {
 						</div>`).join("")}
 				</details>`;
 			}
+
+			const logistics = this._render_logistics_block(claim);
 
 			panel.find(".ch-claim-dashboard").html(`
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
@@ -859,6 +921,7 @@ export class ClaimsWorkspace {
 						<div style="padding:6px 10px;background:#f9fafb;border-radius:6px;font-size:12px">
 							<b>${__("Issue")}:</b> ${claim.issue_description || "N/A"}
 						</div>
+						${logistics}
 						${log_html}
 					</div>
 				</div>
@@ -887,18 +950,110 @@ export class ClaimsWorkspace {
 
 		return [
 			{ label: __("Filed"), icon: "fa-file-text", done: true, color: "#3b82f6" },
+			{ label: __("Pickup"), icon: "fa-truck",
+			  done: ["Pickup Requested", "Pickup Scheduled", "Picked Up", "Ticket Created", "In Repair", "Repair Complete", "Out for Delivery", "Delivered", "Closed"].includes(s),
+			  color: "#0f766e" },
 			{ label: claim.requires_approval ? __("Approval") : __("Auto"),
 			  icon: "fa-check-circle",
-			  done: ["Approved","Ticket Created","In Repair","Repair Complete","Closed","Rejected"].includes(s),
+			  done: ["Approved","Pickup Requested","Pickup Scheduled","Picked Up","Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed","Rejected"].includes(s),
 			  color: s === "Rejected" ? "#ef4444" : "#22c55e" },
 			{ label: __("GoFix"), icon: "fa-wrench",
-			  done: ["Ticket Created","In Repair","Repair Complete","Closed"].includes(s), color: "#8b5cf6" },
+			  done: ["Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed"].includes(s), color: "#8b5cf6" },
 			{ label: __("Repair"), icon: "fa-cog",
-			  done: ["In Repair","Repair Complete","Closed"].includes(s), color: "#eab308" },
+			  done: ["In Repair","Repair Complete","Out for Delivery","Delivered","Closed"].includes(s), color: "#eab308" },
+			{ label: __("Delivery"), icon: "fa-motorcycle",
+			  done: ["Out for Delivery","Delivered","Closed"].includes(s), color: "#0ea5e9" },
 			{ label: __("Done"), icon: "fa-trophy",
-			  done: ["Repair Complete","Closed"].includes(s), color: "#22c55e" },
+			  done: ["Repair Complete","Delivered","Closed"].includes(s), color: "#22c55e" },
 			{ label: __("Closed"), icon: "fa-lock", done: s === "Closed", color: "#6b7280" },
 		];
+	}
+
+	_render_logistics_block(claim) {
+		const mode = claim.mode_of_service || "Walk-in";
+		const lstat = claim.logistics_status || "Not Required";
+		const pickup_flow = ["Pickup", "Courier"].includes(mode);
+		if (!pickup_flow && !claim.pickup_required && !claim.pickup_address && !claim.pickup_scheduled_at) {
+			return "";
+		}
+
+		const actions = [];
+		if (["Approved", "Pickup Requested"].includes(claim.claim_status)) {
+			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="schedule_pickup"><i class="fa fa-calendar"></i> ${__("Schedule Pickup")}</button>`);
+		}
+		if (claim.claim_status === "Pickup Scheduled") {
+			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="mark_picked_up"><i class="fa fa-truck"></i> ${__("Mark Picked Up")}</button>`);
+		}
+		if (claim.claim_status === "Repair Complete") {
+			actions.push(`<button class="btn btn-xs btn-info ch-claim-log-action" data-claim="${claim.name}" data-action="mark_out_for_delivery"><i class="fa fa-motorcycle"></i> ${__("Out for Delivery")}</button>`);
+		}
+		if (claim.claim_status === "Out for Delivery") {
+			actions.push(`<button class="btn btn-xs btn-success ch-claim-log-action" data-claim="${claim.name}" data-action="mark_delivered_back"><i class="fa fa-check"></i> ${__("Mark Delivered")}</button>`);
+		}
+
+		return `<div style="padding:8px 10px;background:#f0fdfa;border:1px solid #99f6e4;border-radius:6px;font-size:12px;margin-top:8px">
+			<b><i class="fa fa-map-marker"></i> ${__("Pickup & Delivery")}</b>
+			<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
+				<div><span class="text-muted">${__("Mode")}:</span> ${mode}</div>
+				<div><span class="text-muted">${__("Logistics Status")}:</span> ${lstat}</div>
+				<div><span class="text-muted">${__("Pickup Slot")}:</span> ${claim.pickup_slot || "—"}</div>
+				<div><span class="text-muted">${__("Tracking")}:</span> ${claim.pickup_tracking_no || "—"}</div>
+				<div><span class="text-muted">${__("Partner")}:</span> ${claim.pickup_partner || "—"}</div>
+				<div><span class="text-muted">${__("Delivered At")}:</span> ${claim.delivered_back_at || "—"}</div>
+			</div>
+			${claim.pickup_address ? `<div style="margin-top:6px"><span class="text-muted">${__("Address")}:</span> ${frappe.utils.escape_html(claim.pickup_address)}</div>` : ""}
+			${actions.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${actions.join("")}</div>` : ""}
+		</div>`;
+	}
+
+	_handle_logistics_action(panel, claim_name, action) {
+		const call_action = (args = {}) => {
+			return frappe.xcall("ch_item_master.ch_item_master.warranty_api.update_claim_logistics", {
+				claim_name,
+				action,
+				...args,
+			}).then(() => {
+				frappe.show_alert({ message: __("Claim logistics updated"), indicator: "green" });
+				this._show_claim_detail(panel, claim_name);
+				this._load_claims_pipeline(panel);
+			});
+		};
+
+		if (action === "schedule_pickup") {
+			frappe.prompt([
+				{ fieldname: "pickup_address", fieldtype: "Small Text", label: __("Pickup Address"), reqd: 1 },
+				{ fieldname: "pickup_slot", fieldtype: "Datetime", label: __("Pickup Slot") },
+				{ fieldname: "pickup_partner", fieldtype: "Data", label: __("Pickup Partner") },
+				{ fieldname: "pickup_tracking_no", fieldtype: "Data", label: __("Tracking Number") },
+				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => call_action(v), __("Schedule Pickup"), __("Save"));
+			return;
+		}
+
+		if (action === "mark_picked_up") {
+			frappe.prompt([
+				{ fieldname: "delivery_otp", fieldtype: "Data", label: __("Pickup OTP"), description: __("Optional") },
+				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => call_action(v), __("Mark Picked Up"), __("Confirm"));
+			return;
+		}
+
+		if (action === "mark_out_for_delivery") {
+			frappe.prompt([
+				{ fieldname: "pickup_partner", fieldtype: "Data", label: __("Delivery Partner") },
+				{ fieldname: "pickup_tracking_no", fieldtype: "Data", label: __("Tracking Number") },
+				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => call_action(v), __("Out for Delivery"), __("Confirm"));
+			return;
+		}
+
+		if (action === "mark_delivered_back") {
+			frappe.prompt([
+				{ fieldname: "delivery_otp", fieldtype: "Data", label: __("Delivery OTP"), description: __("Optional") },
+				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => call_action(v), __("Mark Delivered"), __("Confirm"));
+			return;
+		}
 	}
 
 	// ── Claims Pipeline ─────────────────────────────────────────────
@@ -962,11 +1117,16 @@ export class ClaimsWorkspace {
 			"Draft":            { bg: "#f3f4f6", fg: "#374151" },
 			"Pending Approval": { bg: "#fef3c7", fg: "#92400e" },
 			"Approved":         { bg: "#dbeafe", fg: "#1e40af" },
+			"Pickup Requested": { bg: "#ccfbf1", fg: "#115e59" },
+			"Pickup Scheduled": { bg: "#99f6e4", fg: "#115e59" },
+			"Picked Up":        { bg: "#5eead4", fg: "#134e4a" },
 			"Rejected":         { bg: "#fef2f2", fg: "#991b1b" },
 			"Ticket Created":   { bg: "#ede9fe", fg: "#5b21b6" },
 			"Sent to Manufacturer": { bg: "#dbeafe", fg: "#1e3a8a" },
 			"In Repair":        { bg: "#fef9c3", fg: "#854d0e" },
 			"Repair Complete":  { bg: "#dcfce7", fg: "#166534" },
+			"Out for Delivery": { bg: "#e0f2fe", fg: "#075985" },
+			"Delivered":        { bg: "#bbf7d0", fg: "#166534" },
 			"Closed":           { bg: "#f3f4f6", fg: "#374151" },
 			"Cancelled":        { bg: "#fee2e2", fg: "#991b1b" },
 		};
