@@ -161,6 +161,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        is_credit_sale=0, credit_days=0,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
                        advance_amount=0, kiosk_token=None,
+                       guided_session=None,
                        exception_request=None, warranty_claim=None):
     """Create and submit a Sales Invoice from the CH POS App cart.
 
@@ -226,6 +227,12 @@ def create_pos_invoice(pos_profile, customer, items,
     # Kiosk token link (from queue panel billing)
     if kiosk_token:
         inv.custom_kiosk_token = kiosk_token
+
+    # Guided session link (from Guided Selling workspace)
+    if guided_session:
+        if not frappe.db.exists("POS Guided Session", guided_session):
+            frappe.throw(frappe._("Guided Session {0} not found").format(guided_session))
+        inv.custom_guided_session = guided_session
 
     # Exception request link — validate it's still valid before billing
     if exception_request:
@@ -2136,7 +2143,7 @@ def calculate_buyback_valuation(item_code, condition_checks):
     item_group = frappe.db.get_value("Item", item_code, "item_group")
 
     try:
-        from ch_erp_buyback.buyback.buyback.pricing.engine import calculate_estimated_price
+        from buyback.buyback.pricing.engine import calculate_estimated_price
 
         result = calculate_estimated_price(
             item_code=item_code,
@@ -2231,12 +2238,20 @@ def create_buyback_assessment_with_grading(
 
     doc = frappe.new_doc("Buyback Assessment")
     doc.source = "Store Manual"
-    doc.store = frappe.db.get_value("POS Profile", frappe.form_dict.get("pos_profile"), "warehouse") or ""
+    _pos_profile = frappe.form_dict.get("pos_profile") or ""
+    _store = ""
+    if _pos_profile:
+        _store = frappe.db.get_value("POS Profile", _pos_profile, "warehouse") or ""
+    if not _store:
+        _store = frappe.defaults.get_user_default("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse") or ""
+    doc.store = _store
     doc.mobile_no = mobile_no
     doc.customer = customer or ""
     doc.item = item_code
     doc.imei_serial = imei_serial or ""
-    doc.estimated_grade = valuation["grade"]
+    doc.estimated_grade = frappe.db.get_value(
+        "Grade Master", {"grade_name": valuation["grade"]}, "name"
+    ) or ""
     doc.estimated_price = valuation["final_price"]
     doc.quoted_price = valuation["final_price"]
     doc.remarks = _build_grading_remarks(condition_checks, valuation, kyc_id_type, kyc_id_number, kyc_name)
@@ -2275,7 +2290,7 @@ def _build_grading_remarks(condition_checks, valuation, kyc_id_type, kyc_id_numb
     if valuation["deductions"]:
         lines.append("Deductions:")
         for d in valuation["deductions"]:
-            lines.append(f"  - {d['label']}: -₹{d['amount']:,.0f} ({d['pct']}%)")
+            lines.append(f"  - {d['label']}: -₹{d['amount']:,.0f} ({d.get('pct') or d.get('percent', 0)}%)")
     lines.append(f"Final Price: ₹{valuation['final_price']:,.0f}")
 
     if kyc_id_type and kyc_id_number:
@@ -4527,6 +4542,89 @@ def get_pos_buyback_detail(assessment_name):
 			"details": d.get("details") or "",
 		})
 
+	# Assessment question responses (customer self-assessment)
+	assessment_responses = []
+	for r in (a.responses or []):
+		assessment_responses.append({
+			"question": r.get("question") or "",
+			"question_code": r.get("question_code") or "",
+			"question_text": r.get("question_text") or "",
+			"answer_value": r.get("answer_value") or "",
+			"answer_label": r.get("answer_label") or "",
+			"price_impact_percent": flt(r.get("price_impact_percent")),
+		})
+
+	# Inspection data (if inspection exists)
+	inspection = None
+	if a.buyback_inspection:
+		try:
+			ins = frappe.get_doc("Buyback Inspection", a.buyback_inspection)
+			# Grade options for selector
+			grades = frappe.get_all(
+				"Grade Master", fields=["name", "grade_name"],
+				order_by="name asc",
+			)
+			# Inspection responses with side-by-side data
+			ins_responses = []
+			for ir in (ins.inspection_responses or []):
+				# Fetch answer options for inspector dropdown
+				options = []
+				if ir.question:
+					options = frappe.get_all(
+						"Buyback Question Option",
+						filters={"parent": ir.question},
+						fields=["option_value", "option_label", "price_impact_percent"],
+						order_by="idx asc",
+					)
+				ins_responses.append({
+					"question": ir.get("question") or "",
+					"question_code": ir.get("question_code") or "",
+					"question_text": ir.get("question_text") or "",
+					"assessment_answer": ir.get("assessment_answer") or "",
+					"assessment_answer_label": ir.get("assessment_answer_label") or "",
+					"assessment_impact": flt(ir.get("assessment_impact")),
+					"inspector_answer": ir.get("inspector_answer") or "",
+					"inspector_answer_label": ir.get("inspector_answer_label") or "",
+					"inspector_impact": flt(ir.get("inspector_impact")),
+					"options": [
+						{"value": o.option_value, "label": o.option_label,
+						 "impact": flt(o.price_impact_percent)}
+						for o in options
+					],
+				})
+			# Inspection diagnostics (automated tests)
+			ins_diagnostics = []
+			for id_ in (ins.inspection_diagnostics or []):
+				ins_diagnostics.append({
+					"test_name": id_.get("test_name") or "",
+					"test_code": id_.get("test_code") or "",
+					"assessment_result": id_.get("assessment_result") or "",
+					"assessment_depreciation": flt(id_.get("assessment_depreciation")),
+					"inspector_result": id_.get("inspector_result") or "",
+					"inspector_depreciation": flt(id_.get("inspector_depreciation")),
+				})
+			inspection = {
+				"name": ins.name,
+				"status": ins.status or "",
+				"inspector": ins.inspector or "",
+				"pre_inspection_grade": ins.pre_inspection_grade or "",
+				"post_inspection_grade": ins.post_inspection_grade or "",
+				"condition_grade": ins.condition_grade or "",
+				"estimated_price": flt(ins.estimated_price),
+				"quoted_price": flt(ins.quoted_price),
+				"revised_price": flt(ins.revised_price),
+				"price_override_reason": ins.price_override_reason or "",
+				"remarks": ins.remarks or "",
+				"responses": ins_responses,
+				"diagnostics": ins_diagnostics,
+				"grades": [
+					{"name": g.name, "label": g.grade_name or g.name}
+					for g in grades
+				],
+			}
+		except frappe.DoesNotExistError:
+			pass
+
 	return {
 		"name": a.name,
 		"source": a.source or "",
@@ -4545,6 +4643,8 @@ def get_pos_buyback_detail(assessment_name):
 		"quoted_price": flt(a.quoted_price),
 		"remarks": a.remarks or "",
 		"diagnostics": diagnostics,
+		"assessment_responses": assessment_responses,
+		"inspection": inspection,
 		"order": order,
 		"buyback_inspection": a.buyback_inspection or "",
 	}
@@ -4662,11 +4762,13 @@ def pos_send_customer_otp(order_name):
 
 
 @frappe.whitelist()
-def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None):
+def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
+                                 kyc_id_type=None, kyc_id_number=None):
 	"""Record customer approval of the final buyback price.
 
 	method: "In-Store Signature" | "OTP" | "Token Link"
 	If method == "OTP", otp_code is verified first.
+	kyc_id_type / kyc_id_number: optional KYC data saved on the order.
 	"""
 	doc = frappe.get_doc("Buyback Order", order_name)
 
@@ -4684,6 +4786,16 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
 		if not result.get("valid"):
 			frappe.throw(frappe._(result.get("message", "OTP verification failed.")))
 		doc.otp_verified = 1
+
+	# Save KYC data if provided
+	if kyc_id_type:
+		doc.customer_id_type = kyc_id_type
+	if kyc_id_number:
+		doc.customer_id_number = kyc_id_number
+	if kyc_id_type and kyc_id_number:
+		doc.kyc_verified = 1
+		doc.kyc_verified_by = frappe.session.user
+		doc.kyc_verified_at = frappe.utils.now_datetime()
 
 	doc.flags.ignore_permissions = True
 	doc.customer_approve(method=method)
@@ -4740,11 +4852,20 @@ def pos_send_approval_link(order_name):
 def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 	"""Mark a buyback order as settled via direct cashback to customer.
 
-	Records a payment entry on the order, marks it Paid.
-	Actual JE/stock entry is handled by back-office accounting.
+	Records a payment entry on the order, marks it Paid, then auto-closes.
+	Idempotent — if already Paid/Closed, returns current state.
 	"""
 	frappe.has_permission("Buyback Order", "write", throw=True)
 	doc = frappe.get_doc("Buyback Order", order_name)
+
+	# Idempotency: already settled
+	if doc.status in ("Paid", "Closed"):
+		return {
+			"order_name": doc.name,
+			"status": doc.status,
+			"final_price": flt(doc.final_price),
+			"payment_method": payment_method,
+		}
 
 	if not doc.customer_approved:
 		frappe.throw(frappe._("Customer must approve the final price before cashback settlement."))
@@ -4764,6 +4885,15 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 	doc._calculate_payment_totals()
 	if doc.payment_status == "Paid":
 		doc.mark_paid()
+
+	# Auto-close after successful cashback — triggers lifecycle update
+	if doc.status == "Paid":
+		try:
+			doc.status = "Closed"
+			doc.flags.ignore_permissions = True
+			doc.save()
+		except Exception:
+			frappe.log_error(title=f"Buyback auto-close failed for {doc.name}")
 
 	try:
 		from ch_pos.audit import log_business_event
@@ -4819,12 +4949,57 @@ def pos_create_inspection(assessment_name):
 	if existing_inspection:
 		ins = frappe.get_doc("Buyback Inspection", existing_inspection)
 	else:
+		# Auto-submit if still Draft (POS quick-assessments skip manual submit)
+		ba = frappe.get_doc("Buyback Assessment", assessment_name)
+		if ba.docstatus == 0:
+			ba.submit()
+			frappe.db.commit()
 		from buyback.api import create_inspection_from_assessment
 		result = create_inspection_from_assessment(assessment_name)
 		ins = frappe.get_doc("Buyback Inspection", result["name"])
 
 	# Also get grade options for the inline form selector
-	grades = frappe.get_all("Grade Master", fields=["name", "grade_label"], order_by="name asc")
+	grades = frappe.get_all("Grade Master", fields=["name", "grade_name"], order_by="name asc")
+
+	# Build rich response data with answer options for inspector dropdowns
+	ins_responses = []
+	for ir in (ins.inspection_responses or []):
+		options = []
+		if ir.question:
+			options = frappe.get_all(
+				"Buyback Question Option",
+				filters={"parent": ir.question},
+				fields=["option_value", "option_label", "price_impact_percent"],
+				order_by="idx asc",
+			)
+		ins_responses.append({
+			"question": ir.get("question") or "",
+			"question_code": ir.get("question_code") or "",
+			"question_text": ir.get("question_text") or "",
+			"assessment_answer": ir.get("assessment_answer") or "",
+			"assessment_answer_label": ir.get("assessment_answer_label") or "",
+			"assessment_impact": flt(ir.get("assessment_impact")),
+			"inspector_answer": ir.get("inspector_answer") or "",
+			"inspector_answer_label": ir.get("inspector_answer_label") or "",
+			"inspector_impact": flt(ir.get("inspector_impact")),
+			"options": [
+				{"value": o.option_value, "label": o.option_label,
+				 "impact": flt(o.price_impact_percent)}
+				for o in options
+			],
+		})
+
+	# Inspection diagnostics (automated test results)
+	ins_diagnostics = []
+	for id_ in (ins.inspection_diagnostics or []):
+		ins_diagnostics.append({
+			"test_name": id_.get("test_name") or "",
+			"test_code": id_.get("test_code") or "",
+			"assessment_result": id_.get("assessment_result") or "",
+			"assessment_depreciation": flt(id_.get("assessment_depreciation")),
+			"inspector_result": id_.get("inspector_result") or "",
+			"inspector_depreciation": flt(id_.get("inspector_depreciation")),
+		})
 
 	return {
 		"name": ins.name,
@@ -4840,10 +5015,13 @@ def pos_create_inspection(assessment_name):
 		"revised_price": flt(ins.revised_price),
 		"condition_grade": ins.condition_grade or "",
 		"pre_inspection_grade": ins.pre_inspection_grade or "",
+		"post_inspection_grade": ins.post_inspection_grade or "",
 		"price_override_reason": ins.price_override_reason or "",
 		"remarks": ins.remarks or "",
 		"inspector": ins.inspector or "",
-		"grades": [{"name": g.name, "label": g.grade_label or g.name} for g in grades],
+		"responses": ins_responses,
+		"diagnostics": ins_diagnostics,
+		"grades": [{"name": g.name, "label": g.grade_name or g.name} for g in grades],
 	}
 
 
@@ -4856,6 +5034,13 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 	without creating a second one.
 	"""
 	from buyback.api import complete_inspection
+
+	# Auto-start inspection if still in Draft (POS inline flow)
+	ins_status = frappe.db.get_value("Buyback Inspection", inspection_name, "status")
+	if ins_status == "Draft":
+		from buyback.api import start_inspection
+		start_inspection(inspection_name)
+
 	result = complete_inspection(
 		inspection_name=inspection_name,
 		condition_grade=condition_grade,
@@ -4889,8 +5074,8 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 		order.customer = ins.customer or assessment.customer or ""
 		order.customer_name = ins.customer_name or assessment.customer_name or ""
 		order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
-		order.store = assessment.store or ""
-		order.company = assessment.company or frappe.defaults.get_global_default("company")
+		order.store = ins.store or assessment.store or frappe.defaults.get_user_default("warehouse") or ""
+		order.company = assessment.company or ins.company or frappe.defaults.get_global_default("company")
 		order.item = ins.item or assessment.item or ""
 		order.item_name = ins.item_name or assessment.item_name or ""
 		order.brand = assessment.brand or ""

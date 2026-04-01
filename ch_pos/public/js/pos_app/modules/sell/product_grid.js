@@ -22,23 +22,25 @@ export class ProductGrid {
 		this._on_items_rerender = () => {
 			this.render_items(PosState.last_items || []);
 		};
+		this._on_cart_updated = () => this._refresh_stock_badges();
 		this._bind_events();
 	}
 
 	destroy() {
 		EventBus.off("items:loaded", this._on_items_loaded);
 		EventBus.off("items:rerender", this._on_items_rerender);
+		EventBus.off("cart:updated", this._on_cart_updated);
 	}
 
 	_bind_events() {
 		EventBus.on("items:loaded", this._on_items_loaded);
-
 		EventBus.on("items:rerender", this._on_items_rerender);
+		EventBus.on("cart:updated", this._on_cart_updated);
 
 		// Quick-add button click
 		this.panel.on("click", ".ch-pos-item-add-btn", (e) => {
 			e.stopPropagation();
-			const code = $(e.currentTarget).closest("[data-item-code]").data("item-code");
+			const code = $(e.currentTarget).closest("[data-item-code]").attr("data-item-code");
 			const item = (PosState.last_items || []).find((i) => i.item_code === code);
 			if (item) EventBus.emit("cart:add_item", item);
 		});
@@ -67,7 +69,7 @@ export class ProductGrid {
 		this.panel.on("click", ".ch-pos-item-card, .ch-pos-item-row", (e) => {
 			if ($(e.target).closest(".ch-pos-item-add-btn, .ch-pos-nearby-store").length) return;
 			const $el = $(e.currentTarget);
-			const code = $el.data("item-code");
+			const code = $el.attr("data-item-code");
 			if ($el.hasClass("out-of-stock")) {
 				this._show_nearby_stock(code);
 				return;
@@ -117,6 +119,57 @@ export class ProductGrid {
 			grid.addClass("list-view").removeClass("card-view")
 				.html(header + items.map((item) => this._row_html(item)).join(""));
 		}
+		this._refresh_stock_badges();
+	}
+
+	_refresh_stock_badges() {
+		// Build a map of how many of each item_code are already in the cart
+		const cart_map = {};
+		for (const c of PosState.cart) {
+			cart_map[c.item_code] = (cart_map[c.item_code] || 0) + flt(c.qty);
+		}
+
+		const source = PosState.last_items || [];
+		this.panel.find("[data-item-code]").each(function () {
+			const $el = $(this);
+			const code = $el.attr("data-item-code");
+			const item = source.find ? source.find((i) => i.item_code === code) : null;
+			if (!item) return;
+
+			const avail = Math.max(0, flt(item.stock_qty) - flt(cart_map[code] || 0));
+			const low = avail > 0 && avail <= 3;
+
+			// Card-view badge
+			const $cb = $el.find(".ch-pos-stock-badge");
+			if ($cb.length) {
+				if (avail > 0) {
+					$cb.attr("class", low ? "ch-pos-stock-badge low-stock" : "ch-pos-stock-badge in-stock")
+						.text(low ? `${Math.floor(avail)} left` : Math.floor(avail));
+				} else {
+					$cb.attr("class", "ch-pos-stock-badge out-of-stock").text("OOS");
+				}
+			}
+
+			// List-view badge
+			const $lb = $el.find(".stock-badge");
+			if ($lb.length) {
+				if (avail > 0) {
+					$lb.attr("class", low ? "stock-badge low" : "stock-badge in")
+						.text(low ? `${Math.floor(avail)} left` : Math.floor(avail));
+				} else {
+					$lb.attr("class", "stock-badge out").text("OOS");
+				}
+			}
+
+			// Toggle out-of-stock state and disable add button when nothing left
+			if (avail <= 0) {
+				$el.addClass("out-of-stock");
+				$el.find(".ch-pos-item-add-btn").prop("disabled", true);
+			} else {
+				$el.removeClass("out-of-stock");
+				$el.find(".ch-pos-item-add-btn").prop("disabled", false);
+			}
+		});
 	}
 
 	_card_html(item) {

@@ -377,6 +377,15 @@ export class CartPanel {
 		w.on("click", ".ch-pos-qty-minus", function () {
 			EventBus.emit("cart:qty_minus", $(this).data("idx"));
 		});
+		w.on("change", ".ch-pos-qty-input", function () {
+			EventBus.emit("cart:qty_set", { idx: $(this).data("idx"), qty: $(this).val() });
+		});
+		w.on("keydown", ".ch-pos-qty-input", function (e) {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				$(this).trigger("change");
+			}
+		});
 		w.on("click", ".ch-pos-cart-remove", function () {
 			EventBus.emit("cart:remove", $(this).data("idx"));
 		});
@@ -498,6 +507,28 @@ export class CartPanel {
 			? `<span class="cart-margin-tag">${frappe.utils.escape_html(item.ch_item_type)}</span>`
 			: "";
 		const special = item.is_warranty ? " is-warranty-line" : item.is_vas ? " is-vas-line" : "";
+		const fixed_qty = cint(item.has_serial_no || item.is_warranty || item.is_vas);
+		const whole_uom = cint(item.must_be_whole_number || fixed_qty);
+		const qty_display = whole_uom
+			? `${Math.round(flt(item.qty))}`
+			: `${Math.round(flt(item.qty) * 1000) / 1000}`;
+		const qty_controls = fixed_qty
+			? `<div class="cart-qty-controls">
+				<span class="cart-qty-display">${qty_display}</span>
+			</div>`
+			: whole_uom
+			? `<div class="cart-qty-controls">
+				<button class="btn ch-pos-qty-minus" data-idx="${idx}">−</button>
+				<span class="cart-qty-display">${qty_display}</span>
+				<button class="btn ch-pos-qty-plus" data-idx="${idx}">+</button>
+			</div>`
+			: `<div class="cart-qty-controls">
+				<input type="number" class="form-control input-sm ch-pos-qty-input"
+					data-idx="${idx}" min="0.001" step="0.001" value="${qty_display}">
+			</div>`;
+		const uom_tag = item.uom
+			? `<span class="cart-offer-tag">${frappe.utils.escape_html(item.uom)}</span>`
+			: "";
 
 		// Show auto-applied offer discount as read-only label
 		const disc_label = discount_amt > 0
@@ -518,16 +549,12 @@ export class CartPanel {
 				<div class="cart-line-top">
 					<span class="cart-item-name">
 						${frappe.utils.escape_html(item.item_name)}
-						${offer_tag}${serial_tag}${margin_tag}
+						${offer_tag}${uom_tag}${serial_tag}${margin_tag}
 					</span>
 					<span class="cart-item-amount">₹${format_number(amount)}</span>
 				</div>
 				<div class="cart-line-bottom">
-					<div class="cart-qty-controls">
-						<button class="btn ch-pos-qty-minus" data-idx="${idx}">−</button>
-						<span class="cart-qty-display">${item.qty}</span>
-						<button class="btn ch-pos-qty-plus" data-idx="${idx}">+</button>
-					</div>
+					${qty_controls}
 					<span class="cart-item-rate">@ ₹${format_number(item.rate)}</span>
 					${disc_label}
 					${inline_actions}
@@ -625,7 +652,7 @@ export class CartPanel {
 		const pe_credit       = flt(PosState.product_exchange_credit);
 		const grand_total     = Math.max(0, net - exchange_credit - pe_credit);
 
-		s.find(".total-qty .value").text(total_qty);
+		s.find(".total-qty .value").text(Number.isInteger(total_qty) ? total_qty : format_number(total_qty));
 
 		const ex_row = s.find(".exchange-credit");
 		exchange_credit > 0 ? ex_row.show().find(".value").text(`-₹${format_number(exchange_credit)}`) : ex_row.hide();

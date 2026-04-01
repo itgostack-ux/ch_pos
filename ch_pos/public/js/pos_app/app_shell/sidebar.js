@@ -19,9 +19,9 @@ import { validate_india_phone } from "../shared/helpers.js";
  */
 const COMPANY_MODE_MAP = {
 	// Retail company modes (GoGizmo or any retail company)
-	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "model_compare", "claims", "exceptions", "queue"],
+	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "guided", "model_compare", "claims", "exceptions", "queue"],
 	// Service company modes (GoFix or any service company)
-	service: ["sell", "returns", "buyback", "repair", "queue", "service", "claims", "exceptions"],
+	service: ["sell", "returns", "buyback", "repair", "queue", "service", "guided", "claims", "exceptions"],
 };
 
 /** Heuristic: does this company name indicate a service company? */
@@ -60,6 +60,7 @@ const MODE_SECTIONS = [
 	{
 		label: __("Sales Tools"),
 		modes: [
+			{ key: "guided", icon: "fa-compass", label: __("Guided") },
 			{ key: "model_compare", icon: "fa-columns", label: __("Compare") },
 		],
 	},
@@ -338,6 +339,6 @@ export class Sidebar {
 		return ["sell", "returns", "buyback", "repair"];
 	}
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "model_compare", "claims", "exceptions", "queue"];
+		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "guided", "model_compare", "claims", "exceptions", "queue"];
 	}
 }

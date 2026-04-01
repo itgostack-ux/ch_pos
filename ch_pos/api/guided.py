@@ -55,27 +55,26 @@ def get_guided_questions(sub_category):
     for spec in sub_cat_doc.specifications or []:
         questions.append(
             {
-                "question": f"Preferred {spec.specification}?",
+                "question": f"Preferred {spec.spec}?",
                 "type": "choice",
-                "key": f"spec_{spec.specification}",
-                "options": _get_spec_options(item_group, spec.specification),
+                "key": f"spec_{spec.spec}",
+                "options": _get_spec_options(sub_category, spec.spec),
             }
         )
 
     return questions
 
 
-def _get_spec_options(item_group, spec_name):
-    """Get distinct values of a spec across models in an item group."""
+def _get_spec_options(sub_category, spec_name):
+    """Get distinct values of a spec across models in a sub-category."""
     return frappe.db.sql(
-        """SELECT DISTINCT sv.value
-           FROM `tabCH Spec Value` sv
+        """SELECT DISTINCT sv.spec_value
+           FROM `tabCH Model Spec Value` sv
            JOIN `tabCH Model` m ON m.name = sv.parent
-           JOIN `tabCH Sub Category` sc ON sc.name = m.sub_category
-           WHERE sc.item_group = %s AND sv.specification = %s
-           ORDER BY sv.value""",
-        (item_group, spec_name),
-        pluck="value",
+           WHERE m.sub_category = %s AND sv.spec = %s
+           ORDER BY sv.spec_value""",
+        (sub_category, spec_name),
+        pluck="spec_value",
     )
 
 
@@ -93,6 +92,7 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
     # Base query — items in stock at this warehouse
     items = frappe.db.sql(
         """SELECT i.name as item_code, i.item_name, i.image, i.brand, i.item_group,
+                  i.has_serial_no, i.stock_uom,
                   b.actual_qty as stock_qty
            FROM `tabItem` i
            LEFT JOIN `tabBin` b ON b.item_code = i.name AND b.warehouse = %(wh)s
@@ -103,6 +103,16 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
         {"ig": item_group, "wh": warehouse},
         as_dict=True,
     )
+
+    uom_names = list({item.stock_uom for item in items if item.stock_uom})
+    uom_map = {}
+    if uom_names:
+        all_uoms = frappe.get_all(
+            "UOM",
+            filters={"name": ("in", uom_names)},
+            fields=["name", "must_be_whole_number"],
+        )
+        uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms}
 
     prefs = {r.get("key"): r.get("answer") for r in responses}
     scored = []
@@ -125,6 +135,9 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
                     "brand": item.brand,
                     "price": price,
                     "stock_qty": flt(item.stock_qty),
+                    "has_serial_no": cint(item.has_serial_no),
+                    "stock_uom": item.stock_uom or "Nos",
+                    "must_be_whole_number": cint(uom_map.get(item.stock_uom, 0)),
                     "match_score": round(score, 1),
                     "reason": _build_reason(item, prefs),
                 }
@@ -132,6 +145,94 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
 
     scored.sort(key=lambda x: x["match_score"], reverse=True)
     return scored[:limit]
+
+
+@frappe.whitelist()
+def get_guided_catalog():
+    """Return active categories and sub-categories for guided POS flow."""
+    categories = frappe.get_all(
+        "CH Category",
+        filters={"disabled": 0},
+        fields=["name", "category_name"],
+        order_by="category_name asc",
+    )
+    sub_categories = frappe.get_all(
+        "CH Sub Category",
+        filters={"disabled": 0},
+        fields=["name", "sub_category_name", "category"],
+        order_by="sub_category_name asc",
+    )
+    return {
+        "categories": categories,
+        "sub_categories": sub_categories,
+    }
+
+
+@frappe.whitelist()
+def save_guided_session(
+    session_name=None,
+    pos_profile=None,
+    category=None,
+    sub_category=None,
+    kiosk_token=None,
+    responses=None,
+    recommendations=None,
+    status="Completed",
+):
+    """Create or update POS Guided Session from POS UI."""
+    if isinstance(responses, str):
+        responses = frappe.parse_json(responses)
+    if isinstance(recommendations, str):
+        recommendations = frappe.parse_json(recommendations)
+
+    responses = responses or []
+    recommendations = recommendations or []
+
+    if not sub_category:
+        frappe.throw("Sub Category is required")
+
+    if session_name and frappe.db.exists("POS Guided Session", session_name):
+        doc = frappe.get_doc("POS Guided Session", session_name)
+    else:
+        doc = frappe.new_doc("POS Guided Session")
+
+    warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse") if pos_profile else None
+
+    doc.store = warehouse
+    doc.pos_profile = pos_profile
+    doc.category = category
+    doc.sub_category = sub_category
+    doc.kiosk_token = kiosk_token
+    doc.status = status if status in ("In Progress", "Completed", "Abandoned") else "In Progress"
+
+    doc.set("responses", [])
+    for r in responses:
+        answer = r.get("answer")
+        if isinstance(answer, (list, tuple)):
+            answer = ", ".join([str(v) for v in answer if v is not None])
+        doc.append("responses", {
+            "question": r.get("question") or r.get("key") or "",
+            "answer": str(answer or "")[:140],
+        })
+
+    doc.set("recommended_items", [])
+    for idx, rec in enumerate(recommendations, 1):
+        if not rec.get("item_code"):
+            continue
+        doc.append("recommended_items", {
+            "item_code": rec.get("item_code"),
+            "rank": idx,
+            "match_score": flt(rec.get("match_score") or 0),
+            "reason": (rec.get("reason") or "")[:1000],
+        })
+
+    doc.flags.ignore_permissions = True
+    doc.save(ignore_permissions=True)
+
+    return {
+        "name": doc.name,
+        "status": doc.status,
+    }
 
 
 def _score_item(item, prefs):

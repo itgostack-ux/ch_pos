@@ -1610,6 +1610,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			free_sale_approval_name:        this._is_free_sale ? (this._free_sale_approval_name || "") : "",
 			advance_amount:                 advance > 0 ? advance : 0,
 			kiosk_token:                    PosState.kiosk_token || null,
+			guided_session:                 PosState.guided_session || null,
 			exception_request:              PosState.exception_request || null,
 			warranty_claim:                 PosState.warranty_claim || null,
 		};

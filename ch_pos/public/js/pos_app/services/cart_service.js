@@ -25,20 +25,28 @@ export class CartService {
 				});
 				return;
 			}
-			item.qty += 1;
+			const next_qty = this._normalize_qty(flt(item.qty) + 1, item.must_be_whole_number);
+			if (!this._can_set_qty(item, next_qty)) {
+				return;
+			}
+			item.qty = next_qty;
 			this._apply_best_offer(item);
 			EventBus.emit("cart:updated");
 		});
 
 		EventBus.on("cart:qty_minus", (idx) => {
-			if (PosState.cart[idx].qty > 1) {
-				PosState.cart[idx].qty -= 1;
-				this._apply_best_offer(PosState.cart[idx]);
+			const item = PosState.cart[idx];
+			if (!item) return;
+			if (flt(item.qty) > 1) {
+				item.qty = this._normalize_qty(flt(item.qty) - 1, item.must_be_whole_number);
+				this._apply_best_offer(item);
 			} else {
 				PosState.cart.splice(idx, 1);
 			}
 			EventBus.emit("cart:updated");
 		});
+
+		EventBus.on("cart:qty_set", ({ idx, qty }) => this.set_cart_qty(idx, qty));
 
 		EventBus.on("cart:remove", (idx) => {
 			PosState.cart.splice(idx, 1);
@@ -175,12 +183,55 @@ export class CartService {
 		);
 
 		if (existing) {
-			existing.qty += 1;
+			const next_qty = this._normalize_qty(flt(existing.qty) + 1, existing.must_be_whole_number);
+			if (!this._can_set_qty(existing, next_qty)) {
+				return;
+			}
+			existing.qty = next_qty;
 			this._apply_best_offer(existing);
 			EventBus.emit("cart:updated");
 		} else {
 			this._add_new_cart_item(item_data);
 		}
+	}
+
+	set_cart_qty(idx, qty) {
+		const item = PosState.cart[idx];
+		if (!item || item.has_serial_no || item.is_warranty || item.is_vas) return;
+
+		const next_qty = this._normalize_qty(qty, item.must_be_whole_number);
+		if (!(next_qty > 0)) {
+			frappe.show_alert({ message: __("Quantity must be greater than zero"), indicator: "orange" });
+			return;
+		}
+		if (!this._can_set_qty(item, next_qty)) {
+			return;
+		}
+
+		item.qty = next_qty;
+		this._apply_best_offer(item);
+		EventBus.emit("cart:updated");
+	}
+
+	_normalize_qty(qty, must_be_whole_number) {
+		const value = flt(qty);
+		if (!(value > 0)) return 0;
+		if (cint(must_be_whole_number)) {
+			return Math.max(1, Math.round(value));
+		}
+		return Math.max(0.001, Math.round(value * 1000) / 1000);
+	}
+
+	_can_set_qty(item, qty) {
+		const stock_qty = flt(item.stock_qty);
+		if (!item.has_serial_no && !item.is_warranty && !item.is_vas && stock_qty > 0 && qty > stock_qty) {
+			frappe.show_alert({
+				message: __("Only {0} {1} available for {2}", [format_number(stock_qty), item.uom || __("units"), item.item_name]),
+				indicator: "orange",
+			});
+			return false;
+		}
+		return true;
 	}
 
 	_add_new_cart_item(item_data, serial_no) {
@@ -201,6 +252,8 @@ export class CartService {
 			has_serial_no: cint(item_data.has_serial_no),
 			serial_no: serial_no || "",
 			ch_item_type: item_data.ch_item_type || "",
+			stock_qty: flt(item_data.stock_qty || 0),
+			must_be_whole_number: cint(item_data.must_be_whole_number),
 		};
 		this._apply_best_offer(cart_item);
 		PosState.cart.push(cart_item);

@@ -142,6 +142,16 @@ def pos_item_search(
         )
         price_map = {p.item_code: p for p in all_prices}
 
+        uom_names = list({r.stock_uom for r in items_raw if r.stock_uom})
+        uom_map = {}
+        if uom_names:
+            all_uoms = frappe.get_all(
+                "UOM",
+                filters={"name": ("in", uom_names)},
+                fields=["name", "must_be_whole_number"],
+            )
+            uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms}
+
         # Batch-fetch stock from Bin
         all_bins = []
         if warehouse:
@@ -218,6 +228,7 @@ def pos_item_search(
 
         for row in items_raw:
             row.attributes = attrs_map.get(row.item_code, [])
+            row.must_be_whole_number = cint(uom_map.get(row.stock_uom, 0))
 
             # ch_item_type fallback heuristic
             if not row.get("ch_item_type"):
