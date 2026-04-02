@@ -107,10 +107,22 @@ export class StockTransferWorkspace {
 	}
 
 	_transfer_row(se, tab) {
-		const status_cls = se.docstatus === 0 ? "ch-pos-badge-warning"
-			: se.docstatus === 1 ? "ch-pos-badge-success"
-			: "ch-pos-badge-muted";
-		const status_label = se.docstatus === 0 ? __("Draft") : se.docstatus === 1 ? __("Completed") : __("Cancelled");
+		// Use custom_status for workflow-aware display
+		const cs = se.custom_status || "";
+		const ls = se.custom_logistics_status || "";
+		const STATUS_COLORS = {
+			"Draft": "ch-pos-badge-muted",
+			"Pending With Goods": "ch-pos-badge-warning",
+			"Ready For Pickup": "ch-pos-badge-info",
+			"In Transit": "ch-pos-badge-info",
+			"Ready For Receive": "ch-pos-badge-warning",
+			"Receive At Transit": "ch-pos-badge-warning",
+			"Partially Transferred": "ch-pos-badge-warning",
+			"Transferred": "ch-pos-badge-success",
+			"Force Closed": "ch-pos-badge-muted",
+		};
+		const status_label = cs || (se.docstatus === 0 ? __("Draft") : se.docstatus === 1 ? __("Submitted") : __("Cancelled"));
+		const status_cls = STATUS_COLORS[cs] || (se.docstatus === 1 ? "ch-pos-badge-success" : "ch-pos-badge-muted");
 
 		const direction_icon = tab === "incoming"
 			? `<i class="fa fa-arrow-right" style="color:var(--pos-success);margin:0 6px"></i>`
@@ -119,14 +131,24 @@ export class StockTransferWorkspace {
 		const from_wh = frappe.utils.escape_html(se.from_warehouse || "");
 		const to_wh = frappe.utils.escape_html(se.to_warehouse || "");
 
-		// Accept button for incoming drafts
-		const accept_btn = (tab === "incoming" && se.docstatus === 0)
+		// Receive button — only when ready (after logistics delivers)
+		const can_receive = tab === "incoming" && ["Ready For Receive", "Receive At Transit"].includes(cs);
+		const accept_btn = can_receive
 			? `<button class="btn btn-xs btn-success ch-st-accept-btn" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
-				<i class="fa fa-check"></i> ${__("Receive")}
+				<i class="fa fa-barcode"></i> ${__("Scan & Receive")}
 			   </button>`
 			: "";
 
-		// Parse courier info from remarks
+		// Logistics status badge
+		let logistics_badge = "";
+		if (ls) {
+			const lc = { "Pending Pickup": "#fbbf24", "Picked Up": "#60a5fa", "In Transit": "#3b82f6", "Delivered": "#34d399", "Revert Requested": "#f87171", "Reverted": "#9ca3af" };
+			logistics_badge = `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;background:${lc[ls] || "#e5e7eb"}20;color:${lc[ls] || "#6b7280"}">
+				<i class="fa fa-truck" style="font-size:9px"></i> ${frappe.utils.escape_html(ls)}
+			</span>`;
+		}
+
+		// Courier info from remarks
 		let courier_html = "";
 		if (se.remarks) {
 			const parts = [];
@@ -138,14 +160,15 @@ export class StockTransferWorkspace {
 				const m = se.remarks.match(/Tracking:\s*([^|]+)/);
 				if (m) parts.push(`<i class="fa fa-barcode"></i> ${frappe.utils.escape_html(m[1].trim())}`);
 			}
-			if (se.remarks.includes("ETA:")) {
-				const m = se.remarks.match(/ETA:\s*([^|]+)/);
-				if (m) parts.push(`<i class="fa fa-calendar"></i> ETA: ${frappe.utils.escape_html(m[1].trim())}`);
-			}
 			if (parts.length) {
 				courier_html = `<div style="display:flex;gap:10px;margin-top:6px;font-size:11px;color:var(--pos-text-muted)">${parts.join(" <span style='opacity:0.3'>·</span> ")}</div>`;
 			}
 		}
+
+		// Logistics person
+		const logistics_person = se.custom_logistics_person
+			? `<div style="font-size:11px;color:var(--pos-text-muted);margin-top:4px"><i class="fa fa-user"></i> ${frappe.utils.escape_html(se.custom_logistics_person)}</div>`
+			: "";
 
 		return `
 			<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-sm)">
@@ -157,8 +180,9 @@ export class StockTransferWorkspace {
 								${frappe.datetime.str_to_user(se.posting_date)} · ${se.item_count} ${__("items")}
 							</div>
 						</div>
-						<div style="display:flex;gap:6px;align-items:center">
-							<span class="ch-pos-badge ${status_cls}">${status_label}</span>
+						<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+							<span class="ch-pos-badge ${status_cls}">${frappe.utils.escape_html(status_label)}</span>
+							${logistics_badge}
 							${accept_btn}
 							<button class="btn btn-xs btn-outline-secondary ch-st-view-detail" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
 								<i class="fa fa-external-link"></i>
@@ -171,6 +195,7 @@ export class StockTransferWorkspace {
 						<span style="padding:3px 8px;background:var(--pos-surface-sunken);border-radius:var(--pos-radius-sm)">${to_wh}</span>
 					</div>
 					${courier_html}
+					${logistics_person}
 				</div>
 			</div>`;
 	}
@@ -409,93 +434,100 @@ export class StockTransferWorkspace {
 	}
 
 	_accept_transfer(panel, name) {
-		// Fetch items first, then show receive dialog with editable quantities
+		// Fetch items, then show scan-to-receive dialog
 		frappe.call({
 			method: "ch_pos.api.pos_api.get_stock_transfer_items",
 			args: { stock_entry: name },
 			freeze: true,
 			callback: (r) => {
 				if (!r.message) return;
-				this._show_receive_dialog(panel, r.message);
+				this._show_scan_receive_dialog(panel, r.message);
 			},
 		});
 	}
 
-	_show_receive_dialog(panel, data) {
+	_show_scan_receive_dialog(panel, data) {
 		const items = data.items || [];
-		const rows_html = items.map((item, idx) => `
-			<tr data-idx="${idx}">
-				<td>
-					<div style="font-weight:600">${frappe.utils.escape_html(item.item_name || item.item_code)}</div>
-					<div style="font-size:11px;color:var(--pos-text-muted)">${frappe.utils.escape_html(item.item_code)}</div>
-				</td>
-				<td class="text-center" style="font-weight:600">${item.qty}</td>
-				<td class="text-center">
-					<input type="number" class="form-control ch-st-recv-qty" data-idx="${idx}"
-						value="${item.qty}" min="0" max="${item.qty}" step="1"
-						style="width:80px;text-align:center;margin:0 auto;border-radius:var(--pos-radius-sm)">
-				</td>
-				<td class="text-center" style="color:var(--pos-text-muted)">${frappe.utils.escape_html(item.uom)}</td>
-			</tr>
-		`).join("");
+		const se_name = data.name;
+		// Track received state per item
+		const recv_state = items.map(item => ({
+			item_code: item.item_code,
+			item_name: item.item_name || item.item_code,
+			qty: item.qty,
+			received: 0,
+		}));
+
+		const _render_items = () => {
+			return recv_state.map((s, idx) => {
+				const done = s.received >= s.qty;
+				const cls = done ? "color:var(--pos-success);font-weight:700" : "";
+				return `<tr>
+					<td>
+						<div style="font-weight:600">${frappe.utils.escape_html(s.item_name)}</div>
+						<div style="font-size:11px;color:var(--pos-text-muted)">${frappe.utils.escape_html(s.item_code)}</div>
+					</td>
+					<td class="text-center" style="font-weight:600">${s.qty}</td>
+					<td class="text-center" style="${cls}">${s.received}</td>
+					<td class="text-center">${s.qty - s.received}</td>
+				</tr>`;
+			}).join("");
+		};
+
+		const _all_done = () => recv_state.every(s => s.received >= s.qty);
 
 		const dialog = new frappe.ui.Dialog({
-			title: __("Receive Transfer {0}", [data.name]),
+			title: __("Scan & Receive — {0}", [se_name]),
 			size: "large",
 			fields: [
 				{
 					fieldtype: "HTML",
-					fieldname: "receive_items_html",
+					fieldname: "header_html",
 					options: `
 						<div style="margin-bottom:12px;color:var(--pos-text-secondary);font-size:13px">
 							<strong>${frappe.utils.escape_html(data.from_warehouse || "")}</strong>
 							<i class="fa fa-arrow-right" style="margin:0 8px"></i>
 							<strong>${frappe.utils.escape_html(data.to_warehouse || "")}</strong>
-						</div>
-						<table class="table table-bordered" style="margin:0">
+						</div>`,
+				},
+				{
+					fieldtype: "Data",
+					fieldname: "barcode_input",
+					label: __("Scan IMEI / Barcode"),
+					placeholder: __("Scan or type barcode then press Enter"),
+				},
+				{
+					fieldtype: "HTML",
+					fieldname: "scan_status",
+					options: "",
+				},
+				{
+					fieldtype: "HTML",
+					fieldname: "items_table",
+					options: `
+						<table class="table table-bordered ch-scan-recv-table" style="margin:0">
 							<thead><tr>
 								<th>${__("Item")}</th>
-								<th class="text-center" style="width:90px">${__("Sent")}</th>
-								<th class="text-center" style="width:100px">${__("Received")}</th>
-								<th class="text-center" style="width:70px">${__("UOM")}</th>
+								<th class="text-center" style="width:70px">${__("Sent")}</th>
+								<th class="text-center" style="width:80px">${__("Received")}</th>
+								<th class="text-center" style="width:80px">${__("Pending")}</th>
 							</tr></thead>
-							<tbody>${rows_html}</tbody>
-						</table>
-						<div style="font-size:12px;color:var(--pos-text-muted);margin-top:8px">
-							<i class="fa fa-info-circle"></i>
-							${__("Reduce quantities for items not fully received. Set to 0 to reject an item.")}
-						</div>
-					`,
+							<tbody>${_render_items()}</tbody>
+						</table>`,
 				},
 			],
-			primary_action_label: __("Confirm Receive"),
+			primary_action_label: __("Confirm Received"),
 			primary_action: () => {
-				const received_items = items.map((item, idx) => {
-					const input = dialog.$wrapper.find(`.ch-st-recv-qty[data-idx="${idx}"]`);
-					return {
-						item_code: item.item_code,
-						received_qty: parseFloat(input.val()) || 0,
-					};
-				});
-
-				// Validate at least one item received
-				const total_recv = received_items.reduce((s, r) => s + r.received_qty, 0);
-				if (total_recv <= 0) {
-					frappe.msgprint(__("At least one item must be received"));
-					return;
-				}
-
 				dialog.hide();
 				frappe.call({
-					method: "ch_pos.api.pos_api.receive_stock_transfer",
-					args: { stock_entry: data.name, received_items },
+					method: "ch_pos.api.pos_api.pos_confirm_receive",
+					args: { stock_entry: se_name },
 					freeze: true,
-					freeze_message: __("Processing receive..."),
+					freeze_message: __("Finalizing receive..."),
 					callback: (r) => {
 						if (r.message) {
 							const msg = r.message.partial
-								? __("Transfer {0} partially received", [data.name])
-								: __("Transfer {0} received in full", [data.name]);
+								? __("Transfer {0} partially received", [se_name])
+								: __("Transfer {0} received in full", [se_name]);
 							frappe.show_alert({ message: msg, indicator: "green" });
 							this._load_tab(panel, "incoming");
 						}
@@ -503,6 +535,58 @@ export class StockTransferWorkspace {
 				});
 			},
 		});
+
+		// Barcode scan handler
+		const barcode_field = dialog.fields_dict.barcode_input;
+		barcode_field.$input.on("keydown", (e) => {
+			if (e.key !== "Enter") return;
+			e.preventDefault();
+			const barcode = barcode_field.get_value().trim();
+			if (!barcode) return;
+			barcode_field.set_value("");
+
+			frappe.call({
+				method: "ch_pos.api.pos_api.pos_scan_receive",
+				args: { stock_entry: se_name, barcode },
+				callback: (r) => {
+					if (r.message) {
+						// Update local state from server response
+						(r.message.items || []).forEach(si => {
+							const local = recv_state.find(s => s.item_code === si.item_code);
+							if (local) local.received = si.received_qty;
+						});
+						// Update table
+						dialog.$wrapper.find(".ch-scan-recv-table tbody").html(_render_items());
+						// Show success
+						dialog.fields_dict.scan_status.$wrapper.html(
+							`<div class="alert alert-success" style="padding:6px 10px;font-size:12px;margin:4px 0">
+								<i class="fa fa-check-circle"></i> ${frappe.utils.escape_html(r.message.item_code)} scanned
+							</div>`
+						);
+						// Auto-focus barcode field
+						setTimeout(() => barcode_field.$input.focus(), 100);
+
+						if (_all_done()) {
+							dialog.fields_dict.scan_status.$wrapper.html(
+								`<div class="alert alert-info" style="padding:8px 12px;font-size:13px;margin:4px 0">
+									<i class="fa fa-check-circle"></i> <strong>${__("All items scanned!")}</strong> ${__("Click Confirm Received to complete.")}
+								</div>`
+							);
+						}
+					}
+				},
+				error: () => {
+					dialog.fields_dict.scan_status.$wrapper.html(
+						`<div class="alert alert-danger" style="padding:6px 10px;font-size:12px;margin:4px 0">
+							<i class="fa fa-exclamation-triangle"></i> ${__("Barcode not found or already fully received")}
+						</div>`
+					);
+				},
+			});
+		});
+
 		dialog.show();
+		// Focus scan input immediately
+		setTimeout(() => barcode_field.$input.focus(), 200);
 	}
 }

@@ -2943,6 +2943,8 @@ def get_stock_transfers(pos_profile, direction="incoming"):
     entries = frappe.db.sql(
         f"""SELECT se.name, se.posting_date, se.docstatus,
                    se.from_warehouse, se.to_warehouse, se.remarks,
+                   se.custom_status, se.custom_logistics_status,
+                   se.custom_logistics_person,
                    (SELECT COUNT(*) FROM `tabStock Entry Detail` sed
                     WHERE sed.parent = se.name) AS item_count
             FROM `tabStock Entry` se
@@ -3123,7 +3125,8 @@ def get_stock_transfer_items(stock_entry):
         items.append({
             "item_code": row.item_code,
             "item_name": row.item_name,
-            "qty": flt(row.qty),
+            "qty": flt(row.custom_quantity or row.qty),
+            "received_qty": flt(row.custom_final_received_qty),
             "uom": row.uom,
             "s_warehouse": row.s_warehouse,
             "t_warehouse": row.t_warehouse,
@@ -3131,6 +3134,8 @@ def get_stock_transfer_items(stock_entry):
     return {
         "name": se.name,
         "docstatus": se.docstatus,
+        "custom_status": se.custom_status,
+        "custom_logistics_status": se.custom_logistics_status,
         "from_warehouse": se.from_warehouse,
         "to_warehouse": se.to_warehouse,
         "items": items,
@@ -3200,6 +3205,20 @@ def receive_stock_transfer(stock_entry, received_items):
 
     se.submit()
     return {"name": se.name, "partial": is_partial}
+
+
+@frappe.whitelist()
+def pos_scan_receive(stock_entry, barcode):
+    """Scan a barcode/IMEI during POS receive. Delegates to ch_erp15 transit workflow."""
+    from ch_erp15.ch_erp15.custom.stock_entry import pos_scan_receive as _scan
+    return _scan(stock_entry=stock_entry, barcode=barcode)
+
+
+@frappe.whitelist()
+def pos_confirm_receive(stock_entry):
+    """Confirm receive after scanning. Delegates to ch_erp15 transit workflow."""
+    from ch_erp15.ch_erp15.custom.stock_entry import pos_confirm_receive as _confirm
+    return _confirm(stock_entry=stock_entry)
 
 
 @frappe.whitelist()
