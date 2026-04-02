@@ -239,9 +239,20 @@ export class SessionClosingDashboard {
 					PosState.session_status = null;
 					PosState.device = null;
 					EventBus.emit("session:closed");
-					// POS-16 fix: Force redirect to prevent further transactions after session close
+					// POS-16 fix: Force redirect and invalidate POS session to prevent
+					// further transactions after session close
 					setTimeout(() => {
+						// Clear any cached POS data
+						if (typeof localStorage !== "undefined") {
+							Object.keys(localStorage).forEach((key) => {
+								if (key.startsWith("pos_") || key.startsWith("POS_")) {
+									localStorage.removeItem(key);
+								}
+							});
+						}
 						frappe.set_route("/app/pos-session");
+						// Force page refresh to fully clear POS state
+						setTimeout(() => { window.location.reload(); }, 500);
 					}, 1500);
 				}
 			},

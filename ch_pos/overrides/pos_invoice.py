@@ -121,6 +121,8 @@ class CustomPOSInvoice(SalesInvoice):
             self.run_method("calculate_taxes_and_totals")
 
     def on_submit(self):
+        # POS-17 fix: Validate bundle item pricing is still active at submit time
+        self._validate_bundle_pricing()
         # Standard SalesInvoice.on_submit() already calls update_stock_ledger(),
         # make_gl_entries(), and repost_future_sle_and_gle() when update_stock=1.
         # Do NOT duplicate those calls — that would create 2× SLE and 2× GL entries.
@@ -137,6 +139,37 @@ class CustomPOSInvoice(SalesInvoice):
         if _saved_lp:
             self.loyalty_program = _saved_lp
             self.db_set("loyalty_program", _saved_lp)
+
+    def _validate_bundle_pricing(self):
+        """POS-17 fix: Validate that bundle/free items still have active pricing at submit time.
+        Prevents stale bundle deals from being invoiced after pricing changes.
+        """
+        for item in self.items:
+            if not item.get("custom_is_free_bundle_item"):
+                continue
+            # Check that the Product Bundle is still active
+            parent_item = item.get("custom_bundle_parent") or ""
+            if parent_item and not frappe.db.exists(
+                "Product Bundle", {"new_item_code": parent_item, "disabled": 0}
+            ):
+                frappe.throw(
+                    _("Bundle offer for {0} is no longer active. "
+                      "Please remove the free item {1} and re-add.").format(
+                        parent_item, item.item_code),
+                    title=_("Expired Bundle Offer"),
+                )
+            # Verify CH Item Price is still active for the bundle child
+            if frappe.db.exists("DocType", "CH Item Price"):
+                active_price = frappe.db.exists("CH Item Price", {
+                    "item_code": item.item_code,
+                    "status": "Active",
+                })
+                if not active_price and flt(item.rate) > 0:
+                    frappe.msgprint(
+                        _("Warning: No active price found for bundle item {0}. "
+                          "Pricing may be outdated.").format(item.item_code),
+                        indicator="orange",
+                    )
 
     def on_cancel(self):
         # Reimplements Sales Invoice on_cancel with SLE/GL reversal inserted
@@ -773,8 +806,9 @@ def _apply_margin_scheme(doc):
         if base_value < 0:
             base_value = 0
 
-        # Same formula as ch_erp15: divide by 1.18 to get exclusive taxable
-        taxable_per_unit = base_value / 1.18
+        # POS-15 fix: Dynamic GST rate lookup instead of hardcoded 1.18
+        gst_rate = _get_margin_gst_rate(item.item_code, doc) or 18
+        taxable_per_unit = base_value / (1 + gst_rate / 100)
 
         item.custom_taxable_value = taxable_per_unit * qty
         item.custom_exempted_value = total_exempt  # will be recalculated after tax pass
@@ -904,6 +938,30 @@ def validate_eod_lock(doc, method=None):
                     doc.posting_date,
                 )
             )
+
+def _get_margin_gst_rate(item_code, doc):
+    """POS-15 fix: Get GST rate for margin scheme calculation.
+    Uses same logic as ch_erp15 _get_item_gst_rate — item tax template first,
+    then document tax rows, then defaults to 18%.
+    """
+    from frappe.utils import flt as _flt
+    # Try item-level tax template first
+    if item_code:
+        item_tax_template = frappe.db.get_value("Item", item_code, "item_tax_template")
+        if item_tax_template:
+            rates = frappe.get_all(
+                "Item Tax Template Detail",
+                filters={"parent": item_tax_template},
+                fields=["tax_rate"],
+            )
+            if rates:
+                return sum(_flt(r.tax_rate) for r in rates)
+    # Fall back to document tax rows
+    for tax in (doc.get("taxes") or []):
+        if _flt(tax.get("rate")) > 0:
+            return _flt(tax.rate)
+    return 18
+
 
 def _get_exempted_value(item):
     """Get total exempted value for a Sales Invoice item's serials.

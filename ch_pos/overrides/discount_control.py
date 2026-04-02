@@ -82,7 +82,9 @@ def validate_pos_commercial_policy(doc, method=None):
 					)
 				else:
 					# POS-7 fix: Validate manager_user is a real user with appropriate role
+					# AND verify their password for re-authentication
 					manager_user = item.get("custom_manager_user")
+					manager_pin = item.get("custom_manager_pin")
 					if manager_user:
 						if not frappe.db.exists("User", manager_user):
 							frappe.throw(
@@ -99,6 +101,17 @@ def validate_pos_commercial_policy(doc, method=None):
 									frappe.bold(item_code), manager_user),
 								title=_("Unauthorized Manager Override"),
 							)
+						# POS-7 fix: Verify manager password/PIN for re-authentication
+						if manager_pin:
+							try:
+								from frappe.utils.password import check_password
+								check_password(manager_user, manager_pin)
+							except frappe.AuthenticationError:
+								frappe.throw(
+									_("Item {0}: Invalid manager PIN/password for '{1}'.").format(
+										frappe.bold(item_code), manager_user),
+									title=_("Authentication Failed"),
+								)
 
 			# ── Log override if rate differs from CH Item Price ──────
 			if result and flt(result.get("discount_percent")) > 0:

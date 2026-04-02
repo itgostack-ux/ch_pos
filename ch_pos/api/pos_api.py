@@ -1537,20 +1537,31 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
             )
         raise
 
-    # POS-8 fix: Create return incentive (clawback) entries — fail loudly
+    # POS-8 fix: Create return incentive (clawback) entries — configurable strict mode
     incentive_clawback = 0
     if sales_executive:
         try:
             incentive_clawback = _create_return_incentive_entries(ret, sales_executive)
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"Incentive clawback failed for {ret.name}")
-            frappe.msgprint(
-                frappe._("Warning: Return processed but incentive clawback failed for {0}. "
-                         "Please notify the store manager to review incentive entries manually."
-                ).format(ret.name),
-                indicator="orange",
-                title=frappe._("Incentive Clawback Failed"),
-            )
+            # POS-8 fix: Check if strict clawback mode is enabled
+            strict_clawback = frappe.db.get_single_value("POS Settings", "strict_incentive_clawback") if \
+                frappe.get_meta("POS Settings").has_field("strict_incentive_clawback") else 0
+            if strict_clawback:
+                frappe.throw(
+                    frappe._("Return blocked: Incentive clawback failed for {0}. "
+                             "Cannot process return until clawback is resolved. "
+                             "Contact the store manager.").format(ret.name),
+                    title=frappe._("Incentive Clawback Required"),
+                )
+            else:
+                frappe.msgprint(
+                    frappe._("Warning: Return processed but incentive clawback failed for {0}. "
+                             "Please notify the store manager to review incentive entries manually."
+                    ).format(ret.name),
+                    indicator="orange",
+                    title=frappe._("Incentive Clawback Failed"),
+                )
 
     # Audit
     try:
@@ -3191,8 +3202,30 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
         mr.custom_remarks = 1
         mr.remarks = str(notes)[:500]
 
+    # POS-14 fix: Set approval status to require explicit manager approval
+    if mr.meta.has_field("custom_approval_status"):
+        mr.custom_approval_status = "Pending Approval"
+    if mr.meta.has_field("custom_requested_by"):
+        mr.custom_requested_by = frappe.session.user
+
     mr.flags.ignore_permissions = True
     mr.insert()
+
+    # POS-14 fix: Notify store manager of the source store for approval
+    try:
+        source_store_mgr = frappe.db.get_value(
+            "POS Profile", source_pos_profile, "custom_store_manager"
+        )
+        if source_store_mgr:
+            frappe.sendmail(
+                recipients=[source_store_mgr],
+                subject=frappe._("Cross-Store Transfer Request {0} — Approval Required").format(mr.name),
+                message=frappe._("A cross-store transfer request has been raised from your store. "
+                                  "Please review and approve Material Request {0}.").format(mr.name),
+                now=True,
+            )
+    except Exception:
+        pass  # Non-critical — notification is best-effort
 
     return {
         "name": mr.name,
