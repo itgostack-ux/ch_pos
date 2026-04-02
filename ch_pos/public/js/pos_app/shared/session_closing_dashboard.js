@@ -239,6 +239,10 @@ export class SessionClosingDashboard {
 					PosState.session_status = null;
 					PosState.device = null;
 					EventBus.emit("session:closed");
+					// POS-16 fix: Force redirect to prevent further transactions after session close
+					setTimeout(() => {
+						frappe.set_route("/app/pos-session");
+					}, 1500);
 				}
 			},
 			error: (err) => {

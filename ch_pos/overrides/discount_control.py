@@ -80,6 +80,25 @@ def validate_pos_commercial_policy(doc, method=None):
 						),
 						title=_("Discount Limit Exceeded"),
 					)
+				else:
+					# POS-7 fix: Validate manager_user is a real user with appropriate role
+					manager_user = item.get("custom_manager_user")
+					if manager_user:
+						if not frappe.db.exists("User", manager_user):
+							frappe.throw(
+								_("Item {0}: Manager user '{1}' does not exist.").format(
+									frappe.bold(item_code), manager_user),
+								title=_("Invalid Manager Override"),
+							)
+						manager_roles = frappe.get_roles(manager_user)
+						if not any(r in manager_roles for r in
+								   ("Store Manager", "Sales Manager", "System Manager", "Administrator")):
+							frappe.throw(
+								_("Item {0}: User '{1}' does not have manager privileges "
+								  "to approve discounts.").format(
+									frappe.bold(item_code), manager_user),
+								title=_("Unauthorized Manager Override"),
+							)
 
 			# ── Log override if rate differs from CH Item Price ──────
 			if result and flt(result.get("discount_percent")) > 0:

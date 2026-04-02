@@ -213,18 +213,29 @@ def _send_approval_email(approval_doc, manager_info, token):
 def respond_to_approval(token, manager, action):
     """Handle manager's response from email link.
 
+    Uses token-based authentication — the cryptographic token proves
+    the request came from the correct email recipient.
+
     Args:
-        token: Approval token
+        token: Approval token (cryptographic, 32 bytes)
         manager: Manager's user/email
         action: 'approve' or 'reject'
     """
     if action not in ("approve", "reject"):
         frappe.throw(_("Invalid action"))
 
+    if not token or len(token) < 20:
+        frappe.respond_as_web_page(
+            _("Invalid Request"),
+            _("Missing or invalid approval token."),
+            indicator_color="red",
+        )
+        return
+
     approval = frappe.get_all(
         "CH Free Sale Approval",
         filters={"approval_token": token, "status": "Pending"},
-        fields=["name"],
+        fields=["name", "creation"],
         limit=1,
     )
     if not approval:
@@ -235,9 +246,22 @@ def respond_to_approval(token, manager, action):
         )
         return
 
+    # POS-5 fix: Token expiry — reject tokens older than 24 hours
+    from frappe.utils import time_diff_in_hours
+    age_hours = time_diff_in_hours(now_datetime(), approval[0].creation)
+    if age_hours > 24:
+        frappe.respond_as_web_page(
+            _("Expired"),
+            _("This approval link has expired (valid for 24 hours). "
+              "Please request a new approval."),
+            indicator_color="red",
+        )
+        return
+
     doc = frappe.get_doc("CH Free Sale Approval", approval[0].name)
 
-    # Find the manager's row
+    # Verify the manager email matches a row in this approval
+    # This prevents token reuse with a different manager email
     found = False
     for row in doc.approvals:
         if row.manager == manager and row.status == "Pending":

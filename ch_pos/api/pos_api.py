@@ -305,6 +305,26 @@ def create_pos_invoice(pos_profile, customer, items,
     # Payment — supports split payments (new) and single mode (legacy)
     # Free sales may have no payments
     if cint(is_free_sale):
+        # POS-3 fix: Server-side verification of free sale approval
+        if free_sale_approved_by:
+            # Verify there's an approved CH Free Sale Approval for this user
+            approved = frappe.db.exists("CH Free Sale Approval", {
+                "requested_by": frappe.session.user,
+                "status": "Approved",
+            })
+            if not approved:
+                frappe.throw(
+                    frappe._("Free sale requires an approved CH Free Sale Approval. "
+                             "No approved request found for the current user."),
+                    title=frappe._("Free Sale Not Approved"),
+                )
+        else:
+            frappe.throw(
+                frappe._("Free sale requires manager approval. "
+                         "Please request approval before proceeding."),
+                title=frappe._("Free Sale Not Approved"),
+            )
+
         # Free sale — set custom fields, no payment required
         inv.custom_is_free_sale = 1
         inv.custom_free_sale_reason = (free_sale_reason or "")[:200]
@@ -375,13 +395,15 @@ def create_pos_invoice(pos_profile, customer, items,
     if exchange_assessment:
         ba = frappe.db.get_value(
             "Buyback Assessment", exchange_assessment,
-            ["quoted_price", "estimated_price", "status", "expires_on",
-             "linked_pos_invoice"],
+            ["quoted_price", "estimated_price", "revised_price", "status", "expires_on",
+             "linked_pos_invoice", "inspection_status"],
             as_dict=True,
         )
         if not ba:
             frappe.throw(frappe._("Buyback Assessment {0} not found").format(exchange_assessment))
-        if ba.status in ("Expired", "Cancelled"):
+        # POS-4 fix: Validate assessment status — only allow Approved/QC Passed
+        allowed_statuses = ("Approved", "QC Passed", "Ready", "Quote Accepted")
+        if ba.status in ("Expired", "Cancelled", "Rejected", "Draft"):
             frappe.throw(
                 frappe._("Buyback Assessment {0} is {1} and cannot be used as exchange credit").format(
                     exchange_assessment, ba.status))
@@ -395,7 +417,8 @@ def create_pos_invoice(pos_profile, customer, items,
                     exchange_assessment, ba.expires_on))
 
         inv.custom_exchange_assessment = exchange_assessment
-        exchange_credit = flt(ba.quoted_price) or flt(ba.estimated_price)
+        # INT-4 fix: Use revised_price (post-inspection) if available, else quoted, else estimated
+        exchange_credit = flt(ba.revised_price) or flt(ba.quoted_price) or flt(ba.estimated_price)
         inv.custom_exchange_amount = exchange_credit
 
         # Apply exchange credit as a discount so ERPNext reduces grand_total
@@ -452,12 +475,39 @@ def create_pos_invoice(pos_profile, customer, items,
     # Voucher — add voucher amount to the discount
     voucher_redeemed = 0
     if voucher_code and flt(voucher_amount) > 0:
+        # POS-2 fix: Validate voucher balance before applying
+        from ch_item_master.ch_item_master.voucher_api import validate_voucher
+        v_check = validate_voucher(voucher_code)
+        if not v_check.get("valid"):
+            frappe.throw(frappe._("Voucher {0}: {1}").format(
+                voucher_code, v_check.get("reason", "Invalid voucher")))
+        v_balance = flt(v_check.get("balance", 0))
+        if flt(voucher_amount) > v_balance:
+            frappe.throw(frappe._("Voucher amount ₹{0} exceeds available balance ₹{1}").format(
+                frappe.utils.fmt_money(voucher_amount), frappe.utils.fmt_money(v_balance)))
         inv.discount_amount = flt(inv.discount_amount or 0) + flt(voucher_amount)
 
     # Loyalty points redemption
     if cint(redeem_loyalty_points):
+        # POS-9 fix: Verify customer has sufficient loyalty points before redemption
+        requested_points = cint(loyalty_points)
+        if requested_points > 0 and customer and customer != "Walk-in Customer":
+            try:
+                loyalty_info = get_customer_loyalty(customer, company)
+                available_points = cint(loyalty_info.get("points", 0))
+                if requested_points > available_points:
+                    frappe.throw(
+                        frappe._("Insufficient loyalty points. Requested: {0}, Available: {1}").format(
+                            requested_points, available_points),
+                        title=frappe._("Loyalty Points"),
+                    )
+            except frappe.ValidationError:
+                raise
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), "Loyalty balance check failed")
+
         inv.redeem_loyalty_points = 1
-        inv.loyalty_points = cint(loyalty_points)
+        inv.loyalty_points = requested_points
         inv.loyalty_amount = flt(loyalty_amount)
 
     # Bank offer discount — mutually exclusive with additional discount
@@ -602,14 +652,15 @@ def create_pos_invoice(pos_profile, customer, items,
             if not wi.get("serial_no") and getattr(device_items_on_inv[0], "serial_no", None):
                 wi["serial_no"] = device_items_on_inv[0].serial_no
 
-        # Guard: if still no for_item_code, skip rather than crash the invoice
+        # INT-3 fix: Throw error instead of silently skipping sold plan creation
         if not wi.get("for_item_code"):
-            frappe.log_error(
-                f"Sold Plan skipped for warranty_plan={wi.get('warranty_plan')} on "
-                f"{inv.name}: for_item_code is missing and could not be inferred.",
-                "Sold Plan: missing for_item_code",
+            frappe.throw(
+                frappe._("Cannot create warranty plan record: the device item (for_item_code) "
+                         "could not be determined for warranty plan {0} on invoice {1}. "
+                         "Please ensure each warranty/VAS item is linked to a device.").format(
+                    wi.get("warranty_plan"), inv.name),
+                title=frappe._("Sold Plan Creation Failed"),
             )
-            continue
 
         # Look up device purchase price from the same invoice
         device_price = 0
@@ -1026,7 +1077,14 @@ def validate_coupon(coupon_code, customer=None, cart_total=0):
     if not coupon.pricing_rule:
         return {"valid": False, "reason": frappe._("No pricing rule linked to coupon")}
 
+    # POS-13 fix: Validate linked Pricing Rule still exists and is enabled
+    if not frappe.db.exists("Pricing Rule", coupon.pricing_rule):
+        return {"valid": False, "reason": frappe._("Linked pricing rule no longer exists")}
+
     pr = frappe.get_cached_doc("Pricing Rule", coupon.pricing_rule)
+
+    if pr.disable:
+        return {"valid": False, "reason": frappe._("Linked pricing rule is disabled")}
 
     # Check minimum amount
     if pr.min_amt and cart_total < flt(pr.min_amt):
@@ -1399,6 +1457,17 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     if not ret.items:
         frappe.throw(frappe._("No items to return"))
 
+    # POS-6 fix: Validate serial return state for serialized items
+    for ri in return_items:
+        if ri.get("serial_no"):
+            check = check_serial_returnable(ri["serial_no"], original_invoice)
+            if not check.get("returnable"):
+                frappe.throw(
+                    frappe._("Cannot return serial {0}: {1}").format(
+                        ri["serial_no"], check.get("reason")),
+                    title=frappe._("Serial Return Blocked"),
+                )
+
     # Taxes from original — must be added BEFORE calculating grand_total
     for tax in (orig.taxes or []):
         ret.append("taxes", {
@@ -1468,10 +1537,20 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
             )
         raise
 
-    # Create return incentive (clawback) entries
+    # POS-8 fix: Create return incentive (clawback) entries — fail loudly
     incentive_clawback = 0
     if sales_executive:
-        incentive_clawback = _create_return_incentive_entries(ret, sales_executive)
+        try:
+            incentive_clawback = _create_return_incentive_entries(ret, sales_executive)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Incentive clawback failed for {ret.name}")
+            frappe.msgprint(
+                frappe._("Warning: Return processed but incentive clawback failed for {0}. "
+                         "Please notify the store manager to review incentive entries manually."
+                ).format(ret.name),
+                indicator="orange",
+                title=frappe._("Incentive Clawback Failed"),
+            )
 
     # Audit
     try:

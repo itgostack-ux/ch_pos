@@ -1380,7 +1380,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				}).join("") +
 				`</div>`
 			);
-		}).catch(() => {});
+		}).catch(e => { console.error("Bank offers load failed:", e); });
 	}
 
 	// ───────────────────────────────────────── Helpers ──
@@ -1475,6 +1475,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 	_submit_invoice() {
 		if (this._submitting) return;
+		// POS-19 fix: Set submitting flag immediately to prevent double-submit race
+		this._submitting = true;
 
 		const grand   = this._is_free_sale ? 0 : this._calc_grand_total();
 		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
@@ -1485,10 +1487,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (this._is_free_sale) {
 			if (!this._free_sale_reason) {
 				frappe.show_alert({ message: __("Enter reason for free sale"), indicator: "orange" });
+				this._submitting = false;
 				return;
 			}
 			if (!this._free_sale_approved_by) {
 				frappe.show_alert({ message: __("Enter manager name who approved this free sale"), indicator: "orange" });
+				this._submitting = false;
 				return;
 			}
 		}
@@ -1496,6 +1500,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Normal/credit sale validations
 		if (!this._is_free_sale && !this._is_credit_sale && balance > 0.005) {
 			frappe.show_alert({ message: __("Payment not complete — ₹{0} still due", [format_number(balance)]), indicator: "red" });
+			this._submitting = false;
 			return;
 		}
 
@@ -1505,23 +1510,28 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				const type = this._mop_type(p.mode);
 				if (type === "upi" && flt(p.amount) > 0 && !p.upi_transaction_id) {
 					frappe.show_alert({ message: __("Enter UPI Transaction ID for {0}", [p.mode]), indicator: "orange" });
+					this._submitting = false;
 					return;
 				}
 				if (type === "card" && flt(p.amount) > 0 && !p.card_reference) {
 					frappe.show_alert({ message: __("Enter Card RRN for {0}", [p.mode]), indicator: "orange" });
+					this._submitting = false;
 					return;
 				}
 				if (type === "finance" && flt(p.amount) > 0) {
 					if (!p.finance_provider) {
 						frappe.show_alert({ message: __("Enter Finance Provider for {0}", [p.mode]), indicator: "orange" });
+						this._submitting = false;
 						return;
 					}
 					if (!p.finance_tenure) {
 						frappe.show_alert({ message: __("Select EMI Tenure for {0}", [p.mode]), indicator: "orange" });
+						this._submitting = false;
 						return;
 					}
 					if (!p.finance_approval_id) {
 						frappe.show_alert({ message: __("Enter Approval/Loan ID for {0}", [p.mode]), indicator: "orange" });
+						this._submitting = false;
 						return;
 					}
 				}
@@ -1532,19 +1542,21 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (!this._is_free_sale && this._is_finance_sale_type(PosState.sale_type)) {
 			if (!PosState.sale_sub_type) {
 				frappe.show_alert({ message: __("Select a Finance Partner"), indicator: "orange" });
+				this._submitting = false;
 				return;
 			}
 			if (!PosState.finance_tenure) {
 				frappe.show_alert({ message: __("Select EMI Tenure"), indicator: "orange" });
+				this._submitting = false;
 				return;
 			}
 			if (!PosState.sale_reference) {
 				frappe.show_alert({ message: __("Enter Approval / Loan ID"), indicator: "orange" });
+				this._submitting = false;
 				return;
 			}
 		}
 
-		this._submitting = true;
 		this._overlay.find("#ch-pay-submit").prop("disabled", true);
 		this._overlay.find("#ch-pay-submit-label").text(__("Processing..."));
 
@@ -1814,7 +1826,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 						</div>`);
 				});
 			}
-		}).catch(() => {});
+		}).catch(e => { console.error("Advance payments load failed:", e); });
 	}
 
 	_load_credit_info() {
@@ -1849,7 +1861,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				</div>
 				${over_limit ? `<div class="ch-pay-credit-warn"><i class="fa fa-exclamation-triangle"></i> ${__("Cart total exceeds available credit")}</div>` : ""}
 			`);
-		}).catch(() => {});
+		}).catch(e => { console.error("Credit info load failed:", e); });
 	}
 
 	// ── Category Manager Approval Flow ──────────────────────────
@@ -1978,7 +1990,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				approval_name: this._free_sale_approval_name,
 			}).then(result => {
 				this._render_approval_status(result.approvals);
-			}).catch(() => {});
+			}).catch(e => { console.error("Approval poll failed:", e); });
 		}, 5000);
 	}
 

@@ -116,7 +116,8 @@ def pos_item_search(
                    i.item_group, i.stock_uom, i.has_serial_no,
                    i.variant_of, i.ch_default_warranty_months, i.ch_item_type,
                    IFNULL(i.custom_pos_usage, '') as pos_usage,
-                   IFNULL(i.ch_allow_zero_rate, 0) as ch_allow_zero_rate
+                   IFNULL(i.ch_allow_zero_rate, 0) as ch_allow_zero_rate,
+                   i.description, i.has_batch_no, i.is_stock_item
             FROM `tabItem` i
             WHERE {where}
             ORDER BY i.item_name

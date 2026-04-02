@@ -141,6 +141,8 @@ export const PosState = {
 		this.guided_session = null;
 		this.exception_request = null;
 		this.warranty_claim = null;
+		// POS-10 fix: Clear persisted cart on transaction reset
+		try { localStorage.removeItem("ch_pos_active_cart"); } catch (e) {}
 		// Keep executive and company selection across transactions
 		EventBus.emit("state:transaction_reset");
 	},

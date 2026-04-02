@@ -11,6 +11,73 @@ import { format_number } from "../shared/helpers.js";
 export class CartService {
 	constructor() {
 		this._bind_events();
+		// POS-10 fix: Restore active cart from localStorage on page load
+		this._restore_active_cart();
+	}
+
+	// POS-10 fix: Auto-persist active cart state to localStorage on every change
+	_persist_active_cart() {
+		try {
+			if (!PosState.cart || !PosState.cart.length) {
+				localStorage.removeItem("ch_pos_active_cart");
+				return;
+			}
+			const data = {
+				customer: PosState.customer,
+				cart: JSON.parse(JSON.stringify(PosState.cart)),
+				additional_discount_pct: PosState.additional_discount_pct,
+				additional_discount_amt: PosState.additional_discount_amt,
+				coupon_code: PosState.coupon_code,
+				coupon_discount: PosState.coupon_discount,
+				voucher_code: PosState.voucher_code,
+				voucher_amount: PosState.voucher_amount,
+				exchange_assessment: PosState.exchange_assessment,
+				exchange_amount: PosState.exchange_amount,
+				sale_type: PosState.sale_type,
+				is_credit_sale: PosState.is_credit_sale || false,
+				is_free_sale: PosState.is_free_sale || false,
+				timestamp: frappe.datetime.now_datetime(),
+			};
+			localStorage.setItem("ch_pos_active_cart", JSON.stringify(data));
+		} catch (e) {
+			// Storage full or unavailable — non-critical
+		}
+	}
+
+	_restore_active_cart() {
+		try {
+			const raw = localStorage.getItem("ch_pos_active_cart");
+			if (!raw) return;
+			const data = JSON.parse(raw);
+			// Only restore if saved within last 12 hours
+			if (data.timestamp) {
+				const saved = new Date(data.timestamp);
+				const hours = (Date.now() - saved.getTime()) / 3600000;
+				if (hours > 12) {
+					localStorage.removeItem("ch_pos_active_cart");
+					return;
+				}
+			}
+			if (data.cart && data.cart.length) {
+				PosState.cart = data.cart;
+				if (data.customer) PosState.customer = data.customer;
+				if (data.additional_discount_pct) PosState.additional_discount_pct = data.additional_discount_pct;
+				if (data.additional_discount_amt) PosState.additional_discount_amt = data.additional_discount_amt;
+				if (data.coupon_code) PosState.coupon_code = data.coupon_code;
+				if (data.coupon_discount) PosState.coupon_discount = data.coupon_discount;
+				if (data.voucher_code) PosState.voucher_code = data.voucher_code;
+				if (data.voucher_amount) PosState.voucher_amount = data.voucher_amount;
+				if (data.exchange_assessment) PosState.exchange_assessment = data.exchange_assessment;
+				if (data.exchange_amount) PosState.exchange_amount = data.exchange_amount;
+				if (data.sale_type) PosState.sale_type = data.sale_type;
+				PosState.is_credit_sale = data.is_credit_sale || false;
+				PosState.is_free_sale = data.is_free_sale || false;
+				EventBus.emit("cart:updated");
+				frappe.show_alert({ message: __("Previous cart restored"), indicator: "blue" });
+			}
+		} catch (e) {
+			localStorage.removeItem("ch_pos_active_cart");
+		}
 	}
 
 	_bind_events() {
@@ -72,6 +139,9 @@ export class CartService {
 
 		EventBus.on("coupon:apply", (code) => this._apply_coupon(code));
 		EventBus.on("discount:changed", () => EventBus.emit("cart:updated"));
+
+		// POS-10 fix: Auto-persist cart to localStorage on every update
+		EventBus.on("cart:updated", () => this._persist_active_cart());
 
 		EventBus.on("exchange:open", () => this._show_exchange_dialog());
 		EventBus.on("vas:open", () => this._show_vas_dialog());
