@@ -219,6 +219,7 @@ ch_pos.PosApp = class PosApp {
 					const d = r.message;
 					PosState.warehouse = d.warehouse;
 					PosState.price_list = d.price_list;
+					PosState.default_customer = d.default_customer || null;
 					PosState.payment_modes = d.payment_modes || [];
 					PosState.store_caps = d.store_caps || {};
 					PosState.pos_ext = d.pos_ext || {};

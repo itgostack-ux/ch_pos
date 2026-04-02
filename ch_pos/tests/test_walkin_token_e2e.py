@@ -80,16 +80,7 @@ def _get_test_context():
 
 def _cleanup_test_tokens():
     """Remove tokens created during this test run (customer_name starts with 'E2E-')."""
-    tokens = frappe.get_all(
-        "POS Kiosk Token",
-        filters={"customer_name": ["like", "E2E-%"]},
-        fields=["name", "docstatus"],
-    )
-    for t in tokens:
-        if t.docstatus == 1:
-            frappe.get_doc("POS Kiosk Token", t.name).cancel()
-        frappe.delete_doc("POS Kiosk Token", t.name, force=True)
-    # Also clean up test invoices
+    # Cancel test invoices FIRST (they link to tokens — tokens can't be cancelled while linked)
     invoices = frappe.get_all(
         "Sales Invoice",
         filters={"customer_name": "E2E-Token-Test"},
@@ -99,8 +90,24 @@ def _cleanup_test_tokens():
         if inv.docstatus == 1:
             si = frappe.get_doc("Sales Invoice", inv.name)
             si.flags.ignore_permissions = True
+            si.flags.ignore_links = True
             si.cancel()
-        frappe.delete_doc("Sales Invoice", inv.name, force=True)
+        frappe.delete_doc("Sales Invoice", inv.name, force=True, ignore_permissions=True)
+    frappe.db.commit()
+
+    # Now cancel and delete tokens
+    tokens = frappe.get_all(
+        "POS Kiosk Token",
+        filters={"customer_name": ["like", "E2E-%"]},
+        fields=["name", "docstatus"],
+    )
+    for t in tokens:
+        if t.docstatus == 1:
+            doc = frappe.get_doc("POS Kiosk Token", t.name)
+            doc.flags.ignore_permissions = True
+            doc.flags.ignore_links = True
+            doc.cancel()
+        frappe.delete_doc("POS Kiosk Token", t.name, force=True, ignore_permissions=True)
     frappe.db.commit()
 
 

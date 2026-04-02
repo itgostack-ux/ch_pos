@@ -2,6 +2,15 @@ import frappe
 from frappe.utils import cint, flt
 
 
+def _get_item_offers(item_code):
+    """Return active POS offers for an item (used by item detail endpoint)."""
+    from ch_pos.api.offers import get_applicable_offers
+    try:
+        return get_applicable_offers(item_code=item_code)
+    except Exception:
+        return []
+
+
 @frappe.whitelist()
 def pos_item_search(
     search_term="",

@@ -264,18 +264,26 @@ export class QueueWorkspace {
 			// Store token reference in state — will be passed to Sales Invoice
 			PosState.kiosk_token = token.name;
 
-			// Switch to sell mode
-			PosState.active_mode = "sell";
-			EventBus.emit("mode:set", "sell");
-			EventBus.emit("mode:switch", "sell");
+			// Auto-set customer from token data
+			this._resolve_customer(token).then((customer) => {
+				if (customer) {
+					PosState.customer = customer;
+					EventBus.emit("customer:set", customer);
+				}
 
-			frappe.show_alert({
-				message: __("Billing started for token {0} — {1}", [
-					token.token_display || token.name,
-					token.customer_name,
-				]),
-				indicator: "blue",
-			}, 5);
+				// Switch to sell mode
+				PosState.active_mode = "sell";
+				EventBus.emit("mode:set", "sell");
+				EventBus.emit("mode:switch", "sell");
+
+				frappe.show_alert({
+					message: __("Billing started for token {0} — {1}", [
+						token.token_display || token.name,
+						token.customer_name || __("Walk-in"),
+					]),
+					indicator: "blue",
+				}, 5);
+			});
 		};
 
 		if (token.status === "Waiting") {
@@ -293,6 +301,26 @@ export class QueueWorkspace {
 			// Already Engaged — just proceed
 			_proceed();
 		}
+	}
+
+	/**
+	 * Resolve an ERPNext Customer from token data.
+	 * Priority: linked_customer > phone lookup > default_customer (Walk-in).
+	 */
+	_resolve_customer(token) {
+		// 1. Already linked to an ERPNext Customer
+		if (token.linked_customer) {
+			return Promise.resolve(token.linked_customer);
+		}
+		// 2. Try to find Customer by phone number
+		if (token.customer_phone) {
+			return frappe.xcall("ch_pos.api.token_api.find_customer_by_phone", {
+				phone: token.customer_phone,
+			}).then((name) => name || PosState.default_customer || null)
+			  .catch(() => PosState.default_customer || null);
+		}
+		// 3. Fall back to POS Profile's default customer (Walk-in Customer)
+		return Promise.resolve(PosState.default_customer || null);
 	}
 
 	// ── Retail: Drop Token ──────────────────────────────────────

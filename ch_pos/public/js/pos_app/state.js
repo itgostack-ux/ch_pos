@@ -93,6 +93,7 @@ export const PosState = {
 	service_job_items: [],      // items linked to active service job
 
 	// ── Kiosk Token ────────────────────────────────────
+	default_customer: null,     // POS Profile default customer (Walk-in Customer)
 	kiosk_token: null,          // linked POS Kiosk Token name (for billing from queue)
 	guided_session: null,       // linked POS Guided Session name (for assisted sell flow)
 

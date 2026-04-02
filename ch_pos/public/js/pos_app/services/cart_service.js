@@ -707,94 +707,45 @@ export class CartService {
 	// ── Exchange Dialog ─────────────────────────────────
 	_show_exchange_dialog() {
 		let exchange_data = null;
-		let active_tab = "lookup";
 		const dialog = new frappe.ui.Dialog({
 			title: __("Buyback Exchange"),
 			fields: [
-				{
-					fieldname: "tab_bar_html",
-					fieldtype: "HTML",
-					options: `<div class="ch-pos-exchange-tabs" style="display:flex;gap:8px;margin-bottom:12px">
-						<button class="btn btn-sm btn-primary ch-exc-tab" data-tab="lookup">${__("Find Existing")}</button>
-						<button class="btn btn-sm btn-default ch-exc-tab" data-tab="new">${__("Add Old Device")}</button>
-					</div>`,
-				},
-				// --- Lookup tab fields ---
 				{
 					fieldname: "lookup_mode",
 					fieldtype: "Select",
 					label: __("Find by"),
 					options: "Assessment ID\nIMEI / Serial\nCustomer Mobile",
 					default: "Assessment ID",
-					depends_on: "eval:doc.__tab === 'lookup'",
 				},
 				{
 					fieldname: "assessment",
 					fieldtype: "Link",
 					label: __("Buyback Assessment"),
 					options: "Buyback Assessment",
-					depends_on: "eval:doc.__tab === 'lookup' && doc.lookup_mode === 'Assessment ID'",
+					depends_on: "eval:doc.lookup_mode === 'Assessment ID'",
 					get_query: () => ({ filters: { status: ["in", ["Submitted", "Inspection Created"]] } }),
 				},
 				{
 					fieldname: "imei_serial",
 					fieldtype: "Data",
 					label: __("IMEI / Serial No"),
-					depends_on: "eval:doc.__tab === 'lookup' && doc.lookup_mode === 'IMEI / Serial'",
+					depends_on: "eval:doc.lookup_mode === 'IMEI / Serial'",
 				},
 				{
 					fieldname: "mobile_no",
 					fieldtype: "Data",
 					label: __("Customer Mobile"),
-					depends_on: "eval:doc.__tab === 'lookup' && doc.lookup_mode === 'Customer Mobile'",
+					depends_on: "eval:doc.lookup_mode === 'Customer Mobile'",
 				},
-				// --- New Device tab fields ---
-				{
-					fieldname: "new_item_code",
-					fieldtype: "Link",
-					label: __("Device Model"),
-					options: "Item",
-					depends_on: "eval:doc.__tab === 'new'",
-					get_query: () => ({
-						filters: { has_serial_no: 1, disabled: 0 },
-					}),
-				},
-				{
-					fieldname: "new_imei",
-					fieldtype: "Data",
-					label: __("IMEI / Serial"),
-					depends_on: "eval:doc.__tab === 'new'",
-				},
-				{
-					fieldname: "new_mobile",
-					fieldtype: "Data",
-					label: __("Customer Mobile"),
-					depends_on: "eval:doc.__tab === 'new'",
-				},
-				{ fieldtype: "Section Break", label: __("Condition Checks"), depends_on: "eval:doc.__tab === 'new'" },
-				{ fieldname: "chk_screen", fieldtype: "Check", label: __("Screen OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
-				{ fieldname: "chk_body", fieldtype: "Check", label: __("Body OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
-				{ fieldname: "chk_buttons", fieldtype: "Check", label: __("Buttons OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
-				{ fieldtype: "Column Break", depends_on: "eval:doc.__tab === 'new'" },
-				{ fieldname: "chk_charging", fieldtype: "Check", label: __("Charging OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
-				{ fieldname: "chk_camera", fieldtype: "Check", label: __("Camera OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
-				{ fieldname: "chk_speaker_mic", fieldtype: "Check", label: __("Speaker/Mic OK"), default: 1, depends_on: "eval:doc.__tab === 'new'", columns: 4 },
-				// --- Shared result section ---
 				{ fieldtype: "Section Break", label: __("Exchange Details") },
 				{
 					fieldname: "exchange_details_html",
 					fieldtype: "HTML",
-					options: `<p class="text-muted">${__("Search for an assessment or add a new device above")}</p>`,
+					options: `<p class="text-muted">${__("Search for an assessment above")}</p>`,
 				},
 			],
-			size: "large",
 			primary_action_label: __("Apply Exchange"),
 			primary_action: () => {
-				if (active_tab === "new" && !exchange_data) {
-					// Create assessment then apply
-					this._create_and_apply_exchange(dialog);
-					return;
-				}
 				if (!exchange_data) {
 					frappe.show_alert({ message: __("No exchange data loaded"), indicator: "red" });
 					return;
@@ -804,70 +755,8 @@ export class CartService {
 			},
 		});
 
-		// Tab switching
-		dialog.set_value("__tab", "lookup");
-		dialog.$wrapper.on("click", ".ch-exc-tab", function () {
-			const tab = $(this).data("tab");
-			active_tab = tab;
-			exchange_data = null;
-			dialog.set_value("__tab", tab);
-			dialog.$wrapper.find(".ch-exc-tab").removeClass("btn-primary").addClass("btn-default");
-			$(this).removeClass("btn-default").addClass("btn-primary");
-			dialog.fields_dict.exchange_details_html.$wrapper.html(
-				`<p class="text-muted">${tab === "lookup"
-					? __("Search for an assessment above")
-					: __("Fill device details, then click Evaluate")}</p>`
-			);
-			if (tab === "new") {
-				dialog.set_df_property("primary_action_label", "label", __("Evaluate"));
-				dialog.get_primary_btn().text(__("Evaluate"));
-			} else {
-				dialog.get_primary_btn().text(__("Apply Exchange"));
-			}
-		});
-
-		// Live valuation when condition checks change (new device tab)
-		const check_fields = ["chk_screen", "chk_body", "chk_buttons", "chk_charging", "chk_camera", "chk_speaker_mic"];
-		const run_valuation = frappe.utils.debounce(() => {
-			if (active_tab !== "new") return;
-			const item_code = dialog.get_value("new_item_code");
-			if (!item_code) return;
-			const checks = {
-				screen: !!dialog.get_value("chk_screen"),
-				body: !!dialog.get_value("chk_body"),
-				buttons: !!dialog.get_value("chk_buttons"),
-				charging: !!dialog.get_value("chk_charging"),
-				camera: !!dialog.get_value("chk_camera"),
-				speaker_mic: !!dialog.get_value("chk_speaker_mic"),
-			};
-			frappe.xcall("ch_pos.api.pos_api.calculate_buyback_valuation", {
-				item_code, condition_checks: checks,
-			}).then((val) => {
-				if (!val) return;
-				const deductions_html = val.deductions.length
-					? val.deductions.map(d =>
-						`<tr><td class="text-danger">${frappe.utils.escape_html(d.label)}</td><td class="text-danger">−₹${format_number(d.amount)}</td></tr>`
-					).join("")
-					: `<tr><td colspan="2" class="text-success">${__("No deductions — perfect condition")}</td></tr>`;
-				dialog.fields_dict.exchange_details_html.$wrapper.html(`
-					<div class="ch-pos-exchange-preview">
-						<table class="table table-sm">
-							<tr><td><b>${__("Base Value")}</b></td><td>₹${format_number(val.base_price)}</td></tr>
-							${deductions_html}
-							<tr style="border-top:2px solid var(--border-color)"><td><b>${__("Exchange Value")}</b></td>
-								<td class="text-success" style="font-size:1.2em"><b>₹${format_number(val.final_price)}</b></td></tr>
-							<tr><td><b>${__("Grade")}</b></td><td><span class="badge badge-info">${val.grade}</span></td></tr>
-						</table>
-					</div>`);
-			});
-		}, 400);
-
-		check_fields.forEach((f) => dialog.fields_dict[f].$input.on("change", run_valuation));
-		dialog.fields_dict.new_item_code.$input.on("change", run_valuation);
-
-		// Lookup (existing assessment) handler
+		// Lookup handler
 		const lookup = () => {
-			if (active_tab !== "lookup") return;
 			const mode = dialog.get_value("lookup_mode");
 			const args = {};
 			if (mode === "Assessment ID") args.assessment = dialog.get_value("assessment");
@@ -908,58 +797,6 @@ export class CartService {
 		dialog.fields_dict.imei_serial.$input.on("change", lookup);
 		dialog.fields_dict.mobile_no.$input.on("change", lookup);
 		dialog.show();
-	}
-
-	/** Create a Buyback Assessment from the "Add Old Device" tab and apply exchange */
-	_create_and_apply_exchange(dialog) {
-		const item_code = dialog.get_value("new_item_code");
-		const imei = (dialog.get_value("new_imei") || "").trim();
-		const mobile_no = (dialog.get_value("new_mobile") || "").trim();
-
-		if (!item_code) {
-			frappe.show_alert({ message: __("Select a device model"), indicator: "orange" });
-			return;
-		}
-		if (!mobile_no) {
-			frappe.show_alert({ message: __("Enter customer mobile"), indicator: "orange" });
-			return;
-		}
-
-		const checks = {
-			screen: !!dialog.get_value("chk_screen"),
-			body: !!dialog.get_value("chk_body"),
-			buttons: !!dialog.get_value("chk_buttons"),
-			charging: !!dialog.get_value("chk_charging"),
-			camera: !!dialog.get_value("chk_camera"),
-			speaker_mic: !!dialog.get_value("chk_speaker_mic"),
-		};
-
-		dialog.disable_primary_action();
-		frappe.xcall("ch_pos.api.pos_api.create_buyback_assessment_with_grading", {
-			mobile_no,
-			item_code,
-			imei_serial: imei || undefined,
-			customer: PosState.customer || undefined,
-			condition_checks: checks,
-		}).then((result) => {
-			if (!result || !result.name) {
-				dialog.enable_primary_action();
-				frappe.show_alert({ message: __("Failed to create assessment"), indicator: "red" });
-				return;
-			}
-			dialog.hide();
-			const item_name = frappe.boot.item_names?.[item_code] || item_code;
-			this._apply_exchange({
-				assessment: result.name,
-				item_code,
-				item_name,
-				imei_serial: imei,
-				condition_grade: result.grade,
-				buyback_amount: result.estimated_price,
-			});
-		}).catch(() => {
-			dialog.enable_primary_action();
-		});
 	}
 
 	_apply_exchange(data) {

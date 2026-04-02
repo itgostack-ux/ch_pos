@@ -770,6 +770,35 @@ def get_walkin_insights(pos_profile: str = "", days: int = 30):
 
 
 # ---------------------------------------------------------------------------
+# Customer Lookup by Phone
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def find_customer_by_phone(phone: str):
+    """Return the ERPNext Customer name matching this phone number, or None."""
+    if not phone or not phone.strip():
+        return None
+    phone = normalize_indian_phone(phone.strip())
+    # Try mobile_no on Customer directly
+    name = frappe.db.get_value("Customer", {"mobile_no": phone}, "name")
+    if name:
+        return name
+    # Try Dynamic Link on Contact
+    contact = frappe.db.sql(
+        """SELECT dl.link_name
+           FROM `tabContact Phone` cp
+           JOIN `tabDynamic Link` dl ON dl.parent = cp.parent AND dl.parenttype = 'Contact'
+           WHERE cp.phone = %s AND dl.link_doctype = 'Customer'
+           LIMIT 1""",
+        (phone,),
+        as_dict=True,
+    )
+    if contact:
+        return contact[0].link_name
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Counter Walk-in — creates a lightweight token from POS app
 # ---------------------------------------------------------------------------
 

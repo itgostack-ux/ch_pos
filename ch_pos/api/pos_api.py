@@ -73,6 +73,7 @@ def get_pos_profile_data(pos_profile):
         "currency": profile.currency or frappe.get_cached_value(
             "Company", profile.company, "default_currency"
         ),
+        "default_customer": profile.customer or None,
         "payment_modes": payment_modes,
         "store_caps": store_caps,
         "pos_ext": pos_ext,
@@ -4763,7 +4764,13 @@ def pos_send_customer_otp(order_name):
 
 @frappe.whitelist()
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
-                                 kyc_id_type=None, kyc_id_number=None):
+                                 kyc_id_type=None, kyc_id_number=None,
+                                 customer_id_front=None, customer_id_back=None,
+                                 customer_photo=None,
+                                 settlement_type=None, payout_mode=None,
+                                 upi_id=None, bank_account_holder=None,
+                                 bank_account_number=None, bank_ifsc=None,
+                                 bank_name=None):
 	"""Record customer approval of the final buyback price.
 
 	method: "In-Store Signature" | "OTP" | "Token Link"
@@ -4792,6 +4799,32 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
 		doc.customer_id_type = kyc_id_type
 	if kyc_id_number:
 		doc.customer_id_number = kyc_id_number
+	if customer_id_front:
+		doc.customer_id_front = customer_id_front
+	if customer_id_back:
+		doc.customer_id_back = customer_id_back
+	if customer_photo:
+		doc.customer_photo = customer_photo
+
+	# Save settlement & payout details
+	if settlement_type:
+		doc.settlement_type = settlement_type
+	if payout_mode:
+		doc.customer_payout_mode = payout_mode
+	if upi_id:
+		doc.customer_upi_id = upi_id
+	if bank_account_holder:
+		doc.customer_bank_account_holder = bank_account_holder
+	if bank_account_number:
+		doc.customer_bank_account_number = bank_account_number
+	if bank_ifsc:
+		doc.customer_bank_ifsc = bank_ifsc
+	if bank_name:
+		doc.customer_bank_name = bank_name
+	if payout_mode:
+		doc.customer_payout_updated_at = frappe.utils.now_datetime()
+		doc.customer_payout_updated_by = frappe.session.user
+
 	if kyc_id_type and kyc_id_number:
 		doc.kyc_verified = 1
 		doc.kyc_verified_by = frappe.session.user
@@ -4872,12 +4905,17 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 
 	from frappe.utils import now_datetime
 	doc.settlement_type = "Buyback"
-	doc.append("payments", {
-		"payment_method": payment_method,
-		"amount": flt(doc.final_price),
-		"payment_date": now_datetime(),
-		"transaction_reference": f"POS-Cashback-{doc.name}",
-	})
+
+	# Prevent duplicate payment row
+	txn_ref = f"POS-Cashback-{doc.name}"
+	already_exists = any(p.transaction_reference == txn_ref for p in (doc.payments or []))
+	if not already_exists:
+		doc.append("payments", {
+			"payment_method": payment_method,
+			"amount": flt(doc.final_price),
+			"payment_date": now_datetime(),
+			"transaction_reference": txn_ref,
+		})
 	doc.flags.ignore_permissions = True
 	doc.save()
 

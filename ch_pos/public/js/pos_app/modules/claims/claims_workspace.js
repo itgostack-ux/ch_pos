@@ -769,7 +769,7 @@ export class ClaimsWorkspace {
 
 	_show_claim_result(panel, result) {
 		const is_approved = result.claim_status === "Approved";
-		const is_mfr = result.coverage_type === "Manufacturer Warranty";
+		const is_mfr = result.coverage_type === "manufacturer_warranty";
 		const is_sent_mfr = result.claim_status === "Sent to Manufacturer";
 		const needs_approval = result.requires_approval;
 		const pickup_flow = ["Pickup Requested", "Pickup Scheduled"].includes(result.claim_status)
@@ -896,16 +896,32 @@ export class ClaimsWorkspace {
 						<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;margin-bottom:10px">
 							<div><span class="text-muted">${__("Device")}:</span> ${claim.item_name || claim.serial_no}</div>
 							<div><span class="text-muted">${__("Serial")}:</span> <code>${claim.serial_no}</code></div>
-							<div><span class="text-muted">${__("Coverage")}:</span> ${claim.coverage_type || "N/A"}</div>
+							<div><span class="text-muted">${__("Coverage")}:</span>
+								<span class="badge" style="background:${this._coverage_style(claim.coverage_type).bg};color:${this._coverage_style(claim.coverage_type).fg};font-size:10px;padding:1px 5px">${this._coverage_label(claim.coverage_type)}</span>
+								${claim.coverage_source ? `<span class="text-muted" style="font-size:10px">(${claim.coverage_source})</span>` : ""}
+							</div>
 							<div><span class="text-muted">${__("Filed")}:</span> ${claim.claim_date}</div>
 							<div><span class="text-muted">${__("GoGizmo pays")}:</span> ₹${claim.gogizmo_share || 0}</div>
 							<div><span class="text-muted">${__("Customer pays")}:</span> ₹${claim.customer_share || 0}</div>
+							${claim.entitlement_decision ? `<div><span class="text-muted">${__("Entitlement")}:</span> ${claim.entitlement_decision}</div>` : ""}
+							${claim.final_outcome ? `<div><span class="text-muted">${__("Outcome")}:</span> ${claim.final_outcome}</div>` : ""}
 							${claim.service_request ? `<div><span class="text-muted">${__("GoFix")}:</span>
 								<a href="/app/service-request/${claim.service_request}" target="_blank">${claim.service_request}</a></div>` : ""}
 							${claim.repair_status ? `<div><span class="text-muted">${__("Repair")}:</span> ${claim.repair_status}</div>` : ""}
 						</div>
 
-						${claim.coverage_type === "Manufacturer Warranty" ? `
+						${claim.coverage_type === "repair_warranty" && claim.previous_service_ticket ? `
+						<div style="padding:8px 10px;background:#dbeafe;border:1px solid #93c5fd;border-radius:6px;font-size:12px;margin-bottom:8px">
+							<b><i class="fa fa-history"></i> ${__("Repair Warranty — Previous Service")}</b>
+							<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
+								<div><span class="text-muted">${__("Prev Ticket")}:</span> ${claim.previous_service_ticket || "—"}</div>
+								<div><span class="text-muted">${__("Prev Invoice")}:</span> ${claim.previous_service_invoice || "—"}</div>
+								<div><span class="text-muted">${__("Part")}:</span> ${claim.replaced_part_reference || "—"}</div>
+								<div><span class="text-muted">${__("Valid Till")}:</span> ${claim.part_warranty_valid_till || "—"}</div>
+							</div>
+						</div>` : ""}
+
+						${claim.coverage_type === "manufacturer_warranty" ? `
 						<div style="padding:8px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;font-size:12px;margin-bottom:8px">
 							<b><i class="fa fa-truck"></i> ${__("Manufacturer Service Details")}</b>
 							<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
@@ -921,6 +937,9 @@ export class ClaimsWorkspace {
 						<div style="padding:6px 10px;background:#f9fafb;border-radius:6px;font-size:12px">
 							<b>${__("Issue")}:</b> ${claim.issue_description || "N/A"}
 						</div>
+						${this._render_receiving_block(claim)}
+						${this._render_qc_block(claim)}
+						${this._render_fee_block(claim)}
 						${logistics}
 						${log_html}
 					</div>
@@ -934,10 +953,9 @@ export class ClaimsWorkspace {
 
 	_progress_steps(claim) {
 		const s = claim.claim_status;
-		const is_mfr = claim.coverage_type === "Manufacturer Warranty";
+		const is_mfr = claim.coverage_type === "manufacturer_warranty";
 
 		if (is_mfr) {
-			// Manufacturer warranty flow: Filed → Sent to Manufacturer → Done → Closed
 			return [
 				{ label: __("Filed"), icon: "fa-file-text", done: true, color: "#3b82f6" },
 				{ label: __("Sent to OEM"), icon: "fa-truck",
@@ -948,23 +966,40 @@ export class ClaimsWorkspace {
 			];
 		}
 
+		const AFTER_APPROVAL = ["Approved","Pickup Requested","Pickup Scheduled","Picked Up",
+			"Device Received","QC Pending","QC Passed","QC Failed","Fee Pending","Fee Paid","Fee Waived",
+			"Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed"];
+		const AFTER_RECEIVED = ["Device Received","QC Pending","QC Passed","QC Failed",
+			"Fee Pending","Fee Paid","Fee Waived","Ticket Created","In Repair","Repair Complete",
+			"Out for Delivery","Delivered","Closed"];
+		const AFTER_QC = ["QC Passed","Fee Pending","Fee Paid","Fee Waived",
+			"Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed"];
+		const AFTER_FEE = ["Fee Paid","Fee Waived","Ticket Created","In Repair",
+			"Repair Complete","Out for Delivery","Delivered","Closed"];
+		const AFTER_TICKET = ["Ticket Created","In Repair","Repair Complete",
+			"Out for Delivery","Delivered","Closed"];
+		const AFTER_REPAIR = ["Repair Complete","Out for Delivery","Delivered","Closed"];
+
 		return [
 			{ label: __("Filed"), icon: "fa-file-text", done: true, color: "#3b82f6" },
-			{ label: __("Pickup"), icon: "fa-truck",
-			  done: ["Pickup Requested", "Pickup Scheduled", "Picked Up", "Ticket Created", "In Repair", "Repair Complete", "Out for Delivery", "Delivered", "Closed"].includes(s),
-			  color: "#0f766e" },
 			{ label: claim.requires_approval ? __("Approval") : __("Auto"),
 			  icon: "fa-check-circle",
-			  done: ["Approved","Pickup Requested","Pickup Scheduled","Picked Up","Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed","Rejected"].includes(s),
+			  done: [...AFTER_APPROVAL, "Rejected"].includes(s),
 			  color: s === "Rejected" ? "#ef4444" : "#22c55e" },
+			{ label: __("Pickup"), icon: "fa-truck",
+			  done: AFTER_RECEIVED.includes(s) || s === "Picked Up",
+			  color: "#0f766e" },
+			{ label: __("Received"), icon: "fa-inbox",
+			  done: AFTER_RECEIVED.includes(s), color: "#06b6d4" },
+			{ label: __("QC"), icon: "fa-check-square-o",
+			  done: AFTER_QC.includes(s),
+			  color: s === "QC Failed" ? "#ef4444" : "#8b5cf6" },
+			{ label: __("Fee"), icon: "fa-credit-card",
+			  done: AFTER_FEE.includes(s), color: "#f59e0b" },
 			{ label: __("GoFix"), icon: "fa-wrench",
-			  done: ["Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed"].includes(s), color: "#8b5cf6" },
+			  done: AFTER_TICKET.includes(s), color: "#8b5cf6" },
 			{ label: __("Repair"), icon: "fa-cog",
-			  done: ["In Repair","Repair Complete","Out for Delivery","Delivered","Closed"].includes(s), color: "#eab308" },
-			{ label: __("Delivery"), icon: "fa-motorcycle",
-			  done: ["Out for Delivery","Delivered","Closed"].includes(s), color: "#0ea5e9" },
-			{ label: __("Done"), icon: "fa-trophy",
-			  done: ["Repair Complete","Delivered","Closed"].includes(s), color: "#22c55e" },
+			  done: AFTER_REPAIR.includes(s), color: "#eab308" },
 			{ label: __("Closed"), icon: "fa-lock", done: s === "Closed", color: "#6b7280" },
 		];
 	}
@@ -972,53 +1007,187 @@ export class ClaimsWorkspace {
 	_render_logistics_block(claim) {
 		const mode = claim.mode_of_service || "Walk-in";
 		const lstat = claim.logistics_status || "Not Required";
-		const pickup_flow = ["Pickup", "Courier"].includes(mode);
-		if (!pickup_flow && !claim.pickup_required && !claim.pickup_address && !claim.pickup_scheduled_at) {
-			return "";
-		}
+		const s = claim.claim_status;
 
+		// ── Action buttons based on current status ──
 		const actions = [];
-		if (["Approved", "Pickup Requested"].includes(claim.claim_status)) {
+
+		// Pickup flow
+		if (["Approved", "Pickup Requested"].includes(s) && claim.pickup_required) {
 			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="schedule_pickup"><i class="fa fa-calendar"></i> ${__("Schedule Pickup")}</button>`);
 		}
-		if (claim.claim_status === "Pickup Scheduled") {
+		if (s === "Pickup Scheduled") {
 			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="mark_picked_up"><i class="fa fa-truck"></i> ${__("Mark Picked Up")}</button>`);
 		}
-		if (claim.claim_status === "Repair Complete") {
+
+		// Device Receiving (walk-in: from Approved; pickup: from Picked Up)
+		if ((s === "Approved" && !claim.pickup_required) || s === "Picked Up") {
+			actions.push(`<button class="btn btn-xs btn-info ch-claim-log-action" data-claim="${claim.name}" data-action="receive_device"><i class="fa fa-inbox"></i> ${__("Receive Device")}</button>`);
+		}
+
+		// Intake QC (after receiving)
+		if (["Device Received", "QC Pending"].includes(s)) {
+			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="perform_qc"><i class="fa fa-check-square-o"></i> ${__("Perform Intake QC")}</button>`);
+		}
+
+		// Processing Fee (after QC passed)
+		if (s === "QC Passed" && !claim.processing_fee_amount) {
+			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="generate_fee"><i class="fa fa-calculator"></i> ${__("Generate Fee")}</button>`);
+		}
+		if (["Fee Pending", "QC Passed"].includes(s) && flt(claim.processing_fee_amount) > 0
+		    && !["Paid","Waived","Not Required"].includes(claim.processing_fee_status)) {
+			actions.push(`<button class="btn btn-xs btn-success ch-claim-log-action" data-claim="${claim.name}" data-action="collect_fee"><i class="fa fa-credit-card"></i> ${__("Collect Fee ₹") + format_number(claim.processing_fee_amount)}</button>`);
+			actions.push(`<button class="btn btn-xs btn-default ch-claim-log-action" data-claim="${claim.name}" data-action="send_fee_link"><i class="fa fa-paper-plane"></i> ${__("Send Link")}</button>`);
+			actions.push(`<button class="btn btn-xs btn-default ch-claim-log-action" data-claim="${claim.name}" data-action="waive_fee"><i class="fa fa-ban"></i> ${__("Waive Fee")}</button>`);
+		}
+
+		// Create Repair Ticket (after all gates pass)
+		if (["Fee Paid", "Fee Waived"].includes(s)
+		    || (s === "QC Passed" && claim.processing_fee_status === "Not Required")) {
+			if (!claim.service_request) {
+				actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="create_ticket"><i class="fa fa-wrench"></i> ${__("Create GoFix Ticket")}</button>`);
+			}
+		}
+
+		// Additional damage/cost approval (during repair)
+		if (["In Repair", "Ticket Created"].includes(s)) {
+			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="request_additional_approval"><i class="fa fa-exclamation-triangle"></i> ${__("Additional Cost")}</button>`);
+		}
+		if (s === "Additional Approval Pending") {
+			actions.push(`<button class="btn btn-xs btn-success ch-claim-log-action" data-claim="${claim.name}" data-action="resolve_additional_approved"><i class="fa fa-check"></i> ${__("Customer Approved")}</button>`);
+			actions.push(`<button class="btn btn-xs btn-danger ch-claim-log-action" data-claim="${claim.name}" data-action="resolve_additional_rejected"><i class="fa fa-times"></i> ${__("Customer Rejected")}</button>`);
+		}
+
+		// Final QC (after repair)
+		if (s === "Repair Complete" || s === "Final QC Pending") {
+			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="perform_final_qc"><i class="fa fa-check-double"></i> ${__("Final QC")}</button>`);
+		}
+
+		// Post-repair delivery
+		if (["Repair Complete", "Final QC Passed", "Payment Received", "Invoice Raised"].includes(s)) {
 			actions.push(`<button class="btn btn-xs btn-info ch-claim-log-action" data-claim="${claim.name}" data-action="mark_out_for_delivery"><i class="fa fa-motorcycle"></i> ${__("Out for Delivery")}</button>`);
 		}
-		if (claim.claim_status === "Out for Delivery") {
+		if (s === "Out for Delivery") {
 			actions.push(`<button class="btn btn-xs btn-success ch-claim-log-action" data-claim="${claim.name}" data-action="mark_delivered_back"><i class="fa fa-check"></i> ${__("Mark Delivered")}</button>`);
 		}
 
-		return `<div style="padding:8px 10px;background:#f0fdfa;border:1px solid #99f6e4;border-radius:6px;font-size:12px;margin-top:8px">
-			<b><i class="fa fa-map-marker"></i> ${__("Pickup & Delivery")}</b>
-			<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
+		// ── Summary card ──
+		const fee_status_badge = this._fee_status_badge(claim);
+		const qc_badge = claim.intake_qc_status
+			? `<span class="badge" style="background:${claim.intake_qc_status === 'Passed' ? '#dcfce7' : '#fef2f2'};color:${claim.intake_qc_status === 'Passed' ? '#166534' : '#991b1b'};font-size:10px;padding:1px 5px">${claim.intake_qc_status}</span>`
+			: "";
+
+		let logistics_detail = "";
+		const pickup_flow = ["Pickup", "Courier"].includes(mode);
+		if (pickup_flow || claim.pickup_required || claim.pickup_address) {
+			logistics_detail = `
+			<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;font-size:11px">
 				<div><span class="text-muted">${__("Mode")}:</span> ${mode}</div>
-				<div><span class="text-muted">${__("Logistics Status")}:</span> ${lstat}</div>
+				<div><span class="text-muted">${__("Logistics")}:</span> ${lstat}</div>
 				<div><span class="text-muted">${__("Pickup Slot")}:</span> ${claim.pickup_slot || "—"}</div>
 				<div><span class="text-muted">${__("Tracking")}:</span> ${claim.pickup_tracking_no || "—"}</div>
 				<div><span class="text-muted">${__("Partner")}:</span> ${claim.pickup_partner || "—"}</div>
-				<div><span class="text-muted">${__("Delivered At")}:</span> ${claim.delivered_back_at || "—"}</div>
+				<div><span class="text-muted">${__("Received At")}:</span> ${claim.device_received_at || "—"}</div>
 			</div>
-			${claim.pickup_address ? `<div style="margin-top:6px"><span class="text-muted">${__("Address")}:</span> ${frappe.utils.escape_html(claim.pickup_address)}</div>` : ""}
+			${claim.pickup_address ? `<div style="margin-top:4px;font-size:11px"><span class="text-muted">${__("Address")}:</span> ${frappe.utils.escape_html(claim.pickup_address)}</div>` : ""}`;
+		}
+
+		return `
+		<div style="padding:8px 10px;background:#f0fdfa;border:1px solid #99f6e4;border-radius:6px;font-size:12px;margin-top:8px">
+			<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+				<b><i class="fa fa-tasks"></i> ${__("Claim Progress")}</b>
+				<div style="display:flex;gap:4px">${qc_badge} ${fee_status_badge}</div>
+			</div>
+			<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;font-size:11px">
+				<div><span class="text-muted">${__("GoGizmo")}:</span> <b>₹${format_number(claim.gogizmo_share || 0)}</b></div>
+				<div><span class="text-muted">${__("Customer")}:</span> <b>₹${format_number(claim.customer_share || 0)}</b></div>
+				<div><span class="text-muted">${__("Fee")}:</span> <b>₹${format_number(claim.processing_fee_amount || 0)}</b></div>
+			</div>
+			${logistics_detail}
 			${actions.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${actions.join("")}</div>` : ""}
 		</div>`;
 	}
 
+	_fee_status_badge(claim) {
+		const s = claim.processing_fee_status || "Not Required";
+		const m = {
+			"Not Required": { bg: "#f3f4f6", fg: "#6b7280" },
+			"Pending": { bg: "#fef3c7", fg: "#92400e" },
+			"Link Sent": { bg: "#dbeafe", fg: "#1e40af" },
+			"Paid": { bg: "#dcfce7", fg: "#166534" },
+			"Waived": { bg: "#ede9fe", fg: "#5b21b6" },
+		};
+		const c = m[s] || m["Not Required"];
+		return `<span class="badge" style="background:${c.bg};color:${c.fg};font-size:10px;padding:1px 5px">${__("Fee")}: ${s}</span>`;
+	}
+
+	_render_receiving_block(claim) {
+		if (!claim.device_received_at) return "";
+		return `
+		<div style="padding:8px 10px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;font-size:12px;margin-top:8px">
+			<b><i class="fa fa-inbox"></i> ${__("Device Received")}</b>
+			<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
+				<div><span class="text-muted">${__("Received At")}:</span> ${claim.device_received_at}</div>
+				<div><span class="text-muted">${__("By")}:</span> ${claim.device_received_by || "—"}</div>
+				<div><span class="text-muted">${__("Condition")}:</span> ${claim.condition_on_receipt || "—"}</div>
+				<div><span class="text-muted">${__("IMEI OK")}:</span> ${claim.imei_verified ? "✓ Yes" : "✗ No"}</div>
+				${claim.accessories_received ? `<div style="grid-column:span 2"><span class="text-muted">${__("Accessories")}:</span> ${frappe.utils.escape_html(claim.accessories_received)}</div>` : ""}
+				${claim.receiving_remarks ? `<div style="grid-column:span 2"><span class="text-muted">${__("Remarks")}:</span> ${frappe.utils.escape_html(claim.receiving_remarks)}</div>` : ""}
+			</div>
+		</div>`;
+	}
+
+	_render_qc_block(claim) {
+		if (!claim.intake_qc_status) return "";
+		const passed = claim.intake_qc_status === "Passed";
+		const bg = passed ? "#dcfce7" : "#fef2f2";
+		const border = passed ? "#bbf7d0" : "#fecaca";
+		return `
+		<div style="padding:8px 10px;background:${bg};border:1px solid ${border};border-radius:6px;font-size:12px;margin-top:8px">
+			<b><i class="fa fa-check-square-o"></i> ${__("Intake QC")} — ${claim.intake_qc_status}</b>
+			<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
+				<div><span class="text-muted">${__("Done By")}:</span> ${claim.intake_qc_by || "—"}</div>
+				<div><span class="text-muted">${__("Done At")}:</span> ${claim.intake_qc_at || "—"}</div>
+				${claim.intake_qc_result_reason ? `<div style="grid-column:span 2"><span class="text-muted">${__("Reason")}:</span> ${frappe.utils.escape_html(claim.intake_qc_result_reason)}</div>` : ""}
+				${claim.intake_qc_remarks ? `<div style="grid-column:span 2"><span class="text-muted">${__("Remarks")}:</span> ${frappe.utils.escape_html(claim.intake_qc_remarks)}</div>` : ""}
+			</div>
+		</div>`;
+	}
+
+	_render_fee_block(claim) {
+		if (!claim.processing_fee_amount && claim.processing_fee_status === "Not Required") return "";
+		const s = claim.processing_fee_status || "Pending";
+		const paid = ["Paid","Waived","Not Required"].includes(s);
+		const bg = paid ? "#dcfce7" : "#fef3c7";
+		const border = paid ? "#bbf7d0" : "#fde68a";
+		return `
+		<div style="padding:8px 10px;background:${bg};border:1px solid ${border};border-radius:6px;font-size:12px;margin-top:8px">
+			<b><i class="fa fa-credit-card"></i> ${__("Processing Fee")} — ${s}</b>
+			<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
+				<div><span class="text-muted">${__("Amount")}:</span> <b>₹${format_number(claim.processing_fee_amount || 0)}</b></div>
+				${s === "Paid" ? `<div><span class="text-muted">${__("Paid")}:</span> ₹${format_number(claim.processing_fee_paid_amount || 0)} via ${claim.payment_mode || "—"}</div>` : ""}
+				${s === "Paid" && claim.processing_fee_paid_at ? `<div><span class="text-muted">${__("Paid At")}:</span> ${claim.processing_fee_paid_at}</div>` : ""}
+				${claim.processing_fee_payment_ref ? `<div><span class="text-muted">${__("Ref")}:</span> ${claim.processing_fee_payment_ref}</div>` : ""}
+				${s === "Link Sent" ? `<div><span class="text-muted">${__("Link Sent")}:</span> ${claim.processing_fee_link_sent_at || "—"} via ${claim.processing_fee_link_sent_via || "—"}</div>` : ""}
+				${s === "Waived" ? `<div><span class="text-muted">${__("Waived")}:</span> ₹${format_number(claim.waived_amount || 0)}</div>` : ""}
+				${claim.waiver_reason ? `<div style="grid-column:span 2"><span class="text-muted">${__("Reason")}:</span> ${frappe.utils.escape_html(claim.waiver_reason)}</div>` : ""}
+			</div>
+		</div>`;
+	}
+
 	_handle_logistics_action(panel, claim_name, action) {
-		const call_action = (args = {}) => {
+		const refresh = (msg) => {
+			frappe.show_alert({ message: __(msg || "Updated"), indicator: "green" });
+			this._show_claim_detail(panel, claim_name);
+			this._load_claims_pipeline(panel);
+		};
+		const call_logistics = (args = {}) => {
 			return frappe.xcall("ch_item_master.ch_item_master.warranty_api.update_claim_logistics", {
-				claim_name,
-				action,
-				...args,
-			}).then(() => {
-				frappe.show_alert({ message: __("Claim logistics updated"), indicator: "green" });
-				this._show_claim_detail(panel, claim_name);
-				this._load_claims_pipeline(panel);
-			});
+				claim_name, action, ...args,
+			}).then(() => refresh("Claim logistics updated"));
 		};
 
+		// ── Pickup / Delivery (existing) ──
 		if (action === "schedule_pickup") {
 			frappe.prompt([
 				{ fieldname: "pickup_address", fieldtype: "Small Text", label: __("Pickup Address"), reqd: 1 },
@@ -1026,32 +1195,204 @@ export class ClaimsWorkspace {
 				{ fieldname: "pickup_partner", fieldtype: "Data", label: __("Pickup Partner") },
 				{ fieldname: "pickup_tracking_no", fieldtype: "Data", label: __("Tracking Number") },
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
-			], (v) => call_action(v), __("Schedule Pickup"), __("Save"));
+			], (v) => call_logistics(v), __("Schedule Pickup"), __("Save"));
 			return;
 		}
-
 		if (action === "mark_picked_up") {
 			frappe.prompt([
 				{ fieldname: "delivery_otp", fieldtype: "Data", label: __("Pickup OTP"), description: __("Optional") },
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
-			], (v) => call_action(v), __("Mark Picked Up"), __("Confirm"));
+			], (v) => call_logistics(v), __("Mark Picked Up"), __("Confirm"));
 			return;
 		}
-
 		if (action === "mark_out_for_delivery") {
 			frappe.prompt([
-				{ fieldname: "pickup_partner", fieldtype: "Data", label: __("Delivery Partner") },
+				{ fieldname: "pickup_partner", fieldtype: "Select", label: __("Delivery Partner"),
+				  options: "Delhivery\nBluedart\nDTDC\nEcom Express\nXpressbees\nShadowfax\nSelf" },
 				{ fieldname: "pickup_tracking_no", fieldtype: "Data", label: __("Tracking Number") },
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
-			], (v) => call_action(v), __("Out for Delivery"), __("Confirm"));
+			], (v) => call_logistics(v), __("Out for Delivery"), __("Confirm"));
 			return;
 		}
-
 		if (action === "mark_delivered_back") {
 			frappe.prompt([
 				{ fieldname: "delivery_otp", fieldtype: "Data", label: __("Delivery OTP"), description: __("Optional") },
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
-			], (v) => call_action(v), __("Mark Delivered"), __("Confirm"));
+			], (v) => call_logistics(v), __("Mark Delivered"), __("Confirm"));
+			return;
+		}
+
+		// ── Device Receiving ──
+		if (action === "receive_device") {
+			frappe.prompt([
+				{ fieldname: "condition_on_receipt", fieldtype: "Select", label: __("Device Condition"),
+				  options: "\nGood\nMinor Damage\nMajor Damage\nWrong Device\nEmpty Parcel", reqd: 1 },
+				{ fieldname: "accessories_received", fieldtype: "Small Text", label: __("Accessories Received"),
+				  description: __("Charger, cable, box, etc.") },
+				{ fieldname: "imei_verified", fieldtype: "Check", label: __("IMEI Verified"), default: 1 },
+				{ fieldname: "receiving_remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.receive_claim_device", {
+					claim_name,
+					condition_on_receipt: v.condition_on_receipt,
+					accessories_received: v.accessories_received,
+					imei_verified: v.imei_verified,
+					receiving_remarks: v.receiving_remarks,
+				}).then(() => refresh("Device received successfully"));
+			}, __("Receive Device"), __("Confirm Receipt"));
+			return;
+		}
+
+		// ── Intake QC ──
+		if (action === "perform_qc") {
+			frappe.prompt([
+				{ fieldname: "qc_result", fieldtype: "Select", label: __("QC Result"),
+				  options: "\nPassed\nFailed\nNot Repairable", reqd: 1 },
+				{ fieldname: "qc_remarks", fieldtype: "Small Text", label: __("QC Remarks") },
+				{ fieldname: "qc_result_reason", fieldtype: "Small Text", label: __("Reason"),
+				  depends_on: "eval:doc.qc_result!='Passed'", mandatory_depends_on: "eval:doc.qc_result!='Passed'" },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.perform_claim_qc", {
+					claim_name,
+					qc_result: v.qc_result,
+					qc_remarks: v.qc_remarks,
+					qc_result_reason: v.qc_result_reason,
+				}).then(() => refresh("Intake QC completed"));
+			}, __("Perform Intake QC"), __("Submit QC"));
+			return;
+		}
+
+		// ── Generate Fee ──
+		if (action === "generate_fee") {
+			frappe.prompt([
+				{ fieldname: "fee_amount", fieldtype: "Currency", label: __("Fee Amount (override)"),
+				  description: __("Leave blank for auto-calculation") },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.generate_claim_fee", {
+					claim_name,
+					fee_amount: v.fee_amount || null,
+				}).then(() => refresh("Processing fee generated"));
+			}, __("Generate Processing Fee"), __("Generate"));
+			return;
+		}
+
+		// ── Collect Fee (mark paid) ──
+		if (action === "collect_fee") {
+			frappe.prompt([
+				{ fieldname: "paid_amount", fieldtype: "Currency", label: __("Amount Paid"), reqd: 1 },
+				{ fieldname: "payment_mode", fieldtype: "Select", label: __("Payment Mode"),
+				  options: "\nCash\nUPI\nCard\nOnline\nNEFT", reqd: 1 },
+				{ fieldname: "payment_ref", fieldtype: "Data", label: __("Transaction Reference") },
+				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.mark_claim_fee_paid", {
+					claim_name,
+					paid_amount: v.paid_amount,
+					payment_mode: v.payment_mode,
+					payment_ref: v.payment_ref,
+					remarks: v.remarks,
+				}).then(() => refresh("Processing fee collected"));
+			}, __("Collect Processing Fee"), __("Confirm Payment"));
+			return;
+		}
+
+		// ── Send Fee Link ──
+		if (action === "send_fee_link") {
+			frappe.prompt([
+				{ fieldname: "channel", fieldtype: "Select", label: __("Send Via"),
+				  options: "WhatsApp\nSMS", default: "WhatsApp", reqd: 1 },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.send_claim_fee_link", {
+					claim_name,
+					channel: v.channel,
+				}).then(() => refresh("Payment link sent"));
+			}, __("Send Payment Link"), __("Send"));
+			return;
+		}
+
+		// ── Waive Fee ──
+		if (action === "waive_fee") {
+			frappe.prompt([
+				{ fieldname: "waiver_reason", fieldtype: "Small Text", label: __("Waiver Reason"), reqd: 1 },
+				{ fieldname: "waived_amount", fieldtype: "Currency", label: __("Amount to Waive"),
+				  description: __("Leave blank to waive full amount") },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.waive_claim_fee", {
+					claim_name,
+					waiver_reason: v.waiver_reason,
+					waived_amount: v.waived_amount || null,
+				}).then(() => refresh("Fee waiver processed"));
+			}, __("Waive Processing Fee"), __("Submit"));
+			return;
+		}
+
+		// ── Create GoFix Ticket ──
+		if (action === "create_ticket") {
+			frappe.confirm(
+				__("Create GoFix repair ticket for this claim?"),
+				() => {
+					frappe.xcall("ch_item_master.ch_item_master.warranty_api.create_claim_repair_ticket", {
+						claim_name,
+					}).then(() => refresh("GoFix ticket created"));
+				}
+			);
+			return;
+		}
+
+		// ── Request Additional Approval ──
+		if (action === "request_additional_approval") {
+			frappe.prompt([
+				{ fieldname: "additional_issue_description", fieldtype: "Small Text",
+				  label: __("Additional Issue Found"), reqd: 1 },
+				{ fieldname: "additional_cost_estimated", fieldtype: "Currency",
+				  label: __("Estimated Additional Cost"), reqd: 1 },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.request_additional_approval_claim", {
+					claim_name,
+					additional_issue_description: v.additional_issue_description,
+					additional_cost_estimated: v.additional_cost_estimated,
+				}).then(() => refresh("Additional approval requested"));
+			}, __("Request Customer Approval for Additional Cost"), __("Send Request"));
+			return;
+		}
+
+		// ── Resolve Additional Approval (Approved) ──
+		if (action === "resolve_additional_approved") {
+			frappe.prompt([
+				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.resolve_additional_approval_claim", {
+					claim_name, decision: "Approved", remarks: v.remarks,
+				}).then(() => refresh("Customer approved additional cost"));
+			}, __("Customer Approved Additional Cost"), __("Confirm"));
+			return;
+		}
+
+		// ── Resolve Additional Approval (Rejected) ──
+		if (action === "resolve_additional_rejected") {
+			frappe.prompt([
+				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.resolve_additional_approval_claim", {
+					claim_name, decision: "Rejected", remarks: v.remarks,
+				}).then(() => refresh("Customer rejected additional cost"));
+			}, __("Customer Rejected Additional Cost"), __("Confirm"));
+			return;
+		}
+
+		// ── Perform Final QC ──
+		if (action === "perform_final_qc") {
+			frappe.prompt([
+				{ fieldname: "qc_result", fieldtype: "Select", label: __("Final QC Result"),
+				  options: "\nPassed\nFailed", reqd: 1 },
+				{ fieldname: "qc_remarks", fieldtype: "Small Text", label: __("QC Remarks") },
+			], (v) => {
+				frappe.xcall("ch_item_master.ch_item_master.warranty_api.perform_final_qc_claim", {
+					claim_name,
+					qc_result: v.qc_result,
+					qc_remarks: v.qc_remarks,
+				}).then(() => refresh("Final QC completed"));
+			}, __("Final QC After Repair"), __("Submit QC"));
 			return;
 		}
 	}
@@ -1115,29 +1456,66 @@ export class ClaimsWorkspace {
 	_status_color(status) {
 		const m = {
 			"Draft":            { bg: "#f3f4f6", fg: "#374151" },
+			"Pending Coverage Check": { bg: "#f3f4f6", fg: "#6b7280" },
+			"Coverage Identified": { bg: "#dbeafe", fg: "#1e40af" },
 			"Pending Approval": { bg: "#fef3c7", fg: "#92400e" },
+			"Need More Information": { bg: "#fef9c3", fg: "#854d0e" },
 			"Approved":         { bg: "#dbeafe", fg: "#1e40af" },
+			"Partially Approved": { bg: "#fff7ed", fg: "#c2410c" },
 			"Pickup Requested": { bg: "#ccfbf1", fg: "#115e59" },
 			"Pickup Scheduled": { bg: "#99f6e4", fg: "#115e59" },
 			"Picked Up":        { bg: "#5eead4", fg: "#134e4a" },
+			"Device Received":  { bg: "#a7f3d0", fg: "#065f46" },
+			"QC Pending":       { bg: "#fef3c7", fg: "#92400e" },
+			"QC Passed":        { bg: "#bbf7d0", fg: "#166534" },
+			"QC Failed":        { bg: "#fecaca", fg: "#991b1b" },
+			"Fee Pending":      { bg: "#fef3c7", fg: "#92400e" },
+			"Fee Paid":         { bg: "#dcfce7", fg: "#166534" },
+			"Fee Waived":       { bg: "#ede9fe", fg: "#5b21b6" },
 			"Rejected":         { bg: "#fef2f2", fg: "#991b1b" },
 			"Ticket Created":   { bg: "#ede9fe", fg: "#5b21b6" },
 			"Sent to Manufacturer": { bg: "#dbeafe", fg: "#1e3a8a" },
 			"In Repair":        { bg: "#fef9c3", fg: "#854d0e" },
+			"Additional Approval Pending": { bg: "#fef3c7", fg: "#92400e" },
+			"Awaiting Spare":   { bg: "#fef9c3", fg: "#854d0e" },
 			"Repair Complete":  { bg: "#dcfce7", fg: "#166534" },
+			"Final QC Pending": { bg: "#fef3c7", fg: "#92400e" },
+			"Final QC Passed":  { bg: "#bbf7d0", fg: "#166534" },
+			"Invoice Pending":  { bg: "#fef3c7", fg: "#92400e" },
+			"Invoice Raised":   { bg: "#dbeafe", fg: "#1e40af" },
+			"Payment Pending":  { bg: "#fef3c7", fg: "#92400e" },
+			"Payment Received": { bg: "#dcfce7", fg: "#166534" },
 			"Out for Delivery": { bg: "#e0f2fe", fg: "#075985" },
 			"Delivered":        { bg: "#bbf7d0", fg: "#166534" },
 			"Closed":           { bg: "#f3f4f6", fg: "#374151" },
 			"Cancelled":        { bg: "#fee2e2", fg: "#991b1b" },
+			"Not Repairable":   { bg: "#fecaca", fg: "#991b1b" },
 		};
 		return m[status] || { bg: "#f3f4f6", fg: "#374151" };
 	}
 
 	_coverage_style(cov) {
-		if (cov === "In Warranty") return { bg: "#dcfce7", fg: "#166534" };
-		if (cov === "Partial Coverage") return { bg: "#fff7ed", fg: "#92400e" };
-		if (cov === "Manufacturer Warranty") return { bg: "#dbeafe", fg: "#1e40af" };
-		return { bg: "#fef2f2", fg: "#991b1b" };
+		const styles = {
+			"anniversary_warranty": { bg: "#dcfce7", fg: "#166534" },
+			"vas_plan": { bg: "#fff7ed", fg: "#92400e" },
+			"repair_warranty": { bg: "#dbeafe", fg: "#1e40af" },
+			"manufacturer_warranty": { bg: "#e0f2fe", fg: "#075985" },
+			"paid_repair": { bg: "#fef2f2", fg: "#991b1b" },
+			"goodwill": { bg: "#ede9fe", fg: "#5b21b6" },
+		};
+		return styles[cov] || { bg: "#f3f4f6", fg: "#6b7280" };
+	}
+
+	_coverage_label(cov) {
+		const labels = {
+			"anniversary_warranty": __("Anniversary Warranty"),
+			"vas_plan": __("VAS Plan"),
+			"repair_warranty": __("Repair Warranty"),
+			"manufacturer_warranty": __("Manufacturer Warranty"),
+			"paid_repair": __("Paid Repair"),
+			"goodwill": __("Goodwill"),
+		};
+		return labels[cov] || cov || "N/A";
 	}
 
 	_plan_status_style(status) {

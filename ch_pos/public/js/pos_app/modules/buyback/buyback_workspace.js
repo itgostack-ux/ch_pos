@@ -32,7 +32,11 @@ function _determine_stage(data) {
 		if (["Approved", "Awaiting Customer Approval", "Awaiting OTP", "OTP Verified"].includes(s)) return STAGE.APPROVE;
 		if (["Draft", "Awaiting Approval"].includes(s)) return STAGE.INSPECT;
 	}
-	// Assessment-based: inspection exists but no order yet
+	// Assessment-based: inspection completed but no order yet → show approve/create order
+	if (data.inspection && data.inspection.status === "Completed" && !data.order) {
+		return STAGE.APPROVE;
+	}
+	// Assessment-based: inspection exists but not completed yet
 	const status = data.status || "";
 	if (status === "Inspection Created" && data.buyback_inspection) return STAGE.INSPECT;
 	return STAGE.ASSESS;
@@ -244,15 +248,24 @@ export class BuybackWorkspace {
 		else if (stage === STAGE.SETTLE) body_html = this._html_settle(data);
 		else if (stage === STAGE.APPROVE) body_html = this._html_approve(data);
 		else if (stage === STAGE.INSPECT) {
-			// INSPECT stage: show inline inspection form
-			// If inspection data is already in the detail payload, render directly
-			if (data.inspection) {
-				body_html = this._html_inspect_inline(data.inspection, data);
+			// INSPECT stage: open full form instead of inline
+			const ins_name = data.buyback_inspection
+				|| (data.inspection && data.inspection.name);
+			if (ins_name) {
+				body_html = `
+					<div style="padding:20px;text-align:center">
+						<div style="margin-bottom:16px;font-size:13px;color:var(--pos-text-muted)">
+							${__("Inspection")} <strong>${frappe.utils.escape_html(ins_name)}</strong>
+						</div>
+						<button class="btn btn-primary btn-lg ch-bb-act ch-bb-open-inspection-form"
+							data-inspection="${frappe.utils.escape_html(ins_name)}"
+							style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
+							<i class="fa fa-external-link"></i> ${__("Open Inspection Form")}
+						</button>
+					</div>`;
 			} else if (data.order && ["Draft", "Awaiting Approval"].includes(data.order.status)) {
-				// Order exists but awaiting manager approval
 				body_html = this._html_inspect_awaiting(data);
 			} else {
-				// Inspection exists but rich data not loaded yet — show loading
 				body_html = `<div style="padding:30px;text-align:center">
 					<i class="fa fa-spinner fa-spin fa-2x" style="opacity:0.3"></i>
 					<div style="margin-top:8px;font-size:12px;color:var(--pos-text-muted)">${__("Loading inspection...")}</div>
@@ -637,6 +650,38 @@ export class BuybackWorkspace {
 	// ─────────────────────────────── stage: APPROVE ──
 	_html_approve(data) {
 		const order = data.order;
+		const ins = data.inspection;
+
+		// Inspection completed but no order created yet — need to create order first
+		if (!order && ins && ins.status === "Completed") {
+			const price = ins.revised_price || ins.quoted_price || data.quoted_price || data.estimated_price;
+			const grade = ins.post_inspection_grade || ins.condition_grade || ins.pre_inspection_grade || "";
+			return `
+				<div class="ch-bb-valuation-banner"
+					style="background:var(--pos-success-light,#d1fae5);border-color:var(--pos-success,#10b981)">
+					<div class="ch-bb-val-label" style="color:var(--pos-success-dark,#065f46)">
+						<i class="fa fa-check-circle"></i> ${__("Inspection Complete")}
+					</div>
+					<div class="ch-bb-val-amount" style="color:var(--pos-success-dark,#065f46)">
+						₹${format_number(price)}
+					</div>
+					<div class="ch-bb-val-sub">
+						${grade ? __("Grade") + " " + frappe.utils.escape_html(grade) + " · " : ""}
+						${frappe.utils.escape_html(data.customer_name || data.mobile_no || "—")}
+					</div>
+				</div>
+				<div class="ch-bb-actions" style="margin-top:16px;flex-direction:column;gap:10px">
+					<button class="btn btn-primary btn-lg ch-bb-act ch-bb-create-order-from-inspection"
+						data-name="${frappe.utils.escape_html(data.name)}"
+						data-inspection="${frappe.utils.escape_html(ins.name)}"
+						data-price="${price}"
+						data-grade="${frappe.utils.escape_html(grade)}"
+						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
+						<i class="fa fa-check-circle"></i> ${__("Create Order & Send for Approval")}
+					</button>
+				</div>`;
+		}
+
 		const price = order ? order.final_price : (data.quoted_price || data.estimated_price);
 		const mobile = data.mobile_no || "";
 		const masked = mobile ? mobile.slice(0, 2) + "****" + mobile.slice(-2) : "—";
@@ -830,15 +875,26 @@ export class BuybackWorkspace {
 			frappe.set_route("Form", "Buyback Assessment", $(e.currentTarget).data("name"));
 		});
 
-		// ── ASSESS: Start/continue inspection inline ────
+		// ── ASSESS: Start/continue inspection — open form ────
 		el.on("click.bbstage", ".ch-bb-start-inspection", (e) => {
 			const btn = $(e.currentTarget);
 			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}`);
+
+			// If inspection already exists, open it directly
+			if (data.buyback_inspection) {
+				frappe.set_route("Form", "Buyback Inspection", data.buyback_inspection);
+				return;
+			}
+
 			frappe.xcall("ch_pos.api.pos_api.pos_create_inspection", {
 				assessment_name: data.name,
 			}).then((ins) => {
-				// Reload full detail to get proper INSPECT stage with rich data
-				this._reload();
+				const ins_name = ins && (ins.name || ins.inspection_name);
+				if (ins_name) {
+					frappe.set_route("Form", "Buyback Inspection", ins_name);
+				} else {
+					this._reload();
+				}
 			}).catch(() => {
 				btn.prop("disabled", false)
 					.html(`<i class="fa fa-search-plus"></i> ${__("Start Inspection")}`);
@@ -881,8 +937,27 @@ export class BuybackWorkspace {
 		});
 
 		// ── INSPECT INLINE: Open inspection in desk ─────
-		el.on("click.bbstage", ".ch-bb-inspection-to-desk", (e) => {
+		el.on("click.bbstage", ".ch-bb-inspection-to-desk, .ch-bb-open-inspection-form", (e) => {
 			frappe.set_route("Form", "Buyback Inspection", $(e.currentTarget).data("inspection"));
+		});
+
+		// ── APPROVE: Create order from completed inspection ─────
+		el.on("click.bbstage", ".ch-bb-create-order-from-inspection", (e) => {
+			const btn = $(e.currentTarget);
+			const price = parseFloat(btn.data("price")) || 0;
+			btn.prop("disabled", true)
+				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating Order...")}`);
+			frappe.xcall("ch_pos.api.pos_api.pos_start_buyback_order", {
+				assessment_name: data.name,
+				pos_profile: PosState.pos_profile || "",
+				final_price: price,
+			}).then(() => {
+				frappe.show_alert({ message: __("Order created — send for approval"), indicator: "green" });
+				this._reload();
+			}).catch(() => {
+				btn.prop("disabled", false)
+					.html(`<i class="fa fa-check-circle"></i> ${__("Create Order & Send for Approval")}`);
+			});
 		});
 
 		// ── ASSESS: Walk-in — create order directly ─────
@@ -1004,105 +1079,373 @@ export class BuybackWorkspace {
 		const price = order.final_price || 0;
 		const mobile = data.mobile_no || order.mobile_no || "";
 		const masked = mobile ? mobile.slice(0, 2) + "****" + mobile.slice(-2) : "—";
+		const device_label = frappe.utils.escape_html(data.item_name || "");
+		const self = this;
+
+		const STEPS = [
+			{ key: "otp", label: __("OTP") },
+			{ key: "kyc", label: __("KYC & Photos") },
+			{ key: "settlement", label: __("Settlement") },
+		];
+		let step = 0;
+		const state = {
+			otp_code: "", kyc_id_type: order.customer_id_type || "", kyc_id_number: order.customer_id_number || "",
+			settlement_type: order.settlement_type || "", payout_mode: order.customer_payout_mode || "",
+			upi_id: order.customer_upi_id || "",
+			bank_account_holder: order.customer_bank_account_holder || "",
+			bank_account_number: order.customer_bank_account_number || "",
+			bank_ifsc: order.customer_bank_ifsc || "", bank_name: order.customer_bank_name || "",
+			customer_confirm: false,
+		};
+
+		/* ── File upload state ── */
+		const uploads = { customer_id_front: null, customer_id_back: null, customer_photo: null };
 
 		const dlg = new frappe.ui.Dialog({
 			title: __("Customer Approval — In-Store Verification"),
 			size: "large",
-			fields: [
-				{ fieldtype: "HTML", fieldname: "price_summary", options: `
-					<div style="text-align:center;padding:12px 0 16px;border-bottom:1px solid var(--border-color)">
-						<div style="font-size:11px;text-transform:uppercase;color:var(--text-muted);letter-spacing:.05em;font-weight:600">
-							${__("Buyback Amount to be Paid")}
+			fields: [{ fieldtype: "HTML", fieldname: "wizard_html" }],
+			primary_action_label: __("Verify & Approve"),
+			primary_action: () => _submit(),
+		});
+
+		const $body = dlg.fields_dict.wizard_html.$wrapper;
+		dlg.$wrapper.find(".modal-body").css({ overflow: "hidden", padding: 0 });
+		$body.css({ padding: 0 });
+
+		/* ── Helpers ── */
+		function _esc(v) { return frappe.utils.escape_html(v || ""); }
+
+		function _stepper_html() {
+			return STEPS.map((s, i) => {
+				const cls = i < step ? "done" : i === step ? "active" : "";
+				const num = i < step ? '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.485 1.929a1 1 0 010 1.414l-7.07 7.071a1 1 0 01-1.415 0L1.929 7.343a1 1 0 111.414-1.414L5.5 8.086l6.364-6.364a1 1 0 011.414 0l.207.207z"/></svg>' : (i + 1);
+				return `${i > 0 ? `<div class="ch-wz-line ${i <= step ? 'done' : ''}"></div>` : ""}
+					<div class="ch-wz-dot ${cls}"><span class="ch-wz-n">${num}</span><span class="ch-wz-lbl">${s.label}</span></div>`;
+			}).join("");
+		}
+
+		function _input(name, label, type, opts = {}) {
+			const val = _esc(state[name]);
+			const req = opts.reqd ? '<span style="color:var(--red-500)"> *</span>' : "";
+			if (type === "select") {
+				const options = (opts.options || []).map(o => `<option value="${_esc(o)}" ${state[name] === o ? "selected" : ""}>${_esc(o || `— ${label} —`)}</option>`).join("");
+				return `<div class="ch-wz-field" ${opts.hidden ? 'style="display:none"' : ""} data-field="${name}">
+					<label class="ch-wz-label">${label}${req}</label>
+					<select class="ch-wz-select" data-name="${name}">${options}</select>
+					${opts.desc ? `<div class="ch-wz-desc">${opts.desc}</div>` : ""}
+				</div>`;
+			}
+			return `<div class="ch-wz-field" ${opts.hidden ? 'style="display:none"' : ""} data-field="${name}">
+				<label class="ch-wz-label">${label}${req}</label>
+				<input class="ch-wz-input" type="${type || "text"}" data-name="${name}" value="${val}" placeholder="${_esc(opts.placeholder || "")}" />
+				${opts.desc ? `<div class="ch-wz-desc">${opts.desc}</div>` : ""}
+			</div>`;
+		}
+
+		function _file_input(name, label, desc) {
+			return `<div class="ch-wz-file-box" data-upload="${name}">
+				<label class="ch-wz-label">${label}</label>
+				<div class="ch-wz-file-drop">
+					<div class="ch-wz-file-icon"><i class="fa fa-cloud-upload"></i></div>
+					<div class="ch-wz-file-text">${__("Click or drag to upload")}</div>
+					<input type="file" accept="image/*" style="display:none" />
+					<div class="ch-wz-file-preview" style="display:none"></div>
+				</div>
+				${desc ? `<div class="ch-wz-desc">${desc}</div>` : ""}
+			</div>`;
+		}
+
+		/* ── Step content builders ── */
+		function _step_otp() {
+			return `<div class="ch-wz-card">
+				<div class="ch-wz-hint">
+					<i class="fa fa-info-circle"></i>
+					${__("An OTP will be sent to {0} for price approval.", [masked])}
+				</div>
+				<div style="margin:16px 0">
+					<button class="btn btn-primary btn-sm ch-wz-send-otp" style="border-radius:6px;font-weight:600;padding:6px 16px">
+						<i class="fa fa-paper-plane"></i> ${__("Send OTP to")} ${masked}
+					</button>
+					<span class="ch-wz-otp-status" style="margin-left:10px;font-size:12px"></span>
+				</div>
+				${_input("otp_code", __("Enter OTP"), "text", { reqd: true, placeholder: "e.g. 123456", desc: __("6-digit OTP sent to customer's mobile") })}
+			</div>`;
+		}
+
+		function _step_kyc() {
+			return `<div class="ch-wz-card">
+				<div class="ch-wz-row">
+					${_input("kyc_id_type", __("ID Type"), "select", { reqd: true, options: ["", "Aadhaar", "PAN", "Passport", "Driving Licence", "Voter ID"] })}
+					${_input("kyc_id_number", __("ID Number"), "text", { reqd: true })}
+				</div>
+				<div class="ch-wz-row ch-wz-row-3" style="margin-top:16px">
+					${_file_input("customer_id_front", __("ID Proof — Front"), __("Front side of ID card"))}
+					${_file_input("customer_id_back", __("ID Proof — Back"), __("Back side of ID card"))}
+					${_file_input("customer_photo", __("Customer Photo"), __("Selfie for identity verification"))}
+				</div>
+			</div>`;
+		}
+
+		function _step_settlement() {
+			return `<div class="ch-wz-card">
+				<div class="ch-wz-alert">
+					<i class="fa fa-hand-pointer-o"></i>
+					<div>
+						<strong>${__("Please hand the device to the customer")}</strong><br/>
+						<span>${__("Customer should select their preference and enter payment details.")}</span>
+					</div>
+				</div>
+				${_input("settlement_type", __("I want to"), "select", { reqd: true, options: ["", "Buyback", "Exchange"], desc: __("Buyback = cash/UPI/bank payout · Exchange = trade-in for a new device") })}
+				<div class="ch-wz-payout-section" style="display:${state.settlement_type === "Buyback" ? "block" : "none"}">
+					<div class="ch-wz-divider"></div>
+					<div class="ch-wz-section-title">${__("Payout Details")}</div>
+					${_input("payout_mode", __("Receive payment via"), "select", { reqd: true, options: ["", "Cash", "UPI", "Bank Transfer"] })}
+					<div class="ch-wz-payout-upi" style="display:${state.payout_mode === "UPI" ? "block" : "none"}">
+						${_input("upi_id", __("Your UPI ID"), "text", { reqd: true, placeholder: "e.g. 9876543210@upi" })}
+					</div>
+					<div class="ch-wz-payout-bank" style="display:${state.payout_mode === "Bank Transfer" ? "block" : "none"}">
+						<div class="ch-wz-row">
+							${_input("bank_account_holder", __("Account Holder Name"), "text", { reqd: true })}
+							${_input("bank_account_number", __("Account Number"), "text", { reqd: true })}
 						</div>
-						<div style="font-size:32px;font-weight:800;color:var(--primary);line-height:1.2;margin:4px 0">
-							₹${format_number(price)}
-						</div>
-						<div style="font-size:12px;color:var(--text-muted)">
-							${__("Device:")} ${frappe.utils.escape_html(data.item_name || "")} ·
-							${__("Order:")} ${order.name}
+						<div class="ch-wz-row">
+							${_input("bank_ifsc", __("IFSC Code"), "text", { reqd: true })}
+							${_input("bank_name", __("Bank Name"), "text")}
 						</div>
 					</div>
-				` },
+					<div class="ch-wz-payout-confirm" style="display:${state.payout_mode ? "flex" : "none"}">
+						<label class="ch-wz-check">
+							<input type="checkbox" data-name="customer_confirm" ${state.customer_confirm ? "checked" : ""} />
+							<span>${__("I confirm the above details are correct")}</span>
+						</label>
+					</div>
+				</div>
+			</div>`;
+		}
 
-				{ fieldtype: "Section Break", label: __("Step 1: Send OTP to Customer") },
-				{ fieldtype: "HTML", fieldname: "otp_info", options: `
-					<p class="text-muted" style="font-size:12px;margin-bottom:8px">
-						<i class="fa fa-info-circle"></i>
-						${__("An OTP will be sent to customer's number {0} for price approval.", [masked])}
-					</p>
-				` },
-				{ fieldname: "otp_code", fieldtype: "Data", label: __("Enter OTP"), reqd: 1,
-					description: __("6-digit OTP sent to customer's mobile") },
+		/* ── Full render ── */
+		function _render() {
+			const step_fn = [_step_otp, _step_kyc, _step_settlement][step];
+			$body.html(`
+				<style>
+					.ch-wz{font-family:var(--font-stack);padding:0}
+					.ch-wz-header{text-align:center;padding:20px 24px 16px;background:var(--subtle-fg);border-bottom:1px solid var(--border-color)}
+					.ch-wz-price-label{font-size:11px;text-transform:uppercase;color:var(--text-muted);letter-spacing:.06em;font-weight:600}
+					.ch-wz-price-val{font-size:30px;font-weight:800;color:var(--primary);margin:2px 0}
+					.ch-wz-price-sub{font-size:12px;color:var(--text-muted)}
+					.ch-wz-stepper{display:flex;align-items:center;justify-content:center;padding:16px 24px;border-bottom:1px solid var(--border-color);gap:0}
+					.ch-wz-dot{display:flex;align-items:center;gap:6px}
+					.ch-wz-n{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+						font-size:12px;font-weight:700;border:2px solid var(--gray-300);color:var(--gray-400);background:#fff;flex-shrink:0}
+					.ch-wz-lbl{font-size:13px;font-weight:600;color:var(--text-muted);white-space:nowrap}
+					.ch-wz-dot.active .ch-wz-n{border-color:var(--primary);background:var(--primary);color:#fff}
+					.ch-wz-dot.active .ch-wz-lbl{color:var(--text-color)}
+					.ch-wz-dot.done .ch-wz-n{border-color:var(--green-500);background:var(--green-50);color:var(--green-600)}
+					.ch-wz-dot.done .ch-wz-lbl{color:var(--green-600)}
+					.ch-wz-line{width:32px;height:2px;background:var(--gray-200);margin:0 8px;flex-shrink:0}
+					.ch-wz-line.done{background:var(--green-500)}
+					.ch-wz-content{padding:20px 24px 16px}
+					.ch-wz-card{}
+					.ch-wz-hint{background:var(--blue-50,#e3f2fd);border-radius:8px;padding:12px 16px;font-size:13px;color:var(--blue-700,#1565c0);margin-bottom:16px}
+					.ch-wz-hint i{margin-right:6px}
+					.ch-wz-alert{display:flex;gap:12px;background:var(--yellow-50,#fffde7);border:1px solid var(--yellow-200,#fff9c4);border-radius:8px;padding:14px 16px;margin-bottom:18px;font-size:13px}
+					.ch-wz-alert i{font-size:18px;color:var(--yellow-700);margin-top:2px}
+					.ch-wz-alert span{color:var(--text-muted);font-size:12px}
+					.ch-wz-row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+					.ch-wz-row-3{grid-template-columns:1fr 1fr 1fr}
+					.ch-wz-field{margin-bottom:14px}
+					.ch-wz-label{display:block;font-size:12px;font-weight:600;color:var(--heading-color);margin-bottom:6px}
+					.ch-wz-input,.ch-wz-select{width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;background:#fff;
+						color:var(--text-color);outline:none;transition:border-color .15s}
+					.ch-wz-input:focus,.ch-wz-select:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(var(--primary-rgb,.1),.15)}
+					.ch-wz-desc{font-size:11px;color:var(--text-muted);margin-top:4px}
+					.ch-wz-divider{border-top:1px solid var(--border-color);margin:18px 0}
+					.ch-wz-section-title{font-size:14px;font-weight:700;margin-bottom:14px;color:var(--heading-color)}
+					.ch-wz-payout-confirm{display:flex;padding:12px 0}
+					.ch-wz-check{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:500;color:var(--heading-color)}
+					.ch-wz-check input{width:18px;height:18px;accent-color:var(--primary)}
+					.ch-wz-file-box{margin-bottom:14px}
+					.ch-wz-file-drop{border:2px dashed var(--gray-300);border-radius:8px;padding:16px;text-align:center;cursor:pointer;transition:border-color .15s;position:relative;min-height:80px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+					.ch-wz-file-drop:hover{border-color:var(--primary)}
+					.ch-wz-file-drop.has-file{border-style:solid;border-color:var(--green-400);background:var(--green-50)}
+					.ch-wz-file-icon{font-size:22px;color:var(--gray-400);margin-bottom:4px}
+					.ch-wz-file-text{font-size:12px;color:var(--text-muted)}
+					.ch-wz-file-preview{font-size:12px;color:var(--green-700);font-weight:600}
+					.ch-wz-file-preview i{margin-right:4px}
+					.ch-wz-nav{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;border-top:1px solid var(--border-color)}
+					.ch-wz-nav .btn{border-radius:6px;font-weight:600;padding:8px 20px;font-size:13px}
+				</style>
+				<div class="ch-wz">
+					<div class="ch-wz-header">
+						<div class="ch-wz-price-label">${__("Buyback Amount to be Paid")}</div>
+						<div class="ch-wz-price-val">₹${format_number(price)}</div>
+						<div class="ch-wz-price-sub">${device_label} · ${order.name}</div>
+					</div>
+					<div class="ch-wz-stepper">${_stepper_html()}</div>
+					<div class="ch-wz-content">${step_fn()}</div>
+					<div class="ch-wz-nav">
+						<div>${step > 0 ? `<button class="btn btn-default ch-wz-back"><i class="fa fa-arrow-left"></i> ${__("Back")}</button>` : ""}</div>
+						<div>
+							${step < STEPS.length - 1
+								? `<button class="btn btn-primary ch-wz-next">${__("Next")} <i class="fa fa-arrow-right"></i></button>`
+								: `<button class="btn btn-primary ch-wz-submit"><i class="fa fa-check"></i> ${__("Verify & Approve")}</button>`}
+						</div>
+					</div>
+				</div>
+			`);
+			// Hide dialog's default footer since we have our own nav
+			dlg.get_primary_btn().closest(".modal-footer").hide();
+			_bind_events();
+		}
 
-				{ fieldtype: "Section Break", label: __("Step 2: Customer KYC Verification") },
-				{ fieldname: "kyc_id_type", fieldtype: "Select", label: __("ID Type"), reqd: 1,
-					options: "\nAadhaar\nPAN\nPassport\nDriving Licence\nVoter ID",
-					default: order.customer_id_type || "" },
-				{ fieldtype: "Column Break" },
-				{ fieldname: "kyc_id_number", fieldtype: "Data", label: __("ID Number"), reqd: 1,
-					default: order.customer_id_number || "" },
-			],
-			primary_action_label: __("Verify & Approve"),
-			primary_action: (values) => {
-				if (!values.otp_code || values.otp_code.length < 4) {
-					frappe.show_alert({ message: __("Enter a valid OTP"), indicator: "orange" });
-					return;
-				}
-				if (!values.kyc_id_type || !values.kyc_id_number) {
-					frappe.show_alert({ message: __("KYC ID type and number are required"), indicator: "orange" });
-					return;
-				}
-
-				dlg.disable_primary_action();
-				dlg.set_title(__("Verifying..."));
-
-				frappe.xcall("ch_pos.api.pos_api.pos_approve_customer_buyback", {
-					order_name: order.name,
-					method: "OTP",
-					otp_code: values.otp_code,
-					kyc_id_type: values.kyc_id_type,
-					kyc_id_number: values.kyc_id_number,
-				}).then(() => {
-					dlg.hide();
-					frappe.show_alert({ message: __("Customer approved (OTP verified + KYC)"), indicator: "green" });
-					this._reload();
-				}).catch((e) => {
-					dlg.enable_primary_action();
-					dlg.set_title(__("Customer Approval — In-Store Verification"));
-					frappe.show_alert({ message: e.message || __("Verification failed"), indicator: "red" });
-				});
-			},
-		});
-
-		// Add "Send OTP" button below the form
-		dlg.$wrapper.find('[data-fieldname="otp_code"]').closest(".frappe-control").before(`
-			<div style="margin-bottom:10px">
-				<button class="btn btn-sm btn-primary ch-bb-send-otp-btn" style="border-radius:6px;font-weight:600">
-					<i class="fa fa-paper-plane"></i> ${__("Send OTP to")} ${masked}
-				</button>
-				<span class="ch-bb-otp-status" style="margin-left:8px;font-size:12px"></span>
-			</div>
-		`);
-
-		dlg.$wrapper.find(".ch-bb-send-otp-btn").on("click", function () {
-			const btn = $(this);
-			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Sending...")}`);
-			frappe.xcall("ch_pos.api.pos_api.pos_send_customer_otp", {
-				order_name: order.name,
-			}).then((res) => {
-				btn.prop("disabled", true)
-					.html(`<i class="fa fa-check"></i> ${__("OTP Sent")}`)
-					.removeClass("btn-primary").addClass("btn-success");
-				dlg.$wrapper.find(".ch-bb-otp-status")
-					.html(`<span style="color:var(--green-600)"><i class="fa fa-check-circle"></i> ${__("Sent to {0}", [res.masked_mobile])}</span>`);
-			}).catch((e) => {
-				btn.prop("disabled", false)
-					.html(`<i class="fa fa-paper-plane"></i> ${__("Retry Send OTP")}`);
-				frappe.show_alert({ message: e.message || __("Failed to send OTP"), indicator: "red" });
+		/* ── Sync input values to state on every change ── */
+		function _sync_state() {
+			$body.find(".ch-wz-input, .ch-wz-select").each(function () {
+				const name = $(this).data("name");
+				if (name) state[name] = $(this).val();
 			});
-		});
+			$body.find('input[type="checkbox"][data-name]').each(function () {
+				state[$(this).data("name")] = $(this).is(":checked");
+			});
+		}
+
+		/* ── Event binding ── */
+		function _bind_events() {
+			$body.find(".ch-wz-back").on("click", () => { _sync_state(); step--; _render(); });
+			$body.find(".ch-wz-next").on("click", () => { _sync_state(); if (_validate()) { step++; _render(); } });
+			$body.find(".ch-wz-submit").on("click", () => { _sync_state(); _submit(); });
+
+			/* settlement_type toggle */
+			$body.find('[data-name="settlement_type"]').on("change", function () {
+				state.settlement_type = $(this).val();
+				$body.find(".ch-wz-payout-section").toggle(state.settlement_type === "Buyback");
+			});
+			/* payout_mode toggle */
+			$body.find('[data-name="payout_mode"]').on("change", function () {
+				state.payout_mode = $(this).val();
+				$body.find(".ch-wz-payout-upi").toggle(state.payout_mode === "UPI");
+				$body.find(".ch-wz-payout-bank").toggle(state.payout_mode === "Bank Transfer");
+				$body.find(".ch-wz-payout-confirm").toggle(!!state.payout_mode);
+			});
+
+			/* Send OTP */
+			$body.find(".ch-wz-send-otp").on("click", function () {
+				const btn = $(this);
+				btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Sending...")}`);
+				frappe.xcall("ch_pos.api.pos_api.pos_send_customer_otp", { order_name: order.name })
+				.then((res) => {
+					btn.prop("disabled", true).html(`<i class="fa fa-check"></i> ${__("OTP Sent")}`).removeClass("btn-primary").addClass("btn-success");
+					$body.find(".ch-wz-otp-status").html(`<span style="color:var(--green-600)"><i class="fa fa-check-circle"></i> ${__("Sent to {0}", [res.masked_mobile])}</span>`);
+				}).catch((e) => {
+					btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Retry Send OTP")}`);
+					frappe.show_alert({ message: e.message || __("Failed to send OTP"), indicator: "red" });
+				});
+			});
+
+			/* File uploads */
+			$body.find(".ch-wz-file-drop").each(function () {
+				const $drop = $(this);
+				const $input = $drop.find('input[type="file"]');
+				const name = $drop.closest("[data-upload]").data("upload");
+
+				$drop.on("click", () => $input.trigger("click"));
+				$drop.on("dragover", (e) => { e.preventDefault(); $drop.css("border-color", "var(--primary)"); });
+				$drop.on("dragleave drop", () => $drop.css("border-color", ""));
+				$drop.on("drop", (e) => { e.preventDefault(); if (e.originalEvent.dataTransfer.files.length) _handle_file(name, $drop, e.originalEvent.dataTransfer.files[0]); });
+				$input.on("change", function () { if (this.files.length) _handle_file(name, $drop, this.files[0]); });
+			});
+		}
+
+		function _handle_file(name, $drop, file) {
+			$drop.find(".ch-wz-file-icon, .ch-wz-file-text").hide();
+			$drop.find(".ch-wz-file-preview").show().html(`<i class="fa fa-spinner fa-spin"></i> ${__("Uploading...")}`);
+			$drop.addClass("has-file");
+
+			const form_data = new FormData();
+			form_data.append("file", file, file.name);
+			form_data.append("doctype", "Buyback Order");
+			form_data.append("docname", order.name);
+			form_data.append("fieldname", name);
+			form_data.append("is_private", 1);
+
+			$.ajax({
+				url: "/api/method/upload_file",
+				type: "POST",
+				data: form_data,
+				processData: false,
+				contentType: false,
+				headers: { "X-Frappe-CSRF-Token": frappe.csrf_token },
+			}).done((r) => {
+				const url = r.message.file_url;
+				uploads[name] = url;
+				$drop.find(".ch-wz-file-preview").html(`<i class="fa fa-check-circle"></i> ${frappe.utils.escape_html(file.name)}`);
+			}).fail(() => {
+				$drop.find(".ch-wz-file-preview").html(`<span style="color:var(--red-500)"><i class="fa fa-times"></i> ${__("Upload failed")}</span>`);
+				$drop.removeClass("has-file");
+				uploads[name] = null;
+			});
+		}
+
+		/* ── Per-step validation ── */
+		function _validate() {
+			if (step === 0) {
+				if (!state.otp_code || state.otp_code.length < 4) {
+					frappe.show_alert({ message: __("Please enter a valid OTP"), indicator: "orange" }); return false;
+				}
+			} else if (step === 1) {
+				if (!state.kyc_id_type || !state.kyc_id_number) {
+					frappe.show_alert({ message: __("ID Type and ID Number are required"), indicator: "orange" }); return false;
+				}
+			}
+			return true;
+		}
+
+		/* ── Final submit ── */
+		function _submit() {
+			_sync_state();
+			if (!state.settlement_type) {
+				frappe.show_alert({ message: __("Please select Buyback or Exchange"), indicator: "orange" }); return;
+			}
+			if (state.settlement_type === "Buyback") {
+				if (!state.payout_mode) { frappe.show_alert({ message: __("Please select a payout mode"), indicator: "orange" }); return; }
+				if (state.payout_mode === "UPI" && !state.upi_id) { frappe.show_alert({ message: __("UPI ID is required"), indicator: "orange" }); return; }
+				if (state.payout_mode === "Bank Transfer" && (!state.bank_account_holder || !state.bank_account_number || !state.bank_ifsc)) {
+					frappe.show_alert({ message: __("Bank account details are required"), indicator: "orange" }); return;
+				}
+				if (!state.customer_confirm) { frappe.show_alert({ message: __("Customer must confirm the details are correct"), indicator: "orange" }); return; }
+			}
+
+			$body.find(".ch-wz-submit").prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Verifying...")}`);
+
+			frappe.xcall("ch_pos.api.pos_api.pos_approve_customer_buyback", {
+				order_name: order.name,
+				method: "OTP",
+				otp_code: state.otp_code,
+				kyc_id_type: state.kyc_id_type,
+				kyc_id_number: state.kyc_id_number,
+				customer_id_front: uploads.customer_id_front || null,
+				customer_id_back: uploads.customer_id_back || null,
+				customer_photo: uploads.customer_photo || null,
+				settlement_type: state.settlement_type,
+				payout_mode: state.settlement_type === "Buyback" ? state.payout_mode : null,
+				upi_id: state.upi_id || null,
+				bank_account_holder: state.bank_account_holder || null,
+				bank_account_number: state.bank_account_number || null,
+				bank_ifsc: state.bank_ifsc || null,
+				bank_name: state.bank_name || null,
+			}).then(() => {
+				dlg.hide();
+				frappe.show_alert({ message: __("Customer approved ✓"), indicator: "green" });
+				self._reload();
+			}).catch((e) => {
+				$body.find(".ch-wz-submit").prop("disabled", false).html(`<i class="fa fa-check"></i> ${__("Verify & Approve")}`);
+				frappe.show_alert({ message: e.message || __("Verification failed"), indicator: "red" });
+			});
+		}
 
 		dlg.show();
+		_render();
 	}
 
 	// ─────────────────────────────── new assessment dialog ──

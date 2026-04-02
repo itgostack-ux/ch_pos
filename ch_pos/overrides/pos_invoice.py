@@ -783,6 +783,16 @@ def _apply_margin_scheme(doc):
         flt(item.amount) for item in doc.items if not item.get("custom_is_margin_item")
     )
 
+    # Only modify taxes if they are still "On Net Total" (first validate pass).
+    # After the first pass we switch them to "Actual" so that subsequent calls
+    # to calculate_taxes_and_totals (e.g. during submit) respect the pre-set
+    # amounts and keep grand_total / paid_amount consistent with margin taxes.
+    has_on_net_total = any(t.charge_type == "On Net Total" for t in doc.taxes)
+    if not has_on_net_total:
+        # Taxes are already "Actual" from a previous validate pass.
+        # Summary fields (custom_margin_*) were already set; nothing to do.
+        return
+
     # Recalculate tax rows for margin items
     total_gst = 0
     for tax in doc.taxes:
@@ -795,12 +805,20 @@ def _apply_margin_scheme(doc):
         non_margin_tax = (total_non_margin * flt(tax.rate)) / 100
 
         combined = margin_tax + non_margin_tax
+
+        # Switch to "Actual" so ERPNext's calculate_taxes_and_totals won't
+        # recompute these amounts from the rate on subsequent validate calls.
+        tax.charge_type = "Actual"
         tax.tax_amount = combined
         tax.tax_amount_after_discount_amount = combined
         tax.base_tax_amount = combined
         tax.base_tax_amount_after_discount_amount = combined
 
         total_gst += margin_tax
+
+    # Recompute totals now that taxes are "Actual" with margin-only amounts.
+    # This updates grand_total, paid_amount, outstanding_amount consistently.
+    doc.run_method("calculate_taxes_and_totals")
 
     # Calculate exempted value per margin item
     total_exempted = 0

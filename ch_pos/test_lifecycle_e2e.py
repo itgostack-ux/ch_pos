@@ -405,6 +405,7 @@ def step_1_purchase():
             "rate": COST_RATE,
             "warehouse": WAREHOUSE,
             "serial_no": TEST_IMEI,
+            "custom_imei": "Yes",
         }],
     })
     pr.flags.ignore_permissions = True
