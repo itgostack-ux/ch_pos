@@ -631,6 +631,7 @@ def create_pos_invoice(pos_profile, customer, items,
             )
             if sp:
                 sold_plans.append(sp.name)
+                wi["_sold_plan"] = sp.name  # carry forward for voucher linkage
         except Exception:
             frappe.log_error(
                 frappe.get_traceback(),
@@ -638,31 +639,40 @@ def create_pos_invoice(pos_profile, customer, items,
             )
 
     # ── VAS Voucher Generation ────────────────────────────────────────────────
-    # For each VAS item: generate floor(price/500) × ₹500 vouchers, email to customer
+    # Read voucher rules from CH VAS Settings (configurable face value, validity,
+    # item-group restriction, etc.)  Each VAS item generates
+    # floor(price ÷ face_value) single-use vouchers linked back to the sold plan.
     generated_vouchers = []
     try:
         from ch_item_master.ch_item_master.voucher_api import issue_voucher
+        vas_cfg = frappe.get_cached_doc("CH VAS Settings")
+        voucher_face_value = flt(vas_cfg.vas_voucher_amount) or 2000
+        voucher_validity   = cint(vas_cfg.vas_voucher_validity_days) or 180
+        voucher_item_group = vas_cfg.vas_voucher_item_group or None
+        voucher_channel    = vas_cfg.vas_voucher_channel or None
+
         customer_phone = frappe.db.get_value("Customer", customer, "mobile_no") or ""
         customer_email = frappe.db.get_value("Customer", customer, "email_id") or ""
         for wi in warranty_items:
             if not wi.get("is_vas"):
                 continue
             vas_price = flt(wi["price"])
-            voucher_count = int(vas_price // 500)
+            voucher_count = int(vas_price // voucher_face_value)
             for _ in range(voucher_count):
                 v = issue_voucher(
                     voucher_type="VAS Voucher",
-                    amount=500,
+                    amount=voucher_face_value,
                     company=profile.company,
                     customer=customer if customer != "Walk-in Customer" else None,
                     phone=customer_phone or None,
-                    valid_days=180,
+                    valid_days=voucher_validity,
                     source_type="Purchase",
                     source_document=inv.name,
                     reason=f"VAS purchase on {inv.name}",
-                    single_use=0,
-                    applicable_channel="POS",
-                    applicable_item_group="Accessories",
+                    single_use=1,
+                    applicable_channel=voucher_channel,
+                    applicable_item_group=voucher_item_group,
+                    sold_plan=wi.get("_sold_plan"),
                 )
                 generated_vouchers.append(v)
         if generated_vouchers and (customer_email or customer_phone):
