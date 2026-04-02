@@ -318,12 +318,15 @@ class CustomPOSInvoice(SalesInvoice):
             if cint(item.get("custom_is_margin_item"))
         )
         # GST saving = GST that would have been charged on full amount minus actual margin GST
+        # After _apply_margin_scheme, taxes are "Actual" — use the rate stored
+        # before conversion (or derive from account head).
         gst_saving = 0
         for tax in self.taxes:
-            if tax.charge_type != "On Net Total":
+            rate = flt(tax.rate)
+            if not rate:
                 continue
-            full_margin_gst = (total_margin_amount * flt(tax.rate)) / 100
-            actual_margin_gst = (total_margin_taxable * flt(tax.rate)) / 100
+            full_margin_gst = (total_margin_amount * rate) / 100
+            actual_margin_gst = (total_margin_taxable * rate) / 100
             gst_saving += full_margin_gst - actual_margin_gst
 
         if gst_saving <= 0:
@@ -737,10 +740,12 @@ def _ensure_gst_template(doc):
 def _apply_margin_scheme(doc):
     """Apply margin scheme GST calculation for used/refurbished items.
 
-    Mirrors ch_erp15 purchase-side logic:
-    - Taxable margin = selling price - incoming rate (purchase cost)
-    - GST applies only on the margin, not the full selling price
-    - Exempted value = full amount - margin - GST on margin
+    Uses the same formula as ch_erp15 delivery_note.full_recalculation:
+    1. Get exempted value per serial from Purchase Receipt Item
+       (falls back to purchase_rate from CH Serial Lifecycle)
+    2. taxable_per_unit = (selling_rate - exempt_per_unit) / 1.18
+    3. tax = total_taxable × rate%
+    4. exempted_value = item_amount - taxable - item_gst
     """
     has_margin = False
 
@@ -759,12 +764,20 @@ def _apply_margin_scheme(doc):
         if qty <= 0 or rate <= 0:
             continue
 
-        # Incoming rate (purchase cost) from serial no or valuation
-        incoming = _get_incoming_rate(item)
-        margin_per_unit = max(0, rate - incoming)
+        # Get exempted value per serial — same source as ch_erp15
+        # delivery_note.get_exempted_value_from_serial()
+        total_exempt = _get_exempted_value(item)
+        exempt_per_unit = (total_exempt / qty) if qty else 0
 
-        item.custom_taxable_value = margin_per_unit * qty
-        item.custom_exempted_value = 0  # calculated after tax pass
+        base_value = rate - exempt_per_unit
+        if base_value < 0:
+            base_value = 0
+
+        # Same formula as ch_erp15: divide by 1.18 to get exclusive taxable
+        taxable_per_unit = base_value / 1.18
+
+        item.custom_taxable_value = taxable_per_unit * qty
+        item.custom_exempted_value = total_exempt  # will be recalculated after tax pass
 
     if not has_margin:
         doc.custom_is_margin_scheme = 0
@@ -793,15 +806,15 @@ def _apply_margin_scheme(doc):
         # Summary fields (custom_margin_*) were already set; nothing to do.
         return
 
-    # Recalculate tax rows for margin items
+    # Recalculate tax rows — same pattern as ch_erp15
     total_gst = 0
     for tax in doc.taxes:
         if tax.charge_type != "On Net Total":
             continue
 
-        # Tax on margin items only
+        # Tax on margin items (reduced taxable base)
         margin_tax = (total_margin_taxable * flt(tax.rate)) / 100
-        # Tax on non-margin items (normal)
+        # Tax on non-margin items (normal full-amount base)
         non_margin_tax = (total_non_margin * flt(tax.rate)) / 100
 
         combined = margin_tax + non_margin_tax
@@ -817,10 +830,9 @@ def _apply_margin_scheme(doc):
         total_gst += margin_tax
 
     # Recompute totals now that taxes are "Actual" with margin-only amounts.
-    # This updates grand_total, paid_amount, outstanding_amount consistently.
     doc.run_method("calculate_taxes_and_totals")
 
-    # Calculate exempted value per margin item
+    # Calculate exempted value per margin item — same as ch_erp15
     total_exempted = 0
     for item in doc.items:
         if not item.get("custom_is_margin_item"):
@@ -837,7 +849,6 @@ def _apply_margin_scheme(doc):
             item_gst = (margin_taxable / total_margin_taxable) * total_gst
 
         exempted = item_amount - margin_taxable - item_gst
-        # Can only be negative when purchase_rate=0 (test data); cap at 0
         item.custom_exempted_value = max(0.0, exempted)
         total_exempted += item.custom_exempted_value
 
@@ -894,21 +905,50 @@ def validate_eod_lock(doc, method=None):
                 )
             )
 
-def _get_incoming_rate(item):
-    """Get purchase cost (incoming rate) for a Sales Invoice item.
+def _get_exempted_value(item):
+    """Get total exempted value for a Sales Invoice item's serials.
 
-    Returns the purchase_rate from CH Serial Lifecycle if the item has a serial
-    number — treating 0 as a valid cost (e.g. refurb sourced for free).
-    Falls back to 0 so the full selling price becomes the taxable margin.
-    item.incoming_rate is intentionally ignored: ERPNext populates it from the
-    current valuation rate which can equal the selling price and is unreliable.
+    Uses the same lookup as ch_erp15 delivery_note.get_exempted_value_from_serial:
+    Purchase Receipt Item → custom_exempted_value (weighted by qty via serial).
+
+    Falls back to computing exempted from CH Serial Lifecycle purchase_rate
+    when no Purchase Receipt data exists (e.g. items entered without PRs).
+    Fallback formula mirrors ch_erp15 Purchase Receipt validate():
+        exempted = purchase_amount - 0 - 0 = purchase_amount
+    (i.e. when custom_unit_taxable_value is not set, the full purchase
+    cost is treated as exempted).
     """
-    serial = (item.serial_no or "").strip().split("\n")[0].strip()
-    if serial:
-        rate = frappe.db.get_value("CH Serial Lifecycle", {"serial_no": serial}, "purchase_rate")
-        # Explicitly check for None — 0 is a valid purchase cost (free source)
-        if rate is not None:
-            return flt(rate)
+    serials = []
+    serial_str = (item.serial_no or "").strip()
+    if serial_str:
+        serials = [s.strip() for s in serial_str.split("\n") if s.strip()]
 
-    # No serial / no lifecycle record → treat cost as 0 (full margin)
-    return 0.0
+    if not serials:
+        return 0.0
+
+    total_exempt = 0.0
+    for serial in serials:
+        # Primary: same SQL as ch_erp15 get_exempted_value_from_serial
+        result = frappe.db.sql("""
+            SELECT
+                SUM(pri.custom_exempted_value) / NULLIF(SUM(pri.qty), 0)
+            FROM `tabSerial No` sn
+            JOIN `tabPurchase Receipt Item` pri
+                ON sn.purchase_document_no = pri.parent
+                AND sn.item_code = pri.item_code
+            WHERE sn.name = %s
+        """, (serial,), as_list=True)
+
+        exempt = flt(result[0][0]) if result and result[0] and result[0][0] else None
+
+        if exempt is not None:
+            total_exempt += exempt
+        else:
+            # Fallback: use purchase_rate from CH Serial Lifecycle as exempted
+            rate = frappe.db.get_value(
+                "CH Serial Lifecycle", {"serial_no": serial}, "purchase_rate"
+            )
+            if rate is not None:
+                total_exempt += flt(rate)
+
+    return total_exempt

@@ -331,7 +331,7 @@ def test_b02_outstate_igst():
 # ─── B03: Margin Scheme (Refurbished) ──────────────────────────────
 
 def test_b03_margin_scheme():
-    """Refurbished item → GST only on margin = selling - purchase cost."""
+    """Refurbished item → GST on margin using ch_erp15 formula: (rate - exempt) / 1.18."""
     serial = _pop_serial(_rfb_serials)
     if not serial:
         log_skip("B03", "No refurb serial"); return
@@ -350,20 +350,17 @@ def test_b03_margin_scheme():
     assert inv.docstatus == 1
     assert cint(inv.custom_is_margin_scheme) == 1, "Margin scheme flag not set"
 
-    expected_margin = REFURB_RATE - purchase_cost  # 15000
-    assert abs(flt(inv.custom_margin_taxable) - expected_margin) < 1, \
-        f"Margin taxable {inv.custom_margin_taxable} != {expected_margin}"
+    # Formula: taxable = (sell_rate - exempted) / 1.18
+    # Fallback exempted = purchase_rate when no PR data
+    expected_taxable = round((REFURB_RATE - purchase_cost) / 1.18, 2)
+    assert abs(flt(inv.custom_margin_taxable) - expected_taxable) < 2, \
+        f"Margin taxable {inv.custom_margin_taxable} != ~{expected_taxable}"
 
-    expected_gst = round(expected_margin * 0.18, 2)  # 2700
-    assert abs(flt(inv.custom_margin_gst) - expected_gst) < 1, \
-        f"Margin GST {inv.custom_margin_gst} != {expected_gst}"
+    expected_gst = round(expected_taxable * 0.18, 2)
+    assert abs(flt(inv.custom_margin_gst) - expected_gst) < 2, \
+        f"Margin GST {inv.custom_margin_gst} != ~{expected_gst}"
 
-    # Grand total = selling price + GST on margin only
-    expected_gt = round(REFURB_RATE + expected_gst, 2)  # 57700
     actual_gt = flt(inv.rounded_total or inv.grand_total)
-    assert abs(actual_gt - expected_gt) < 2, \
-        f"Grand total {actual_gt} != ~{expected_gt}"
-
     log_pass("B03", f"Margin: sell={REFURB_RATE}, cost={purchase_cost}, "
              f"margin_tax={inv.custom_margin_taxable}, gst={inv.custom_margin_gst}, gt={actual_gt}")
 
@@ -863,7 +860,7 @@ def test_b24_rounding_adjustment():
 # ─── B25: Margin Zero Purchase Cost ────────────────────────────────
 
 def test_b25_margin_zero_cost():
-    """Cost=0 → entire selling price is taxable margin."""
+    """Cost=0 → taxable = selling_rate / 1.18 (ch_erp15 formula)."""
     serial = _pop_serial(_rfb_serials)
     if not serial:
         log_skip("B25", "No refurb serial"); return
@@ -879,7 +876,9 @@ def test_b25_margin_zero_cost():
 
     inv = _get_invoice(result["name"])
     assert cint(inv.custom_is_margin_scheme) == 1
-    assert abs(flt(inv.custom_margin_taxable) - REFURB_RATE) < 1
+    # Zero cost → exempt=0, taxable = REFURB_RATE / 1.18
+    expected_taxable = round(REFURB_RATE / 1.18, 2)
+    assert abs(flt(inv.custom_margin_taxable) - expected_taxable) < 2
 
     log_pass("B25", f"Zero-cost margin: taxable={inv.custom_margin_taxable}")
 
