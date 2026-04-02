@@ -2838,7 +2838,10 @@ def store_dashboard(pos_profile):
 
 @frappe.whitelist()
 def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None):
-    """Create a Store Material Request from POS for stock replenishment."""
+    """Create a Store Material Request from POS for stock replenishment.
+
+    Source warehouse is auto-resolved from the store's zone if not provided.
+    """
     from ch_erp15.ch_erp15.store_request_api import create_store_material_request
 
     required_by_date = nowdate()
@@ -2855,6 +2858,34 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
         required_by_date=required_by_date,
         preferred_source_warehouse=source_warehouse or None,
     )
+
+
+@frappe.whitelist()
+def get_draft_material_requests(pos_profile):
+    """Get Draft MRs for this POS store (store exec can append items to these)."""
+    from ch_erp15.ch_erp15.store_request_api import get_draft_requests
+    return get_draft_requests(pos_profile=pos_profile)
+
+
+@frappe.whitelist()
+def add_items_to_material_request(request_name, items):
+    """Add items to an existing Draft Material Request from POS."""
+    from ch_erp15.ch_erp15.store_request_api import add_items_to_draft
+    return add_items_to_draft(request_name=request_name, items=items)
+
+
+@frappe.whitelist()
+def check_material_request_capacity(pos_profile, items):
+    """Check Warehouse Capacity limits for requested items."""
+    from ch_erp15.ch_erp15.store_request_api import check_request_capacity
+    return check_request_capacity(pos_profile=pos_profile, items=items)
+
+
+@frappe.whitelist()
+def get_store_zone_info(pos_profile):
+    """Get zone and source warehouse info for the POS store."""
+    from ch_erp15.ch_erp15.store_request_api import get_zone_source_warehouse
+    return get_zone_source_warehouse(pos_profile=pos_profile)
 
 
 @frappe.whitelist()
