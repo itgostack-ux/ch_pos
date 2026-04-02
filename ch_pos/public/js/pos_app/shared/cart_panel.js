@@ -801,7 +801,7 @@ export class CartPanel {
 					get_query: () => ({
 						filters: {
 							docstatus: 1,
-							processing_fee_status: "Pending",
+							claim_status: "Approved",
 							processing_fee_invoice: ["in", ["", null]],
 						},
 					}),
