@@ -115,7 +115,8 @@ def pos_item_search(
         f"""SELECT i.name as item_code, i.item_name, i.image, i.brand,
                    i.item_group, i.stock_uom, i.has_serial_no,
                    i.variant_of, i.ch_default_warranty_months, i.ch_item_type,
-                   IFNULL(i.custom_pos_usage, '') as pos_usage
+                   IFNULL(i.custom_pos_usage, '') as pos_usage,
+                   IFNULL(i.ch_allow_zero_rate, 0) as ch_allow_zero_rate
             FROM `tabItem` i
             WHERE {where}
             ORDER BY i.item_name

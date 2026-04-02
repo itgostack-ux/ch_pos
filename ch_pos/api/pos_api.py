@@ -4332,7 +4332,13 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
 # ── Quick Customer Creation ──────────────────────────────────────
 @frappe.whitelist()
 def quick_create_customer(customer_name, mobile_no="", email_id="",
-                          customer_group="Individual", company=None):
+                          customer_group="Individual", company=None,
+                          alternate_phone="", whatsapp_number="",
+                          address_line1="", address_line2="", city="",
+                          state="", pincode="", area="", gstin="",
+                          same_as_billing=1,
+                          shipping_address_line1="", shipping_city="",
+                          shipping_state="", shipping_pincode=""):
     """Create a new Customer quickly from the POS interface."""
     frappe.has_permission("Customer", "create", throw=True)
     cust = frappe.new_doc("Customer")
@@ -4347,6 +4353,10 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         cust.mobile_no = mobile_no.strip()
     if email_id:
         cust.email_id = email_id.strip()
+    if alternate_phone:
+        cust.ch_alternate_phone = alternate_phone.strip()
+    if whatsapp_number:
+        cust.ch_whatsapp_number = whatsapp_number.strip()
     cust.flags.ignore_permissions = True
     cust.flags.ignore_mandatory = True
     cust.save()
@@ -4362,6 +4372,39 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         contact.append("links", {"link_doctype": "Customer", "link_name": cust.name})
         contact.flags.ignore_permissions = True
         contact.save()
+
+    # Create billing address if provided
+    if address_line1 or city or pincode:
+        billing = frappe.new_doc("Address")
+        billing.address_title = customer_name
+        billing.address_type = "Billing"
+        billing.address_line1 = address_line1 or customer_name
+        billing.address_line2 = address_line2
+        billing.city = city or ""
+        billing.state = state or ""
+        billing.pincode = pincode or ""
+        if area:
+            billing.county = area  # Use county field for area/locality
+        if gstin:
+            billing.gstin = gstin
+        billing.append("links", {"link_doctype": "Customer", "link_name": cust.name})
+        billing.flags.ignore_permissions = True
+        billing.flags.ignore_mandatory = True
+        billing.save()
+
+        # Create separate shipping address if not same as billing
+        if not cint(same_as_billing) and shipping_address_line1:
+            shipping = frappe.new_doc("Address")
+            shipping.address_title = customer_name
+            shipping.address_type = "Shipping"
+            shipping.address_line1 = shipping_address_line1
+            shipping.city = shipping_city or ""
+            shipping.state = shipping_state or ""
+            shipping.pincode = shipping_pincode or ""
+            shipping.append("links", {"link_doctype": "Customer", "link_name": cust.name})
+            shipping.flags.ignore_permissions = True
+            shipping.flags.ignore_mandatory = True
+            shipping.save()
 
     return cust.name
 
@@ -5393,3 +5436,66 @@ def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_ser
 		        f"selected={selected_serial} oldest={oldest_serial} item={item_code}",
 		title="POS FIFO Violation",
 	)
+
+
+# ── Bundle / Free Items ──────────────────────────────────────────
+@frappe.whitelist()
+def get_bundle_items(item_code, warehouse=None, channel="POS"):
+	"""Return free/bundled accessory items for a parent item.
+
+	Looks up Product Bundle for ``item_code``.  Returns child items
+	(excluding the parent itself) with pricing and stock info so the
+	POS frontend can show a "Select free items" popup.
+	"""
+	if not frappe.db.exists("Product Bundle", {"new_item_code": item_code, "disabled": 0}):
+		return []
+
+	bundle = frappe.get_doc("Product Bundle", {"new_item_code": item_code, "disabled": 0})
+	result = []
+	for row in bundle.items:
+		if row.item_code == item_code:
+			continue  # skip the parent item itself
+
+		item = frappe.db.get_value(
+			"Item", row.item_code,
+			["item_name", "image", "item_group", "stock_uom", "has_serial_no",
+			 "ch_item_type", "ch_allow_zero_rate"],
+			as_dict=True,
+		)
+		if not item:
+			continue
+
+		# Pricing
+		ch_price = frappe.db.get_value(
+			"CH Item Price",
+			{"item_code": row.item_code, "channel": channel, "status": "Active"},
+			["selling_price", "mrp"],
+			as_dict=True,
+		)
+		selling_price = flt(ch_price.selling_price) if ch_price else 0
+		mrp = flt(ch_price.mrp) if ch_price else 0
+
+		# Stock
+		stock_qty = 0
+		if warehouse:
+			stock_qty = flt(frappe.db.get_value(
+				"Bin", {"item_code": row.item_code, "warehouse": warehouse}, "actual_qty"
+			))
+
+		result.append({
+			"item_code": row.item_code,
+			"item_name": item.item_name,
+			"image": item.image,
+			"item_group": item.item_group,
+			"stock_uom": item.stock_uom,
+			"has_serial_no": cint(item.has_serial_no),
+			"ch_item_type": item.ch_item_type or "",
+			"ch_allow_zero_rate": cint(item.ch_allow_zero_rate),
+			"selling_price": selling_price,
+			"mrp": mrp,
+			"stock_qty": stock_qty,
+			"bundle_qty": flt(row.qty),
+			"is_free_bundle_item": 1,
+		})
+
+	return result

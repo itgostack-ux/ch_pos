@@ -101,6 +101,11 @@ export class CartService {
 			frappe.show_alert({ message: __("Item {0} is out of stock", [item_data.item_name]), indicator: "red" });
 			return;
 		}
+		// Block items with no selling price (unless allow_zero_rate is set)
+		if (!flt(item_data.selling_price) && !flt(item_data.mrp) && !cint(item_data.ch_allow_zero_rate)) {
+			frappe.show_alert({ message: __("Item {0} has no selling price. Cannot add to cart.", [item_data.item_name]), indicator: "red" });
+			return;
+		}
 		if (PosState.voucher_code && !item_data.is_warranty && !item_data.is_vas) {
 			const item_group = (item_data.item_group || "").toLowerCase();
 			if (item_group !== "accessories") {
@@ -155,6 +160,15 @@ export class CartService {
 		if (item_data.stock_qty <= 0) {
 			frappe.show_alert({
 				message: __("Item {0} is out of stock", [item_data.item_name]),
+				indicator: "red",
+			});
+			return;
+		}
+
+		// Block items with no selling price (unless allow_zero_rate is set)
+		if (!flt(item_data.selling_price) && !flt(item_data.mrp) && !cint(item_data.ch_allow_zero_rate)) {
+			frappe.show_alert({
+				message: __("Item {0} has no selling price. Cannot add to cart.", [item_data.item_name]),
 				indicator: "red",
 			});
 			return;
@@ -252,6 +266,7 @@ export class CartService {
 			has_serial_no: cint(item_data.has_serial_no),
 			serial_no: serial_no || "",
 			ch_item_type: item_data.ch_item_type || "",
+			ch_allow_zero_rate: cint(item_data.ch_allow_zero_rate),
 			stock_qty: flt(item_data.stock_qty || 0),
 			must_be_whole_number: cint(item_data.must_be_whole_number),
 		};
@@ -259,6 +274,72 @@ export class CartService {
 		PosState.cart.push(cart_item);
 		EventBus.emit("cart:updated");
 		this._prompt_warranty(item_data, cart_item);
+		this._prompt_bundle_items(item_data);
+	}
+
+	/** Show a popup to add free bundle items (accessories) when a main device is added */
+	_prompt_bundle_items(item_data) {
+		frappe.xcall("ch_pos.api.pos_api.get_bundle_items", {
+			item_code: item_data.item_code,
+			warehouse: PosState.warehouse,
+		}).then((items) => {
+			if (!items || !items.length) return;
+
+			const fields = [
+				{
+					fieldtype: "HTML",
+					fieldname: "bundle_info",
+					options: `<p class="text-muted" style="margin-bottom:12px">
+						${__("The following accessories are available with {0}. Select items to add for free.", [frappe.utils.escape_html(item_data.item_name)])}
+					</p>`,
+				},
+			];
+
+			items.forEach((bi, i) => {
+				const in_stock = flt(bi.stock_qty) > 0;
+				fields.push({
+					fieldname: `bundle_item_${i}`,
+					fieldtype: "Check",
+					label: `${bi.item_name} ${in_stock ? "" : "(" + __("Out of stock") + ")"}`,
+					default: in_stock ? 1 : 0,
+					read_only: !in_stock ? 1 : 0,
+					description: bi.selling_price ? `₹${bi.selling_price} → ₹0 (Free)` : __("Free"),
+				});
+			});
+
+			const dlg = new frappe.ui.Dialog({
+				title: __("Free Accessories — {0}", [item_data.item_name]),
+				fields: fields,
+				size: "small",
+				primary_action_label: __("Add Selected"),
+				primary_action: (values) => {
+					items.forEach((bi, i) => {
+						if (values[`bundle_item_${i}`]) {
+							const free_item = {
+								...bi,
+								selling_price: 0,
+								mrp: bi.mrp || 0,
+								ch_allow_zero_rate: 1,
+								is_free_bundle_item: 1,
+							};
+							this._add_new_cart_item(free_item);
+							// Set rate to 0 for the just-added free item
+							const last = PosState.cart[PosState.cart.length - 1];
+							if (last && last.item_code === bi.item_code) {
+								last.rate = 0;
+								last.is_free_bundle_item = true;
+								last.bundle_parent = item_data.item_code;
+							}
+						}
+					});
+					EventBus.emit("cart:updated");
+					dlg.hide();
+				},
+				secondary_action_label: __("Skip"),
+				secondary_action: () => dlg.hide(),
+			});
+			dlg.show();
+		});
 	}
 
 	/** Prompt for IMEI/serial selection from available stock, with manual scan fallback */

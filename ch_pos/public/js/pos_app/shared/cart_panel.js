@@ -292,14 +292,47 @@ export class CartPanel {
 		const d = new frappe.ui.Dialog({
 			title: __("New Customer"),
 			fields: [
+				// ── Basic Info ──
 				{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"), reqd: 1 },
 				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), options: "Phone" },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "email_id", fieldtype: "Data", label: __("Email"), options: "Email" },
 				{ fieldname: "customer_group", fieldtype: "Link", label: __("Customer Group"),
 				  options: "Customer Group", default: "Individual" },
+
+				// ── Additional Contact ──
+				{ fieldtype: "Section Break", label: __("Additional Contact") },
+				{ fieldname: "alternate_phone", fieldtype: "Data", label: __("Alternate Number"), options: "Phone" },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "whatsapp_number", fieldtype: "Data", label: __("WhatsApp Number"), options: "Phone" },
+
+				// ── Address ──
+				{ fieldtype: "Section Break", label: __("Address") },
+				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1") },
+				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2") },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "city", fieldtype: "Data", label: __("City") },
+				{ fieldname: "state", fieldtype: "Data", label: __("State") },
+				{ fieldtype: "Section Break" },
+				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode") },
+				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality") },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "gstin", fieldtype: "Data", label: __("GSTIN") },
+
+				// ── Billing / Shipping ──
+				{ fieldtype: "Section Break", label: __("Shipping") },
+				{ fieldname: "same_as_billing", fieldtype: "Check", label: __("Ship to same as billing address"), default: 1 },
+				{ fieldname: "shipping_address_line1", fieldtype: "Data", label: __("Shipping Address Line 1"),
+				  depends_on: "eval:!doc.same_as_billing" },
+				{ fieldname: "shipping_city", fieldtype: "Data", label: __("Shipping City"),
+				  depends_on: "eval:!doc.same_as_billing" },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "shipping_state", fieldtype: "Data", label: __("Shipping State"),
+				  depends_on: "eval:!doc.same_as_billing" },
+				{ fieldname: "shipping_pincode", fieldtype: "Data", label: __("Shipping Pincode"),
+				  depends_on: "eval:!doc.same_as_billing" },
 			],
-			size: "small",
+			size: "large",
 			primary_action_label: __("Create"),
 			primary_action: (values) => {
 				const phone = (values.mobile_no || "").trim();
@@ -310,6 +343,20 @@ export class CartPanel {
 					email_id: values.email_id || "",
 					customer_group: values.customer_group || "Individual",
 					company: PosState.company,
+					alternate_phone: values.alternate_phone || "",
+					whatsapp_number: values.whatsapp_number || "",
+					address_line1: values.address_line1 || "",
+					address_line2: values.address_line2 || "",
+					city: values.city || "",
+					state: values.state || "",
+					pincode: values.pincode || "",
+					area: values.area || "",
+					gstin: values.gstin || "",
+					same_as_billing: values.same_as_billing ? 1 : 0,
+					shipping_address_line1: values.shipping_address_line1 || "",
+					shipping_city: values.shipping_city || "",
+					shipping_state: values.shipping_state || "",
+					shipping_pincode: values.shipping_pincode || "",
 				}).then((name) => {
 					d.hide();
 					frappe.show_alert({ message: __("Customer {0} created", [name]), indicator: "green" });
