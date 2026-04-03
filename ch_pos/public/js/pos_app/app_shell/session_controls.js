@@ -15,7 +15,9 @@ import { SessionClosingDashboard } from "../shared/session_closing_dashboard.js"
 export class SessionControls {
 	constructor() {
 		this._closing_dashboard = new SessionClosingDashboard();
+		this._container = null;
 		this._bind_events();
+		this.render();
 	}
 
 	_bind_events() {
@@ -28,105 +30,181 @@ export class SessionControls {
 			if (session_data.company) {
 				PosState.company = session_data.company;
 			}
+			EventBus.emit("session:status_changed", PosState.session_status);
+			this.render();
 		});
 
 		EventBus.on("session:locked", () => {
 			PosState.session_status = "Locked";
-			this._update_info();
+			EventBus.emit("session:status_changed", PosState.session_status);
+			this.render();
 		});
 
 		EventBus.on("session:unlocked", () => {
 			PosState.session_status = "Open";
-			this._update_info();
+			EventBus.emit("session:status_changed", PosState.session_status);
+			this.render();
 		});
 
-		// Re-render into sidebar whenever it redraws
-		EventBus.on("sidebar:rendered", (wrapper) => {
-			if (PosState.session_name) {
-				this.render(wrapper);
-			}
+		EventBus.on("profile:loaded", () => this.render());
+		EventBus.on("sessionbar:rendered", (wrapper) => {
+			this._container = wrapper;
+			this.render(wrapper);
 		});
 	}
 
-	/**
-	 * Render the session info panel at the bottom of the sidebar.
-	 */
-	render(container) {
-		this._container = container;
-		const html = `
-		<div class="ch-session-controls" style="padding:12px;border-top:1px solid var(--border-color);font-size:0.82rem">
-			<div class="ch-session-info" style="margin-bottom:8px">
-				<div style="font-weight:700;color:var(--primary);margin-bottom:4px">
-					<i class="fa fa-calendar"></i>
-					<span class="ch-biz-date">${PosState.business_date || ""}</span>
-				</div>
-				<div class="text-muted ch-session-id" style="font-size:0.75rem"></div>
-				${PosState.company ? `<div class="text-muted" style="font-size:0.72rem"><i class="fa fa-building-o"></i> <span class="ch-company">${frappe.utils.escape_html(PosState.company)}</span></div>` : ""}
-				${PosState.device ? `<div class="text-muted" style="font-size:0.72rem"><i class="fa fa-desktop"></i> <span class="ch-device">${frappe.utils.escape_html(PosState.device)}</span></div>` : ""}
-				<div class="ch-session-status-badge" style="font-size:0.72rem;margin-top:2px"></div>
-			</div>
-			<div class="ch-session-actions" style="display:flex;flex-direction:column;gap:6px">
-				<button class="btn btn-xs btn-default ch-btn-x-report" title="${__("X Report (Interim)")}">
-					<i class="fa fa-file-text-o"></i> ${__("X Report")}
-				</button>
-				<button class="btn btn-xs btn-default ch-btn-cash-drop" title="${__("Cash Drop to Safe")}">
-					<i class="fa fa-money"></i> ${__("Cash Drop")}
-				</button>
-				<button class="btn btn-xs btn-default ch-btn-switch-user" title="${__("Switch Cashier")}">
-					<i class="fa fa-user"></i> ${__("Switch Cashier")}
-				</button>
-				<button class="btn btn-xs btn-warning ch-btn-lock-session" title="${__("Lock Session (temporary pause)")}">
-					<i class="fa fa-lock"></i> ${__("Lock Session")}
-				</button>
-				<button class="btn btn-xs btn-info ch-btn-unlock-session" title="${__("Unlock Session")}" style="display:none">
-					<i class="fa fa-unlock"></i> ${__("Unlock Session")}
-				</button>
-				<button class="btn btn-xs btn-default ch-btn-settlement" title="${__("Settlement (EOD Cash Reconciliation)")}">
-					<i class="fa fa-calculator"></i> ${__("Settlement")}
-				</button>
-				<button class="btn btn-xs btn-danger ch-btn-close-session" title="${__("Close Session")}">
-					<i class="fa fa-power-off"></i> ${__("Close Session")}
-				</button>
-			</div>
-		</div>`;
+	_get_container(container) {
+		if (container) {
+			this._container = container;
+		}
+		if (this._container?.length) {
+			return this._container;
+		}
+		const wrapper = $(".ch-pos-session-bar");
+		if (wrapper.length) {
+			this._container = wrapper;
+		}
+		return this._container;
+	}
 
-		container.append(html);
-		this._bind_buttons(container);
+	_can_manage_session() {
+		const exec = PosState.executive_access?.own_executive || {};
+		const role = String(exec.role || "").toLowerCase();
+		return Boolean(
+			PosState.executive_access?.is_manager
+			|| /manager|head|admin|owner/.test(role)
+			|| (frappe.user_roles || []).includes("System Manager")
+		);
+	}
+
+	render(container) {
+		const wrapper = this._get_container(container);
+		if (!wrapper?.length) return;
+
+		const slot = wrapper.find(".ch-session-profile-slot");
+		if (!slot.length) return;
+
+		const can_manage = this._can_manage_session();
+		const exec = PosState.executive_access?.own_executive || {};
+		const display_name = exec.executive_name || frappe.session.user_fullname || frappe.session.user;
+		const company = PosState.active_company || PosState.company || __("No Company");
+		const initials = (display_name || "U")
+			.split(" ")
+			.map((part) => part[0])
+			.join("")
+			.substring(0, 2)
+			.toUpperCase();
+		const is_locked = PosState.session_status === "Locked";
+		const has_session = Boolean(PosState.session_name);
+
+		slot.html(`
+			<div class="ch-session-profile-tools">
+				<button class="ch-session-walkin-quick" title="${__("Log Walk-in")}">
+					<i class="fa fa-sign-in"></i>
+					<span>${__("Log Walk-in")}</span>
+				</button>
+				<div class="ch-session-profile-shell${can_manage ? " is-manager" : " is-readonly"}">
+					<button class="ch-session-profile-trigger${can_manage ? " is-manager" : ""}" type="button"
+						title="${can_manage ? __("Session actions") : __("Logged in user")}">
+						<span class="ch-session-profile-avatar">${frappe.utils.escape_html(initials)}</span>
+						<span class="ch-session-profile-meta">
+							<span class="ch-session-profile-name">${frappe.utils.escape_html(display_name)}</span>
+							<span class="ch-session-profile-company">${frappe.utils.escape_html(company)}</span>
+						</span>
+						${can_manage ? `<i class="fa fa-chevron-down ch-session-profile-caret"></i>` : ""}
+					</button>
+					${can_manage ? `
+						<div class="ch-session-profile-dropdown">
+							<button class="ch-session-menu-item ch-btn-x-report" ${has_session ? "" : "disabled"}>
+								<i class="fa fa-file-text-o"></i>
+								<span>${__("X Report")}</span>
+							</button>
+							<button class="ch-session-menu-item ch-btn-cash-drop" ${(has_session && !is_locked) ? "" : "disabled"}>
+								<i class="fa fa-money"></i>
+								<span>${__("Cash Drop")}</span>
+							</button>
+							<button class="ch-session-menu-item ch-btn-switch-user" ${(has_session && !is_locked) ? "" : "disabled"}>
+								<i class="fa fa-user"></i>
+								<span>${__("Switch Cashier")}</span>
+							</button>
+							<button class="ch-session-menu-item ch-session-menu-lock" ${has_session ? "" : "disabled"}>
+								<i class="fa ${is_locked ? "fa-unlock" : "fa-lock"}"></i>
+								<span class="ch-session-menu-label">${is_locked ? __("Unlock Session") : __("Lock Session")}</span>
+							</button>
+							<button class="ch-session-menu-item ch-btn-settlement" ${has_session ? "" : "disabled"}>
+								<i class="fa fa-calculator"></i>
+								<span>${__("Settlement")}</span>
+							</button>
+							<button class="ch-session-menu-item ch-btn-close-session is-danger" ${has_session ? "" : "disabled"}>
+								<i class="fa fa-power-off"></i>
+								<span>${__("Close Session")}</span>
+							</button>
+						</div>` : ""}
+				</div>
+			</div>
+		`);
+
+		this._bind_buttons(slot);
 		this._update_info();
 	}
 
 	_update_info() {
-		if (!this._container) return;
-		const panel = this._container.find(".ch-session-controls");
-		panel.find(".ch-biz-date").text(PosState.business_date || __("No date"));
-		panel.find(".ch-session-id").text(PosState.session_name || "");
+		if (!this._container?.length) return;
+		const slot = this._container.find(".ch-session-profile-slot");
+		if (!slot.length) return;
 
-		// Status badge
 		const status = PosState.session_status || "Open";
-		const status_color = {
-			Open: "green", Locked: "orange", "Pending Close": "blue", Closed: "red",
-		}[status] || "gray";
-		panel.find(".ch-session-status-badge").html(
-			`<span class="indicator-pill ${status_color}">${__(status)}</span>`
-		);
-
-		// Toggle lock/unlock buttons based on status
 		const is_locked = status === "Locked";
-		panel.find(".ch-btn-lock-session").toggle(!is_locked);
-		panel.find(".ch-btn-unlock-session").toggle(is_locked);
+		const has_session = Boolean(PosState.session_name);
 
-		// Disable transactional buttons when locked
-		panel.find(".ch-btn-cash-drop, .ch-btn-switch-user").prop("disabled", is_locked);
+		slot.find(".ch-btn-x-report, .ch-btn-settlement, .ch-btn-close-session, .ch-session-menu-lock").prop("disabled", !has_session);
+		slot.find(".ch-btn-cash-drop, .ch-btn-switch-user").prop("disabled", !has_session || is_locked);
+		slot.find(".ch-session-menu-lock i").attr("class", `fa ${is_locked ? "fa-unlock" : "fa-lock"}`);
+		slot.find(".ch-session-menu-label").text(is_locked ? __("Unlock Session") : __("Lock Session"));
 	}
 
 	_bind_buttons(container) {
-		container.find(".ch-btn-x-report").on("click", () => this._show_x_report());
-		container.find(".ch-btn-cash-drop").on("click", () => this._show_cash_drop());
-		container.find(".ch-btn-switch-user").on("click", () => this._show_switch_user());
-		container.find(".ch-btn-lock-session").on("click", () => this._lock_session());
-		container.find(".ch-btn-unlock-session").on("click", () => this._unlock_session());
-		container.find(".ch-btn-settlement").on("click", () => this._show_settlement());
-		container.find(".ch-btn-close-session").on("click", () => this._show_close_session());
+		container.find(".ch-session-walkin-quick").on("click", () => EventBus.emit("walkin:open"));
+		container.find(".ch-session-profile-trigger.is-manager").on("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			container.find(".ch-session-profile-shell").toggleClass("open");
+		});
+
+		$(document).off("click.ch_pos_profile_menu").on("click.ch_pos_profile_menu", (e) => {
+			if (!$(e.target).closest(".ch-session-profile-shell").length) {
+				$(".ch-session-profile-shell").removeClass("open");
+			}
+		});
+
+		container.find(".ch-btn-x-report").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_x_report();
+		});
+		container.find(".ch-btn-cash-drop").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_cash_drop();
+		});
+		container.find(".ch-btn-switch-user").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_switch_user();
+		});
+		container.find(".ch-session-menu-lock").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			if (PosState.session_status === "Locked") {
+				this._unlock_session();
+			} else {
+				this._lock_session();
+			}
+		});
+		container.find(".ch-btn-settlement").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_settlement();
+		});
+		container.find(".ch-btn-close-session").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_close_session();
+		});
 	}
 
 	_show_x_report() {

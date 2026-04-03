@@ -7,6 +7,11 @@
 import { PosState, EventBus } from "../../state.js";
 import { format_number } from "../../shared/helpers.js";
 
+function _is_service_company(company) {
+	const lc = (company || "").toLowerCase();
+	return lc.includes("gofix") || lc.includes("service");
+}
+
 const DECISION_MAP = {
 	Draft: "warning", Accepted: "info", "In Service": "warning",
 	Completed: "success", Invoiced: "info", Delivered: "success",
@@ -22,6 +27,20 @@ export class ServiceWorkspace {
 	}
 
 	render(panel) {
+		const active_company = PosState.active_company || PosState.company || "";
+		if (!_is_service_company(active_company)) {
+			panel.html(`
+				<div class="ch-pos-mode-panel">
+					<div class="ch-pos-empty-state" style="padding:48px 20px;">
+						<div class="empty-icon"><i class="fa fa-building-o"></i></div>
+						<div class="empty-title">${__("GoFix only")}</div>
+						<div class="empty-subtitle">${__("Repair ticket tracking is available only inside the GoFix company context.")}</div>
+					</div>
+				</div>
+			`);
+			return;
+		}
+
 		panel.html(`
 			<div class="ch-pos-mode-panel">
 				<div class="ch-mode-header">
@@ -63,6 +82,7 @@ export class ServiceWorkspace {
 	_bind(panel) {
 		const do_search = () => {
 			const q = panel.find(".ch-svc-search").val().trim();
+			const company = PosState.active_company || PosState.company || "";
 			if (!q) return;
 			panel.find(".ch-svc-results").html(
 				`<div style="padding:24px;text-align:center"><i class="fa fa-spinner fa-spin"></i></div>`
@@ -71,6 +91,7 @@ export class ServiceWorkspace {
 				method: "frappe.client.get_list",
 				args: {
 					doctype: "Service Request",
+					filters: company ? { company } : {},
 					or_filters: [
 						["name", "like", `%${q}%`],
 						["contact_number", "like", `%${q}%`],

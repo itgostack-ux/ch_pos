@@ -21,7 +21,7 @@ const COMPANY_MODE_MAP = {
 	// Retail company modes (GoGizmo or any retail company)
 	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "guided", "model_compare", "claims", "exceptions", "queue"],
 	// Service company modes (GoFix or any service company)
-	service: ["sell", "returns", "buyback", "repair", "queue", "service", "guided", "claims", "exceptions"],
+	service: ["sell", "returns", "buyback", "repair", "queue", "service", "guided", "exceptions"],
 };
 
 /** Heuristic: does this company name indicate a service company? */
@@ -168,12 +168,6 @@ export class Sidebar {
 
 		html += `
 			<div class="ch-pos-sidebar-bottom">
-				<div class="ch-pos-walkin-btn-wrap">
-					<button class="ch-pos-walkin-btn" title="${__("Log Walk-in")}">
-						<i class="fa fa-sign-in"></i>
-						<span class="sidebar-label">${__("Log Walk-in")}</span>
-					</button>
-				</div>
 				<div class="store-info">
 					<div class="store-avatar">${frappe.utils.escape_html(initials)}</div>
 					<div class="store-detail">
@@ -201,74 +195,77 @@ export class Sidebar {
 		if (this.collapsed) this._apply_collapsed(true);
 	}
 
+	_show_walkin_dialog() {
+		const d = new frappe.ui.Dialog({
+			title: __("Log Walk-in"),
+			fields: [
+				{
+					label: __("Purpose"),
+					fieldname: "visit_purpose",
+					fieldtype: "Select",
+					options: "Enquiry\nRepair\nSales\nBuyback\nOther",
+					default: "Enquiry",
+					reqd: 1,
+				},
+				{
+					label: __("Customer Name"),
+					fieldname: "customer_name",
+					fieldtype: "Data",
+					placeholder: __("Optional"),
+				},
+				{
+					label: __("Phone"),
+					fieldname: "customer_phone",
+					fieldtype: "Data",
+					placeholder: __("Optional"),
+				},
+				{
+					label: __("Remarks"),
+					fieldname: "remarks",
+					fieldtype: "Small Text",
+					placeholder: __("Optional — what did the customer need?"),
+				},
+			],
+			primary_action_label: __("Log Walk-in"),
+			primary_action: (values) => {
+				if (values.customer_phone && !validate_india_phone(values.customer_phone)) {
+					frappe.show_alert({ message: __("Enter a valid Indian phone number (10 digits starting with 6-9)"), indicator: "orange" });
+					return;
+				}
+				d.hide();
+				frappe.call({
+					method: "ch_pos.api.token_api.log_counter_walkin",
+					args: {
+						pos_profile: PosState.pos_profile,
+						visit_purpose: values.visit_purpose,
+						customer_name: values.customer_name || "",
+						customer_phone: values.customer_phone || "",
+						remarks: values.remarks || "",
+					},
+					callback: (r) => {
+						const res = r.message || {};
+						if (res.status === "ok") {
+							frappe.show_alert({
+								message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
+								indicator: "green",
+							});
+							EventBus.emit("walkin:logged", res);
+						} else {
+							frappe.show_alert({ message: __("Could not log walk-in"), indicator: "orange" });
+						}
+					},
+				});
+			},
+		});
+		d.show();
+	}
+
 	bind() {
 		const sidebar = this.wrapper;
 
-		// Walk-in Log button — creates a token record for direct counter walk-ins
-		sidebar.on("click", ".ch-pos-walkin-btn", () => {
-			const d = new frappe.ui.Dialog({
-				title: __("Log Walk-in"),
-				fields: [
-					{
-						label: __("Purpose"),
-						fieldname: "visit_purpose",
-						fieldtype: "Select",
-						options: "Enquiry\nRepair\nSales\nBuyback\nOther",
-						default: "Enquiry",
-						reqd: 1,
-					},
-					{
-						label: __("Customer Name"),
-						fieldname: "customer_name",
-						fieldtype: "Data",
-						placeholder: __("Optional"),
-					},
-					{
-						label: __("Phone"),
-						fieldname: "customer_phone",
-						fieldtype: "Data",
-						placeholder: __("Optional"),
-					},
-					{
-						label: __("Remarks"),
-						fieldname: "remarks",
-						fieldtype: "Small Text",
-						placeholder: __("Optional — what did the customer need?"),
-					},
-				],
-				primary_action_label: __("Log Walk-in"),
-				primary_action: (values) => {
-					if (values.customer_phone && !validate_india_phone(values.customer_phone)) {
-						frappe.show_alert({ message: __("Enter a valid Indian phone number (10 digits starting with 6-9)"), indicator: "orange" });
-						return;
-					}
-					d.hide();
-					frappe.call({
-						method: "ch_pos.api.token_api.log_counter_walkin",
-						args: {
-							pos_profile: PosState.pos_profile,
-							visit_purpose: values.visit_purpose,
-							customer_name: values.customer_name || "",
-							customer_phone: values.customer_phone || "",
-							remarks: values.remarks || "",
-						},
-						callback: (r) => {
-							const res = r.message || {};
-							if (res.status === "ok") {
-								frappe.show_alert({
-									message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
-									indicator: "green",
-								});
-								EventBus.emit("walkin:logged", res);
-							} else {
-								frappe.show_alert({ message: __("Could not log walk-in"), indicator: "orange" });
-							}
-						},
-					});
-				},
-			});
-			d.show();
-		});
+		// Walk-in Log button — also triggered from the top-right profile area
+		sidebar.on("click", ".ch-pos-walkin-btn", () => this._show_walkin_dialog());
+		EventBus.on("walkin:open", () => this._show_walkin_dialog());
 
 		// Collapse toggle
 		sidebar.on("click", ".ch-pos-sidebar-toggle", () => {

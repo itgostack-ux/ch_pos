@@ -37,13 +37,17 @@ export class SessionBar {
 					</span>
 				</div>
 				<div class="ch-session-right">
-					<span class="ch-session-shortcut" title="${__("Search")}">F2 ${__("Search")}</span>
-					<span class="ch-session-shortcut" title="${__("Pay")}">F8 ${__("Pay")}</span>
-					<span class="ch-session-shortcut" title="${__("Hold")}">F5 ${__("Hold")}</span>
-					<span class="ch-session-shortcut" title="${__("Cancel")}">Esc ${__("Cancel")}</span>
+					<div class="ch-session-shortcuts-wrap">
+						<span class="ch-session-shortcut" title="${__("Search")}">F2 ${__("Search")}</span>
+						<span class="ch-session-shortcut" title="${__("Pay")}">F8 ${__("Pay")}</span>
+						<span class="ch-session-shortcut" title="${__("Hold")}">F5 ${__("Hold")}</span>
+						<span class="ch-session-shortcut" title="${__("Cancel")}">Esc ${__("Cancel")}</span>
+					</div>
+					<div class="ch-session-profile-slot"></div>
 				</div>
 			</div>
 		`);
+		EventBus.emit("sessionbar:rendered", this.wrapper);
 	}
 
 	_bind() {

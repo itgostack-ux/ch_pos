@@ -4191,6 +4191,17 @@ body > .desk-alert-container {
   align-items: center;
   gap: 8px;
 }
+.ch-session-right {
+  margin-left: auto;
+  justify-content: flex-end;
+  flex: 1;
+}
+.ch-session-shortcuts-wrap,
+.ch-session-profile-slot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .ch-session-divider {
   color: rgba(255,255,255,0.15);
   font-size: 10px;
@@ -4221,6 +4232,136 @@ body > .desk-alert-container {
   color: rgba(255,255,255,0.45);
   letter-spacing: 0.3px;
   white-space: nowrap;
+}
+.ch-session-profile-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ch-session-walkin-quick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: var(--pos-radius-sm);
+  background: rgba(245,158,11,0.18);
+  color: rgba(255,255,255,0.95);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--pos-transition);
+}
+.ch-session-walkin-quick:hover {
+  background: rgba(245,158,11,0.28);
+  border-color: rgba(245,158,11,0.42);
+}
+.ch-session-profile-shell {
+  position: relative;
+}
+.ch-session-profile-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.92);
+  min-width: 0;
+}
+.ch-session-profile-trigger.is-manager {
+  cursor: pointer;
+}
+.ch-session-profile-shell.open .ch-session-profile-trigger,
+.ch-session-profile-trigger.is-manager:hover {
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(255,255,255,0.16);
+}
+.ch-session-profile-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--pos-primary), #2563eb);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.ch-session-profile-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  line-height: 1.15;
+}
+.ch-session-profile-name,
+.ch-session-profile-company {
+  display: block;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ch-session-profile-name {
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.ch-session-profile-company {
+  color: rgba(255,255,255,0.68);
+  font-size: 10px;
+}
+.ch-session-profile-caret {
+  color: rgba(255,255,255,0.55);
+  font-size: 10px;
+}
+.ch-session-profile-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  display: none;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 6px;
+  border-radius: var(--pos-radius-md);
+  background: var(--pos-surface);
+  border: 1px solid var(--pos-border);
+  box-shadow: var(--pos-shadow-lg);
+  z-index: 30;
+}
+.ch-session-profile-shell.open .ch-session-profile-dropdown {
+  display: flex;
+}
+.ch-session-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--pos-radius-sm);
+  background: transparent;
+  color: var(--pos-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.ch-session-menu-item:hover:not(:disabled) {
+  background: var(--pos-surface-sunken);
+  color: var(--pos-primary);
+}
+.ch-session-menu-item.is-danger {
+  color: var(--pos-danger);
+}
+.ch-session-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -4455,12 +4596,17 @@ body > .desk-alert-container {
    RESPONSIVE — Session bar
    ═══════════════════════════════════════════════════════════ */
 @media (max-width: 1024px) {
-  .ch-session-right { display: none; }
+  .ch-session-shortcuts-wrap { display: none; }
   .ch-pos-imei-wrap { min-width: 160px; }
 }
 @media (max-width: 768px) {
-  .ch-session-center { display: none; }
-  .ch-session-bar { height: 36px; font-size: 10px; }
+  .ch-session-center,
+  .ch-session-profile-company,
+  .ch-session-walkin-quick span {
+    display: none;
+  }
+  .ch-session-bar { height: 36px; font-size: 10px; padding: 0 10px; }
+  .ch-session-profile-name { max-width: 96px; }
 }
 /* ── end payment overlay ─────────────────────────────────────────────── */
 

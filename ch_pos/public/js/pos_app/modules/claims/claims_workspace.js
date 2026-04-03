@@ -11,6 +11,11 @@
 import { PosState, EventBus } from "../../state.js";
 import { assert_india_phone } from "../../shared/helpers.js";
 
+function _is_service_company(company) {
+	const lc = (company || "").toLowerCase();
+	return lc.includes("gofix") || lc.includes("service");
+}
+
 export class ClaimsWorkspace {
 	constructor() {
 		this._dashboard = null;
@@ -26,6 +31,21 @@ export class ClaimsWorkspace {
 	}
 
 	render(panel) {
+		const active_company = PosState.active_company || PosState.company || "";
+		if (_is_service_company(active_company)) {
+			panel.html(`
+				<div class="ch-pos-mode-panel">
+					<div class="ch-pos-empty-state" style="padding:48px 20px;">
+						<div class="empty-icon"><i class="fa fa-lock"></i></div>
+						<div class="empty-title">${__("Claims stay with GoGizmo")}</div>
+						<div class="empty-subtitle">${__("GoFix users should work on the linked repair ticket only. Claim status is synced automatically for the retail side.")}</div>
+					</div>
+				</div>
+			`);
+			this._stop_auto_refresh();
+			return;
+		}
+
 		panel.html(`
 			<div class="ch-pos-mode-panel">
 				<div class="ch-mode-header">
@@ -906,7 +926,7 @@ export class ClaimsWorkspace {
 							${claim.entitlement_decision ? `<div><span class="text-muted">${__("Entitlement")}:</span> ${claim.entitlement_decision}</div>` : ""}
 							${claim.final_outcome ? `<div><span class="text-muted">${__("Outcome")}:</span> ${claim.final_outcome}</div>` : ""}
 							${claim.service_request ? `<div><span class="text-muted">${__("GoFix")}:</span>
-								<a href="/app/service-request/${claim.service_request}" target="_blank">${claim.service_request}</a></div>` : ""}
+								<b>${claim.service_request}</b> <span class="text-muted" style="font-size:11px">${__("status synced from GoFix")}</span></div>` : ""}
 							${claim.repair_status ? `<div><span class="text-muted">${__("Repair")}:</span> ${claim.repair_status}</div>` : ""}
 						</div>
 
@@ -1405,7 +1425,11 @@ export class ClaimsWorkspace {
 
 		frappe.xcall("frappe.client.get_list", {
 			doctype: "CH Warranty Claim",
-			filters: { docstatus: ["!=", 2], claim_status: ["not in", ["Closed", "Cancelled"]] },
+			filters: {
+				docstatus: ["!=", 2],
+				claim_status: ["not in", ["Closed", "Cancelled"]],
+				company: PosState.active_company || PosState.company || "",
+			},
 			fields: ["name", "claim_date", "claim_status", "serial_no", "customer_name",
 				"customer", "item_name", "coverage_type"],
 			order_by: "modified desc",

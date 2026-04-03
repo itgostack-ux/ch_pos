@@ -45,7 +45,25 @@ def pos_item_search(
 
     profile_doc = frappe.get_cached_doc("POS Profile", pos_profile) if pos_profile else None
     warehouse = profile_doc.warehouse if profile_doc else None
+    company = company or (profile_doc.company if profile_doc else None)
 
+    if company and warehouse:
+        try:
+            from ch_pos.api.pos_api import _get_executive_access
+
+            access = _get_executive_access(frappe.session.user, warehouse)
+            allowed_companies = {row.get("company") for row in (access or {}).get("companies", []) if row.get("company")}
+            if allowed_companies and company not in allowed_companies:
+                frappe.throw(
+                    frappe._("You are not permitted to access {0} items.").format(frappe.bold(company)),
+                    frappe.PermissionError,
+                )
+        except frappe.PermissionError:
+            raise
+        except Exception:
+            pass
+
+    is_service_company = bool(company and any(tag in company.lower() for tag in ("gofix", "service")))
     has_lifecycle_status = frappe.db.has_column("Item", "ch_lifecycle_status")
     has_pos_usage = frappe.db.has_column("Item", "custom_pos_usage")
 
@@ -116,13 +134,25 @@ def pos_item_search(
     usage_context = (usage_context or "sale").lower()
     if has_pos_usage:
         if usage_context == "sale":
-            conditions.append(
-                "(IFNULL(i.custom_pos_usage, '') IN ('', 'Sale', 'Sale and Repair'))"
-            )
+            if is_service_company:
+                conditions.append(
+                    "(IFNULL(i.custom_pos_usage, '') = 'Sale and Repair'"
+                    " OR (IFNULL(i.custom_pos_usage, '') = '' AND i.item_group IN ('Accessories', 'Mobile Parts', 'Repair Services', 'Spares', 'Sub Assemblies')))"
+                )
+            else:
+                conditions.append(
+                    "(IFNULL(i.custom_pos_usage, '') IN ('', 'Sale', 'Sale and Repair'))"
+                )
         elif usage_context == "repair":
-            conditions.append(
-                "(IFNULL(i.custom_pos_usage, '') IN ('', 'Repair Only', 'Sale and Repair'))"
-            )
+            if is_service_company:
+                conditions.append(
+                    "(IFNULL(i.custom_pos_usage, '') IN ('Repair Only', 'Sale and Repair')"
+                    " OR (IFNULL(i.custom_pos_usage, '') = '' AND i.item_group IN ('Accessories', 'Mobile Parts', 'Repair Services', 'Spares', 'Sub Assemblies')))"
+                )
+            else:
+                conditions.append(
+                    "(IFNULL(i.custom_pos_usage, '') IN ('', 'Repair Only', 'Sale and Repair'))"
+                )
 
     where = " AND ".join(conditions)
 
