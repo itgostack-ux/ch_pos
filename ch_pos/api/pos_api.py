@@ -5568,10 +5568,15 @@ def get_bundle_items(item_code, warehouse=None, channel="POS"):
 		if row.item_code == item_code:
 			continue  # skip the parent item itself
 
+		item_fields = ["item_name", "image", "item_group", "stock_uom", "has_serial_no"]
+		if frappe.db.has_column("Item", "ch_item_type"):
+			item_fields.append("ch_item_type")
+		if frappe.db.has_column("Item", "ch_allow_zero_rate"):
+			item_fields.append("ch_allow_zero_rate")
+
 		item = frappe.db.get_value(
 			"Item", row.item_code,
-			["item_name", "image", "item_group", "stock_uom", "has_serial_no",
-			 "ch_item_type", "ch_allow_zero_rate"],
+			item_fields,
 			as_dict=True,
 		)
 		if not item:
@@ -5601,8 +5606,8 @@ def get_bundle_items(item_code, warehouse=None, channel="POS"):
 			"item_group": item.item_group,
 			"stock_uom": item.stock_uom,
 			"has_serial_no": cint(item.has_serial_no),
-			"ch_item_type": item.ch_item_type or "",
-			"ch_allow_zero_rate": cint(item.ch_allow_zero_rate),
+			"ch_item_type": (item.get("ch_item_type") or "") if item else "",
+			"ch_allow_zero_rate": cint(item.get("ch_allow_zero_rate")) if item else 0,
 			"selling_price": selling_price,
 			"mrp": mrp,
 			"stock_qty": stock_qty,

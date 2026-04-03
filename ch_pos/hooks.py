@@ -5,7 +5,7 @@ app_description = "POS solution for GoGizmo & GoFix retail stores"
 app_email = "admin@gofix.in"
 app_license = "MIT"
 
-required_apps = ["frappe", "erpnext"]
+required_apps = ["frappe", "erpnext", "ch_item_master"]
 
 after_install = "ch_pos.setup.after_install"
 after_migrate = "ch_pos.setup.after_migrate"

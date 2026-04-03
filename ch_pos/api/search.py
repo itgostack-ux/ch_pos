@@ -2,6 +2,21 @@ import frappe
 from frappe.utils import cint, flt
 
 
+def _optional_item_select(fieldname, alias=None, fallback="''", cast="text"):
+    """Build a safe SQL select expression for optional Item custom fields."""
+    alias = alias or fieldname
+    if not frappe.db.has_column("Item", fieldname):
+        return f"{fallback} as {alias}"
+
+    expr = f"i.{fieldname}"
+    if cast == "int":
+        expr = f"IFNULL({expr}, 0)"
+    elif cast == "text":
+        expr = f"IFNULL({expr}, '')"
+
+    return f"{expr} as {alias}"
+
+
 def _get_item_offers(item_code):
     """Return active POS offers for an item (used by item detail endpoint)."""
     from ch_pos.api.offers import get_applicable_offers
@@ -31,25 +46,29 @@ def pos_item_search(
     profile_doc = frappe.get_cached_doc("POS Profile", pos_profile) if pos_profile else None
     warehouse = profile_doc.warehouse if profile_doc else None
 
+    has_lifecycle_status = frappe.db.has_column("Item", "ch_lifecycle_status")
+    has_pos_usage = frappe.db.has_column("Item", "custom_pos_usage")
+
     conditions = ["i.disabled = 0", "i.is_sales_item = 1", "i.has_variants = 0"]
     # Lifecycle status rules:
     #   blank (draft/unconfigured) → never show
     #   Active                     → always show
     #   End of Life / Discontinued → show only if stock exists (any warehouse)
-    conditions.append(
-        "(IFNULL(i.ch_lifecycle_status, '') = 'Active'"
-        " OR (IFNULL(i.ch_lifecycle_status, '') IN ('End of Life', 'Discontinued')"
-        "   AND ("
-        "     (i.has_serial_no = 1 AND EXISTS ("
-        "       SELECT 1 FROM `tabSerial No` sn"
-        "       WHERE sn.item_code = i.name AND sn.status = 'Active'))"
-        "     OR"
-        "     (i.has_serial_no = 0 AND EXISTS ("
-        "       SELECT 1 FROM `tabBin` b"
-        "       WHERE b.item_code = i.name AND b.actual_qty > 0))"
-        "   )"
-        " ))"
-    )
+    if has_lifecycle_status:
+        conditions.append(
+            "(IFNULL(i.ch_lifecycle_status, '') = 'Active'"
+            " OR (IFNULL(i.ch_lifecycle_status, '') IN ('End of Life', 'Discontinued')"
+            "   AND ("
+            "     (i.has_serial_no = 1 AND EXISTS ("
+            "       SELECT 1 FROM `tabSerial No` sn"
+            "       WHERE sn.item_code = i.name AND sn.status = 'Active'))"
+            "     OR"
+            "     (i.has_serial_no = 0 AND EXISTS ("
+            "       SELECT 1 FROM `tabBin` b"
+            "       WHERE b.item_code = i.name AND b.actual_qty > 0))"
+            "   )"
+            " ))"
+        )
     values = {}
 
     if search_term:
@@ -95,14 +114,15 @@ def pos_item_search(
 
     # Usage context filter: sale, repair, or both
     usage_context = (usage_context or "sale").lower()
-    if usage_context == "sale":
-        conditions.append(
-            "(IFNULL(i.custom_pos_usage, '') IN ('', 'Sale', 'Sale and Repair'))"
-        )
-    elif usage_context == "repair":
-        conditions.append(
-            "(IFNULL(i.custom_pos_usage, '') IN ('', 'Repair Only', 'Sale and Repair'))"
-        )
+    if has_pos_usage:
+        if usage_context == "sale":
+            conditions.append(
+                "(IFNULL(i.custom_pos_usage, '') IN ('', 'Sale', 'Sale and Repair'))"
+            )
+        elif usage_context == "repair":
+            conditions.append(
+                "(IFNULL(i.custom_pos_usage, '') IN ('', 'Repair Only', 'Sale and Repair'))"
+            )
 
     where = " AND ".join(conditions)
 
@@ -111,13 +131,26 @@ def pos_item_search(
         values,
     )[0][0]
 
+    select_fields = [
+        "i.name as item_code",
+        "i.item_name",
+        "i.image",
+        "i.brand",
+        "i.item_group",
+        "i.stock_uom",
+        "i.has_serial_no",
+        "i.variant_of",
+        _optional_item_select("ch_default_warranty_months", fallback="0", cast="int"),
+        _optional_item_select("ch_item_type", fallback="''", cast="text"),
+        _optional_item_select("custom_pos_usage", alias="pos_usage", fallback="''", cast="text"),
+        _optional_item_select("ch_allow_zero_rate", fallback="0", cast="int"),
+        "i.description",
+        "i.has_batch_no",
+        "i.is_stock_item",
+    ]
+
     items_raw = frappe.db.sql(
-        f"""SELECT i.name as item_code, i.item_name, i.image, i.brand,
-                   i.item_group, i.stock_uom, i.has_serial_no,
-                   i.variant_of, i.ch_default_warranty_months, i.ch_item_type,
-                   IFNULL(i.custom_pos_usage, '') as pos_usage,
-                   IFNULL(i.ch_allow_zero_rate, 0) as ch_allow_zero_rate,
-                   i.description, i.has_batch_no, i.is_stock_item
+        f"""SELECT {', '.join(select_fields)}
             FROM `tabItem` i
             WHERE {where}
             ORDER BY i.item_name
