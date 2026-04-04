@@ -179,12 +179,13 @@ def pos_item_search(
         "i.is_stock_item",
     ]
 
+    select_clause = ", ".join(select_fields)
     items_raw = frappe.db.sql(
-        """SELECT {', '.join(select_fields)}
+        """SELECT {select_clause}
             FROM `tabItem` i
             WHERE {where}
             ORDER BY i.item_name
-            LIMIT %(limit)s OFFSET %(offset)s""".format(where=where),  # noqa: UP032
+            LIMIT %(limit)s OFFSET %(offset)s""".format(select_clause=select_clause, where=where),  # noqa: UP032
         {**values, "limit": page_size, "offset": page * page_size},
         as_dict=True,
     )
