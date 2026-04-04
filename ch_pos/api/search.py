@@ -157,7 +157,7 @@ def pos_item_search(
     where = " AND ".join(conditions)
 
     total = frappe.db.sql(
-        f"SELECT COUNT(*) FROM `tabItem` i WHERE {where}",
+        "SELECT COUNT(*) FROM `tabItem` i WHERE {where}".format(where=where),
         values,
     )[0][0]
 
@@ -180,11 +180,11 @@ def pos_item_search(
     ]
 
     items_raw = frappe.db.sql(
-        f"""SELECT {', '.join(select_fields)}
+        """SELECT {', '.join(select_fields)}
             FROM `tabItem` i
             WHERE {where}
             ORDER BY i.item_name
-            LIMIT %(limit)s OFFSET %(offset)s""",
+            LIMIT %(limit)s OFFSET %(offset)s""".format(where=where),  # noqa: UP032
         {**values, "limit": page_size, "offset": page * page_size},
         as_dict=True,
     )
@@ -384,7 +384,7 @@ def _get_nearby_warehouses(pos_profile):
 
     where = " AND ".join(conditions)
     stores = frappe.db.sql(
-        f"""SELECT s.store_code, s.store_name, s.city, s.pincode, s.warehouse
+        """SELECT s.store_code, s.store_name, s.city, s.pincode, s.warehouse
             FROM `tabCH Store` s
             WHERE {where}
             ORDER BY
@@ -392,7 +392,7 @@ def _get_nearby_warehouses(pos_profile):
                      WHEN s.pincode LIKE %(pin3)s THEN 1
                      ELSE 2 END,
                 s.store_name
-            LIMIT 10""",
+            LIMIT 10""".format(where=where),  # noqa: UP032
         {**values, "cur_pin": current.pincode or "", "pin3": (current.pincode or "")[:3] + "%"},
         as_dict=True,
     )

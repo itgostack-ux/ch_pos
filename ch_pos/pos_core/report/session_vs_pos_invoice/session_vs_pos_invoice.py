@@ -34,7 +34,7 @@ def execute(filters=None):
             conditions += " AND s.business_date <= %(to_date)s"
             params["to_date"] = getdate(filters["to_date"])
 
-    sessions = frappe.db.sql(f"""
+    sessions = frappe.db.sql("""
         SELECT s.name AS session, s.store, s.company, s.business_date,
                s.user, s.net_sales AS session_net_sales,
                s.total_invoices AS session_invoices, s.pos_profile
@@ -42,7 +42,7 @@ def execute(filters=None):
         WHERE {conditions}
         ORDER BY s.business_date DESC
         LIMIT 500
-    """, params, as_dict=True)
+    """.format(conditions=conditions), params, as_dict=True)  # noqa: UP032
 
     data = []
     for s in sessions:

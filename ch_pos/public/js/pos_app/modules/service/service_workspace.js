@@ -7,11 +7,6 @@
 import { PosState, EventBus } from "../../state.js";
 import { format_number } from "../../shared/helpers.js";
 
-function _is_service_company(company) {
-	const lc = (company || "").toLowerCase();
-	return lc.includes("gofix") || lc.includes("service");
-}
-
 const DECISION_MAP = {
 	Draft: "warning", Accepted: "info", "In Service": "warning",
 	Completed: "success", Invoiced: "info", Delivered: "success",
@@ -27,8 +22,7 @@ export class ServiceWorkspace {
 	}
 
 	render(panel) {
-		const active_company = PosState.active_company || PosState.company || "";
-		if (!_is_service_company(active_company)) {
+		if (PosState.active_company_type !== "service") {
 			panel.html(`
 				<div class="ch-pos-mode-panel">
 					<div class="ch-pos-empty-state" style="padding:48px 20px;">

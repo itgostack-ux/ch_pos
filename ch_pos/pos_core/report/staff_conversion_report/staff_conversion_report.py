@@ -49,7 +49,7 @@ def get_data(filters):
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    rows = frappe.db.sql(f"""
+    rows = frappe.db.sql("""
         SELECT
             COALESCE(u.full_name, t.technician) AS staff,
             t.pos_profile,
@@ -66,7 +66,7 @@ def get_data(filters):
         {where}
         GROUP BY t.technician, t.pos_profile
         ORDER BY converted DESC, total_handled DESC
-    """, params, as_dict=True)
+    """.format(where=where), params, as_dict=True)  # noqa: UP032
 
     for r in rows:
         r["conversion_rate"] = flt(r["converted"] / r["total_handled"] * 100, 1) if r["total_handled"] else 0
@@ -76,7 +76,7 @@ def get_data(filters):
     # Find top drop reason per staff
     if rows:
         staff_list = [r["staff"] for r in rows]
-        drop_data = frappe.db.sql(f"""
+        drop_data = frappe.db.sql("""
             SELECT
                 COALESCE(u.full_name, t.technician) AS staff,
                 t.drop_reason,
@@ -88,7 +88,7 @@ def get_data(filters):
             AND t.drop_reason IS NOT NULL AND t.drop_reason != ''
             GROUP BY t.technician, t.drop_reason
             ORDER BY cnt DESC
-        """, params, as_dict=True)
+        """.format(where=where), params, as_dict=True)  # noqa: UP032
 
         top_reasons = {}
         for d in drop_data:

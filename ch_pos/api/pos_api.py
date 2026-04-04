@@ -1230,7 +1230,7 @@ def get_customer_credit_info(customer, company=None):
         WHERE party_type = 'Customer' AND party = %s
           AND is_cancelled = 0
           {company_filter}
-    """.format(
+    """.format(  # noqa: UP032
         company_filter=f"AND company = {frappe.db.escape(company)}" if company else ""
     ), customer)[0][0] or 0)
 
@@ -3109,7 +3109,7 @@ def get_stock_transfers(pos_profile, direction="incoming"):
         params = (warehouse, warehouse)
 
     entries = frappe.db.sql(
-        f"""SELECT se.name, se.posting_date, se.docstatus,
+        """SELECT se.name, se.posting_date, se.docstatus,
                    se.from_warehouse, se.to_warehouse, se.remarks,
                    se.custom_status, se.custom_logistics_status,
                    se.custom_logistics_person,
@@ -3120,7 +3120,7 @@ def get_stock_transfers(pos_profile, direction="incoming"):
               AND se.docstatus IN (0, 1)
               AND ({wh_filter})
             ORDER BY se.creation DESC
-            LIMIT 20""",
+            LIMIT 20""".format(wh_filter=wh_filter),  # noqa: UP032
         params,
         as_dict=True,
     )
@@ -3974,6 +3974,47 @@ def get_central_warehouses(company=None):
 
 # ── Executive Access & Incentive APIs ────────────────────────────
 
+# Canonical mode lists — single source of truth (no JS duplication).
+# Shared modes (imei, customer360, reports) are always included.
+_SHARED_MODES = ["imei", "customer360", "reports"]
+
+COMPANY_MODE_MAP = {
+    "retail": [
+        "sell", "returns", "buyback", "material_request", "stock_transfer",
+        "guided", "model_compare", "claims", "exceptions", "queue",
+    ] + _SHARED_MODES,
+    "service": [
+        "sell", "returns", "buyback", "repair", "queue", "service",
+        "guided", "exceptions",
+    ] + _SHARED_MODES,
+}
+
+
+def _get_company_type(company, stores=None):
+    """Resolve company type ('retail' or 'service') from CH Store flags,
+    falling back to a name heuristic if flags aren't set.
+
+    Checks stores that *belong to* this company (via CH Store.company),
+    not the user's current store.
+    """
+    # Check CH Store capability flags for stores owned by this company
+    store_caps = frappe.db.get_all(
+        "CH Store",
+        filters={"company": company, "disabled": 0},
+        fields=["is_retail_enabled", "is_service_enabled"],
+    )
+    for cap in store_caps:
+        if cint(cap.is_service_enabled) and not cint(cap.is_retail_enabled):
+            return "service"
+        if cint(cap.is_retail_enabled) and not cint(cap.is_service_enabled):
+            return "retail"
+
+    # Fallback: name heuristic (single place — not duplicated in JS)
+    lc = (company or "").lower()
+    if "gofix" in lc or "service" in lc:
+        return "service"
+    return "retail"
+
 
 def _get_executive_access(user, warehouse):
     """Build executive access payload for the logged-in user.
@@ -4019,14 +4060,17 @@ def _get_executive_access(user, warehouse):
     else:
         accessible_companies = list(own_companies)
 
-    # Build company-role map
+    # Build company-role map with server-resolved type and allowed modes
     company_roles = []
     for comp in accessible_companies:
         user_exec = next((e for e in own if e.company == comp), None)
         role = user_exec.role if user_exec else "Manager"
+        ctype = _get_company_type(comp)
         company_roles.append({
             "company": comp,
             "role": role,
+            "company_type": ctype,
+            "allowed_modes": COMPANY_MODE_MAP.get(ctype, COMPANY_MODE_MAP["retail"]),
         })
 
     # Store executives grouped by company (for the "billed by" selector)
@@ -5469,7 +5513,7 @@ def get_todays_invoices(pos_profile, date=None, phone=None):
 			return []
 
 		cust_placeholders = ", ".join(["%s"] * len(customers))
-		rows = frappe.db.sql(f"""
+		rows = frappe.db.sql("""
 			SELECT
 				pi.name,
 				pi.customer,
@@ -5487,7 +5531,7 @@ def get_todays_invoices(pos_profile, date=None, phone=None):
 			GROUP BY pi.name
 			ORDER BY pi.posting_date DESC, pi.posting_time DESC
 			LIMIT 50
-		""", [pos_profile] + customers, as_dict=True)
+		""".format(cust_placeholders=cust_placeholders), [pos_profile] + customers, as_dict=True)  # noqa: UP032
 		return rows
 
 	# Default: search by date

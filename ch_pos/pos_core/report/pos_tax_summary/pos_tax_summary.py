@@ -66,7 +66,7 @@ def get_data(filters):
           {conditions}
         GROUP BY pi.name
         ORDER BY pi.posting_date DESC, pi.name DESC
-    """.format(conditions=conditions), filters, as_dict=True)
+    """.format(conditions=conditions), filters, as_dict=True)  # noqa: UP032
 
     data = []
     for inv in invoices:

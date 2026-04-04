@@ -34,7 +34,7 @@ def execute(filters=None):
             conditions += " AND s.business_date <= %(to_date)s"
             params["to_date"] = getdate(filters["to_date"])
 
-    data = frappe.db.sql(f"""
+    data = frappe.db.sql("""
         SELECT
             s.name AS session, s.store, s.company, s.device, s.user,
             s.business_date, s.opening_cash, s.closing_cash_actual,
@@ -44,6 +44,6 @@ def execute(filters=None):
         FROM `tabCH POS Session` s
         WHERE {conditions}
         ORDER BY ABS(s.cash_variance) DESC, s.business_date DESC
-    """, params, as_dict=True)
+    """.format(conditions=conditions), params, as_dict=True)  # noqa: UP032
 
     return columns, data

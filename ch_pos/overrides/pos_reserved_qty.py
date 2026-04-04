@@ -37,7 +37,7 @@ def _get_pos_reserved_qty_from_table(child_table, item_code, warehouse):
     qty_column = "qty" if child_table == "Packed Item" else "stock_qty"
 
     reserved_qty = frappe.db.sql(
-        f"""
+        """
             SELECT COALESCE(SUM(p_item.`{qty_column}`), 0) AS stock_qty
             FROM `tabPOS Invoice` p_inv
             JOIN `tab{child_table}` p_item ON p_item.parent = p_inv.name
@@ -57,7 +57,7 @@ def _get_pos_reserved_qty_from_table(child_table, item_code, warehouse):
                         )
                     )
               )
-        """,
+        """.format(child_table=child_table, qty_column=qty_column),  # noqa: UP032
         {"item_code": item_code, "warehouse": warehouse},
         as_dict=True,
     )

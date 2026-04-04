@@ -39,7 +39,7 @@ def execute(filters=None):
             conditions += " AND s.business_date <= %(to_date)s"
             params["to_date"] = getdate(filters["to_date"])
 
-    sessions = frappe.db.sql(f"""
+    sessions = frappe.db.sql("""
         SELECT
             s.name AS session, s.store, s.company, s.device, s.user,
             s.business_date, s.shift_start, s.shift_end,
@@ -49,7 +49,7 @@ def execute(filters=None):
         WHERE {conditions}
         ORDER BY s.business_date DESC, s.shift_end DESC
         LIMIT 500
-    """, params, as_dict=True)
+    """.format(conditions=conditions), params, as_dict=True)  # noqa: UP032
 
     # Enrich with settlement data
     for row in sessions:

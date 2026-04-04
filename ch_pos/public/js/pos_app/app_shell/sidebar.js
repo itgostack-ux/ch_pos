@@ -4,32 +4,12 @@
  * Retail-grade mode switcher with icon pills, grouped sections,
  * operator/store identity, and network status.
  *
- * Access control: modules are shown/hidden based on which companies
- * the logged-in executive has access to at this store.
- * - GoGizmo (retail): Sell, Returns, Buyback, Inventory, Sales Tools
- * - GoFix (services): Sell (accessories), Returns, Buyback, Repair, Service
- * - Shared (always): Lookup, Insights
+ * Access control: the server resolves allowed_modes per company
+ * (based on CH Store capability flags or company type).
+ * The sidebar simply renders what the server says — no client-side heuristics.
  */
 import { PosState, EventBus } from "../state.js";
 import { validate_india_phone } from "../shared/helpers.js";
-
-/**
- * Company-to-mode mapping.
- * Modes not listed here are always visible (shared).
- */
-const COMPANY_MODE_MAP = {
-	// Retail company modes (GoGizmo or any retail company)
-	retail: ["sell", "returns", "buyback", "material_request", "stock_transfer", "guided", "model_compare", "claims", "exceptions", "queue"],
-	// Service company modes (GoFix or any service company)
-	service: ["sell", "returns", "buyback", "repair", "queue", "service", "guided", "exceptions"],
-};
-
-/** Heuristic: does this company name indicate a service company? */
-function _is_service_company(company) {
-	if (!company) return false;
-	const lc = company.toLowerCase();
-	return lc.includes("gofix") || lc.includes("service");
-}
 
 const MODE_SECTIONS = [
 	{
@@ -111,59 +91,39 @@ export class Sidebar {
 		}
 	}
 
-	/** Compute which modes the current user can access based on active company */
+	/** Compute which modes the current user can access (server-driven). */
 	_compute_allowed_modes() {
 		const access = PosState.executive_access;
 		const active = PosState.active_company;
 
-		// If a specific company is actively selected (e.g. via Switch Company),
-		// always filter modes by that company type
-		if (active) {
-			const allowed = new Set();
-			if (_is_service_company(active)) {
-				COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
-			} else {
-				COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
-			}
-			this._allowed_modes = allowed;
-			return;
-		}
-
-		// If executive records exist but no active company yet, show union of all
 		if (access && access.companies && access.companies.length) {
-			const allowed = new Set();
-			for (const cr of access.companies) {
-				if (_is_service_company(cr.company)) {
-					COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
-				} else {
-					COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
-				}
+			// Find modes for the active company, or union all if none selected
+			const match = active
+				? access.companies.find(c => c.company === active)
+				: null;
+
+			if (match && match.allowed_modes) {
+				this._allowed_modes = new Set(match.allowed_modes);
+				return;
 			}
-			this._allowed_modes = allowed;
-			return;
+
+			// Union of all accessible companies' modes
+			const union = new Set();
+			for (const cr of access.companies) {
+				(cr.allowed_modes || []).forEach(m => union.add(m));
+			}
+			if (union.size) {
+				this._allowed_modes = union;
+				return;
+			}
 		}
 
-		// No executives, no active company — fall back to POS Profile company
-		const fallback = PosState.company;
-		if (fallback) {
-			const allowed = new Set();
-			if (_is_service_company(fallback)) {
-				COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
-			} else {
-				COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
-			}
-			this._allowed_modes = allowed;
-		} else {
-			// Truly unknown — show all (admin fallback)
-			this._allowed_modes = null;
-		}
+		// No executive data — show all (admin fallback)
+		this._allowed_modes = null;
 	}
 
 	_is_mode_allowed(modeKey) {
-		if (!this._allowed_modes) return true; // no restriction
-		// If the mode isn't in any company map, it's shared (always visible)
-		const allMapped = [...COMPANY_MODE_MAP.retail, ...COMPANY_MODE_MAP.service];
-		if (!allMapped.includes(modeKey)) return true;
+		if (!this._allowed_modes) return true;
 		return this._allowed_modes.has(modeKey);
 	}
 

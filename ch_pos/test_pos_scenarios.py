@@ -7,7 +7,6 @@ Or: cd /home/palla/erpnext-bench && python apps/ch_pos/ch_pos/test_pos_scenarios
 import sys
 sys.path.insert(0, "/home/palla/erpnext-bench/apps/frappe")
 
-import traceback
 import frappe
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -632,9 +631,11 @@ def scenario_10_return_credit_note(ctx):
             ok(name, f"Credit note {result['name']} for {orig_inv}")
             try:
                 ret = frappe.get_doc("Sales Invoice", result["name"])
-                if ret.docstatus == 1: ret.cancel()
+                if ret.docstatus == 1:
+                    ret.cancel()
                 frappe.delete_doc("Sales Invoice", result["name"], force=True)
-            except: pass
+            except Exception:
+                frappe.log_error("Test cleanup: failed to delete credit note")
         else:
             fail(name, str(result))
     except Exception as e:

@@ -99,7 +99,7 @@ class POSEDCSettlement(Document):
 					  AND sip.amount = %(amount)s
 					  {mop_filter}
 					LIMIT 2
-				""".format(mop_filter=mop_type_filter), {
+				""".format(mop_filter=mop_type_filter), {  # noqa: UP032
 					"date": row.transaction_date,
 					"amount": flt(row.amount),
 				})

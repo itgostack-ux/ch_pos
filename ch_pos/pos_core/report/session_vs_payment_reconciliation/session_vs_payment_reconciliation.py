@@ -31,7 +31,7 @@ def execute(filters=None):
             conditions += " AND s.business_date <= %(to_date)s"
             params["to_date"] = getdate(filters["to_date"])
 
-    data = frappe.db.sql(f"""
+    data = frappe.db.sql("""
         SELECT
             s.name AS session,
             s.store,
@@ -54,6 +54,6 @@ def execute(filters=None):
                  sip.mode_of_payment, mop.type
         ORDER BY s.business_date DESC, s.name, payment_total DESC
         LIMIT 1000
-    """, params, as_dict=True)
+    """.format(conditions=conditions), params, as_dict=True)  # noqa: UP032
 
     return columns, data

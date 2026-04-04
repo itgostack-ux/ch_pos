@@ -44,7 +44,7 @@ def get_data(filters):
     where = "WHERE " + " AND ".join(conditions)
 
     # Main aggregation by drop_reason and store
-    rows = frappe.db.sql(f"""
+    rows = frappe.db.sql("""
         SELECT
             COALESCE(NULLIF(t.drop_reason, ''), 'Not Specified') AS drop_reason,
             t.pos_profile,
@@ -54,7 +54,7 @@ def get_data(filters):
         {where}
         GROUP BY drop_reason, t.pos_profile
         ORDER BY count DESC
-    """, params, as_dict=True)
+    """.format(where=where), params, as_dict=True)  # noqa: UP032
 
     # Total drops for percentage
     total_drops = sum(r["count"] for r in rows) or 1
@@ -64,7 +64,7 @@ def get_data(filters):
         r["avg_handling_mins"] = flt(r["avg_handling_mins"], 1)
 
     # Cross-tab: top category, brand, budget per drop_reason
-    cross = frappe.db.sql(f"""
+    cross = frappe.db.sql("""
         SELECT
             COALESCE(NULLIF(t.drop_reason, ''), 'Not Specified') AS drop_reason,
             t.category_interest,
@@ -75,7 +75,7 @@ def get_data(filters):
         {where}
         GROUP BY drop_reason, t.category_interest, t.brand_interest, t.budget_range
         ORDER BY cnt DESC
-    """, params, as_dict=True)
+    """.format(where=where), params, as_dict=True)  # noqa: UP032
 
     # Build top-N maps
     cat_map, brand_map, budget_map = {}, {}, {}
@@ -141,7 +141,7 @@ def get_summary(data, filters):
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     total_tokens = frappe.db.sql(
-        f"SELECT COUNT(*) FROM `tabPOS Kiosk Token` {where}", params
+        "SELECT COUNT(*) FROM `tabPOS Kiosk Token` {where}".format(where=where), params
     )[0][0] or 1
 
     top_reason = data[0]["drop_reason"] if data else "N/A"

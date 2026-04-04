@@ -64,7 +64,7 @@ def get_data(filters):
           AND pi.custom_exchange_assessment != ''
           {conditions}
         ORDER BY pi.posting_date DESC
-    """.format(conditions=conditions), filters, as_dict=True)
+    """.format(conditions=conditions), filters, as_dict=True)  # noqa: UP032
 
     data = []
     for inv in invoices:

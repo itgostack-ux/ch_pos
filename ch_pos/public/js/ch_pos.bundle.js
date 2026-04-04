@@ -229,9 +229,12 @@ ch_pos.PosApp = class PosApp {
 					PosState.executive_access = access;
 					if (access && access.companies && access.companies.length) {
 						// Default to the profile's company, or first accessible
-						PosState.active_company = access.companies.find(
+						const match = access.companies.find(
 							(c) => c.company === d.company
-						) ? d.company : access.companies[0].company;
+						);
+						const chosen = match || access.companies[0];
+						PosState.active_company = chosen.company;
+						PosState.active_company_type = chosen.company_type || null;
 
 						// Default sales executive to own record
 						if (access.own_executive) {
@@ -240,6 +243,7 @@ ch_pos.PosApp = class PosApp {
 						}
 					} else {
 						PosState.active_company = d.company;
+						PosState.active_company_type = null;
 					}
 
 					// Trigger initial module load (default: sell mode)

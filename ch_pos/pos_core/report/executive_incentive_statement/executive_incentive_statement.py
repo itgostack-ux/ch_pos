@@ -80,7 +80,7 @@ def get_data(filters):
     view = filters.get("view", "Summary")
 
     if view == "Detail":
-        rows = frappe.db.sql(f"""
+        rows = frappe.db.sql("""
             SELECT
                 il.posting_date,
                 COALESCE(pe.executive_name, il.pos_executive) AS executive_name,
@@ -98,12 +98,12 @@ def get_data(filters):
             LEFT JOIN `tabPOS Executive` pe ON pe.name = il.pos_executive
             WHERE {conditions}
             ORDER BY il.posting_date DESC, il.pos_executive
-        """, values, as_dict=True)
+        """.format(conditions=conditions), values, as_dict=True)  # noqa: UP032
         return rows
 
     else:
         # Summary: group by executive
-        rows = frappe.db.sql(f"""
+        rows = frappe.db.sql("""
             SELECT
                 COALESCE(pe.executive_name, il.pos_executive) AS executive_name,
                 il.store,
@@ -117,13 +117,13 @@ def get_data(filters):
             WHERE {conditions}
             GROUP BY il.pos_executive
             ORDER BY total_incentive DESC
-        """, values, as_dict=True)
+        """.format(conditions=conditions), values, as_dict=True)  # noqa: UP032
         return rows
 
 
 def get_report_summary(filters):
     conditions, values = _build_conditions(filters)
-    totals = frappe.db.sql(f"""
+    totals = frappe.db.sql("""
         SELECT
             COUNT(DISTINCT il.invoice)                                          AS billings,
             SUM(il.billing_amount)                                              AS billing_amount,
@@ -133,7 +133,7 @@ def get_report_summary(filters):
         FROM `tabPOS Incentive Ledger` il
         LEFT JOIN `tabPOS Executive` pe ON pe.name = il.pos_executive
         WHERE {conditions}
-    """, values, as_dict=True)
+    """.format(conditions=conditions), values, as_dict=True)  # noqa: UP032
 
     if not totals:
         return []

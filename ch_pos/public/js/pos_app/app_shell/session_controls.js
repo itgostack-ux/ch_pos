@@ -269,6 +269,13 @@ export class SessionControls {
 				PosState.active_company = values.company;
 				PosState.company = values.company;
 
+				// Update company_type from server-provided data
+				const access = PosState.executive_access;
+				const entry = access && access.companies
+					? access.companies.find(c => c.company === values.company)
+					: null;
+				PosState.active_company_type = entry ? entry.company_type : null;
+
 				// Update company display in session bar
 				const short = values.company.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
 				$(".ch-session-profile-company").text(short);

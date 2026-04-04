@@ -62,7 +62,7 @@ def get_data(filters):
           AND pi.is_return = 0
           {conditions}
         ORDER BY pi.posting_date DESC, pi.name
-    """.format(conditions=conditions), filters, as_dict=True)
+    """.format(conditions=conditions), filters, as_dict=True)  # noqa: UP032
 
     data = []
     for row in rows:

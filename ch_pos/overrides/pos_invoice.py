@@ -945,9 +945,9 @@ def _get_margin_gst_rate(item_code, doc):
     then document tax rows, then defaults to 18%.
     """
     from frappe.utils import flt as _flt
-    # Try item-level tax template first
+    # Try item-level tax template first (via Item Tax child table)
     if item_code:
-        item_tax_template = frappe.db.get_value("Item", item_code, "item_tax_template")
+        item_tax_template = frappe.db.get_value("Item Tax", {"parent": item_code}, "item_tax_template")
         if item_tax_template:
             rates = frappe.get_all(
                 "Item Tax Template Detail",

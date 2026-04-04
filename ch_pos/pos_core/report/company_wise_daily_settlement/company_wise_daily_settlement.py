@@ -29,7 +29,7 @@ def execute(filters=None):
             conditions += " AND s.business_date <= %(to_date)s"
             params["to_date"] = getdate(filters["to_date"])
 
-    data = frappe.db.sql(f"""
+    data = frappe.db.sql("""
         SELECT
             s.company,
             s.business_date,
@@ -44,6 +44,6 @@ def execute(filters=None):
         WHERE {conditions}
         GROUP BY s.company, s.business_date
         ORDER BY s.business_date DESC, s.company
-    """, params, as_dict=True)
+    """.format(conditions=conditions), params, as_dict=True)  # noqa: UP032
 
     return columns, data

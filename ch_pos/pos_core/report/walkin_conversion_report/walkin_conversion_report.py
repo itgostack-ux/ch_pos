@@ -48,7 +48,7 @@ def get_data(filters):
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    rows = frappe.db.sql(f"""
+    rows = frappe.db.sql("""
         SELECT
             DATE(t.creation) AS date,
             t.pos_profile,
@@ -67,7 +67,7 @@ def get_data(filters):
         {where}
         GROUP BY DATE(t.creation), t.pos_profile
         ORDER BY DATE(t.creation) DESC, t.pos_profile
-    """, params, as_dict=True)
+    """.format(where=where), params, as_dict=True)  # noqa: UP032
 
     for r in rows:
         r["conversion_rate"] = flt(r["converted"] / r["total_footfall"] * 100, 1) if r["total_footfall"] else 0
