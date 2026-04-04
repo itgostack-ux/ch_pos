@@ -41,8 +41,10 @@ def compare_items(item_codes, customer_preferences=None):
 
 @frappe.whitelist()
 def get_upsell_suggestions(item_code, cart_items=None):
-	"""AI upsell suggestions for an item.
+	"""AI-powered upsell suggestions for an item.
 
+	Flow: gather item context + catalog data → call AI for smart suggestions
+	→ fall back to rule-based suggestions on any failure.
 	Resilience: returns empty list on any failure instead of raising.
 	"""
 	try:
@@ -50,50 +52,21 @@ def get_upsell_suggestions(item_code, cart_items=None):
 			cart_items = frappe.parse_json(cart_items)
 
 		item = frappe.get_cached_doc("Item", item_code)
+		settings = _get_ai_settings()
 
-		accessories = frappe.db.get_all(
-			"Item",
-			filters={
-				"item_group": ["like", "%Accessor%"],
-				"brand": item.brand,
-				"disabled": 0,
-				"is_sales_item": 1,
-			},
-			fields=["name as item_code", "item_name", "image"],
-			limit=5,
-		)
+		# Gather catalog context for AI / fallback
+		catalog_context = _build_upsell_context(item, cart_items)
 
-		plans = frappe.db.get_all(
-			"CH Warranty Plan",
-			filters={"status": "Active", "brand": item.brand},
-			fields=["name", "plan_name", "price", "duration_months", "coverage_description"],
-		)
+		if settings and settings.enable_ai:
+			try:
+				result = _ai_upsell(item, cart_items, catalog_context, settings)
+				if result:
+					return result
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), "AI upsell failed - using rule fallback")
 
-		suggestions = []
-		for acc in accessories:
-			price = flt(frappe.db.get_value(
-				"CH Item Price",
-				{"item_code": acc.item_code, "channel": "POS", "status": "Active"},
-				"selling_price",
-			))
-			suggestions.append({
-				"item_code": acc.item_code,
-				"item_name": acc.item_name,
-				"type": "Accessory",
-				"reason": f"Popular accessory for {item.brand}",
-				"price": price,
-			})
-
-		for plan in plans:
-			suggestions.append({
-				"item_code": plan.name,
-				"item_name": plan.plan_name,
-				"type": "Warranty",
-				"reason": plan.coverage_description or f"{plan.duration_months} months protection",
-				"price": flt(plan.price),
-			})
-
-		return suggestions
+		# Rule-based fallback
+		return _rule_based_upsell(item, catalog_context)
 
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), f"get_upsell_suggestions failed for {item_code}")
@@ -102,8 +75,10 @@ def get_upsell_suggestions(item_code, cart_items=None):
 
 @frappe.whitelist()
 def explain_offers(cart):
-	"""Plain-language explanation of applied offers.
+	"""AI-powered plain-language explanation of applied offers.
 
+	Flow: gather offer data → call AI for friendly explanation
+	→ fall back to template-based explanation on failure.
 	Resilience: returns a safe message on any failure.
 	"""
 	try:
@@ -114,25 +89,25 @@ def explain_offers(cart):
 		if not items:
 			return "No items in cart."
 
-		explanations = []
-		for item in items:
-			offers = frappe.db.get_all(
-				"CH Item Offer",
-				filters={
-					"item_code": item.get("item_code"),
-					"channel": "POS",
-					"status": "Active",
-					"start_date": ["<=", frappe.utils.today()],
-					"end_date": [">=", frappe.utils.today()],
-				},
-				fields=["offer_name", "offer_type", "value_type", "value"],
-				order_by="priority asc",
-			)
-			for offer in offers:
-				desc = _describe_offer(offer, item)
-				if desc:
-					explanations.append(desc)
+		offer_data = _gather_offer_data(items)
+		if not offer_data:
+			return "No special offers apply to this cart."
 
+		settings = _get_ai_settings()
+		if settings and settings.enable_ai:
+			try:
+				result = _ai_explain_offers(offer_data, cart, settings)
+				if result:
+					return result
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), "AI offer explain failed - using template")
+
+		# Template-based fallback
+		explanations = []
+		for od in offer_data:
+			desc = _describe_offer(od["offer"], od["item"])
+			if desc:
+				explanations.append(desc)
 		return " ".join(explanations) if explanations else "No special offers apply to this cart."
 
 	except Exception:
@@ -288,8 +263,327 @@ def _static_compare(item_codes, preferences):
 
 
 def _describe_offer(offer, item):
-	if offer.value_type == "Percentage":
-		return f"{offer.offer_name}: {flt(offer.value)}% off on {item.get('item_name', '')}."
-	elif offer.value_type == "Amount":
-		return f"{offer.offer_name}: Rs.{flt(offer.value)} off on {item.get('item_name', '')}."
+	if isinstance(offer, dict):
+		vtype = offer.get("value_type", "")
+		val = flt(offer.get("value", 0))
+		name = offer.get("offer_name", "")
+	else:
+		vtype = offer.value_type
+		val = flt(offer.value)
+		name = offer.offer_name
+
+	item_name = item.get("item_name", "") if isinstance(item, dict) else getattr(item, "item_name", "")
+
+	if vtype == "Percentage":
+		return f"{name}: {val}% off on {item_name}."
+	elif vtype == "Amount":
+		return f"{name}: Rs.{val} off on {item_name}."
 	return ""
+
+
+# -- AI upsell helpers -------------------------------------------------------
+
+
+def _build_upsell_context(item, cart_items):
+	"""Gather catalog data for upsell: accessories, warranty plans, related items."""
+	context = {"accessories": [], "plans": [], "related": []}
+
+	# Accessories matching brand or general
+	acc_filters = {"item_group": "Accessories", "disabled": 0, "is_sales_item": 1}
+	if item.brand:
+		acc_filters["brand"] = item.brand
+	accessories = frappe.db.get_all(
+		"Item",
+		filters=acc_filters,
+		fields=["name as item_code", "item_name", "brand", "image"],
+		limit=10,
+	)
+	for acc in accessories:
+		price = flt(frappe.db.get_value(
+			"CH Item Price",
+			{"item_code": acc.item_code, "channel": "POS", "status": "Active"},
+			"selling_price",
+		))
+		if not price:
+			price = flt(frappe.db.get_value("Item Price",
+				{"item_code": acc.item_code, "selling": 1}, "price_list_rate"))
+		acc["price"] = price
+		context["accessories"].append(acc)
+
+	# Active warranty / protection plans
+	plans = frappe.db.get_all(
+		"CH Warranty Plan",
+		filters={"status": "Active"},
+		fields=["name", "plan_name", "price", "duration_months", "coverage_description", "plan_type", "brand"],
+	)
+	for plan in plans:
+		context["plans"].append({
+			"plan_code": plan.name,
+			"plan_name": plan.plan_name,
+			"price": flt(plan.price),
+			"duration_months": plan.duration_months,
+			"coverage": plan.coverage_description or "",
+			"plan_type": plan.plan_type or "",
+			"brand": plan.brand or "",
+		})
+
+	# Higher-spec items in same category (for upgrades)
+	if item.item_group:
+		related = frappe.db.sql("""
+			SELECT i.name as item_code, i.item_name, i.brand,
+				COALESCE(cp.selling_price, ip.price_list_rate, 0) as price
+			FROM tabItem i
+			LEFT JOIN `tabCH Item Price` cp ON cp.item_code = i.name AND cp.channel = 'POS' AND cp.status = 'Active'
+			LEFT JOIN `tabItem Price` ip ON ip.item_code = i.name AND ip.selling = 1
+			WHERE i.item_group = %(group)s AND i.disabled = 0 AND i.is_sales_item = 1
+				AND i.name != %(item)s
+				AND COALESCE(cp.selling_price, ip.price_list_rate, 0) > 0
+			ORDER BY COALESCE(cp.selling_price, ip.price_list_rate, 0) DESC
+			LIMIT 5
+		""", {"group": item.item_group, "item": item.name}, as_dict=1)
+		context["related"] = related
+
+	return context
+
+
+def _ai_upsell(item, cart_items, catalog_context, settings):
+	"""Call AI for smart upsell suggestions."""
+	import requests
+
+	# Build item details
+	item_data = {
+		"item_code": item.name,
+		"item_name": item.item_name,
+		"brand": item.brand or "",
+		"item_group": item.item_group or "",
+		"description": (item.description or "")[:300],
+	}
+	price = flt(frappe.db.get_value(
+		"CH Item Price",
+		{"item_code": item.name, "channel": "POS", "status": "Active"},
+		"selling_price",
+	))
+	if not price:
+		price = flt(frappe.db.get_value("Item Price",
+			{"item_code": item.name, "selling": 1}, "price_list_rate"))
+	item_data["price"] = price
+
+	# Model specs
+	if hasattr(item, "ch_model") and item.ch_model:
+		try:
+			model_doc = frappe.get_cached_doc("CH Model", item.ch_model)
+			item_data["specs"] = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}
+		except Exception:
+			pass
+
+	cart_summary = []
+	if cart_items:
+		for ci in cart_items:
+			ci_code = ci.get("item_code", "") if isinstance(ci, dict) else ci
+			ci_name = frappe.db.get_value("Item", ci_code, "item_name") or ci_code
+			cart_summary.append(ci_name)
+
+	system_prompt = settings.upsell_system_prompt or (
+		"You are a helpful retail assistant at an electronics store. "
+		"Suggest relevant accessories, protection plans, or upgrades. "
+		"Be helpful and concise. Return JSON only."
+	)
+
+	user_prompt = (
+		f"Customer is buying: {json.dumps(item_data)}\n"
+		f"Already in cart: {json.dumps(cart_summary) if cart_summary else 'nothing else'}\n\n"
+		f"Available accessories: {json.dumps(catalog_context['accessories'][:5])}\n"
+		f"Available protection plans: {json.dumps(catalog_context['plans'][:5])}\n"
+		f"Available upgrades: {json.dumps([{'item_code':r['item_code'],'item_name':r['item_name'],'price':r['price']} for r in catalog_context.get('related',[])])}\n\n"
+		"Pick the top 3-4 most relevant suggestions. For each:\n"
+		"- item_code: exact code from the lists above\n"
+		"- item_name: exact name\n"
+		"- type: 'Accessory', 'Protection Plan', or 'Upgrade'\n"
+		"- reason: one compelling sentence why the customer needs this\n"
+		"- price: the price\n"
+		"- priority: 1 (must-have) to 3 (nice-to-have)\n\n"
+		"Return JSON: {\"suggestions\": [...], \"sales_tip\": \"one sentence sales coaching tip\"}"
+	)
+
+	api_key = settings.get_password("api_key")
+	endpoint = settings.api_endpoint or "https://api.openai.com/v1/chat/completions"
+
+	resp = requests.post(
+		endpoint,
+		headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+		json={
+			"model": settings.upsell_model or "gpt-4o-mini",
+			"messages": [
+				{"role": "system", "content": system_prompt},
+				{"role": "user", "content": user_prompt},
+			],
+			"max_tokens": cint(settings.max_tokens) or 2000,
+			"response_format": {"type": "json_object"},
+		},
+		timeout=cint(settings.timeout_sec) or 10,
+	)
+	resp.raise_for_status()
+
+	content = resp.json()["choices"][0]["message"]["content"]
+	parsed = json.loads(content)
+
+	suggestions = parsed.get("suggestions", [])
+	sales_tip = parsed.get("sales_tip", "")
+
+	# Validate and enrich suggestions — only return items that actually exist
+	valid = []
+	for s in suggestions:
+		code = s.get("item_code", "")
+		stype = s.get("type", "")
+		if stype == "Protection Plan":
+			if frappe.db.exists("CH Warranty Plan", code):
+				valid.append({
+					"item_code": code,
+					"item_name": s.get("item_name", ""),
+					"type": "Protection Plan",
+					"reason": s.get("reason", ""),
+					"price": flt(s.get("price", 0)),
+					"priority": cint(s.get("priority", 2)),
+					"source": "AI",
+				})
+		elif frappe.db.exists("Item", code):
+			valid.append({
+				"item_code": code,
+				"item_name": s.get("item_name", ""),
+				"type": stype or "Accessory",
+				"reason": s.get("reason", ""),
+				"price": flt(s.get("price", 0)),
+				"priority": cint(s.get("priority", 2)),
+				"source": "AI",
+			})
+
+	if sales_tip and valid:
+		valid[0]["sales_tip"] = sales_tip
+
+	return valid if valid else None
+
+
+def _rule_based_upsell(item, catalog_context):
+	"""Fallback: rule-based upsell from catalog context."""
+	suggestions = []
+
+	for acc in catalog_context.get("accessories", [])[:3]:
+		suggestions.append({
+			"item_code": acc["item_code"],
+			"item_name": acc["item_name"],
+			"type": "Accessory",
+			"reason": f"Popular accessory for {item.brand or item.item_group}",
+			"price": flt(acc.get("price", 0)),
+			"priority": 2,
+			"source": "Rule",
+		})
+
+	for plan in catalog_context.get("plans", [])[:2]:
+		suggestions.append({
+			"item_code": plan["plan_code"],
+			"item_name": plan["plan_name"],
+			"type": "Protection Plan",
+			"reason": plan.get("coverage") or f"{plan['duration_months']} months protection",
+			"price": flt(plan.get("price", 0)),
+			"priority": 1,
+			"source": "Rule",
+		})
+
+	return suggestions
+
+
+# -- AI offer explain helpers ------------------------------------------------
+
+
+def _gather_offer_data(items):
+	"""Gather all applicable offers for cart items, including global offers."""
+	offer_data = []
+	seen_offers = set()
+	today = frappe.utils.today()
+
+	for item in items:
+		item_code = item.get("item_code")
+		if not item_code:
+			continue
+		# Item-specific offers
+		offers = frappe.db.get_all(
+			"CH Item Offer",
+			filters={
+				"item_code": item_code,
+				"channel": "POS",
+				"status": "Active",
+				"start_date": ["<=", today],
+				"end_date": [">=", today],
+			},
+			fields=["name", "offer_name", "offer_type", "value_type", "value", "notes"],
+			order_by="priority asc",
+		)
+		for offer in offers:
+			if offer.name not in seen_offers:
+				seen_offers.add(offer.name)
+				offer_data.append({"offer": offer, "item": item})
+
+	# Global offers (item_code is null or empty)
+	global_offers = frappe.db.get_all(
+		"CH Item Offer",
+		filters={
+			"item_code": ["in", [None, ""]],
+			"channel": "POS",
+			"status": "Active",
+			"start_date": ["<=", today],
+			"end_date": [">=", today],
+		},
+		fields=["name", "offer_name", "offer_type", "value_type", "value", "notes"],
+		order_by="priority asc",
+	)
+	for offer in global_offers:
+		if offer.name not in seen_offers:
+			seen_offers.add(offer.name)
+			offer_data.append({"offer": offer, "item": {"item_name": "your cart"}})
+
+	return offer_data
+
+
+def _ai_explain_offers(offer_data, cart, settings):
+	"""Call AI to explain offers in plain language."""
+	import requests
+
+	offers_summary = []
+	for od in offer_data:
+		offers_summary.append({
+			"item": od["item"].get("item_name", od["item"].get("item_code", "")),
+			"offer": od["offer"].get("offer_name", ""),
+			"type": od["offer"].get("value_type", ""),
+			"value": flt(od["offer"].get("value", 0)),
+			"notes": od["offer"].get("notes", ""),
+		})
+
+	system_prompt = settings.offer_explain_prompt or (
+		"You are a friendly retail assistant. Explain discounts simply. "
+		"Use Indian Rupee. Max 3 sentences."
+	)
+
+	user_prompt = (
+		f"The customer's cart has these offers applied:\n{json.dumps(offers_summary, indent=2)}\n\n"
+		"Explain the savings in a friendly, clear way. "
+		"Mention total approximate savings. Max 3 sentences."
+	)
+
+	api_key = settings.get_password("api_key")
+	endpoint = settings.api_endpoint or "https://api.openai.com/v1/chat/completions"
+
+	resp = requests.post(
+		endpoint,
+		headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+		json={
+			"model": settings.upsell_model or "gpt-4o-mini",
+			"messages": [
+				{"role": "system", "content": system_prompt},
+				{"role": "user", "content": user_prompt},
+			],
+			"max_tokens": 300,
+		},
+		timeout=cint(settings.timeout_sec) or 10,
+	)
+	resp.raise_for_status()
+	return resp.json()["choices"][0]["message"]["content"].strip()

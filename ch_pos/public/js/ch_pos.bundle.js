@@ -24,6 +24,7 @@ import { SessionControls } from "./pos_app/app_shell/session_controls.js";
 import { ItemService } from "./pos_app/services/item_service.js";
 import { CartService } from "./pos_app/services/cart_service.js";
 import { SyncService } from "./pos_app/services/sync_service.js";
+import { UpsellService } from "./pos_app/services/upsell_service.js";
 
 // Module workspaces
 import { SellWorkspace } from "./pos_app/modules/sell/sell_workspace.js";
@@ -76,6 +77,7 @@ ch_pos.PosApp = class PosApp {
 		this.sync_service = new SyncService();
 		this.item_service = new ItemService();
 		this.cart_service = new CartService();
+		this.upsell_service = new UpsellService();
 		this.payment_dialog = new PaymentDialog();
 		this.network_status = new NetworkStatus();
 	}

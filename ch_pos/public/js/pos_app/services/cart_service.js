@@ -343,6 +343,7 @@ export class CartService {
 		this._apply_best_offer(cart_item);
 		PosState.cart.push(cart_item);
 		EventBus.emit("cart:updated");
+		EventBus.emit("cart:item_added", { item_data, cart_item });
 		this._prompt_warranty(item_data, cart_item);
 		this._prompt_bundle_items(item_data);
 	}
