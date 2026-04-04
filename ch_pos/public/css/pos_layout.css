@@ -84,29 +84,29 @@ body.ch-pos-fullscreen .container { max-width: 100% !important; padding: 0 !impo
 
 /* Section Headers */
 .ch-pos-sidebar-section {
-  padding: 20px 20px 8px;
-  font-size: var(--pos-fs-2xs);
+  padding: 14px 20px 4px;
+  font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.8px;
   color: var(--sidebar-section-text);
   user-select: none;
 }
-.ch-pos-sidebar-section:first-child { padding-top: 20px; }
+.ch-pos-sidebar-section:first-child { padding-top: 14px; }
 
-/* Nav Items — large touch targets */
+/* Nav Items — compact to fit all menus without scroll */
 .ch-pos-sidebar-item {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   width: calc(100% - 12px);
-  margin: 2px 6px;
-  padding: 10px 14px;
-  min-height: var(--pos-touch-min);
+  margin: 1px 6px;
+  padding: 6px 14px;
+  min-height: 34px;
   border: none;
   background: transparent;
   color: var(--sidebar-text);
-  font-size: var(--pos-fs-md);
+  font-size: var(--pos-fs-sm);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--pos-transition);
@@ -118,14 +118,14 @@ body.ch-pos-fullscreen .container { max-width: 100% !important; padding: 0 !impo
   letter-spacing: 0.01em;
 }
 .ch-pos-sidebar-item .sidebar-icon {
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--pos-radius-sm);
   background: rgba(255,255,255,0.05);
-  font-size: 14px;
+  font-size: 12px;
   flex-shrink: 0;
   transition: all var(--pos-transition);
 }
@@ -158,12 +158,12 @@ body.ch-pos-fullscreen .container { max-width: 100% !important; padding: 0 !impo
 /* Sidebar Bottom — Operator + Store info */
 .ch-pos-sidebar-bottom {
   margin-top: auto;
-  padding: 16px;
+  padding: 10px 16px;
   border-top: 1px solid var(--sidebar-divider);
 }
 /* Walk-in Log Button */
 .ch-pos-walkin-btn-wrap {
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 .ch-pos-walkin-btn {
   display: flex;
