@@ -13,10 +13,22 @@ from frappe import _
 from frappe.utils import flt, cint, now_datetime, getdate, nowdate
 
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
-from ch_pos.pos_core.doctype.ch_pos_user_allocation.ch_pos_user_allocation import (
-    get_user_allocation,
-    get_user_company,
-)
+
+
+def _get_executive_permissions(exec_record):
+    """Derive session permissions from POS Executive role.
+    Manager gets all permissions; others get basic open/close."""
+    if not exec_record:
+        return {"can_open_session": 0, "can_close_session": 0, "can_approve_variance": 0, "can_do_cash_drop": 0}
+
+    role = frappe.db.get_value("POS Executive", exec_record.name, "role") or "Executive"
+    is_manager = role == "Manager"
+    return {
+        "can_open_session": 1,
+        "can_close_session": 1,
+        "can_approve_variance": 1 if is_manager else 0,
+        "can_do_cash_drop": 1 if is_manager else 0,
+    }
 
 
 # ── POS Launch / Context ─────────────────────────────────────────────────────
@@ -33,8 +45,13 @@ def get_pos_context():
     frappe.has_permission("Sales Invoice", "read", throw=True)
     user = frappe.session.user
 
-    # Get user allocation
-    alloc = get_user_allocation(user)
+    # Get user's POS Executive record (primary source of truth)
+    exec_record = frappe.db.get_value(
+        "POS Executive",
+        {"user": user, "is_active": 1},
+        ["name", "company", "store"],
+        as_dict=True,
+    )
 
     # System Managers / Administrators always get a store picker
     is_system_manager = "System Manager" in frappe.get_roles(user) or user == "Administrator"
@@ -43,18 +60,18 @@ def get_pos_context():
             "status": "select_store",
             "message": _("You have System Manager access. Select a store to continue."),
             "stores": _get_all_active_stores(),
-            "default_store": alloc.store if alloc else None,
+            "default_store": exec_record.store if exec_record else None,
         }
 
-    if not alloc:
+    if not exec_record:
         return {
             "status": "no_allocation",
-            "message": _("You are not allocated to any company for POS operations. Contact your manager."),
+            "message": _("You have no active POS Executive record. Contact your manager."),
         }
 
-    company = alloc.company
-    store = alloc.store
-    device_name = alloc.default_device
+    company = exec_record.company
+    store = exec_record.store
+    device_name = None  # device resolved below if CH Device Master exists
 
     # Resolve device
     device = None
@@ -104,12 +121,7 @@ def get_pos_context():
         "device": device,
         "business_date": str(business_date) if business_date else None,
         "day_closed": day_closed,
-        "allocation": {
-            "can_open_session": cint(alloc.can_open_session),
-            "can_close_session": cint(alloc.can_close_session),
-            "can_approve_variance": cint(alloc.can_approve_variance),
-            "can_do_cash_drop": cint(alloc.can_do_cash_drop),
-        },
+        "allocation": _get_executive_permissions(exec_record),
         "existing_session": {
             "name": existing_session.name,
             "user": existing_session.user,

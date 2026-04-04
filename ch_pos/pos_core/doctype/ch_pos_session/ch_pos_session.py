@@ -166,30 +166,40 @@ class CHPOSSession(Document):
             )
 
     def _validate_user_allocation(self):
-        """User must be allocated to this company and store."""
+        """User must be assigned to this company and store via POS Executive."""
         if self.docstatus != 0:
             return
-        try:
-            enforce = cint(frappe.db.get_single_value("CH POS Control Settings", "enforce_user_company_isolation"))
-        except Exception:
-            enforce = 0
-        if not enforce:
+
+        # Check POS Executive — the single source of truth
+        exec_exists = frappe.db.exists("POS Executive", {
+            "user": self.user,
+            "company": self.company,
+            "store": self.store,
+            "is_active": 1,
+        })
+        if exec_exists:
             return
 
-        from ch_pos.pos_core.doctype.ch_pos_user_allocation.ch_pos_user_allocation import get_user_allocation
-        alloc = get_user_allocation(self.user, self.company)
-        if not alloc:
+        # Check if user has POS Executive for this company but different store
+        exec_other_store = frappe.db.get_value("POS Executive", {
+            "user": self.user,
+            "company": self.company,
+            "is_active": 1,
+        }, "store")
+        if exec_other_store:
             frappe.throw(
-                _("User {0} is not allocated to company {1} for POS operations.").format(
-                    self.user, self.company
+                _("User {0} is assigned to store {1}, not {2}. Update the POS Executive record or create a new one.").format(
+                    self.user, exec_other_store, self.store
                 )
             )
-        if alloc.store != self.store:
-            frappe.throw(
-                _("User {0} is allocated to store {1}, not {2}.").format(
-                    self.user, alloc.store, self.store
-                )
+
+        # No POS Executive found
+        frappe.throw(
+            _("User {0} has no active POS Executive record for company {1}. "
+              "Create one in POS > POS Executive.").format(
+                self.user, self.company
             )
+        )
 
     def _validate_business_date(self):
         """Business date must match the store's current business date."""

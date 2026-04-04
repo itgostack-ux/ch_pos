@@ -123,6 +123,10 @@ export class SessionControls {
 								<i class="fa fa-money"></i>
 								<span>${__("Cash Drop")}</span>
 							</button>
+							<button class="ch-session-menu-item ch-btn-switch-company">
+								<i class="fa fa-building-o"></i>
+								<span>${__("Switch Company")}</span>
+							</button>
 							<button class="ch-session-menu-item ch-btn-switch-user" ${(has_session && !is_locked) ? "" : "disabled"}>
 								<i class="fa fa-user"></i>
 								<span>${__("Switch Cashier")}</span>
@@ -185,6 +189,10 @@ export class SessionControls {
 			container.find(".ch-session-profile-shell").removeClass("open");
 			this._show_cash_drop();
 		});
+		container.find(".ch-btn-switch-company").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_switch_company();
+		});
 		container.find(".ch-btn-switch-user").on("click", () => {
 			container.find(".ch-session-profile-shell").removeClass("open");
 			this._show_switch_user();
@@ -205,6 +213,77 @@ export class SessionControls {
 			container.find(".ch-session-profile-shell").removeClass("open");
 			this._show_close_session();
 		});
+	}
+
+	_show_switch_company() {
+		// Build list of accessible companies
+		const access = PosState.executive_access;
+		let companies = [];
+
+		if (access && access.companies && access.companies.length) {
+			companies = access.companies.map(c => c.company);
+		}
+
+		// System Manager with no executive records — fetch all companies
+		if (!companies.length && (frappe.user_roles || []).includes("System Manager")) {
+			frappe.xcall("frappe.client.get_list", {
+				doctype: "Company",
+				fields: ["name"],
+				limit_page_length: 0,
+			}).then(result => {
+				const all_companies = (result || []).map(r => r.name);
+				this._open_company_dialog(all_companies);
+			});
+			return;
+		}
+
+		if (companies.length <= 1) {
+			frappe.show_alert({ message: __("Only one company available"), indicator: "blue" });
+			return;
+		}
+
+		this._open_company_dialog(companies);
+	}
+
+	_open_company_dialog(companies) {
+		const current = PosState.active_company || PosState.company || "";
+		const options = companies.map(c => c).join("\n");
+
+		const d = new frappe.ui.Dialog({
+			title: __("Switch Company"),
+			fields: [
+				{
+					fieldname: "company",
+					fieldtype: "Select",
+					label: __("Company"),
+					options: options,
+					default: current,
+					reqd: 1,
+				},
+			],
+			primary_action_label: __("Switch"),
+			primary_action: (values) => {
+				d.hide();
+				if (values.company === current) return;
+
+				PosState.active_company = values.company;
+				PosState.company = values.company;
+
+				// Update company display in session bar
+				const short = values.company.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
+				$(".ch-session-profile-company").text(short);
+
+				// Re-render sidebar modes and cart executive bar
+				EventBus.emit("company:switched", values.company);
+				EventBus.emit("profile:loaded", PosState);
+
+				frappe.show_alert({
+					message: __("Switched to {0}", [short]),
+					indicator: "green",
+				});
+			},
+		});
+		d.show();
 	}
 
 	_show_x_report() {

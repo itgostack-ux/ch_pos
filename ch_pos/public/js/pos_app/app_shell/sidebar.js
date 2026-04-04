@@ -113,42 +113,25 @@ export class Sidebar {
 
 	/** Compute which modes the current user can access based on active company */
 	_compute_allowed_modes() {
-		// System Manager / Administrator sees all modes regardless
-		if ((frappe.user_roles || []).includes("System Manager")) {
-			this._allowed_modes = null;
-			return;
-		}
-
 		const access = PosState.executive_access;
-		if (!access || !access.companies || !access.companies.length) {
-			// No executive records — fall back to POS Profile company to filter modes
-			const fallback_company = PosState.active_company || PosState.company;
-			if (fallback_company) {
-				const allowed = new Set();
-				if (_is_service_company(fallback_company)) {
-					COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
-				} else {
-					COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
-				}
-				this._allowed_modes = allowed;
-			} else {
-				this._allowed_modes = null; // truly unknown — show all
-			}
-			return;
-		}
-
 		const active = PosState.active_company;
-		const allowed = new Set();
 
+		// If a specific company is actively selected (e.g. via Switch Company),
+		// always filter modes by that company type
 		if (active) {
-			// Show modules based on the active company type
+			const allowed = new Set();
 			if (_is_service_company(active)) {
 				COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
 			} else {
 				COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
 			}
-		} else {
-			// No active company yet — show all accessible
+			this._allowed_modes = allowed;
+			return;
+		}
+
+		// If executive records exist but no active company yet, show union of all
+		if (access && access.companies && access.companies.length) {
+			const allowed = new Set();
 			for (const cr of access.companies) {
 				if (_is_service_company(cr.company)) {
 					COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
@@ -156,9 +139,24 @@ export class Sidebar {
 					COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
 				}
 			}
+			this._allowed_modes = allowed;
+			return;
 		}
 
-		this._allowed_modes = allowed;
+		// No executives, no active company — fall back to POS Profile company
+		const fallback = PosState.company;
+		if (fallback) {
+			const allowed = new Set();
+			if (_is_service_company(fallback)) {
+				COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
+			} else {
+				COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
+			}
+			this._allowed_modes = allowed;
+		} else {
+			// Truly unknown — show all (admin fallback)
+			this._allowed_modes = null;
+		}
 	}
 
 	_is_mode_allowed(modeKey) {

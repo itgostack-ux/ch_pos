@@ -173,17 +173,21 @@ export class RepairWorkspace {
 			parent: panel.find(".ch-repair-customer-link"),
 			render_input: true,
 		});
-		// Auto-populate phone when customer changes
-		cust_field.$input && cust_field.$input.on("change", () => {
-			const cust = cust_field.get_value();
-			if (cust) {
-				frappe.db.get_value("Customer", cust, "mobile_no").then(r => {
-					if (r && r.message && r.message.mobile_no) {
-						panel.find(".ch-rep-phone").val(r.message.mobile_no);
+		// Auto-populate phone when customer is selected from awesomplete
+		if (cust_field.$input) {
+			cust_field.$input.on("awesomplete-selectcomplete", () => {
+				setTimeout(() => {
+					const cust = cust_field.get_value();
+					if (cust) {
+						frappe.db.get_value("Customer", cust, "mobile_no").then(r => {
+							if (r && r.message && r.message.mobile_no) {
+								panel.find(".ch-rep-phone").val(r.message.mobile_no);
+							}
+						});
 					}
-				});
-			}
-		});
+				}, 100);
+			});
+		}
 		const device_field = frappe.ui.form.make_control({
 			df: { fieldname: "device_item", fieldtype: "Link", options: "Item", placeholder: __("Device model") },
 			parent: panel.find(".ch-repair-device-link"),
