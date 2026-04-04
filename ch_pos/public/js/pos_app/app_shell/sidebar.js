@@ -86,15 +86,48 @@ export class Sidebar {
 		this._allowed_modes = null; // computed after profile loads
 		this.render();
 		this.bind();
+		this._auto_responsive();
 		if (this.collapsed) this._apply_collapsed(true);
+	}
+
+	/** Auto-collapse sidebar on narrow screens */
+	_auto_responsive() {
+		if (!window.matchMedia) return;
+		const mql = window.matchMedia("(max-width: 1024px)");
+		const handler = (e) => {
+			if (e.matches && !this.collapsed) {
+				this.collapsed = true;
+				this._apply_collapsed(true);
+			} else if (!e.matches && this.collapsed &&
+				localStorage.getItem("ch_pos_sidebar_collapsed") !== "1") {
+				this.collapsed = false;
+				this._apply_collapsed(false);
+			}
+		};
+		mql.addEventListener("change", handler);
+		if (mql.matches && !this.collapsed) {
+			this.collapsed = true;
+			this._apply_collapsed(true);
+		}
 	}
 
 	/** Compute which modes the current user can access based on active company */
 	_compute_allowed_modes() {
 		const access = PosState.executive_access;
 		if (!access || !access.companies || !access.companies.length) {
-			// No executive records — show everything (admin / fallback)
-			this._allowed_modes = null;
+			// No executive records — fall back to POS Profile company to filter modes
+			const fallback_company = PosState.active_company || PosState.company;
+			if (fallback_company) {
+				const allowed = new Set();
+				if (_is_service_company(fallback_company)) {
+					COMPANY_MODE_MAP.service.forEach((m) => allowed.add(m));
+				} else {
+					COMPANY_MODE_MAP.retail.forEach((m) => allowed.add(m));
+				}
+				this._allowed_modes = allowed;
+			} else {
+				this._allowed_modes = null; // truly unknown — show all
+			}
 			return;
 		}
 

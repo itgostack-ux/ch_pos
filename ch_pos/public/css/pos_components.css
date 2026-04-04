@@ -4143,7 +4143,13 @@ body > .desk-alert-container {
   font-weight: 700;
 }
 
-/* ── Responsive tweak for narrow screens ─────────────────────────────── */
+/* ── Responsive tweak for screens ─────────────────────────────── */
+@media (min-width: 1920px) {
+  .ch-pay-screen { max-width: 1000px; max-height: 780px; }
+  .ch-pay-btn-label { font-size: 15px; }
+  .ch-pay-numpad-btn { min-height: 52px; font-size: 18px; }
+  .ch-pay-total-value { font-size: 30px; }
+}
 @media (max-width: 768px) {
   .ch-pay-screen {
     flex-direction: column;
@@ -4163,6 +4169,13 @@ body > .desk-alert-container {
   .ch-pay-right {
     height: 62%;
   }
+}
+@media (max-width: 480px) {
+  .ch-pay-screen { height: 100vh; width: 100vw; }
+  .ch-pay-left { height: 30%; }
+  .ch-pay-right { height: 70%; }
+  .ch-pay-numpad-btn { min-height: 44px; font-size: 16px; }
+  .ch-pay-btn-label { font-size: 12px; }
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -4326,10 +4339,12 @@ body > .desk-alert-container {
   right: 0;
   display: none;
   flex-direction: column;
+  gap: 2px;
   min-width: 200px;
   padding: 6px;
   border-radius: var(--pos-radius-md);
-  background: var(--pos-surface);
+  background: #fff;
+  color: #111827;
   border: 1px solid var(--pos-border);
   box-shadow: var(--pos-shadow-lg);
   z-index: 30;
@@ -4346,21 +4361,31 @@ body > .desk-alert-container {
   border: none;
   border-radius: var(--pos-radius-sm);
   background: transparent;
-  color: var(--pos-text-primary);
+  color: #1f2937 !important;
+  -webkit-text-fill-color: #1f2937;
   font-size: 12px;
   font-weight: 600;
   text-align: left;
   cursor: pointer;
 }
+.ch-session-menu-item span,
+.ch-session-menu-item i {
+  color: inherit !important;
+  -webkit-text-fill-color: currentColor;
+}
 .ch-session-menu-item:hover:not(:disabled) {
   background: var(--pos-surface-sunken);
-  color: var(--pos-primary);
+  color: var(--pos-primary, #2563eb) !important;
+  -webkit-text-fill-color: var(--pos-primary, #2563eb);
 }
 .ch-session-menu-item.is-danger {
-  color: var(--pos-danger);
+  color: var(--pos-danger, #dc2626) !important;
+  -webkit-text-fill-color: var(--pos-danger, #dc2626);
 }
 .ch-session-menu-item:disabled {
-  opacity: 0.45;
+  opacity: 1;
+  color: rgba(31, 41, 55, 0.55) !important;
+  -webkit-text-fill-color: rgba(31, 41, 55, 0.55);
   cursor: not-allowed;
 }
 
@@ -4595,6 +4620,10 @@ body > .desk-alert-container {
 /* ═══════════════════════════════════════════════════════════
    RESPONSIVE — Session bar
    ═══════════════════════════════════════════════════════════ */
+@media (min-width: 1920px) {
+  .ch-session-bar { height: 48px; font-size: 13px; padding: 0 20px; }
+  .ch-session-profile-name { max-width: 200px; }
+}
 @media (max-width: 1024px) {
   .ch-session-shortcuts-wrap { display: none; }
   .ch-pos-imei-wrap { min-width: 160px; }
@@ -4607,6 +4636,12 @@ body > .desk-alert-container {
   }
   .ch-session-bar { height: 36px; font-size: 10px; padding: 0 10px; }
   .ch-session-profile-name { max-width: 96px; }
+}
+@media (max-width: 480px) {
+  .ch-session-bar { height: 32px; padding: 0 6px; }
+  .ch-session-left { gap: 4px; }
+  .ch-session-profile-name { max-width: 64px; }
+  .ch-pos-kbd-hint, .ch-pay-kbd-hint { display: none; }
 }
 /* ── end payment overlay ─────────────────────────────────────────────── */
 

@@ -1,5 +1,7 @@
+import datetime
+
 import frappe
-from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day
+from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime
 from buyback.utils import validate_indian_phone
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
@@ -2936,26 +2938,67 @@ def store_dashboard(pos_profile):
     }
 
 
+def _get_material_request_due_datetime(urgency=None, required_by_date=None, required_by_time=None):
+    """Return the due datetime used for stock-request delay tracking."""
+    urgency = (urgency or "Standard").title()
+    due_dt = now_datetime()
+
+    if urgency == "Urgent":
+        due_dt = due_dt + datetime.timedelta(hours=2)
+    elif urgency == "Low":
+        due_dt = due_dt + datetime.timedelta(days=7)
+        due_dt = due_dt.replace(hour=18, minute=0, second=0, microsecond=0)
+    else:
+        due_dt = due_dt + datetime.timedelta(days=3)
+        due_dt = due_dt.replace(hour=13, minute=0, second=0, microsecond=0)
+
+    if required_by_date:
+        time_value = (required_by_time or due_dt.strftime("%H:%M")).strip()
+        if len(time_value) == 5:
+            time_value = f"{time_value}:00"
+        try:
+            due_dt = get_datetime(f"{required_by_date} {time_value}")
+        except Exception:
+            pass
+
+    return due_dt
+
+
+def _format_delay_minutes(minutes):
+    minutes = max(cint(minutes), 0)
+    days, rem = divmod(minutes, 1440)
+    hours, mins = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins or not parts:
+        parts.append(f"{mins}m")
+    return " ".join(parts)
+
+
 @frappe.whitelist()
-def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None):
+def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None,
+                            required_by_date=None, required_by_time=None):
     """Create a Store Material Request from POS for stock replenishment.
 
     Source warehouse is auto-resolved from the store's zone if not provided.
+    A due date + time is captured so teams can track delivery delays precisely.
     """
     from ch_erp15.ch_erp15.store_request_api import create_store_material_request
 
-    required_by_date = nowdate()
-    if urgency == "Standard":
-        required_by_date = frappe.utils.add_days(nowdate(), 3)
-    elif urgency == "Low":
-        required_by_date = frappe.utils.add_days(nowdate(), 7)
+    urgency = (urgency or "Standard").title()
+    due_dt = _get_material_request_due_datetime(urgency, required_by_date, required_by_time)
+    required_by_date = str(getdate(due_dt))
 
     return create_store_material_request(
         pos_profile=pos_profile,
         items=items,
-        priority=urgency or "Standard",
+        priority=urgency,
         notes=notes or None,
         required_by_date=required_by_date,
+        required_by_datetime=due_dt,
         preferred_source_warehouse=source_warehouse or None,
     )
 
@@ -3009,14 +3052,39 @@ def get_pending_material_requests(pos_profile):
     item_counts = {r.parent: r.item_count for r in rows}
 
     out = []
+    now_dt = now_datetime()
+    closed_statuses = {"Received", "Transferred", "Stopped", "Cancelled"}
+
     for req in requests:
+        sla_due_by = req.get("sla_due_by")
+        delay_minutes = 0
+        delay_label = ""
+        delay_state = "scheduled"
+
+        if sla_due_by and req.get("status") not in closed_statuses:
+            try:
+                delta_minutes = int((now_dt - get_datetime(sla_due_by)).total_seconds() // 60)
+                if delta_minutes > 0:
+                    delay_minutes = delta_minutes
+                    delay_label = _format_delay_minutes(delta_minutes)
+                    delay_state = "delayed"
+                else:
+                    delay_label = _format_delay_minutes(abs(delta_minutes))
+                    delay_state = "due"
+            except Exception:
+                pass
+
         entry = {
             "name": req["name"],
-            "transaction_date": req.get("required_by_date") or req.get("creation"),
+            "transaction_date": str(sla_due_by or req.get("required_by_date") or req.get("creation")),
             "status": req.get("status"),
             "approval_status": req.get("approval_status", ""),
             "priority": req.get("priority", ""),
             "sla_breached": req.get("sla_breached", 0),
+            "sla_due_by": str(sla_due_by) if sla_due_by else None,
+            "delay_minutes": delay_minutes,
+            "delay_label": delay_label,
+            "delay_state": delay_state,
             "item_count": item_counts.get(req["name"], 0),
             "purchase_requests": req.get("purchase_requests", []),
             "stock_entries": req.get("stock_entries", []),

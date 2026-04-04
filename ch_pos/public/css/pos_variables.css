@@ -110,6 +110,28 @@
 }
 
 /* ── Responsive Overrides ────────────────────────────────── */
+
+/* TV / Large Display (≥1920px) */
+@media (min-width: 1920px) {
+  :root {
+    --sidebar-w: 260px;
+    --cart-w: 480px;
+    --cart-w-min: 440px;
+    --pos-fs-2xs: 11px;
+    --pos-fs-xs: 12px;
+    --pos-fs-sm: 13px;
+    --pos-fs-base: 14px;
+    --pos-fs-md: 15px;
+    --pos-fs-lg: 18px;
+    --pos-fs-xl: 20px;
+    --pos-fs-2xl: 26px;
+    --pos-fs-3xl: 34px;
+    --pos-touch-min: 48px;
+    --pos-touch-comfortable: 52px;
+  }
+}
+
+/* Standard laptop */
 @media (max-width: 1280px) {
   :root {
     --sidebar-w: 200px;

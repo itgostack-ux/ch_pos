@@ -35,7 +35,13 @@ export class RepairWorkspace {
 					<div class="section-body">
 						<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md)">
 							<div class="ch-pos-field-group">
-								<label>${__("Customer")} <span style="color:var(--pos-danger)">*</span></label>
+								<label style="display:flex;align-items:center;gap:8px">
+									${__("Customer")} <span style="color:var(--pos-danger)">*</span>
+									<button class="btn btn-xs btn-outline-primary ch-rep-new-customer"
+										style="border-radius:var(--pos-radius-sm);font-size:11px;padding:1px 8px;margin-left:auto">
+										<i class="fa fa-plus"></i> ${__("New")}
+									</button>
+								</label>
 								<div class="ch-repair-customer-link"></div>
 							</div>
 							<div class="ch-pos-field-group">
@@ -90,8 +96,11 @@ export class RepairWorkspace {
 					<div class="section-body">
 						<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md)">
 							<div class="ch-pos-field-group">
-								<label>${__("Issue Category")}</label>
-								<div class="ch-repair-issue-cat-link"></div>
+								<label>${__("Issue Categories")}</label>
+								<div class="ch-repair-issue-cats">
+									<div class="ch-repair-issue-cat-link" style="margin-bottom:4px"></div>
+									<div class="ch-rep-issue-tags" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+								</div>
 							</div>
 							<div class="ch-pos-field-group">
 								<label>${__("Warranty Status")}</label>
@@ -145,9 +154,6 @@ export class RepairWorkspace {
 
 				<!-- Actions -->
 				<div class="ch-mode-actions">
-					<button class="btn btn-success ch-rep-quick-job" style="flex:1">
-						<i class="fa fa-bolt"></i> ${__("Quick Job Card")}
-					</button>
 					<button class="btn btn-primary ch-rep-create" style="flex:1">
 						<i class="fa fa-plus-circle"></i> ${__("Create Service Request")}
 					</button>
@@ -167,6 +173,17 @@ export class RepairWorkspace {
 			parent: panel.find(".ch-repair-customer-link"),
 			render_input: true,
 		});
+		// Auto-populate phone when customer changes
+		cust_field.$input && cust_field.$input.on("change", () => {
+			const cust = cust_field.get_value();
+			if (cust) {
+				frappe.db.get_value("Customer", cust, "mobile_no").then(r => {
+					if (r && r.message && r.message.mobile_no) {
+						panel.find(".ch-rep-phone").val(r.message.mobile_no);
+					}
+				});
+			}
+		});
 		const device_field = frappe.ui.form.make_control({
 			df: { fieldname: "device_item", fieldtype: "Link", options: "Item", placeholder: __("Device model") },
 			parent: panel.find(".ch-repair-device-link"),
@@ -177,10 +194,75 @@ export class RepairWorkspace {
 			parent: panel.find(".ch-repair-serial-link"),
 			render_input: true,
 		});
+
+		// ── Issue Category Multiselect (tag-based) ──
+		const selected_issues = [];
 		const issue_cat_field = frappe.ui.form.make_control({
-			df: { fieldname: "issue_category", fieldtype: "Link", options: "Issue Category", placeholder: __("Issue category") },
+			df: { fieldname: "issue_category", fieldtype: "Link", options: "Issue Category", placeholder: __("Add issue category...") },
 			parent: panel.find(".ch-repair-issue-cat-link"),
 			render_input: true,
+		});
+		const _render_issue_tags = () => {
+			const container = panel.find(".ch-rep-issue-tags");
+			container.empty();
+			selected_issues.forEach((cat, idx) => {
+				container.append(`
+					<span class="badge" style="background:#e8f0fe;color:#1a73e8;padding:4px 10px;border-radius:12px;font-size:12px;display:inline-flex;align-items:center;gap:4px">
+						${frappe.utils.escape_html(cat)}
+						<i class="fa fa-times ch-rep-remove-issue" data-idx="${idx}" style="cursor:pointer;opacity:0.7"></i>
+					</span>
+				`);
+			});
+		};
+		// Frappe Link uses awesomplete — listen to selection event, not "change"
+		if (issue_cat_field.$input) {
+			issue_cat_field.$input.on("awesomplete-selectcomplete", () => {
+				setTimeout(() => {
+					const val = issue_cat_field.get_value();
+					if (val && !selected_issues.includes(val)) {
+						selected_issues.push(val);
+						_render_issue_tags();
+					}
+					issue_cat_field.set_value("");
+				}, 100);
+			});
+		}
+		panel.on("click", ".ch-rep-remove-issue", function () {
+			selected_issues.splice($(this).data("idx"), 1);
+			_render_issue_tags();
+		});
+
+		// ── New Customer quick-create ──
+		panel.on("click", ".ch-rep-new-customer", () => {
+			const d = new frappe.ui.Dialog({
+				title: __("New Customer"),
+				fields: [
+					{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"), reqd: 1 },
+					{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), reqd: 1 },
+					{ fieldtype: "Column Break" },
+					{ fieldname: "email_id", fieldtype: "Data", label: __("Email"), options: "Email" },
+					{ fieldname: "customer_group", fieldtype: "Link", label: __("Customer Group"), options: "Customer Group", default: "Individual" },
+				],
+				primary_action_label: __("Create"),
+				primary_action: (values) => {
+					frappe.xcall("frappe.client.insert", {
+						doc: {
+							doctype: "Customer",
+							customer_name: values.customer_name,
+							customer_type: "Individual",
+							customer_group: values.customer_group || "Individual",
+							mobile_no: values.mobile_no,
+							email_id: values.email_id || undefined,
+						}
+					}).then((doc) => {
+						cust_field.set_value(doc.name);
+						panel.find(".ch-rep-phone").val(values.mobile_no);
+						frappe.show_alert({ message: __("Customer {0} created", [doc.customer_name]), indicator: "green" });
+						d.hide();
+					});
+				}
+			});
+			d.show();
 		});
 
 		panel.on("click", ".ch-rep-create", () => {
@@ -199,6 +281,15 @@ export class RepairWorkspace {
 			}
 			if (!assert_india_phone(panel.find(".ch-rep-phone")[0], phone)) return;
 
+			// Build issue_lines from multiselect tags
+			const issue_lines = selected_issues.map(cat => ({
+				issue_category: cat,
+				reported_by: "Customer",
+				status: "Open",
+			}));
+			// Keep first category as primary issue_category for backward compat
+			const primary_issue = selected_issues.length ? selected_issues[0] : "";
+
 			frappe.xcall("frappe.client.insert", {
 				doc: {
 					doctype: "Service Request",
@@ -206,7 +297,8 @@ export class RepairWorkspace {
 					contact_number: phone,
 					device_item: device_item,
 					serial_no: serial_field.get_value() || "",
-					issue_category: issue_cat_field.get_value() || "",
+					issue_category: primary_issue,
+					issue_lines: issue_lines,
 					issue_description: issue_desc,
 					warranty_status: panel.find(".ch-rep-warranty").val() || "",
 					device_condition: device_condition,
@@ -247,6 +339,8 @@ export class RepairWorkspace {
 				device_field.set_value("");
 				serial_field.set_value("");
 				issue_cat_field.set_value("");
+				selected_issues.length = 0;
+				_render_issue_tags();
 				// Create walk-in token for this repair intake
 				if (PosState.pos_profile) {
 					frappe.call({
@@ -317,76 +411,8 @@ export class RepairWorkspace {
 			device_field.set_value("");
 			serial_field.set_value("");
 			issue_cat_field.set_value("");
-		});
-
-		// ── Quick Job Card: SR → Accept → Job Assignment in one call ──
-		panel.on("click", ".ch-rep-quick-job", () => {
-			const customer = cust_field.get_value();
-			const device_item = device_field.get_value();
-			const phone = panel.find(".ch-rep-phone").val().trim();
-			const issue_desc = panel.find(".ch-rep-issue").val().trim();
-			const priority = panel.find(".ch-rep-priority").val() || "Medium";
-			const est_hours = parseFloat(panel.find(".ch-rep-est-hours").val()) || undefined;
-			const device_condition = panel.find(".ch-rep-condition").val() || undefined;
-			const accessories = panel.find(".ch-rep-accessories").val().trim() || undefined;
-			const data_disclaimer = panel.find(".ch-rep-data-disclaimer").is(":checked") ? 1 : 0;
-
-			if (!customer || !phone || !device_item || !issue_desc) {
-				frappe.show_alert({ message: __("Customer, phone, device, and issue description are required"), indicator: "orange" });
-				return;
-			}
-			if (!assert_india_phone(panel.find(".ch-rep-phone")[0], phone)) return;
-
-			const btn = panel.find(".ch-rep-quick-job");
-			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating Job Card...")}`);
-
-			frappe.xcall("ch_pos.api.pos_api.create_quick_job_card", {
-				customer,
-				contact_number: phone,
-				device_item,
-				issue_description: issue_desc,
-				serial_no: serial_field.get_value() || undefined,
-				issue_category: issue_cat_field.get_value() || undefined,
-				warranty_status: panel.find(".ch-rep-warranty").val() || undefined,
-				priority,
-				estimated_hours: est_hours,
-				device_condition,
-				accessories_received: accessories,
-				data_backup_disclaimer: data_disclaimer,
-			}).then((result) => {
-				btn.prop("disabled", false).html(`<i class="fa fa-bolt"></i> ${__("Quick Job Card")}`);
-				frappe.show_alert({
-					message: __("Job Card {0} created (SR: {1}, SO: {2})", [
-						result.job_assignment, result.service_request, result.service_order
-					]),
-					indicator: "green",
-				});
-
-				panel.find(".ch-rep-result-area").html(`
-					<div class="ch-rep-result" style="margin-bottom:var(--pos-space-md)">
-						<i class="fa fa-check-circle" style="font-size:18px;color:var(--pos-success)"></i>
-						<span><b>${__("Job Card")}: ${result.job_assignment}</b></span>
-						<div style="margin-left:auto;display:flex;gap:6px">
-							<span class="badge badge-info" style="font-size:11px">${__("SR")}: ${result.service_request}</span>
-							<span class="badge badge-warning" style="font-size:11px">${__("SO")}: ${result.service_order}</span>
-							<button class="btn btn-sm btn-outline-primary ch-rep-open-sr"
-								data-name="${result.service_request}" style="border-radius:var(--pos-radius-sm);font-weight:700">
-								<i class="fa fa-external-link"></i> ${__("Open in GoFix")}
-							</button>
-						</div>
-					</div>`);
-
-				// Clear form
-				panel.find("input, textarea").val("");
-				panel.find("select").prop("selectedIndex", 0);
-				cust_field.set_value("");
-				device_field.set_value("");
-				serial_field.set_value("");
-				issue_cat_field.set_value("");
-				this._load_pipeline(panel);
-			}).catch(() => {
-				btn.prop("disabled", false).html(`<i class="fa fa-bolt"></i> ${__("Quick Job Card")}`);
-			});
+			selected_issues.length = 0;
+			_render_issue_tags();
 		});
 	}
 

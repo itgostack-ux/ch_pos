@@ -60,15 +60,23 @@ export class MaterialRequestWorkspace {
 						<span class="ch-mr-editing-badge" style="display:none;font-size:var(--pos-fs-2xs);background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;margin-left:8px">${__("Adding to draft")}</span>
 					</div>
 					<div class="section-body">
-						<!-- Urgency -->
-						<div style="display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:12px">
+						<!-- Urgency / due target -->
+						<div style="display:grid;grid-template-columns:1.1fr 1fr 0.9fr;gap:10px;margin-bottom:12px">
 							<div class="ch-pos-field-group">
-								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Urgency")}</label>
+								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Request Type")}</label>
 								<select class="form-control ch-mr-urgency" style="border-radius:var(--pos-radius-sm);height:36px">
-									<option value="Standard">${__("Standard (3 days)")}</option>
-									<option value="Urgent">${__("Urgent (today)")}</option>
-									<option value="Low">${__("Low (1 week)")}</option>
+									<option value="Urgent">${__("Urgent")}</option>
+									<option value="Standard" selected>${__("Standard")}</option>
+									<option value="Low">${__("Low")}</option>
 								</select>
+							</div>
+							<div class="ch-pos-field-group">
+								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Need By Date")}</label>
+								<input type="date" class="form-control ch-mr-needed-date" style="border-radius:var(--pos-radius-sm);height:36px">
+							</div>
+							<div class="ch-pos-field-group">
+								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Need By Time")}</label>
+								<input type="time" class="form-control ch-mr-needed-time" style="border-radius:var(--pos-radius-sm);height:36px">
 							</div>
 						</div>
 						<!-- Item + qty row -->
@@ -115,6 +123,7 @@ export class MaterialRequestWorkspace {
 
 		this._init_item_field(panel);
 		this._bind(panel);
+		this._apply_due_defaults(panel, true);
 		this._load_zone_info(panel);
 		this._load_drafts(panel);
 		this._load_pending(panel);
@@ -135,6 +144,50 @@ export class MaterialRequestWorkspace {
 		});
 		this.item_field.$input.css({ "border-radius": "var(--pos-radius-sm)" });
 		el.find(".frappe-control").css({ "margin-bottom": "0" });
+	}
+
+	_get_due_defaults(urgency) {
+		const now = new Date();
+		let target = new Date(now);
+
+		if (urgency === "Urgent") {
+			target = new Date(now.getTime() + (2 * 60 * 60 * 1000));
+		} else if (urgency === "Low") {
+			target = new Date(now.getTime() + (7 * 24 * 60 * 60 * 1000));
+			target.setHours(18, 0, 0, 0);
+		} else {
+			target = new Date(now.getTime() + (3 * 24 * 60 * 60 * 1000));
+			target.setHours(13, 0, 0, 0);
+		}
+
+		const local = new Date(target.getTime() - (target.getTimezoneOffset() * 60000));
+		return {
+			date: local.toISOString().slice(0, 10),
+			time: local.toISOString().slice(11, 16),
+		};
+	}
+
+	_apply_due_defaults(panel, force = false) {
+		const dateInput = panel.find(".ch-mr-needed-date");
+		const timeInput = panel.find(".ch-mr-needed-time");
+		if (!dateInput.length || !timeInput.length) return;
+		if (!force && dateInput.val() && timeInput.val()) return;
+
+		const defaults = this._get_due_defaults(panel.find(".ch-mr-urgency").val() || "Standard");
+		dateInput.val(defaults.date);
+		timeInput.val(defaults.time);
+	}
+
+	_format_delay(minutes) {
+		const total = Math.max(parseInt(minutes, 10) || 0, 0);
+		const days = Math.floor(total / 1440);
+		const hours = Math.floor((total % 1440) / 60);
+		const mins = total % 60;
+		const parts = [];
+		if (days) parts.push(`${days}d`);
+		if (hours) parts.push(`${hours}h`);
+		if (mins || !parts.length) parts.push(`${mins}m`);
+		return parts.join(" ");
 	}
 
 	_load_zone_info(panel) {
@@ -166,6 +219,7 @@ export class MaterialRequestWorkspace {
 	}
 
 	_bind(panel) {
+		panel.on("change", ".ch-mr-urgency", () => this._apply_due_defaults(panel, true));
 		panel.on("click", ".ch-mr-add-btn", () => this._add_item(panel));
 		panel.on("click", ".ch-mr-clear-btn", () => {
 			this.request_items = [];
@@ -353,13 +407,21 @@ export class MaterialRequestWorkspace {
 
 		// Create new request
 		const urgency = panel.find(".ch-mr-urgency").val() || "Standard";
+		const required_by_date = panel.find(".ch-mr-needed-date").val() || "";
+		const required_by_time = panel.find(".ch-mr-needed-time").val() || "";
 		const notes = panel.find(".ch-mr-notes").val() || "";
+		if (!required_by_date || !required_by_time) {
+			frappe.show_alert({ message: __("Please choose the required date and time."), indicator: "orange" });
+			return;
+		}
 		frappe.call({
 			method: "ch_pos.api.pos_api.create_material_request",
 			args: {
 				pos_profile: PosState.pos_profile,
 				items: this.request_items,
 				urgency,
+				required_by_date,
+				required_by_time,
 				notes: notes || undefined,
 			},
 			freeze: true,
@@ -496,13 +558,22 @@ export class MaterialRequestWorkspace {
 						: "ch-pos-badge-muted";
 					const sla_warn = mr.sla_breached
 						? ` <span style="color:#dc2626;font-size:10px"><i class="fa fa-exclamation-circle"></i> SLA</span>` : "";
+					const dueText = mr.sla_due_by
+						? `${__("Need by")}: ${frappe.datetime.str_to_user(mr.sla_due_by)}`
+						: `${__("Need by")}: ${frappe.datetime.str_to_user(mr.transaction_date)}`;
+					const delayText = mr.delay_state === "delayed"
+						? `<span style="color:#dc2626;font-size:10px;font-weight:700"><i class="fa fa-clock-o"></i> ${__("Delayed by")} ${frappe.utils.escape_html(mr.delay_label || this._format_delay(mr.delay_minutes))}</span>`
+						: (mr.delay_state === "due" && mr.delay_label
+							? `<span style="color:#92400e;font-size:10px;font-weight:700"><i class="fa fa-hourglass-half"></i> ${__("Due in")} ${frappe.utils.escape_html(mr.delay_label)}</span>`
+							: "");
 					return `
 						<div class="ch-mr-request-row" style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--pos-border-light)">
 							<div>
 								<div style="font-weight:700;font-size:var(--pos-fs-sm)">${frappe.utils.escape_html(mr.name)}${sla_warn}</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
-									${frappe.datetime.str_to_user(mr.transaction_date)} · ${mr.item_count} ${__("items")} · ${mr.priority || "Standard"}
+									${dueText} · ${mr.item_count} ${__("items")} · ${mr.priority || "Standard"}
 								</div>
+								${delayText ? `<div style="margin-top:4px">${delayText}</div>` : ""}
 							</div>
 							<div style="display:flex;gap:8px;align-items:center">
 								<span class="ch-pos-badge ${status_cls}">${frappe.utils.escape_html(mr.status)}</span>
