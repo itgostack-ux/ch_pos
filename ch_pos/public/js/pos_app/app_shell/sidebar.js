@@ -113,6 +113,12 @@ export class Sidebar {
 
 	/** Compute which modes the current user can access based on active company */
 	_compute_allowed_modes() {
+		// System Manager / Administrator sees all modes regardless
+		if ((frappe.user_roles || []).includes("System Manager")) {
+			this._allowed_modes = null;
+			return;
+		}
+
 		const access = PosState.executive_access;
 		if (!access || !access.companies || !access.companies.length) {
 			// No executive records — fall back to POS Profile company to filter modes
