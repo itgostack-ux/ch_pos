@@ -325,6 +325,28 @@ class CHPOSSession(Document):
         self.db_set("status", "Open")
         self.status = "Open"
 
+    # Valid state transitions for the session lifecycle
+    _VALID_TRANSITIONS = {
+        "Draft": {"Open"},
+        "Open": {"Locked", "Closing", "Pending Close", "Closed"},
+        "Locked": {"Open", "Closing", "Pending Close", "Closed"},
+        "Suspended": {"Open", "Closing", "Closed"},
+        "Closing": {"Pending Close", "Closed"},
+        "Pending Close": {"Closed"},
+        "Closed": set(),  # terminal state
+    }
+
+    def _validate_status_transition(self, new_status):
+        """Ensure only valid state transitions are allowed."""
+        old_status = self.get_db_value("status") or "Draft"
+        allowed = self._VALID_TRANSITIONS.get(old_status, set())
+        if new_status not in allowed:
+            frappe.throw(
+                _("Invalid session transition: {0} → {1}. Allowed: {2}").format(
+                    old_status, new_status, ", ".join(allowed) or "none"
+                )
+            )
+
     def close_session(self, closing_cash, denomination_rows=None, variance_reason=None,
                       manager_pin_user=None):
         """Close this session — called from POS UI."""

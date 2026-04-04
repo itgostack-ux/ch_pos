@@ -32,7 +32,10 @@ def verify_manager_pin(pin, store=None, permission=None):
 
     filters = {"is_active": 1}
     if store:
-        filters["store"] = ("in", [store, None, ""])
+        filters["store"] = store
+    else:
+        # Without a store context, only match PINs that have an explicit store assigned
+        filters["store"] = ("is", "set")
 
     managers = frappe.get_all(
         "CH Manager PIN",

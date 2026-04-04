@@ -441,6 +441,9 @@ export class SessionControls {
 					PosState.session_status = "Locked";
 					EventBus.emit("session:locked");
 					frappe.show_alert({ message: __("Session locked"), indicator: "orange" });
+				}).catch((err) => {
+					console.error("Lock session error:", err);
+					frappe.msgprint({ title: __("Lock Failed"), message: err.message || __("Failed to lock session"), indicator: "red" });
 				});
 			}
 		);
@@ -454,6 +457,9 @@ export class SessionControls {
 			PosState.session_status = "Open";
 			EventBus.emit("session:unlocked");
 			frappe.show_alert({ message: __("Session unlocked"), indicator: "green" });
+		}).catch((err) => {
+			console.error("Unlock session error:", err);
+			frappe.msgprint({ title: __("Unlock Failed"), message: err.message || __("Failed to unlock session"), indicator: "red" });
 		});
 	}
 

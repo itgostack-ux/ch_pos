@@ -161,105 +161,111 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
     # Get business date
     business_date = get_store_business_date(store)
 
-    # Check for unclosed sessions (strict store-level single session)
-    unclosed = frappe.db.get_value(
-        "CH POS Session",
-        {
-            "store": store,
-            "status": ("in", ["Open", "Suspended", "Closing"]),
-            "docstatus": 1,
-        },
-        ["name", "pos_profile", "user"],
-        as_dict=True,
-    )
-    if unclosed:
-        frappe.throw(
-            _("Session {0} (Profile: {1}, Cashier: {2}) is still active. Close it before opening a new one.").format(
-                unclosed.name, unclosed.pos_profile, unclosed.user
+    # Acquire advisory lock to prevent race condition on session creation
+    lock_key = f"pos_session_{store}_{business_date}"
+    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    try:
+        # Check for unclosed sessions (strict store-level single session)
+        unclosed = frappe.db.get_value(
+            "CH POS Session",
+            {
+                "store": store,
+                "status": ("in", ["Open", "Suspended", "Closing"]),
+                "docstatus": 1,
+            },
+            ["name", "pos_profile", "user"],
+            as_dict=True,
+        )
+        if unclosed:
+            frappe.throw(
+                _("Session {0} (Profile: {1}, Cashier: {2}) is still active. Close it before opening a new one.").format(
+                    unclosed.name, unclosed.pos_profile, unclosed.user
+                )
             )
-        )
 
-    # Do not allow reopening for the same business date once store day is closed.
-    closed_for_day = frappe.db.exists(
-        "CH POS Session",
-        {
-            "store": store,
-            "business_date": business_date,
-            "status": "Closed",
-            "docstatus": 1,
-        },
-    )
-    if closed_for_day:
-        frappe.throw(
-            _(
-                "Business date {0} for store {1} is already closed. "
-                "Complete settlement and advance business date before opening a new session."
-            ).format(business_date, store)
+        # Do not allow reopening for the same business date once store day is closed.
+        closed_for_day = frappe.db.exists(
+            "CH POS Session",
+            {
+                "store": store,
+                "business_date": business_date,
+                "status": "Closed",
+                "docstatus": 1,
+            },
         )
+        if closed_for_day:
+            frappe.throw(
+                _(
+                    "Business date {0} for store {1} is already closed. "
+                    "Complete settlement and advance business date before opening a new session."
+                ).format(business_date, store)
+            )
 
     # Manager PIN verification for opening approval
-    manager_user = None
-    if manager_pin:
-        pin_result = verify_manager_pin(manager_pin, store=store, permission="can_approve_opening")
-        if not pin_result.get("valid"):
-            frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
-        manager_user = pin_result["user"]
+        manager_user = None
+        if manager_pin:
+            pin_result = verify_manager_pin(manager_pin, store=store, permission="can_approve_opening")
+            if not pin_result.get("valid"):
+                frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+            manager_user = pin_result["user"]
 
-    # Validate opening cash against previous closing / expected float
-    expected_float = _get_expected_float(pos_profile, store)
+        # Validate opening cash against previous closing / expected float
+        expected_float = _get_expected_float(pos_profile, store)
 
-    # Create ERPNext POS Opening Entry (for GL linkage)
-    balance_details = []
-    for p in (profile.payments or []):
-        amt = opening_cash if (frappe.db.get_value("Mode of Payment", p.mode_of_payment, "type") == "Cash") else 0
-        balance_details.append({
-            "mode_of_payment": p.mode_of_payment,
-            "opening_amount": amt,
-        })
-
-    opening_entry = frappe.get_doc({
-        "doctype": "POS Opening Entry",
-        "pos_profile": pos_profile,
-        "company": company,
-        "user": frappe.session.user,
-        "period_start_date": now_datetime(),
-        "balance_details": balance_details,
-    })
-    opening_entry.insert(ignore_permissions=True)
-    opening_entry.submit()
-
-    # Update Business Date status to Open if not already
-    bd_doc_name = frappe.db.get_value("CH Business Date", {"store": store}, "name")
-    if bd_doc_name:
-        bd_status = frappe.db.get_value("CH Business Date", bd_doc_name, "status")
-        if not bd_status or bd_status == "Closed":
-            frappe.db.set_value("CH Business Date", bd_doc_name, {
-                "status": "Open",
-                "opened_on": now_datetime(),
-                "opened_by": frappe.session.user,
-                "closed_on": None,
-                "closed_by": None,
+        # Create ERPNext POS Opening Entry (for GL linkage)
+        balance_details = []
+        for p in (profile.payments or []):
+            amt = opening_cash if (frappe.db.get_value("Mode of Payment", p.mode_of_payment, "type") == "Cash") else 0
+            balance_details.append({
+                "mode_of_payment": p.mode_of_payment,
+                "opening_amount": amt,
             })
 
-    # Create CH POS Session
-    session = frappe.get_doc({
-        "doctype": "CH POS Session",
-        "company": company,
-        "pos_profile": pos_profile,
-        "store": store,
-        "device": device_doc.name if device_doc else None,
-        "user": frappe.session.user,
-        "business_date": business_date,
-        "shift_start": now_datetime(),
-        "opening_cash": opening_cash,
-        "expected_float": expected_float,
-        "opening_approved_by": manager_user or "",
-        "opening_approved_at": now_datetime() if manager_user else None,
-        "pos_opening_entry": opening_entry.name,
-        "status": "Open",
-    })
-    session.insert(ignore_permissions=True)
-    session.submit()
+        opening_entry = frappe.get_doc({
+            "doctype": "POS Opening Entry",
+            "pos_profile": pos_profile,
+            "company": company,
+            "user": frappe.session.user,
+            "period_start_date": now_datetime(),
+            "balance_details": balance_details,
+        })
+        opening_entry.insert(ignore_permissions=True)
+        opening_entry.submit()
+
+        # Update Business Date status to Open if not already
+        bd_doc_name = frappe.db.get_value("CH Business Date", {"store": store}, "name")
+        if bd_doc_name:
+            bd_status = frappe.db.get_value("CH Business Date", bd_doc_name, "status")
+            if not bd_status or bd_status == "Closed":
+                frappe.db.set_value("CH Business Date", bd_doc_name, {
+                    "status": "Open",
+                    "opened_on": now_datetime(),
+                    "opened_by": frappe.session.user,
+                    "closed_on": None,
+                    "closed_by": None,
+                })
+
+        # Create CH POS Session
+        session = frappe.get_doc({
+            "doctype": "CH POS Session",
+            "company": company,
+            "pos_profile": pos_profile,
+            "store": store,
+            "device": device_doc.name if device_doc else None,
+            "user": frappe.session.user,
+            "business_date": business_date,
+            "shift_start": now_datetime(),
+            "opening_cash": opening_cash,
+            "expected_float": expected_float,
+            "opening_approved_by": manager_user or "",
+            "opening_approved_at": now_datetime() if manager_user else None,
+            "pos_opening_entry": opening_entry.name,
+            "status": "Open",
+        })
+        session.insert(ignore_permissions=True)
+        session.submit()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
     frappe.db.commit()
 
@@ -371,7 +377,10 @@ def switch_user(session_name, new_user, manager_pin):
     if session.status != "Open":
         frappe.throw(_("Session is not open"))
 
-    pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_opening")
+    pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_cashier_switch")
+    if not pin_result.get("valid"):
+        # Fallback: accept can_approve_opening if can_approve_cashier_switch not configured
+        pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_opening")
     if not pin_result.get("valid"):
         frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
 
@@ -408,6 +417,15 @@ def create_cash_drop(session_name, amount, reason, manager_pin):
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status != "Open":
         frappe.throw(_("Session is not open"))
+
+    # Validate cash drop amount does not exceed estimated cash in drawer
+    estimated_cash = flt(session.opening_cash) - flt(session.total_cash_drops or 0)
+    if amount > estimated_cash and estimated_cash > 0:
+        frappe.throw(
+            _("Cash drop amount (₹{0}) exceeds estimated cash in drawer (₹{1}).").format(
+                amount, estimated_cash
+            )
+        )
 
     pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_cash_drop")
     if not pin_result.get("valid"):

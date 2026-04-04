@@ -18,6 +18,24 @@ from buyback.utils import normalize_indian_phone, validate_indian_phone
 
 _INDIAN_PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 
+# Simple in-memory rate limiter for guest endpoints
+_RATE_LIMIT_CACHE = {}  # key → list of timestamps
+_RATE_LIMIT_MAX = 10  # max requests per window
+_RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
+
+
+def _check_rate_limit(key: str):
+    """Raise if rate limit exceeded for this key (IP/store combo)."""
+    import time
+    now = time.time()
+    window_start = now - _RATE_LIMIT_WINDOW
+    hits = _RATE_LIMIT_CACHE.get(key, [])
+    hits = [t for t in hits if t > window_start]
+    if len(hits) >= _RATE_LIMIT_MAX:
+        frappe.throw(_("Too many requests. Please try again later."), frappe.RateLimitExceededError)
+    hits.append(now)
+    _RATE_LIMIT_CACHE[key] = hits
+
 def _normalize_phone(raw: str) -> str:
     """Alias for backward compatibility — delegates to shared utility."""
     return normalize_indian_phone(raw)
@@ -219,16 +237,12 @@ def get_brand_models(brand: str):
         )
     db_brands = [r.name for r in brand_rows] or [brand]
 
-    brand_placeholders = ", ".join(["%s"] * len(db_brands))
-
-    rows = frappe.db.sql(
-        f"""SELECT DISTINCT item_name FROM `tabItem`
-            WHERE brand IN ({brand_placeholders})
-              AND disabled = 0
-            ORDER BY item_name ASC
-            LIMIT 200""",
-        tuple(db_brands),
-        as_dict=True,
+    rows = frappe.get_all(
+        "Item",
+        filters={"brand": ("in", db_brands), "disabled": 0},
+        fields=["distinct item_name as item_name"],
+        order_by="item_name asc",
+        limit_page_length=200,
     )
 
     seen = set()
@@ -257,6 +271,10 @@ def create_token(
     Create a new queue token. Called from the kiosk (no login required).
     Returns the token display number and doc name.
     """
+    # Rate limit by IP
+    client_ip = frappe.local.request.remote_addr if hasattr(frappe.local, "request") and frappe.local.request else "unknown"
+    _check_rate_limit(f"token_{client_ip}_{pos_profile}")
+
     # Input validation
     if not customer_name or not customer_phone:
         frappe.throw(_("Customer name and phone are required"))

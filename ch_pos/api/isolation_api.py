@@ -275,14 +275,25 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
     settlement.calculate_from_transactions()
 
     # Denomination breakdown
+    denom_total = 0
     if denomination_rows:
         for d in denomination_rows:
+            denom_amount = flt(d.get("denomination")) * int(d.get("count", d.get("quantity", 0)))
+            denom_total += denom_amount
             settlement.append("denomination_details", {
                 "note_or_coin": d.get("note_or_coin", "Note"),
                 "denomination": flt(d.get("denomination")),
                 "count": int(d.get("count", d.get("quantity", 0))),
-                "amount": flt(d.get("denomination")) * int(d.get("count", d.get("quantity", 0))),
+                "amount": denom_amount,
             })
+
+        # Validate denomination sum matches declared closing cash
+        if abs(denom_total - flt(actual_closing_cash)) > 1:
+            frappe.throw(
+                _("Denomination total ({0}) does not match declared closing cash ({1}).").format(
+                    denom_total, flt(actual_closing_cash)
+                )
+            )
 
     if manager_user:
         settlement.signoff_by_manager = manager_user

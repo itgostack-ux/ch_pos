@@ -21,6 +21,7 @@ class CHBusinessDate(Document):
 
 def advance_business_date(store, new_date, reason=None, manager_user=None):
     """Advance the business date for a store. Requires manager override."""
+    frappe.has_permission("CH Business Date", "write", throw=True)
     new_date = getdate(new_date)
 
     if frappe.db.exists("CH Business Date", store):
