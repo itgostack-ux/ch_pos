@@ -84,7 +84,7 @@ export class UpsellService {
 
 		html += `<p class="text-muted" style="margin:0 0 12px 0;font-size:12px">
 			${__("Recommended for")} <b>${item_name}</b>
-			<span class="badge badge-light" style="font-size:10px;margin-left:4px">${source === "AI" ? "✨ AI" : "Auto"}</span>
+			<span class="badge badge-light" style="font-size:10px;margin-left:4px">${source === "AI" ? "✨ AI" : "⚡ Smart"}</span>
 		</p>`;
 
 		// Suggestion rows

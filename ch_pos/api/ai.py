@@ -41,10 +41,11 @@ def compare_items(item_codes, customer_preferences=None):
 
 @frappe.whitelist()
 def get_upsell_suggestions(item_code, cart_items=None):
-	"""AI-powered upsell suggestions for an item.
+	"""Hybrid upsell suggestions: smart rules (instant) + optional AI coaching tip.
 
-	Flow: gather item context + catalog data → call AI for smart suggestions
-	→ fall back to rule-based suggestions on any failure.
+	Flow: smart rule engine picks best plans/accessories/upgrades from catalog
+	→ optionally calls AI for a one-sentence sales coaching tip
+	→ returns instantly even if AI is slow/unavailable.
 	Resilience: returns empty list on any failure instead of raising.
 	"""
 	try:
@@ -52,21 +53,41 @@ def get_upsell_suggestions(item_code, cart_items=None):
 			cart_items = frappe.parse_json(cart_items)
 
 		item = frappe.get_cached_doc("Item", item_code)
+
+		# Get device price
+		device_price = _get_item_pos_price(item.name)
+
+		# Cart item codes already added (to avoid duplicate suggestions)
+		cart_codes = set()
+		if cart_items:
+			for ci in cart_items:
+				cart_codes.add(ci.get("item_code", ci) if isinstance(ci, dict) else ci)
+
+		# ------ Primary: Smart Rule Engine (instant, free) ------
+		suggestions = _smart_rule_upsell(item, device_price, cart_codes)
+
+		if not suggestions:
+			return []
+
+		# ------ Secondary: Optional AI coaching tip ------
 		settings = _get_ai_settings()
-
-		# Gather catalog context for AI / fallback
-		catalog_context = _build_upsell_context(item, cart_items)
-
 		if settings and settings.enable_ai:
 			try:
-				result = _ai_upsell(item, cart_items, catalog_context, settings)
-				if result:
-					return result
+				tip = _ai_coaching_tip(item, device_price, suggestions, settings)
+				if tip:
+					suggestions[0]["sales_tip"] = tip
 			except Exception:
-				frappe.log_error(frappe.get_traceback(), "AI upsell failed - using rule fallback")
+				pass  # AI tip is optional — rule suggestions are already good
 
-		# Rule-based fallback
-		return _rule_based_upsell(item, catalog_context)
+		# Template tip fallback if no AI tip
+		if not suggestions[0].get("sales_tip"):
+			suggestions[0]["sales_tip"] = _template_sales_tip(item, device_price)
+
+		# Strip internal fields before returning
+		for s in suggestions:
+			s.pop("_sold_count", None)
+
+		return suggestions
 
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), f"get_upsell_suggestions failed for {item_code}")
@@ -281,128 +302,250 @@ def _describe_offer(offer, item):
 	return ""
 
 
-# -- AI upsell helpers -------------------------------------------------------
+# -- Smart Hybrid Upsell Engine -----------------------------------------------
+
+# Price tiers for warranty plan matching
+TIER_PREMIUM = 50000   # ₹50K+
+TIER_MID = 15000       # ₹15K–50K
+# Below ₹15K = budget
+
+# Plan recommendation matrix: {tier: [(plan_type_keyword, priority, reason_template), ...]}
+PLAN_TIERS = {
+	"premium": [
+		("Gold", 1, "Complete protection for your ₹{price} {brand} — covers everything for 24 months"),
+		("Theft", 1, "Theft & loss cover is a must-have for premium devices"),
+		("ADLD", 2, "Accidental damage, liquid & dust protection — peace of mind for {duration}"),
+		("Screen", 2, "Screen repairs cost ₹5,000+ — this covers it for just ₹{plan_price}"),
+	],
+	"mid": [
+		("Extended Warranty 24", 1, "Extend your warranty to 24 months — the #1 plan for {group}"),
+		("Screen", 1, "Screen protection at just ₹{plan_price} — most popular for {group}"),
+		("ADLD", 2, "Covers accidental damage & liquid spills for {duration}"),
+		("Extended Warranty 12", 2, "Basic 12-month extended warranty — affordable peace of mind"),
+	],
+	"budget": [
+		("Extended Warranty 12", 1, "Affordable protection — extend your warranty for just ₹{plan_price}"),
+		("Screen", 2, "Protect your screen for just ₹{plan_price}"),
+	],
+}
 
 
-def _build_upsell_context(item, cart_items):
-	"""Gather catalog data for upsell: accessories, warranty plans, related items."""
-	context = {"accessories": [], "plans": [], "related": []}
-
-	# Accessories matching brand or general
-	acc_filters = {"item_group": "Accessories", "disabled": 0, "is_sales_item": 1}
-	if item.brand:
-		acc_filters["brand"] = item.brand
-	accessories = frappe.db.get_all(
-		"Item",
-		filters=acc_filters,
-		fields=["name as item_code", "item_name", "brand", "image"],
-		limit=10,
-	)
-	for acc in accessories:
-		price = flt(frappe.db.get_value(
-			"CH Item Price",
-			{"item_code": acc.item_code, "channel": "POS", "status": "Active"},
-			"selling_price",
-		))
-		if not price:
-			price = flt(frappe.db.get_value("Item Price",
-				{"item_code": acc.item_code, "selling": 1}, "price_list_rate"))
-		acc["price"] = price
-		context["accessories"].append(acc)
-
-	# Active warranty / protection plans
-	plans = frappe.db.get_all(
-		"CH Warranty Plan",
-		filters={"status": "Active"},
-		fields=["name", "plan_name", "price", "duration_months", "coverage_description", "plan_type", "brand"],
-	)
-	for plan in plans:
-		context["plans"].append({
-			"plan_code": plan.name,
-			"plan_name": plan.plan_name,
-			"price": flt(plan.price),
-			"duration_months": plan.duration_months,
-			"coverage": plan.coverage_description or "",
-			"plan_type": plan.plan_type or "",
-			"brand": plan.brand or "",
-		})
-
-	# Higher-spec items in same category (for upgrades)
-	if item.item_group:
-		related = frappe.db.sql("""
-			SELECT i.name as item_code, i.item_name, i.brand,
-				COALESCE(cp.selling_price, ip.price_list_rate, 0) as price
-			FROM tabItem i
-			LEFT JOIN `tabCH Item Price` cp ON cp.item_code = i.name AND cp.channel = 'POS' AND cp.status = 'Active'
-			LEFT JOIN `tabItem Price` ip ON ip.item_code = i.name AND ip.selling = 1
-			WHERE i.item_group = %(group)s AND i.disabled = 0 AND i.is_sales_item = 1
-				AND i.name != %(item)s
-				AND COALESCE(cp.selling_price, ip.price_list_rate, 0) > 0
-			ORDER BY COALESCE(cp.selling_price, ip.price_list_rate, 0) DESC
-			LIMIT 5
-		""", {"group": item.item_group, "item": item.name}, as_dict=1)
-		context["related"] = related
-
-	return context
-
-
-def _ai_upsell(item, cart_items, catalog_context, settings):
-	"""Call AI for smart upsell suggestions."""
-	import requests
-
-	# Build item details
-	item_data = {
-		"item_code": item.name,
-		"item_name": item.item_name,
-		"brand": item.brand or "",
-		"item_group": item.item_group or "",
-		"description": (item.description or "")[:300],
-	}
+def _get_item_pos_price(item_code):
+	"""Get POS selling price for an item, falling back to Item Price."""
 	price = flt(frappe.db.get_value(
 		"CH Item Price",
-		{"item_code": item.name, "channel": "POS", "status": "Active"},
+		{"item_code": item_code, "channel": "POS", "status": "Active"},
 		"selling_price",
 	))
 	if not price:
-		price = flt(frappe.db.get_value("Item Price",
-			{"item_code": item.name, "selling": 1}, "price_list_rate"))
-	item_data["price"] = price
+		price = flt(frappe.db.get_value(
+			"Item Price",
+			{"item_code": item_code, "selling": 1},
+			"price_list_rate",
+		))
+	return price
 
-	# Model specs
-	if hasattr(item, "ch_model") and item.ch_model:
-		try:
-			model_doc = frappe.get_cached_doc("CH Model", item.ch_model)
-			item_data["specs"] = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}
-		except Exception:
-			pass
 
-	cart_summary = []
-	if cart_items:
-		for ci in cart_items:
-			ci_code = ci.get("item_code", "") if isinstance(ci, dict) else ci
-			ci_name = frappe.db.get_value("Item", ci_code, "item_name") or ci_code
-			cart_summary.append(ci_name)
+def _smart_rule_upsell(item, device_price, cart_codes):
+	"""Smart rule-based upsell: picks best warranty plans, accessories, upgrades."""
+	suggestions = []
 
-	system_prompt = settings.upsell_system_prompt or (
-		"You are a helpful retail assistant at an electronics store. "
-		"Suggest relevant accessories, protection plans, or upgrades. "
-		"Be helpful and concise. Return JSON only."
+	# 1. Warranty plan matching by price tier
+	plan_suggestions = _match_warranty_plans(item, device_price, cart_codes)
+	suggestions.extend(plan_suggestions)
+
+	# 2. Accessory matching (brand + group)
+	acc_suggestions = _match_accessories(item, cart_codes)
+	suggestions.extend(acc_suggestions)
+
+	# 3. Upgrade suggestions (same group, slightly higher price)
+	if device_price > 0:
+		upgrade_suggestions = _match_upgrades(item, device_price, cart_codes)
+		suggestions.extend(upgrade_suggestions)
+
+	# Sort: priority 1 first, then by sold-history popularity
+	suggestions.sort(key=lambda s: (s["priority"], -s.get("_sold_count", 0)))
+
+	# Limit to top 4
+	return suggestions[:4]
+
+
+def _match_warranty_plans(item, device_price, cart_codes):
+	"""Match warranty plans based on device price tier and sold history."""
+	# Get all active plans
+	plans = frappe.db.get_all(
+		"CH Warranty Plan",
+		filters={"status": "Active"},
+		fields=["name", "plan_name", "price", "duration_months", "plan_type",
+				"brand", "coverage_description"],
 	)
 
-	user_prompt = (
-		f"Customer is buying: {json.dumps(item_data)}\n"
-		f"Already in cart: {json.dumps(cart_summary) if cart_summary else 'nothing else'}\n\n"
-		f"Available accessories: {json.dumps(catalog_context['accessories'][:5])}\n"
-		f"Available protection plans: {json.dumps(catalog_context['plans'][:5])}\n"
-		f"Available upgrades: {json.dumps([{'item_code':r['item_code'],'item_name':r['item_name'],'price':r['price']} for r in catalog_context.get('related',[])])}\n\n"
-		"Pick the top 3-4 most relevant suggestions. For each:\n"
-		"- item_code: exact code from the lists above\n"
-		"- item_name: exact name\n"
-		"- type: 'Accessory', 'Protection Plan', or 'Upgrade'\n"
-		"- reason: one compelling sentence why the customer needs this\n"
-		"- price: the price\n"
-		"- priority: 1 (must-have) to 3 (nice-to-have)\n\n"
-		"Return JSON: {\"suggestions\": [...], \"sales_tip\": \"one sentence sales coaching tip\"}"
+	if not plans:
+		return []
+
+	# Determine price tier
+	if device_price >= TIER_PREMIUM:
+		tier = "premium"
+	elif device_price >= TIER_MID:
+		tier = "mid"
+	else:
+		tier = "budget"
+
+	tier_rules = PLAN_TIERS.get(tier, PLAN_TIERS["budget"])
+
+	# Get sold-history counts for this item_group (for popularity boost)
+	sold_counts = {}
+	if item.item_group:
+		sold_data = frappe.db.sql("""
+			SELECT sp.warranty_plan, COUNT(*) as cnt
+			FROM `tabCH Sold Plan` sp
+			JOIN tabItem i ON i.name = sp.item_code
+			WHERE i.item_group = %(group)s
+			GROUP BY sp.warranty_plan
+		""", {"group": item.item_group}, as_dict=1)
+		sold_counts = {s.warranty_plan: s.cnt for s in sold_data}
+
+	matched = []
+	used_plans = set()
+
+	for keyword, priority, reason_tpl in tier_rules:
+		for plan in plans:
+			if plan.name in used_plans or plan.name in cart_codes:
+				continue
+			# Brand filter: if plan has brand, must match device brand
+			if plan.brand and plan.brand != item.brand:
+				continue
+			# Match by keyword in plan_name
+			if keyword.lower() not in plan.plan_name.lower():
+				continue
+
+			# Build compelling reason
+			reason = reason_tpl.format(
+				price=f"{device_price:,.0f}" if device_price else "your device",
+				brand=item.brand or item.item_group or "device",
+				group=item.item_group or "devices",
+				duration=f"{plan.duration_months} months" if plan.duration_months else "extended period",
+				plan_price=f"{flt(plan.price):,.0f}",
+			)
+
+			# Boost reason with sold history
+			sold_count = sold_counts.get(plan.name, 0)
+			if sold_count >= 3:
+				reason += f" — {sold_count} customers chose this!"
+			elif sold_count >= 1:
+				reason += " — popular choice"
+
+			matched.append({
+				"item_code": plan.name,
+				"item_name": plan.plan_name,
+				"type": "Protection Plan",
+				"reason": reason,
+				"price": flt(plan.price),
+				"priority": priority,
+				"source": "Smart",
+				"_sold_count": sold_count,
+			})
+			used_plans.add(plan.name)
+			break  # One plan per tier rule
+
+	return matched
+
+
+def _match_accessories(item, cart_codes):
+	"""Match accessories by brand or item group. Filters junk items."""
+	filters = {"item_group": "Accessories", "disabled": 0, "is_sales_item": 1}
+	accessories = frappe.db.get_all(
+		"Item",
+		filters=filters,
+		fields=["name as item_code", "item_name", "brand"],
+		limit=20,
+	)
+
+	suggestions = []
+	for acc in accessories:
+		if acc.item_code in cart_codes:
+			continue
+		# Filter junk: skip items with only numeric/very short names
+		if len(acc.item_name or "") < 4 or (acc.item_name or "").strip().isdigit():
+			continue
+
+		price = _get_item_pos_price(acc.item_code)
+
+		# Prefer brand match
+		brand_match = item.brand and acc.brand and acc.brand == item.brand
+		reason = (
+			f"Made for your {item.brand}" if brand_match
+			else f"Popular accessory for {item.item_group or 'this device'}"
+		)
+
+		suggestions.append({
+			"item_code": acc.item_code,
+			"item_name": acc.item_name,
+			"type": "Accessory",
+			"reason": reason,
+			"price": price,
+			"priority": 2 if brand_match else 3,
+			"source": "Smart",
+			"_sold_count": 0,
+		})
+
+	return suggestions[:2]  # Max 2 accessories
+
+
+def _match_upgrades(item, device_price, cart_codes):
+	"""Suggest upgrades: same item_group, 10-30% more expensive."""
+	if not item.item_group or device_price <= 0:
+		return []
+
+	min_price = device_price * 1.10
+	max_price = device_price * 1.35
+
+	upgrades = frappe.db.sql("""
+		SELECT i.name as item_code, i.item_name, i.brand,
+			COALESCE(cp.selling_price, ip.price_list_rate, 0) as price
+		FROM tabItem i
+		LEFT JOIN `tabCH Item Price` cp
+			ON cp.item_code = i.name AND cp.channel = 'POS' AND cp.status = 'Active'
+		LEFT JOIN `tabItem Price` ip
+			ON ip.item_code = i.name AND ip.selling = 1
+		WHERE i.item_group = %(group)s AND i.disabled = 0 AND i.is_sales_item = 1
+			AND i.name != %(item)s
+			AND COALESCE(cp.selling_price, ip.price_list_rate, 0) BETWEEN %(min)s AND %(max)s
+		ORDER BY COALESCE(cp.selling_price, ip.price_list_rate, 0) ASC
+		LIMIT 2
+	""", {"group": item.item_group, "item": item.name, "min": min_price, "max": max_price}, as_dict=1)
+
+	suggestions = []
+	for u in upgrades:
+		if u.item_code in cart_codes:
+			continue
+		extra = flt(u.price) - device_price
+		suggestions.append({
+			"item_code": u.item_code,
+			"item_name": u.item_name,
+			"type": "Upgrade",
+			"reason": f"For just ₹{extra:,.0f} more, get the {u.item_name}",
+			"price": flt(u.price),
+			"priority": 3,
+			"source": "Smart",
+			"_sold_count": 0,
+		})
+
+	return suggestions[:1]  # Max 1 upgrade suggestion
+
+
+def _ai_coaching_tip(item, device_price, suggestions, settings):
+	"""Optional: call AI for a one-sentence sales coaching tip (not for picking items)."""
+	import requests
+
+	plan_names = [s["item_name"] for s in suggestions if s["type"] == "Protection Plan"]
+	tier_label = "premium" if device_price >= TIER_PREMIUM else ("mid-range" if device_price >= TIER_MID else "budget")
+
+	prompt = (
+		f"Customer is buying: {item.item_name} ({item.brand or ''}, ₹{device_price:,.0f}, {tier_label}).\n"
+		f"We're suggesting: {', '.join(s['item_name'] for s in suggestions)}.\n"
+		"Give ONE short sales coaching tip (max 15 words) for the salesperson. "
+		"Focus on how to pitch the protection plans naturally."
 	)
 
 	api_key = settings.get_password("api_key")
@@ -414,82 +557,27 @@ def _ai_upsell(item, cart_items, catalog_context, settings):
 		json={
 			"model": settings.upsell_model or "gpt-4o-mini",
 			"messages": [
-				{"role": "system", "content": system_prompt},
-				{"role": "user", "content": user_prompt},
+				{"role": "system", "content": "You are a retail sales coach. Be concise."},
+				{"role": "user", "content": prompt},
 			],
-			"max_tokens": cint(settings.max_tokens) or 2000,
-			"response_format": {"type": "json_object"},
+			"max_tokens": 60,
 		},
-		timeout=cint(settings.timeout_sec) or 10,
+		timeout=5,
 	)
 	resp.raise_for_status()
-
-	content = resp.json()["choices"][0]["message"]["content"]
-	parsed = json.loads(content)
-
-	suggestions = parsed.get("suggestions", [])
-	sales_tip = parsed.get("sales_tip", "")
-
-	# Validate and enrich suggestions — only return items that actually exist
-	valid = []
-	for s in suggestions:
-		code = s.get("item_code", "")
-		stype = s.get("type", "")
-		if stype == "Protection Plan":
-			if frappe.db.exists("CH Warranty Plan", code):
-				valid.append({
-					"item_code": code,
-					"item_name": s.get("item_name", ""),
-					"type": "Protection Plan",
-					"reason": s.get("reason", ""),
-					"price": flt(s.get("price", 0)),
-					"priority": cint(s.get("priority", 2)),
-					"source": "AI",
-				})
-		elif frappe.db.exists("Item", code):
-			valid.append({
-				"item_code": code,
-				"item_name": s.get("item_name", ""),
-				"type": stype or "Accessory",
-				"reason": s.get("reason", ""),
-				"price": flt(s.get("price", 0)),
-				"priority": cint(s.get("priority", 2)),
-				"source": "AI",
-			})
-
-	if sales_tip and valid:
-		valid[0]["sales_tip"] = sales_tip
-
-	return valid if valid else None
+	tip = resp.json()["choices"][0]["message"]["content"].strip().strip('"')
+	return tip if len(tip) < 200 else tip[:200]
 
 
-def _rule_based_upsell(item, catalog_context):
-	"""Fallback: rule-based upsell from catalog context."""
-	suggestions = []
-
-	for acc in catalog_context.get("accessories", [])[:3]:
-		suggestions.append({
-			"item_code": acc["item_code"],
-			"item_name": acc["item_name"],
-			"type": "Accessory",
-			"reason": f"Popular accessory for {item.brand or item.item_group}",
-			"price": flt(acc.get("price", 0)),
-			"priority": 2,
-			"source": "Rule",
-		})
-
-	for plan in catalog_context.get("plans", [])[:2]:
-		suggestions.append({
-			"item_code": plan["plan_code"],
-			"item_name": plan["plan_name"],
-			"type": "Protection Plan",
-			"reason": plan.get("coverage") or f"{plan['duration_months']} months protection",
-			"price": flt(plan.get("price", 0)),
-			"priority": 1,
-			"source": "Rule",
-		})
-
-	return suggestions
+def _template_sales_tip(item, device_price):
+	"""Generate a template-based sales tip when AI is unavailable."""
+	brand = item.brand or "this device"
+	if device_price >= TIER_PREMIUM:
+		return f"Premium {brand} purchase — emphasize Gold Bundle as investment protection."
+	elif device_price >= TIER_MID:
+		return f"Mention that extended warranty is the #1 add-on for {item.item_group or 'smartphones'}."
+	else:
+		return "Highlight the affordable price of our protection plans — great value!"
 
 
 # -- AI offer explain helpers ------------------------------------------------
