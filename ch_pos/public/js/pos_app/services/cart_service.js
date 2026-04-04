@@ -83,6 +83,15 @@ export class CartService {
 	_bind_events() {
 		EventBus.on("cart:add_item", (item_data) => this.add_to_cart(item_data));
 
+		EventBus.on("company:switched", () => {
+			if (PosState.cart.length) {
+				PosState.reset_transaction();
+				localStorage.removeItem("ch_pos_active_cart");
+				EventBus.emit("cart:updated");
+				frappe.show_alert({ message: __("Cart cleared — company changed"), indicator: "orange" });
+			}
+		});
+
 		EventBus.on("cart:qty_plus", (idx) => {
 			const item = PosState.cart[idx];
 			if (item.has_serial_no) {
