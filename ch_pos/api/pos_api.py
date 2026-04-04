@@ -223,7 +223,7 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.selling_price_list = profile.selling_price_list
     inv.currency = profile.currency or frappe.get_cached_value("Company", profile.company, "default_currency")
     inv.warehouse = profile.warehouse
-    inv.posting_date = nowdate()
+    inv.posting_date = str(active.get("business_date")) if active.get("business_date") else nowdate()
     inv.is_pos = 1
     inv.update_stock = 1
 
@@ -1412,6 +1412,10 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
     if orig.docstatus != 1 or orig.is_return:
         frappe.throw(frappe._("Can only create returns for submitted non-return invoices"))
 
+    # Use session business_date if available
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+    _active = get_active_session(orig.pos_profile) if orig.pos_profile else None
+
     ret = frappe.new_doc("Sales Invoice")
     ret.pos_profile = orig.pos_profile
     ret.customer = orig.customer
@@ -1424,7 +1428,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
         or (orig.items[0].warehouse if orig.items else None)
         or frappe.get_cached_value("POS Profile", orig.pos_profile, "warehouse")
     )
-    ret.posting_date = nowdate()
+    ret.posting_date = str(_active.get("business_date")) if _active and _active.get("business_date") else nowdate()
     ret.is_pos = 1
     ret.is_return = 1
     ret.return_against = orig.name

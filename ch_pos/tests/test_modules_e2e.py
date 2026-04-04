@@ -9,7 +9,7 @@ bench --site erpnext.local execute ch_pos.tests.test_modules_e2e.run_all
 """
 
 import frappe
-from frappe.utils import cint, flt, nowdate, today, add_days, now_datetime
+from frappe.utils import cint, flt, nowdate, today, add_days, now_datetime, getdate
 
 
 PASS = 0
@@ -53,6 +53,11 @@ def assert_true(val, msg=""):
 
 def _get_ctx():
     """Build test context: POS profile, store, company, warehouse, item, customer."""
+    from ch_pos.api.pos_api import get_active_session
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
+
+    user = frappe.session.user
+
     # Prefer QA profiles which have store + stock configured
     profiles = frappe.get_all(
         "POS Profile", filters={"disabled": 0},
@@ -62,14 +67,53 @@ def _get_ctx():
     if not profiles:
         raise Exception("No active POS Profile found")
 
-    # Try to find a profile with a store and stock items
-    for p in profiles:
-        store = frappe.db.get_value(
-            "POS Profile Extension", {"pos_profile": p.name}, "store"
-        )
+    def _get_store(p):
+        store = frappe.db.get_value("POS Profile Extension", {"pos_profile": p.name}, "store")
         if not store and p.warehouse:
             store = frappe.db.get_value("CH Store", {"warehouse": p.warehouse}, "name")
+        return store
+
+    # Sort profiles: prefer active sessions, then open business dates, filter by POS Executive access
+    def _sort_key(p):
+        store = _get_store(p)
         if not store:
+            return (9,)
+        # Must have POS Executive access
+        has_access = frappe.db.exists("POS Executive", {
+            "user": user, "store": store, "company": p.company, "is_active": 1,
+        })
+        if not has_access:
+            return (8,)
+        try:
+            sess = get_active_session(p.name)
+            if sess:
+                return (0,)
+        except Exception:
+            pass
+        # Check if store's business date is not yet closed
+        try:
+            biz_date = get_store_business_date(store)
+            closed = frappe.db.exists("CH POS Session", {
+                "store": store, "business_date": biz_date,
+                "status": "Closed", "docstatus": 1,
+            })
+            return (1,) if not closed else (2,)
+        except Exception:
+            pass
+        return (2,)
+    profiles.sort(key=_sort_key)
+
+    # Try to find a profile with a store and stock items
+    for p in profiles:
+        store = _get_store(p)
+        if not store:
+            continue
+
+        # Must have POS Executive access
+        has_access = frappe.db.exists("POS Executive", {
+            "user": user, "store": store, "company": p.company, "is_active": 1,
+        })
+        if not has_access:
             continue
 
         item = frappe.db.sql(
@@ -86,6 +130,25 @@ def _get_ctx():
             "Customer", {"disabled": 0},
             "name", order_by="creation desc",
         )
+
+        # Advance business date past all closed sessions
+        biz_date = get_store_business_date(store)
+        # Also reset BD status if it's Closed
+        bd_status = frappe.db.get_value("CH Business Date", store, "status")
+        if bd_status == "Closed":
+            frappe.db.set_value("CH Business Date", store, "status", "Open")
+            frappe.db.commit()
+        # Find the max closed session date and advance past it
+        max_closed = frappe.db.sql(
+            "SELECT MAX(business_date) as d FROM `tabCH POS Session` "
+            "WHERE store=%s AND status='Closed' AND docstatus=1",
+            store, as_dict=1,
+        )
+        max_closed_date = max_closed[0].d if max_closed and max_closed[0].d else None
+        if max_closed_date and getdate(biz_date) <= getdate(max_closed_date):
+            new_date = add_days(max_closed_date, 1)
+            frappe.db.set_value("CH Business Date", store, "business_date", new_date)
+            frappe.db.commit()
 
         return {
             "pos_profile": p.name,
@@ -123,6 +186,12 @@ def _get_or_create_manager_pin(store=None):
             "CH Manager PIN", pin_name, "pin_hash"
         )
         doc = frappe.get_doc("CH Manager PIN", pin_name)
+        # Ensure store matches so verify_pin can find it
+        if store and doc.store != store:
+            doc.store = store
+            doc.flags.ignore_validate = True
+            doc.save(ignore_permissions=True)
+            frappe.db.commit()
         return doc, actual_pin
 
     # Create one with known PIN
@@ -177,6 +246,25 @@ def test_session_management(ctx):
             )
         except Exception:
             pass
+
+    # Advance business date past all closed sessions
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
+    biz_date = get_store_business_date(store)
+    # Reset BD status if Closed
+    bd_status = frappe.db.get_value("CH Business Date", store, "status")
+    if bd_status == "Closed":
+        frappe.db.set_value("CH Business Date", store, "status", "Open")
+        frappe.db.commit()
+    max_closed = frappe.db.sql(
+        "SELECT MAX(business_date) as d FROM `tabCH POS Session` "
+        "WHERE store=%s AND status='Closed' AND docstatus=1",
+        store, as_dict=1,
+    )
+    max_closed_date = max_closed[0].d if max_closed and max_closed[0].d else None
+    if max_closed_date and getdate(biz_date) <= getdate(max_closed_date):
+        new_date = add_days(max_closed_date, 1)
+        frappe.db.set_value("CH Business Date", store, "business_date", new_date)
+        frappe.db.commit()
 
     # SM-01: Get session status (should be no active session)
     try:

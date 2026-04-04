@@ -956,11 +956,14 @@ def _get_margin_gst_rate(item_code, doc):
             )
             if rates:
                 return sum(_flt(r.tax_rate) for r in rates)
-    # Fall back to document tax rows
-    for tax in (doc.get("taxes") or []):
-        if _flt(tax.get("rate")) > 0:
-            return _flt(tax.rate)
-    return 18
+    # Fall back to document tax rows — sum all "On Net Total" rates
+    # (CGST 9% + SGST 9% = 18%, not just the first 9%)
+    total_rate = sum(
+        _flt(tax.get("rate"))
+        for tax in (doc.get("taxes") or [])
+        if _flt(tax.get("rate")) > 0
+    )
+    return total_rate if total_rate > 0 else 18
 
 
 def _get_exempted_value(item):

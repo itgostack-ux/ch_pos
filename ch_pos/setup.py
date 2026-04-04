@@ -235,6 +235,16 @@ CUSTOM_FIELDS = {
             "depends_on": "eval:doc.custom_warranty_claim",
             "module": "POS Core",
         },
+        {
+            "fieldname": "custom_buyback_order",
+            "fieldtype": "Link",
+            "label": "Buyback Order",
+            "options": "Buyback Order",
+            "insert_after": "custom_warranty_claim",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_buyback_order",
+            "module": "POS Core",
+        },
     ],
     "Sales Invoice Item": [
         {
@@ -295,6 +305,15 @@ CUSTOM_FIELDS = {
             "label": "Override Reason",
             "insert_after": "custom_manager_user",
             "depends_on": "eval:doc.custom_manager_approved",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_item_category",
+            "fieldtype": "Select",
+            "label": "Item Category",
+            "options": "\nProduct\nWarranty\nVAS\nAccessory\nService",
+            "insert_after": "custom_override_reason",
+            "read_only": 1,
             "module": "POS Core",
         },
     ],

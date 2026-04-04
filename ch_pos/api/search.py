@@ -491,7 +491,7 @@ def get_item_detail_for_pos(item_code, warehouse=None, price_list=None):
     model_name = frappe.db.get_value("Item", item_code, "ch_model")
     if model_name:
         model_doc = frappe.get_cached_doc("CH Model", model_name)
-        specs = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}
+        specs = {sv.spec: sv.spec_value for sv in (model_doc.spec_values or [])}
 
     # CH Item Price
     ch_price = frappe.db.get_value(

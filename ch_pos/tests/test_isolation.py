@@ -47,6 +47,25 @@ def skip(name, detail=""):
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _advance_business_date(store):
+    """Advance the store's business date past all closed sessions and reset BD status."""
+    bd_rec = frappe.db.get_value("CH Business Date", store, ["business_date", "status"], as_dict=True)
+    if not bd_rec:
+        return
+    if bd_rec.status == "Closed":
+        frappe.db.set_value("CH Business Date", store, "status", "Open")
+    max_closed = frappe.db.sql(
+        "SELECT MAX(business_date) as d FROM `tabCH POS Session` "
+        "WHERE store=%s AND status='Closed' AND docstatus=1",
+        store, as_dict=True,
+    )
+    max_closed_date = max_closed[0].d if max_closed and max_closed[0].d else None
+    if max_closed_date and getdate(bd_rec.business_date) <= getdate(max_closed_date):
+        new_date = add_days(max_closed_date, 1)
+        frappe.db.set_value("CH Business Date", store, "business_date", new_date)
+    frappe.db.commit()
+
+
 def _get_test_context():
     """Gather required references for tests. Returns dict or raises."""
     frappe.set_user("Administrator")
@@ -73,23 +92,33 @@ def _get_test_context():
     for s in all_stores:
         company_stores.setdefault(s.company, []).append(s.name)
 
+    # Get stores where current user has POS Executive access
+    user = frappe.session.user
+    user_stores = set(frappe.get_all(
+        "POS Executive",
+        filters={"user": user, "is_active": 1},
+        pluck="store",
+    ))
+
     for pp in profiles:
         if pp.name in active_profiles:
             continue
-        # Find a store with matching company
-        matching_stores = company_stores.get(pp.company, [])
+        # Find a store with matching company AND user access
+        matching_stores = [s for s in company_stores.get(pp.company, []) if s in user_stores]
         if matching_stores:
+            store = matching_stores[0]
+            _advance_business_date(store)
             return {
                 "pos_profile": pp.name,
                 "company": pp.company,
                 "warehouse": pp.warehouse,
-                "store": matching_stores[0],
+                "store": store,
             }
 
     # No profile without active session has matching stores.
     # Force-close blocking sessions so we can test with a clean profile.
     for pp in profiles:
-        matching_stores = company_stores.get(pp.company, [])
+        matching_stores = [s for s in company_stores.get(pp.company, []) if s in user_stores]
         if not matching_stores:
             continue
         # Find active sessions blocking this profile
@@ -123,11 +152,13 @@ def _get_test_context():
             frappe.db.commit()
             print(f"  ℹ️  Temporarily closed {len(closed_sessions)} blocking session(s): {closed_sessions}")
         # Use a store that was NOT already taken
+        store = matching_stores[0]
+        _advance_business_date(store)
         return {
             "pos_profile": pp.name,
             "company": pp.company,
             "warehouse": pp.warehouse,
-            "store": matching_stores[0],
+            "store": store,
             "closed_blocking_sessions": closed_sessions,
         }
 
@@ -169,8 +200,9 @@ def test_02_no_duplicate_device_session(ctx):
         return
 
     try:
-        # Ensure a business date exists
-        bd = getdate(nowdate())
+        # Use the store's actual business date
+        from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
+        bd = getdate(get_store_business_date(ctx["store"]))
         if not frappe.db.exists("CH Business Date", {"store": ctx["store"], "is_active": 1}):
             frappe.get_doc({
                 "doctype": "CH Business Date",
@@ -221,6 +253,16 @@ def test_03_user_allocation_uniqueness(ctx):
     """Only one active allocation per user per company."""
     name = "03 — User allocation uniqueness"
     try:
+        # Clean up any existing allocation from previous runs
+        existing = frappe.db.get_value(
+            "CH POS User Allocation",
+            {"user": frappe.session.user, "company": ctx["company"]},
+            "name",
+        )
+        if existing:
+            frappe.delete_doc("CH POS User Allocation", existing, force=True, ignore_permissions=True)
+            frappe.db.commit()
+
         alloc1 = frappe.get_doc({
             "doctype": "CH POS User Allocation",
             "user": frappe.session.user,

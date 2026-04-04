@@ -92,6 +92,8 @@ def get_context():
     ctx = {}
 
     # POS Profile — choose one that can actually open a CH POS session
+    # Prefer profiles that already have an active (Open) session to avoid
+    # day-closed / stale-date issues.
     profiles = frappe.get_all(
         "POS Profile",
         filters={"disabled": 0},
@@ -100,14 +102,33 @@ def get_context():
     )
     ctx["pos_profile"] = None
     ctx["store"] = None
+
+    # First pass: prefer a profile with an active session
     for profile in profiles:
         store = frappe.db.get_value("POS Profile Extension", {"pos_profile": profile.name}, "store")
         if not store and profile.warehouse:
             store = frappe.db.get_value("CH Store", {"warehouse": profile.warehouse}, "name")
         if store:
-            ctx["pos_profile"] = profile
-            ctx["store"] = store
-            break
+            has_open = frappe.db.exists(
+                "CH POS Session",
+                {"pos_profile": profile.name, "status": ("in", ["Open", "Locked"]), "docstatus": 1},
+            )
+            if has_open:
+                ctx["pos_profile"] = profile
+                ctx["store"] = store
+                break
+
+    # Second pass: fallback to any profile with a store
+    if not ctx["pos_profile"]:
+        for profile in profiles:
+            store = frappe.db.get_value("POS Profile Extension", {"pos_profile": profile.name}, "store")
+            if not store and profile.warehouse:
+                store = frappe.db.get_value("CH Store", {"warehouse": profile.warehouse}, "name")
+            if store:
+                ctx["pos_profile"] = profile
+                ctx["store"] = store
+                break
+
     if not ctx["pos_profile"] and profiles:
         ctx["pos_profile"] = profiles[0]
 

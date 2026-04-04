@@ -79,7 +79,7 @@ def _skip_eod_lock():
 
 
 def _ensure_session(pos_profile=POS_PROFILE):
-    """Ensure an active CH POS Session exists for the profile (future date)."""
+    """Ensure an active CH POS Session exists for the profile (store business date)."""
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
     active = get_active_session(pos_profile)
     if active:
@@ -89,6 +89,10 @@ def _ensure_session(pos_profile=POS_PROFILE):
     if not store:
         store = frappe.db.get_value("CH Store", {"warehouse": WAREHOUSE}, "name")
 
+    # Use the store's actual business date
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
+    biz_date = get_store_business_date(store) if store else nowdate()
+
     with _skip_eod_lock():
         session = frappe.get_doc({
             "doctype": "CH POS Session",
@@ -96,7 +100,7 @@ def _ensure_session(pos_profile=POS_PROFILE):
             "pos_profile": pos_profile,
             "store": store or "",
             "user": frappe.session.user,
-            "business_date": "2099-01-01",
+            "business_date": biz_date or nowdate(),
             "shift_start": now_datetime(),
             "opening_cash": 5000,
             "status": "Open",
