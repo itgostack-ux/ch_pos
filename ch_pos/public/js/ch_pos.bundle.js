@@ -229,6 +229,7 @@ ch_pos.PosApp = class PosApp {
 					// Executive access control
 					const access = d.executive_access || null;
 					PosState.executive_access = access;
+					PosState.pos_cashier = frappe.session.user;
 					if (access && access.companies && access.companies.length) {
 						// Default to the profile's company, or first accessible
 						const match = access.companies.find(
@@ -238,10 +239,12 @@ ch_pos.PosApp = class PosApp {
 						PosState.active_company = chosen.company;
 						PosState.active_company_type = chosen.company_type || null;
 
-						// Default sales executive to own record
-						if (access.own_executive) {
-							PosState.sales_executive = access.own_executive.name;
-							PosState.sales_executive_name = access.own_executive.executive_name;
+						// Default sales executive to own record for the chosen company
+						const comp_exec = (access.own_by_company || {})[chosen.company];
+						const own = comp_exec || access.own_executive;
+						if (own) {
+							PosState.sales_executive = own.name;
+							PosState.sales_executive_name = own.executive_name;
 						}
 					} else {
 						PosState.active_company = d.company;

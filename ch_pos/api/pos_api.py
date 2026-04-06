@@ -4125,8 +4125,9 @@ def _get_executive_access(user, warehouse):
             "max_discount_pct": e.max_discount_pct,
         })
 
-    # Determine user's own default executive record
+    # Determine user's own executive records — one per company
     own_default = None
+    own_by_company = {}
     if own:
         own_default = {
             "name": own[0].name,
@@ -4136,12 +4137,22 @@ def _get_executive_access(user, warehouse):
             "can_give_discount": own[0].can_give_discount,
             "max_discount_pct": own[0].max_discount_pct,
         }
+        for e in own:
+            own_by_company[e.company] = {
+                "name": e.name,
+                "executive_name": e.executive_name,
+                "company": e.company,
+                "role": e.role,
+                "can_give_discount": e.can_give_discount,
+                "max_discount_pct": e.max_discount_pct,
+            }
 
     return {
         "companies": company_roles,
         "is_manager": is_manager,
         "store_executives": store_execs_by_company,
         "own_executive": own_default,
+        "own_by_company": own_by_company,
         "stores": stores,
     }
 

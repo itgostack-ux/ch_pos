@@ -147,7 +147,7 @@ export class CartPanel {
 
 		// Always show current company as badge (no toggle — companies are separate POS Profiles)
 		const switcher = bar.find(".ch-pos-company-switcher");
-		const comp = PosState.company || (access.companies[0] && access.companies[0].company) || "";
+		const comp = PosState.active_company || PosState.company || (access.companies[0] && access.companies[0].company) || "";
 		const short = comp.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
 		switcher.html(`<span class="ch-pos-company-single">${frappe.utils.escape_html(short)}</span>`).show();
 
@@ -179,17 +179,25 @@ export class CartPanel {
 
 		select.html(options);
 
-		// Auto-select own executive if current selection is invalid
+		// Auto-select: prefer current selection, then own exec for this company, then cashier match, then first
 		if (!PosState.sales_executive || !execs.find((e) => e.name === PosState.sales_executive)) {
-			const own = access.own_executive;
+			// Prefer own_by_company for the active company, fall back to own_executive
+			const comp_exec = (access.own_by_company || {})[company];
+			const own = comp_exec || access.own_executive;
 			if (own && execs.find((e) => e.name === own.name)) {
 				select.val(own.name);
 				PosState.sales_executive = own.name;
 				PosState.sales_executive_name = own.executive_name;
-			} else if (execs.length) {
-				select.val(execs[0].name);
-				PosState.sales_executive = execs[0].name;
-				PosState.sales_executive_name = execs[0].executive_name;
+			} else {
+				// Find exec matching current POS cashier for this company
+				const cashier = PosState.pos_cashier || frappe.session.user;
+				const user_exec = execs.find((e) => e.user === cashier);
+				const fallback = user_exec || execs[0];
+				if (fallback) {
+					select.val(fallback.name);
+					PosState.sales_executive = fallback.name;
+					PosState.sales_executive_name = fallback.executive_name;
+				}
 			}
 		}
 	}
@@ -490,8 +498,9 @@ export class CartPanel {
 			PosState.sale_type = null;
 		});
 
-		// Re-render executive bar when access data arrives
+		// Re-render executive bar when access data arrives or company changes
 		EventBus.on("executive_access:loaded", () => this._render_executive_bar());
+		EventBus.on("company:switched", () => this._render_executive_bar());
 	}
 
 

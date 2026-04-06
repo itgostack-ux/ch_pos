@@ -85,7 +85,9 @@ export class SessionControls {
 		if (!slot.length) return;
 
 		const can_manage = this._can_manage_session();
-		const exec = PosState.executive_access?.own_executive || {};
+		const access = PosState.executive_access;
+		const exec = (access?.own_by_company || {})[PosState.active_company]
+			|| access?.own_executive || {};
 		const display_name = exec.executive_name || frappe.session.user_fullname || frappe.session.user;
 		const company = PosState.active_company || PosState.company || __("No Company");
 		const initials = (display_name || "U")
@@ -276,6 +278,14 @@ export class SessionControls {
 					: null;
 				PosState.active_company_type = entry ? entry.company_type : null;
 
+				// Update sales executive to own record for the new company
+				const comp_exec = (access && access.own_by_company || {})[values.company];
+				const own = comp_exec || (access && access.own_executive);
+				if (own) {
+					PosState.sales_executive = own.name;
+					PosState.sales_executive_name = own.executive_name;
+				}
+
 				// Update company display in session bar
 				const short = values.company.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
 				$(".ch-session-profile-company").text(short);
@@ -398,27 +408,35 @@ export class SessionControls {
 				{
 					fieldname: "info",
 					fieldtype: "HTML",
-					options: `<div class="text-muted mb-3">${__("Current cashier")}: <b>${frappe.session.user}</b></div>`,
+					options: `<div class="text-muted mb-3" style="text-align:center">
+						<i class="fa fa-lock" style="font-size:24px;color:var(--pos-primary,#4f6ef7);margin-bottom:8px"></i>
+						<div>${__("New cashier must login with their credentials")}</div>
+					</div>`,
 				},
 				{
 					fieldname: "new_user",
-					fieldtype: "Link",
-					label: __("New Cashier"),
-					options: "User",
+					fieldtype: "Data",
+					label: __("Email / Username"),
+					reqd: 1,
+				},
+				{
+					fieldname: "pwd",
+					fieldtype: "Password",
+					label: __("Password"),
 					reqd: 1,
 				},
 			],
-			primary_action_label: __("Switch"),
+			primary_action_label: __("Login & Switch"),
 			primary_action: (values) => {
-				if (values.new_user === frappe.session.user) {
-					frappe.msgprint(__("Already logged in as this user"));
-					return;
-				}
+				const user = (values.new_user || "").trim();
+				const pwd = values.pwd;
+				if (!user || !pwd) return;
 				frappe.call({
 					method: "ch_pos.api.session_api.switch_user",
 					args: {
 						session_name: PosState.session_name,
-						new_user: values.new_user,
+						new_user: user,
+						pwd: pwd,
 					},
 					callback: (r) => {
 						if (r.message) {
@@ -429,11 +447,35 @@ export class SessionControls {
 							if (data.executive_access) {
 								const access = data.executive_access;
 								PosState.executive_access = access;
-								if (access.own_executive) {
-									PosState.sales_executive = access.own_executive.name;
-									PosState.sales_executive_name = access.own_executive.executive_name;
+								PosState.pos_cashier = data.user;
+
+								// Update active company if new user has different access
+								let company_changed = false;
+								if (access.companies && access.companies.length) {
+									const cur = PosState.active_company;
+									const still_valid = access.companies.find(c => c.company === cur);
+									if (!still_valid) {
+										const first = access.companies[0];
+										PosState.active_company = first.company;
+										PosState.company = first.company;
+										PosState.active_company_type = first.company_type || null;
+										company_changed = true;
+									}
 								}
+
+								// Pick own_executive for the active company (not just first match)
+								const comp_exec = (access.own_by_company || {})[PosState.active_company];
+								const own = comp_exec || access.own_executive;
+								if (own) {
+									PosState.sales_executive = own.name;
+									PosState.sales_executive_name = own.executive_name;
+								}
+
 								EventBus.emit("executive_access:loaded", access);
+								if (company_changed) {
+									EventBus.emit("company:switched", PosState.active_company);
+								}
+								EventBus.emit("profile:loaded", PosState);
 							}
 
 							// Update session bar operator name

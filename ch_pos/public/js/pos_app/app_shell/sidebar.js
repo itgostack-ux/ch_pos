@@ -154,7 +154,9 @@ export class Sidebar {
 		}
 
 		// Bottom: Store identity + operator + executive badge + network
-		const exec = PosState.executive_access?.own_executive;
+		const access_data = PosState.executive_access;
+		const exec = (access_data?.own_by_company || {})[PosState.active_company]
+			|| access_data?.own_executive;
 		const exec_name = exec ? exec.executive_name : (frappe.session.user_fullname || frappe.session.user);
 		const initials = (exec_name || "U").split(" ").map(w => w[0]).join("").substring(0, 2).toUpperCase();
 		const store = PosState.warehouse || PosState.pos_profile || "";

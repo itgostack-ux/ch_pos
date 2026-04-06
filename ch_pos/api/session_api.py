@@ -369,8 +369,8 @@ def close_session(session_name, closing_cash, denominations=None,
 
 
 @frappe.whitelist()
-def switch_user(session_name, new_user):
-    """Switch cashier on an active session. No manager PIN needed — audit logged."""
+def switch_user(session_name, new_user, pwd=None):
+    """Switch cashier — new cashier must authenticate with their credentials."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
     session = frappe.get_doc("CH POS Session", session_name)
@@ -379,6 +379,15 @@ def switch_user(session_name, new_user):
 
     if not frappe.db.exists("User", new_user):
         frappe.throw(_("User {0} does not exist").format(new_user))
+
+    # Authenticate the new cashier
+    if not pwd:
+        frappe.throw(_("Password is required"))
+    from frappe.utils.password import check_password
+    try:
+        check_password(new_user, pwd)
+    except frappe.AuthenticationError:
+        frappe.throw(_("Invalid password for {0}").format(new_user))
 
     old_user = session.user
     session.db_set("user", new_user)
