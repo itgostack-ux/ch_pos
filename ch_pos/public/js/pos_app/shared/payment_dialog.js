@@ -624,6 +624,17 @@ placeholder="${__("Enter code...")}">
 		ov.on("input", ".ch-pay-row-fin-down", e => {
 			const idx = parseInt($(e.currentTarget).data("idx"));
 			this._payments[idx].finance_down_payment = flt($(e.currentTarget).val()) || 0;
+			const down = flt(this._payments[idx].finance_down_payment);
+			const cash_idx = this._payments.findIndex((p, i) => i !== idx && p.auto_created_by_finance && this._mop_type(p.mode) === "cash");
+			if (down > 0 && cash_idx < 0) {
+				this._payments.push({ mode: "Cash", amount: down, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0, auto_created_by_finance: true });
+			} else if (cash_idx >= 0 && down > 0) {
+				this._payments[cash_idx].amount = down;
+			} else if (cash_idx >= 0 && down <= 0) {
+				this._payments.splice(cash_idx, 1);
+			}
+			this._sync_finance_payments();
+			this._render_payments();
 			this._update_totals();
 		});
 
@@ -637,6 +648,10 @@ placeholder="${__("Enter code...")}">
 				ov.find("#ch-pay-free-chk").prop("checked", false);
 				ov.find("#ch-pay-free-section").hide();
 				this._load_credit_info();
+			}
+			if (this._is_finance_sale_type(PosState.sale_type)) {
+				this._sync_finance_payments();
+				this._render_payments();
 			}
 			this._update_totals();
 		});
@@ -738,7 +753,7 @@ placeholder="${__("Enter code...")}">
 				// requires_payment may come back as 0 (int) or false (bool)
 				const is_free   = !st.requires_payment;
 				const is_credit = !!(st.triggers_credit_sale ||
-					(st.code || "").toUpperCase() === "CS");
+					["CS", "FS"].includes((st.code || "").toUpperCase()));
 
 				// Toggle free sale (only if changed — avoids re-triggering)
 				if (is_free !== this._is_free_sale) {
@@ -776,6 +791,9 @@ placeholder="${__("Enter code...")}">
 				if (val) { ref.attr("placeholder", __("Approval / Loan ID")).show().val(""); } else { ref.hide().val(""); }
 				// Auto-populate payment row finance fields
 				this._sync_finance_to_payment(val, null, null);
+				this._sync_finance_payments();
+				this._render_payments();
+				this._update_totals();
 				return;
 			}
 
@@ -786,12 +804,18 @@ placeholder="${__("Enter code...")}">
 		ov.on("change", "#ch-pay-sale-fin-tenure", e => {
 			PosState.finance_tenure = $(e.currentTarget).val() || null;
 			this._sync_finance_to_payment(PosState.sale_sub_type, PosState.finance_tenure, PosState.sale_reference);
+			this._sync_finance_payments();
+			this._render_payments();
+			this._update_totals();
 		});
 		ov.on("change", "#ch-pay-sale-ref-input", e => {
 			PosState.sale_reference = $(e.currentTarget).val().trim() || null;
 			// Sync approval ID to payment row if finance sale
 			if (this._is_finance_sale_type(PosState.sale_type)) {
 				this._sync_finance_to_payment(PosState.sale_sub_type, PosState.finance_tenure, PosState.sale_reference);
+				this._sync_finance_payments();
+				this._render_payments();
+				this._update_totals();
 			}
 		});
 
@@ -826,7 +850,12 @@ ov.on("click", ".ch-pay-offer-chip", e => {
 	// Re-render chips to update active state (use cached MOP)
 	const mop = this._payments[0] ? this._payments[0].mode : null;
 	if (mop) this._load_bank_offers(mop);
-	this._set_cash_amount(this._calc_balance_due());
+	if (this._is_finance_sale_type(PosState.sale_type)) {
+		this._sync_finance_payments();
+		this._render_payments();
+	} else {
+		this._set_cash_amount(this._calc_balance_due());
+	}
 	this._update_totals();
 });
 
@@ -997,6 +1026,37 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		this._update_totals();
 	}
 
+	_refresh_totals_block() {
+		this._overlay?.find(".ch-pay-totals-block").html(this._build_totals_html());
+	}
+
+	_sync_finance_payments() {
+		if (!this._is_finance_sale_type(PosState.sale_type) || this._is_free_sale) return;
+
+		const grand = this._calc_grand_total();
+		const finance_idx = this._payments.findIndex(p => this._mop_type(p.mode) === "finance");
+		const non_finance_paid = this._payments.reduce((sum, payment, idx) => {
+			if (idx === finance_idx) return sum;
+			return sum + flt(payment.amount);
+		}, 0);
+		const financed_amount = Math.max(0, grand - non_finance_paid);
+
+		if (finance_idx >= 0) {
+			this._payments[finance_idx].amount = financed_amount;
+			return;
+		}
+
+		if (this._payments.length === 0) {
+			this._payments.push({ mode: "Finance", amount: financed_amount, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 });
+			return;
+		}
+
+		if (this._payments.length === 1 && this._mop_type(this._payments[0].mode) === "cash") {
+			this._payments[0].mode = "Finance";
+			this._payments[0].amount = financed_amount;
+		}
+	}
+
 	// ───────────────────────────────────── Discount Reasons ──
 
 	_load_disc_reasons() {
@@ -1096,7 +1156,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (cur) {
 			const should_free   = !cur.requires_payment;
 			const should_credit = !!(cur.triggers_credit_sale ||
-				(cur.code || "").toUpperCase() === "CS");
+				["CS", "FS"].includes((cur.code || "").toUpperCase()));
 			if (should_free !== this._is_free_sale) {
 				this._overlay.find("#ch-pay-free-chk").prop("checked", should_free).trigger("change");
 			}
@@ -1257,6 +1317,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	// ───────────────────────────────────────── Live totals ──
 
 	_update_totals() {
+		this._refresh_totals_block();
+		if (this._is_finance_sale_type(PosState.sale_type) && !this._is_free_sale) {
+			this._sync_finance_payments();
+		}
+		const finance_amount = this._payments.reduce((sum, payment) => {
+			return sum + (this._mop_type(payment.mode) === "finance" ? flt(payment.amount) : 0);
+		}, 0);
 		const grand      = this._is_free_sale ? 0 : this._calc_grand_total();
 
 		// Sync loyalty amount — clamp to current payable grand
@@ -1284,7 +1351,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		let ready = false;
 		if (this._is_free_sale) {
 			ready = !!(this._free_sale_reason && this._free_sale_approved_by);
-		} else if (this._is_credit_sale) {
+		} else if (this._is_credit_sale || this._is_finance_sale_type(PosState.sale_type)) {
 			ready = refs_valid && cash_paid >= 0;
 		} else {
 			ready = balance <= 0.005 && refs_valid;
@@ -1304,7 +1371,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Balance label changes for credit sale
 		const $bal = this._overlay.find("#ch-pay-balance-due");
 		const $label = this._overlay.find("#ch-pay-balance-label");
-		if (this._is_credit_sale && balance > 0.005) {
+		if (this._is_finance_sale_type(PosState.sale_type) && finance_amount > 0.005) {
+			$label.text(__("Financed Amount"));
+			$bal.text(`₹${format_number(finance_amount)}`)
+				.removeClass("ch-pay-bal-positive ch-pay-bal-zero")
+				.addClass("ch-pay-bal-credit");
+		} else if (this._is_credit_sale && balance > 0.005) {
 			$label.text(__("Credit Amount"));
 			$bal.text(`₹${format_number(balance)}`)
 				.removeClass("ch-pay-bal-positive ch-pay-bal-zero")
@@ -1336,6 +1408,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		if (this._is_free_sale) {
 			$lbl.text(__("Confirm Free Sale"));
+		} else if (this._is_finance_sale_type(PosState.sale_type)) {
+			$lbl.text(finance_amount > 0.005 ? __("Confirm Finance Sale — ₹{0} financed", [format_number(finance_amount)]) : __("Confirm Finance Sale"));
 		} else if (this._is_credit_sale) {
 			$lbl.text(balance > 0.005 ? __("Confirm Credit Sale — ₹{0} on credit", [format_number(balance)]) : __("Confirm Payment"));
 		} else {
