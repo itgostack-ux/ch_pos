@@ -15,6 +15,9 @@ body.ch-pos-fullscreen .ch-pos-page {
 }
 body.ch-pos-fullscreen header.navbar,
 body.ch-pos-fullscreen footer { display: none !important; }
+/* Hide Frappe desk sidebar — POS has its own sidebar */
+body.ch-pos-fullscreen .body-sidebar-container { display: none !important; }
+body.ch-pos-fullscreen .body-sidebar { display: none !important; }
 /* Hide page-head ONLY inside the POS page itself, not in Frappe forms opened from POS */
 body.ch-pos-fullscreen .ch-pos-page .page-head { display: none !important; }
 body.ch-pos-fullscreen .layout-side-section { display: none !important; }

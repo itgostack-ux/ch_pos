@@ -13,6 +13,16 @@ frappe.pages["ch-pos-app"].on_page_load = function (wrapper) {
 	});
 };
 
+frappe.pages["ch-pos-app"].on_page_show = function (wrapper) {
+	// Hide Frappe desk sidebar — POS has its own navigation
+	$("body").addClass("ch-pos-fullscreen");
+};
+
+frappe.pages["ch-pos-app"].on_page_hide = function (wrapper) {
+	// Restore Frappe desk sidebar when leaving POS
+	$("body").removeClass("ch-pos-fullscreen");
+};
+
 frappe.pages["ch-pos-app"].refresh = function (wrapper) {
 	// noop — handled inside PosApp
 };

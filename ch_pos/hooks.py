@@ -7,6 +7,16 @@ app_license = "MIT"
 
 required_apps = ["frappe", "erpnext", "ch_item_master"]
 
+# Each item in the list will be shown as an app in the apps page
+add_to_apps_screen = [
+	{
+		"name": "ch_pos",
+		"logo": "/assets/ch_pos/icon.svg",
+		"title": "CH POS",
+		"route": "/desk/pos",
+	}
+]
+
 after_install = "ch_pos.setup.after_install"
 after_migrate = "ch_pos.setup.after_migrate"
 before_uninstall = "ch_pos.setup.before_uninstall"

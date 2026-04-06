@@ -1,0 +1,17 @@
+<svg width="54" height="54" viewBox="0 0 54 54" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M38.5714 0H15.4286C6.90761 0 0 6.90761 0 15.4286V38.5714C0 47.0924 6.90761 54 15.4286 54H38.5714C47.0924 54 54 47.0924 54 38.5714V15.4286C54 6.90761 47.0924 0 38.5714 0Z" fill="#E67E22" fill-opacity="0.09"/>
+<g transform="translate(27,27)">
+<rect x="-13" y="-15" width="26" height="18" rx="2.5" fill="#D35400"/>
+<rect x="-10" y="-12" width="20" height="10" rx="1.2" fill="white"/>
+<line x1="-8" y1="-9" x2="2" y2="-9" stroke="#D35400" stroke-width="1.5" stroke-linecap="round"/>
+<line x1="-8" y1="-6" x2="-2" y2="-6" stroke="#D35400" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
+<text x="7" y="-5" text-anchor="middle" font-family="Arial,sans-serif" font-size="6" font-weight="bold" fill="#D35400">₹</text>
+<rect x="-13" y="5" width="26" height="12" rx="2.5" fill="#D35400" opacity="0.85"/>
+<circle cx="-6" cy="9" r="1.5" fill="white" opacity="0.7"/>
+<circle cx="0" cy="9" r="1.5" fill="white" opacity="0.7"/>
+<circle cx="6" cy="9" r="1.5" fill="white" opacity="0.7"/>
+<circle cx="-6" cy="14" r="1.5" fill="white" opacity="0.7"/>
+<circle cx="0" cy="14" r="1.5" fill="white" opacity="0.7"/>
+<rect x="4" y="12.5" width="5" height="3" rx="0.8" fill="#2ECC71" opacity="0.8"/>
+</g>
+</svg>
