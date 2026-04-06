@@ -133,7 +133,7 @@ def prepare_pos_payment_ui_test():
 	qty = max(1, int(math.ceil(2000 / rate)))
 
 	return {
-		"route": "/app/ch-pos-app",
+		"route": "/desk/ch-pos-app",
 		"pos_profile": ctx["pos_profile"].name,
 		"session_name": ctx["session_name"],
 		"customer": ctx["customer"],

@@ -506,7 +506,7 @@ export class QueueWorkspace {
 						message: `
 							<b>${__("GoFix Request Created!")}</b><br>
 							${r.service_request}
-							<a href="/app/service-request/${r.service_request}" target="_blank"
+							<a href="/desk/service-request/${r.service_request}" target="_blank"
 								style="margin-left:8px;font-size:.85rem">
 								${__("Open")} <i class="fa fa-external-link"></i>
 							</a>
