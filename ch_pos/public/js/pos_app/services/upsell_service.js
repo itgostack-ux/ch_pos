@@ -158,7 +158,7 @@ export class UpsellService {
 					discount_amount: 0,
 					offers: [],
 					applied_offer: null,
-					warranty_plan: s.item_code,
+					warranty_plan: s.warranty_plan || s.item_code,
 					is_warranty: true,
 					is_vas: false,
 					has_serial_no: 0,

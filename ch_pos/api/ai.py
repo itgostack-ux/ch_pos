@@ -377,7 +377,7 @@ def _match_warranty_plans(item, device_price, cart_codes):
 		"CH Warranty Plan",
 		filters={"status": "Active"},
 		fields=["name", "plan_name", "price", "duration_months", "plan_type",
-				"brand", "coverage_description"],
+				"brand", "coverage_description", "service_item"],
 	)
 
 	if not plans:
@@ -436,7 +436,8 @@ def _match_warranty_plans(item, device_price, cart_codes):
 				reason += " — popular choice"
 
 			matched.append({
-				"item_code": plan.name,
+				"item_code": plan.service_item or plan.name,
+				"warranty_plan": plan.name,
 				"item_name": plan.plan_name,
 				"type": "Protection Plan",
 				"reason": reason,
