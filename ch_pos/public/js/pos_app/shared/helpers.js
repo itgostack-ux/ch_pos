@@ -190,3 +190,60 @@ export function validate_id_number(id_type, id_number) {
 	}
 	return true;
 }
+
+/**
+ * Extract a readable error message from frappe.xcall rejection.
+ * frappe.xcall rejects with r?.message which is often undefined for
+ * ValidationError (frappe.throw). We also check frappe.last_response
+ * which contains the full server response including _server_messages.
+ * @param {*} err - The caught error object
+ * @param {string} [fallback] - Fallback message if nothing parsable
+ * @returns {string} HTML-safe error message
+ */
+export function parse_xcall_error(err, fallback) {
+	// Try frappe.last_response._server_messages first (most reliable for frappe.throw)
+	const lr = frappe.last_response;
+	if (lr && lr._server_messages) {
+		try {
+			const msgs = JSON.parse(lr._server_messages);
+			const parts = msgs.map(m => {
+				try { return JSON.parse(m).message || m; } catch (_) { return m; }
+			}).filter(Boolean);
+			if (parts.length) return parts.join("<br>");
+		} catch (_) { /* fall through */ }
+	}
+
+	if (!err) return fallback || __("An unexpected error occurred");
+
+	// frappe.xcall sometimes passes the message string directly
+	if (typeof err === "string") return err;
+	if (err.message) return err.message;
+
+	// Check _server_messages on the error object
+	if (err._server_messages) {
+		try {
+			const msgs = JSON.parse(err._server_messages);
+			const parts = msgs.map(m => {
+				try { return JSON.parse(m).message || m; } catch (_) { return m; }
+			}).filter(Boolean);
+			if (parts.length) return parts.join("<br>");
+		} catch (_) { /* fall through */ }
+	}
+
+	return fallback || __("An unexpected error occurred");
+}
+
+/**
+ * Show a visible error dialog from a .catch() handler.
+ * Use this instead of silently swallowing errors.
+ * Also exposed as window.ch_pos_show_error for non-module scripts.
+ */
+export function show_api_error(err, title) {
+	const msg = parse_xcall_error(err);
+	frappe.msgprint({ title: title || __("Error"), message: msg, indicator: "red" });
+}
+
+// Expose globally so all catch blocks can use it without imports
+window.ch_pos_show_error = function (err, title) {
+	show_api_error(err, title);
+};

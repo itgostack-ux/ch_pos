@@ -635,8 +635,9 @@ def create_pos_invoice(pos_profile, customer, items,
     sold_plans = []
 
     # Build a map of device items on this invoice (non-warranty rows) so we can
-    # auto-infer for_item_code when the JS didn't send it (e.g. VAS dialog with
-    # no device selected — happens when only one device is in the cart).
+    # auto-infer for_item_code / serial_no when the frontend did not send them
+    # (for example AI upsell or attach flows that know the device item but not
+    # the IMEI at submit time).
     device_items_on_inv = [
         inv_item for inv_item in inv.items
         if not any(
@@ -647,12 +648,38 @@ def create_pos_invoice(pos_profile, customer, items,
         )
     ]
 
+    def _infer_device_serial(wi):
+        """Infer the linked device serial/IMEI from invoice rows when missing."""
+        if wi.get("serial_no"):
+            return wi.get("serial_no")
+
+        candidates = []
+        target_item_code = wi.get("for_item_code")
+        for inv_item in device_items_on_inv:
+            if target_item_code and inv_item.item_code != target_item_code:
+                continue
+            serial_no = (getattr(inv_item, "serial_no", None) or "").strip()
+            if serial_no:
+                candidates.append(serial_no)
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        if not target_item_code and len(device_items_on_inv) == 1:
+            serial_no = (getattr(device_items_on_inv[0], "serial_no", None) or "").strip()
+            if serial_no:
+                return serial_no
+
+        return wi.get("serial_no")
+
     for wi in warranty_items:
         # Auto-infer for_item_code: if not sent and exactly one device in cart, use it
         if not wi.get("for_item_code") and len(device_items_on_inv) == 1:
             wi["for_item_code"] = device_items_on_inv[0].item_code
-            if not wi.get("serial_no") and getattr(device_items_on_inv[0], "serial_no", None):
-                wi["serial_no"] = device_items_on_inv[0].serial_no
+
+        inferred_serial = _infer_device_serial(wi)
+        if inferred_serial:
+            wi["serial_no"] = inferred_serial
 
         # INT-3 fix: Throw error instead of silently skipping sold plan creation
         if not wi.get("for_item_code"):
@@ -1773,6 +1800,13 @@ def create_repair_job_from_pos(service_request):
         from gofix.gofix_services.doctype.job_assignment.job_assignment import create_job_sheet_from_service_order
     except ImportError:
         frappe.throw(frappe._("GoFix app is not installed — cannot create repair jobs from POS."))
+
+    # Auto-fill mandatory fields if missing (POS one-click flow)
+    sr = frappe.get_doc("Service Request", service_request)
+    if not sr.estimated_cost or flt(sr.estimated_cost) <= 0:
+        sr.db_set("estimated_cost", 0.01, update_modified=False)  # placeholder, technician updates later
+    if not sr.expected_completion_date:
+        sr.db_set("expected_completion_date", frappe.utils.add_days(frappe.utils.today(), 3), update_modified=False)
 
     # Step 1: Accept SR → creates Service Order
     service_order = accept_service_request(service_request)

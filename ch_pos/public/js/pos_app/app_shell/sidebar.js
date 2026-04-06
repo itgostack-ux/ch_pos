@@ -132,7 +132,7 @@ export class Sidebar {
 
 		let html = `
 			<button class="ch-pos-sidebar-toggle" title="${__("Toggle sidebar")}">
-				<i class="fa fa-chevron-left"></i>
+				<i class="fa fa-bars"></i>
 			</button>`;
 
 		for (const section of MODE_SECTIONS) {

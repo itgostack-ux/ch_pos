@@ -361,25 +361,38 @@ export class RepairWorkspace {
 
 		// Accept & Create Job — chains SR → SO → Job Assignment in one click
 		panel.on("click", ".ch-rep-accept-job", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
 			const btn = $(e.currentTarget);
 			const sr_name = btn.data("name");
+			console.log("[CH-REPAIR] Accept & Create Job clicked, SR:", sr_name);
+			if (!sr_name) {
+				frappe.msgprint({ title: __("Error"), message: __("Service Request name not found on button"), indicator: "red" });
+				return;
+			}
 			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating...")}`);
 
-			frappe.xcall("ch_pos.api.pos_api.create_repair_job_from_pos", {
-				service_request: sr_name,
-			}).then((result) => {
-				btn.replaceWith(`
-					<span class="text-success" style="font-weight:700;font-size:13px">
-						<i class="fa fa-check"></i> ${__("Job")} ${result.job_assignment} ${__("created")}
-					</span>
-				`);
-				frappe.show_alert({
-					message: __("Job Assignment {0} created via Service Order {1}", [result.job_assignment, result.service_order]),
-					indicator: "green",
-				});
-				this._load_pipeline(panel);
-			}).catch(() => {
-				btn.prop("disabled", false).html(`<i class="fa fa-cog"></i> ${__("Accept & Create Job")}`);
+			frappe.call({
+				method: "ch_pos.api.pos_api.create_repair_job_from_pos",
+				args: { service_request: sr_name },
+				callback: (r) => {
+					console.log("[CH-REPAIR] Job created successfully:", r.message);
+					const result = r.message;
+					btn.replaceWith(`
+						<span class="text-success" style="font-weight:700;font-size:13px">
+							<i class="fa fa-check"></i> ${__("Job")} ${result.job_assignment} ${__("created")}
+						</span>
+					`);
+					frappe.show_alert({
+						message: __("Job Assignment {0} created via Service Order {1}", [result.job_assignment, result.service_order]),
+						indicator: "green",
+					});
+					this._load_pipeline(panel);
+				},
+				error: (r) => {
+					console.error("[CH-REPAIR] Job creation failed:", r);
+					btn.prop("disabled", false).html(`<i class="fa fa-cog"></i> ${__("Accept & Create Job")}`);
+				},
 			});
 		});
 
@@ -476,8 +489,9 @@ export class RepairWorkspace {
 					</div>`;
 			}).join("");
 			el.html(rows);
-		}).catch(() => {
+		}).catch((err) => {
 			el.html(`<div class="text-muted text-center" style="padding:16px">${__("Could not load repairs")}</div>`);
+			ch_pos_show_error(err, __("Load Repairs Failed"));
 		});
 	}
 
@@ -854,8 +868,9 @@ export class RepairWorkspace {
 				`,
 			});
 			this._load_pipeline(panel);
-		}).catch(() => {
+		}).catch((err) => {
 			dlg.get_primary_btn().prop("disabled", false).html(__("Close Repair & Create Invoice"));
+			ch_pos_show_error(err, __("Repair Closure Failed"));
 		});
 	}
 }

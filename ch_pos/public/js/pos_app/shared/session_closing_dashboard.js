@@ -74,8 +74,9 @@ export class SessionClosingDashboard {
 				{ fieldtype: "Column Break" },
 				{
 					fieldname: "manager_pin",
-					fieldtype: "Password",
+					fieldtype: "Data",
 					label: __("Manager PIN"),
+					options: "",
 					description: __("Required if variance > ₹100"),
 				},
 			],

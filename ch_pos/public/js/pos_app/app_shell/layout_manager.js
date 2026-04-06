@@ -33,6 +33,7 @@ export class LayoutManager {
 		this._apply_fullscreen();
 		this._render_shell();
 		this._init_components();
+		this._setup_company_guard();
 		this._bind_mode_switch();
 		this._bind_keyboard_shortcuts();
 	}
@@ -55,20 +56,45 @@ export class LayoutManager {
 		content.empty().append(`
 			<div class="ch-pos-session-bar"></div>
 			<div class="ch-pos-offline-bar"></div>
-			<div class="ch-pos-container">
-				<div class="ch-pos-sidebar"></div>
-				<div class="ch-pos-content-panel"></div>
-				<div class="ch-pos-cart-panel"></div>
+			<div class="ch-pos-main-area">
+				<div class="ch-pos-no-company-overlay">
+					<div class="ch-pos-no-company-box">
+						<i class="fa fa-building-o"></i>
+						<h3>${__("No Company Selected")}</h3>
+						<p>${__("Use the profile menu in the top-right corner to select a company.")}</p>
+					</div>
+				</div>
+				<div class="ch-pos-container">
+					<div class="ch-pos-sidebar"></div>
+					<div class="ch-pos-content-panel"></div>
+					<div class="ch-pos-cart-panel"></div>
+				</div>
 			</div>
 		`);
 
 		// Cache DOM references
 		this.$session_bar = content.find(".ch-pos-session-bar");
 		this.$offline_bar = content.find(".ch-pos-offline-bar");
+		this.$main_area = content.find(".ch-pos-main-area");
+		this.$no_company_overlay = content.find(".ch-pos-no-company-overlay");
 		this.$container = content.find(".ch-pos-container");
 		this.$sidebar = content.find(".ch-pos-sidebar");
 		this.$content_panel = content.find(".ch-pos-content-panel");
 		this.$cart_panel = content.find(".ch-pos-cart-panel");
+	}
+
+	/** Show/hide blocking overlay when no company is selected */
+	_setup_company_guard() {
+		const update = () => {
+			const has_company = PosState.active_company || PosState.company;
+			this.$main_area.toggleClass("ch-pos-no-company", !has_company);
+		};
+		// Initial check
+		update();
+		// React to company changes
+		EventBus.on("profile:loaded", update);
+		EventBus.on("company:switched", update);
+		EventBus.on("session:loaded", update);
 	}
 
 	/** Initialize child components */
@@ -128,6 +154,9 @@ export class LayoutManager {
 	/** Bind global keyboard shortcuts for POS workflow */
 	_bind_keyboard_shortcuts() {
 		$(document).on("keydown.ch_pos_shortcuts", (e) => {
+			// Block shortcuts when no company is selected
+			if (!(PosState.active_company || PosState.company)) return;
+
 			// Only handle shortcuts outside of dialog overlays
 			if ($(".modal.show").length || $(".ch-pay-overlay.ch-pay-visible").length) return;
 
