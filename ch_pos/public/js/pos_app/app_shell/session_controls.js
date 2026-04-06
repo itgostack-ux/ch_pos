@@ -407,22 +407,18 @@ export class SessionControls {
 					options: "User",
 					reqd: 1,
 				},
-				{
-					fieldname: "manager_pin",
-					fieldtype: "Data",
-					label: __("Manager PIN"),
-					reqd: 1,
-					options: "",
-				},
 			],
 			primary_action_label: __("Switch"),
 			primary_action: (values) => {
+				if (values.new_user === frappe.session.user) {
+					frappe.msgprint(__("Already logged in as this user"));
+					return;
+				}
 				frappe.call({
 					method: "ch_pos.api.session_api.switch_user",
 					args: {
 						session_name: PosState.session_name,
 						new_user: values.new_user,
-						manager_pin: values.manager_pin,
 					},
 					callback: (r) => {
 						if (r.message) {

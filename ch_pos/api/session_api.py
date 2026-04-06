@@ -369,20 +369,16 @@ def close_session(session_name, closing_cash, denominations=None,
 
 
 @frappe.whitelist()
-def switch_user(session_name, new_user, manager_pin):
-    """Switch cashier on an active session. Requires manager PIN."""
+def switch_user(session_name, new_user):
+    """Switch cashier on an active session. No manager PIN needed — audit logged."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status != "Open":
         frappe.throw(_("Session is not open"))
 
-    pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_cashier_switch")
-    if not pin_result.get("valid"):
-        # Fallback: accept can_approve_opening if can_approve_cashier_switch not configured
-        pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_opening")
-    if not pin_result.get("valid"):
-        frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+    if not frappe.db.exists("User", new_user):
+        frappe.throw(_("User {0} does not exist").format(new_user))
 
     old_user = session.user
     session.db_set("user", new_user)
@@ -395,12 +391,12 @@ def switch_user(session_name, new_user, manager_pin):
             ref_name=session_name,
             before=old_user,
             after=new_user,
-            remarks=f"Approved by {pin_result['name']}",
+            remarks=f"Switched by {frappe.session.user}",
         )
     except Exception:
         pass
 
-    return {"user": new_user, "approved_by": pin_result["name"]}
+    return {"user": new_user}
 
 
 # ── Cash Drop ────────────────────────────────────────────────────────────────
