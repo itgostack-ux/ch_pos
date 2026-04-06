@@ -396,7 +396,20 @@ def switch_user(session_name, new_user):
     except Exception:
         pass
 
-    return {"user": new_user}
+    # Return executive access for the new user so Billed By updates
+    executive_access = None
+    try:
+        from ch_pos.api.pos_api import _get_executive_access
+        profile = frappe.get_cached_doc("POS Profile", session.pos_profile)
+        executive_access = _get_executive_access(new_user, profile.warehouse)
+    except Exception:
+        pass
+
+    return {
+        "user": new_user,
+        "full_name": frappe.db.get_value("User", new_user, "full_name") or new_user,
+        "executive_access": executive_access,
+    }
 
 
 # ── Cash Drop ────────────────────────────────────────────────────────────────

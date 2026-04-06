@@ -423,8 +423,25 @@ export class SessionControls {
 					callback: (r) => {
 						if (r.message) {
 							dlg.hide();
+							const data = r.message;
+
+							// Update executive access for the new cashier
+							if (data.executive_access) {
+								const access = data.executive_access;
+								PosState.executive_access = access;
+								if (access.own_executive) {
+									PosState.sales_executive = access.own_executive.name;
+									PosState.sales_executive_name = access.own_executive.executive_name;
+								}
+								EventBus.emit("executive_access:loaded", access);
+							}
+
+							// Update session bar operator name
+							$(".ch-session-user").text(data.full_name || data.user);
+							this.render();
+
 							frappe.show_alert({
-								message: __("Cashier switched to {0}", [r.message.user]),
+								message: __("Cashier switched to {0}", [data.full_name || data.user]),
 								indicator: "green",
 							});
 						}
