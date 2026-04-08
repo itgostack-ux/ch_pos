@@ -1837,10 +1837,10 @@ def get_store_repairs(pos_profile):
         "Service Request",
         filters={
             "source_warehouse": warehouse,
-            "status": ["in", ["Open", "Draft", "In Service", "Waiting for Parts", "Ready for Delivery"]],
+            "status": ["in", ["Open", "Draft", "In Service", "Waiting for Parts", "Ready for Delivery", "Completed"]],
         },
         fields=[
-            "name", "customer_name", "device_item", "serial_no",
+            "name", "customer", "customer_name", "device_item", "serial_no",
             "issue_category", "status", "decision", "priority",
             "service_order", "creation",
         ],
@@ -1951,7 +1951,7 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
 @frappe.whitelist()
 def get_repair_closure_data(service_request):
     """Return all data needed by the Repair Closure Dialog:
-    technician, spare parts, estimated cost, customer, SO/JA names.
+    technician, spare parts, service items, solutions, estimated cost, customer, SO/JA names.
     """
     sr = frappe.get_doc("Service Request", service_request)
 
@@ -1981,12 +1981,84 @@ def get_repair_closure_data(service_request):
             ORDER BY u.full_name
         """, as_dict=True)
 
-    spare_parts = frappe.db.get_all(
-        "Service Request Spare Part",
-        filters={"parent": service_request, "parenttype": "Service Request"},
-        fields=["spare_part_item", "item_name", "qty", "uom", "rate", "amount"],
-        order_by="idx",
-    )
+    # --- Spare parts: prefer spare_lines (new), fall back to spare_parts (legacy) ---
+    spare_parts = []
+    for row in sr.get("spare_lines", []):
+        if row.status == "Damaged":
+            continue
+        item_code = row.spare_item
+        warranty_months = cint(frappe.db.get_value("Item", item_code, "ch_default_warranty_months")) if item_code else 0
+        spare_parts.append({
+            "spare_part_item": item_code,
+            "item_name": row.item_name or "",
+            "qty": flt(row.qty) or 1,
+            "uom": row.get("uom") or "Nos",
+            "rate": flt(row.rate),
+            "amount": flt(row.amount or (row.qty * row.rate)),
+            "warranty_months": warranty_months,
+        })
+    # Fallback 1: legacy spare_parts child table
+    if not spare_parts:
+        legacy = frappe.db.get_all(
+            "Service Request Spare Part",
+            filters={"parent": service_request, "parenttype": "Service Request"},
+            fields=["spare_part_item", "item_name", "qty", "uom", "rate", "amount"],
+            order_by="idx",
+        )
+        for row in legacy:
+            item_code = row.spare_part_item
+            warranty_months = cint(frappe.db.get_value("Item", item_code, "ch_default_warranty_months")) if item_code else 0
+            row["warranty_months"] = warranty_months
+        spare_parts = legacy
+    # Fallback 2: pull from Solution Spare Mapping if solutions exist but no spares recorded
+    if not spare_parts:
+        solution_names = [r.repair_solution for r in sr.get("solution_lines", []) if r.status == "Completed" and r.requires_spare]
+        if solution_names:
+            mappings = frappe.db.get_all(
+                "Solution Spare Mapping",
+                filters={"repair_solution": ["in", solution_names], "is_active": 1},
+                fields=["spare_item", "item_name", "default_qty", "uom"],
+            )
+            for m in mappings:
+                item_code = m.spare_item
+                rate = flt(frappe.db.get_value("Item Price",
+                    {"item_code": item_code, "selling": 1}, "price_list_rate")) if item_code else 0
+                warranty_months = cint(frappe.db.get_value("Item", item_code, "ch_default_warranty_months")) if item_code else 0
+                spare_parts.append({
+                    "spare_part_item": item_code,
+                    "item_name": m.item_name or "",
+                    "qty": flt(m.default_qty) or 1,
+                    "uom": m.uom or "Nos",
+                    "rate": rate,
+                    "amount": rate * (flt(m.default_qty) or 1),
+                    "warranty_months": warranty_months,
+                    "from_mapping": True,
+                })
+
+    # --- Service items from SR ---
+    service_items = []
+    for row in sr.get("service_items", []):
+        service_items.append({
+            "item_code": row.service_item,
+            "item_name": row.service_item_name or row.get("item_name") or "",
+            "rate": flt(row.rate or row.get("actual_cost") or row.get("estimated_cost") or 0),
+        })
+
+    # --- Solution lines summary ---
+    solutions = []
+    for row in sr.get("solution_lines", []):
+        solutions.append({
+            "repair_solution": row.repair_solution or "",
+            "issue_category": row.issue_category or "",
+            "status": row.status or "",
+        })
+
+    # --- Compute service charge: SR estimated_cost > SO grand_total > 0 ---
+    estimated_cost = flt(sr.estimated_cost)
+    if not estimated_cost and service_items:
+        estimated_cost = sum(i["rate"] for i in service_items)
+    if not estimated_cost and sr.service_order:
+        estimated_cost = flt(frappe.db.get_value("Sales Order", sr.service_order, "grand_total"))
 
     ja = None
     so_qc_status = "Pending"
@@ -2005,13 +2077,20 @@ def get_repair_closure_data(service_request):
         "customer_name": sr.customer_name or sr.customer,
         "device_item": sr.device_item,
         "serial_no": sr.serial_no or "",
-        "estimated_cost": flt(sr.estimated_cost),
+        "estimated_cost": estimated_cost,
         "service_order": sr.service_order or "",
         "job_assignment": ja.name if ja else "",
         "current_technician": (ja.service_engineer if ja else "") or "",
         "qc_status": so_qc_status,
         "spare_parts": spare_parts,
+        "service_items": service_items,
+        "solutions": solutions,
         "technicians": eng_users,
+        "issue_category": sr.issue_category or "",
+        "status": sr.status or "",
+        "decision": sr.decision or "",
+        "priority": sr.priority or "",
+        "service_invoice": sr.service_invoice or "",
     }
 
 
@@ -2142,6 +2221,11 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     inv.is_pos = 1
     inv.update_stock = 0  # spare parts handled via Stock Entry below
 
+    # Link GoFix service details
+    inv.custom_gofix_service_request = service_request
+    if sr.service_order:
+        inv.custom_gofix_service_order = sr.service_order
+
     if service_charge > 0:
         inv.append("items", {
             "item_code": repair_item,
@@ -2155,12 +2239,17 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
         qty = flt(part.get("qty", 1))
         rate = flt(part.get("rate", 0))
         if qty and rate:
+            item_code = part.get("spare_part_item")
+            warranty_months = cint(frappe.db.get_value("Item", item_code, "ch_default_warranty_months")) if item_code else 0
+            desc = f"Part — {service_request}"
+            if warranty_months:
+                desc += f" (Warranty: {warranty_months} months)"
             inv.append("items", {
-                "item_code": part.get("spare_part_item"),
+                "item_code": item_code,
                 "qty": qty,
                 "rate": rate,
                 "uom": part.get("uom") or "Nos",
-                "description": f"Part — {service_request}",
+                "description": desc,
             })
 
     for p in payments:
@@ -5571,6 +5660,7 @@ def get_todays_invoices(pos_profile, date=None, phone=None):
 				pi.posting_time,
 				pi.is_return,
 				pi.status,
+				pi.custom_gofix_service_request,
 				GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
 			FROM `tabSales Invoice` pi
 			JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
@@ -5595,6 +5685,7 @@ def get_todays_invoices(pos_profile, date=None, phone=None):
 			pi.posting_time,
 			pi.is_return,
 			pi.status,
+			pi.custom_gofix_service_request,
 			GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
 		FROM `tabSales Invoice` pi
 		JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name

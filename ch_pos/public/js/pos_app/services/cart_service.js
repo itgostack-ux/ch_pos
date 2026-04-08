@@ -1548,7 +1548,9 @@ export class CartService {
 		// Print button
 		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
 			const name = $(e.currentTarget).data("name");
-			const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=Custom%20Sales%20Invoice&no_letterhead=1`;
+			const is_gofix = $(e.currentTarget).data("gofix");
+			const fmt = is_gofix ? "GoFix Service Invoice" : "Custom Sales Invoice";
+			const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=1`;
 			window.open(url, "_blank");
 		});
 	}

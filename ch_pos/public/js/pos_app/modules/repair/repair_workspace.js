@@ -454,7 +454,7 @@ export class RepairWorkspace {
 					: r.service_order
 						? `<span class="ch-pos-badge badge-warning">${__("SO")}: ${r.service_order}</span>`
 						: `<span class="ch-pos-badge badge-muted">${__("Pending")}</span>`;
-				const collect_btn = r.job_status === "Completed" && !r.billed
+				const collect_btn = (r.job_status === "Completed" || r.status === "Completed") && !r.billed
 					? `<button class="btn btn-xs btn-success ch-rep-collect-payment"
 						data-name="${r.name}"
 						data-service="${r.service_order || ""}"
@@ -516,34 +516,64 @@ export class RepairWorkspace {
 				this._part_row_html(i, p, mop_opts_html)
 			).join("") || this._part_row_html(0, {}, mop_opts_html);
 
+			// Solutions summary
+			const solutions_html = (d.solutions || []).length ? d.solutions.map(s => {
+				const cls = s.status === "Completed" ? "success" : s.status === "Skipped" ? "muted" : "warning";
+				return `<span class="ch-pos-badge badge-${cls}" style="margin:2px 4px 2px 0">${frappe.utils.escape_html(s.repair_solution || s.issue_category)}: ${s.status}</span>`;
+			}).join("") : `<span class="text-muted">${__("No solutions recorded")}</span>`;
+
+			// Service items summary
+			const svc_items_html = (d.service_items || []).length ? d.service_items.map(s =>
+				`<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:12px">
+					<span>${frappe.utils.escape_html(s.item_name || s.item_code)}</span>
+					<span style="font-weight:600">₹${format_number(s.rate)}</span>
+				</div>`
+			).join("") : "";
+
+			// Status info
+			const status_cls = d.status === "Completed" ? "success" : d.status === "Invoiced" ? "blue" : "warning";
+			const priority_cls = d.priority === "High" ? "danger" : d.priority === "Medium" ? "warning" : "muted";
+
 			const html = `
 <div class="ch-closure-dialog" style="font-size:13px">
 
   <!-- Header -->
-  <div style="background:var(--pos-accent-blue,#2563eb);color:#fff;border-radius:8px 8px 0 0;padding:12px 16px;margin:-15px -15px 16px -15px">
-    <div style="font-weight:700;font-size:15px"><i class="fa fa-wrench" style="margin-right:6px"></i>${__("Repair Closure")} — ${frappe.utils.escape_html(sr_name)}</div>
-    <div style="font-size:12px;opacity:.85;margin-top:2px">
-      ${frappe.utils.escape_html(d.customer_name || d.customer || "")}
-      ${d.device_item ? " · " + frappe.utils.escape_html(d.device_item) : ""}
-      ${d.serial_no ? " · " + frappe.utils.escape_html(d.serial_no) : ""}
+  <div style="background:linear-gradient(135deg,#1e40af,#2563eb);color:#fff;border-radius:8px 8px 0 0;padding:14px 18px;margin:-15px -15px 16px -15px">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div style="font-weight:700;font-size:16px;letter-spacing:0.3px"><i class="fa fa-wrench" style="margin-right:8px"></i>${__("Repair Closure")}</div>
+      <span style="font-size:13px;background:rgba(255,255,255,.2);padding:3px 10px;border-radius:12px;font-weight:600">${frappe.utils.escape_html(sr_name)}</span>
+    </div>
+    <div style="display:flex;gap:12px;margin-top:8px;font-size:12px;opacity:.9;flex-wrap:wrap">
+      <span><i class="fa fa-user" style="width:14px"></i> ${frappe.utils.escape_html(d.customer_name || d.customer || "")}</span>
+      ${d.device_item ? `<span><i class="fa fa-mobile" style="width:14px"></i> ${frappe.utils.escape_html(d.device_item)}</span>` : ""}
+      ${d.serial_no ? `<span><i class="fa fa-barcode" style="width:14px"></i> ${frappe.utils.escape_html(d.serial_no)}</span>` : ""}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <span class="ch-pos-badge badge-${status_cls}" style="font-size:11px">${d.status || "Draft"}</span>
+      ${d.priority ? `<span class="ch-pos-badge badge-${priority_cls}" style="font-size:11px">${d.priority}</span>` : ""}
+      ${d.service_order ? `<span style="font-size:11px;opacity:.8"><i class="fa fa-file-text-o"></i> ${frappe.utils.escape_html(d.service_order)}</span>` : ""}
+      ${d.service_invoice ? `<span class="ch-pos-badge badge-success" style="font-size:11px"><i class="fa fa-check"></i> ${d.service_invoice}</span>` : ""}
     </div>
   </div>
 
-  <!-- 1. Technician -->
-  <div class="ch-closure-section">
-    <div class="ch-closure-section-title"><i class="fa fa-user-cog"></i> ${__("1. Technician")}</div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <label style="min-width:90px;color:var(--text-muted)">${__("Assigned to")}</label>
-      <select class="form-control form-control-sm ch-cld-technician" style="flex:1">
-        <option value="">— ${__("Select")} —</option>
-        ${tech_options}
-      </select>
+  ${d.service_invoice ? `
+    <div style="background:#dcfce7;border:1px solid #86efac;border-radius:8px;padding:12px 16px;margin-bottom:12px;text-align:center">
+      <i class="fa fa-check-circle" style="color:#16a34a;font-size:18px"></i>
+      <div style="font-weight:700;margin-top:4px">${__("Already Invoiced")}: <a href="/app/sales-invoice/${d.service_invoice}" target="_blank">${d.service_invoice}</a></div>
     </div>
+  ` : ""}
+
+  <!-- Repair Summary (read-only context) -->
+  <div class="ch-closure-section" style="background:#f8fafc;border-color:#e2e8f0">
+    <div class="ch-closure-section-title" style="margin-bottom:6px"><i class="fa fa-clipboard"></i> ${__("Repair Summary")}</div>
+    ${d.issue_category ? `<div style="font-size:12px;margin-bottom:4px"><b>${__("Issue")}:</b> ${frappe.utils.escape_html(d.issue_category)}</div>` : ""}
+    <div style="margin-bottom:4px">${solutions_html}</div>
+    ${svc_items_html ? `<div style="border-top:1px solid #e2e8f0;padding-top:6px;margin-top:6px">${svc_items_html}</div>` : ""}
   </div>
 
-  <!-- 2. QC -->
+  <!-- 1. QC -->
   <div class="ch-closure-section">
-    <div class="ch-closure-section-title"><i class="fa fa-check-circle"></i> ${__("2. Quality Check")}</div>
+    <div class="ch-closure-section-title"><i class="fa fa-check-circle"></i> ${__("1. Quality Check")}</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
       ${["Pass","Fail","Not Repairable","Customer Cancelled"].map(v =>
         `<label class="ch-qc-opt" style="display:flex;align-items:center;gap:4px;cursor:pointer;padding:4px 10px;border:1px solid var(--pos-border-light,#ddd);border-radius:20px;transition:all .15s">
@@ -557,7 +587,7 @@ export class RepairWorkspace {
   <!-- 3. Spare Parts -->
   <div class="ch-closure-section">
     <div class="ch-closure-section-title" style="display:flex;align-items:center;gap:6px">
-      <span><i class="fa fa-puzzle-piece"></i> ${__("3. Spare Parts")}</span>
+      <span><i class="fa fa-puzzle-piece"></i> ${__("2. Spare Parts")}</span>
       <button class="btn btn-xs btn-outline-primary ch-cld-add-part" style="margin-left:auto;border-radius:20px">
         <i class="fa fa-plus"></i> ${__("Add Part")}
       </button>
@@ -576,18 +606,18 @@ export class RepairWorkspace {
     </table>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
       <label style="min-width:120px">${__("Service Charge (₹)")}</label>
-      <input type="number" class="form-control form-control-sm ch-cld-service-charge" value="${est_cost}" min="0" style="max-width:140px">
+      <input type="number" class="form-control form-control-sm ch-cld-service-charge" value="${est_cost}" min="0" style="max-width:140px;font-weight:600">
     </div>
-    <div style="text-align:right;margin-top:8px;font-weight:600;font-size:14px">
+    <div class="ch-cld-totals-bar">
       ${__("Parts Total")}: ₹<span class="ch-cld-parts-total">0.00</span>
-      &nbsp;|&nbsp; ${__("Invoice Total")}: ₹<span class="ch-cld-grand-total">0.00</span>
+      &nbsp;|&nbsp; ${__("Invoice Total")}: <b>₹<span class="ch-cld-grand-total">0.00</span></b>
     </div>
   </div>
 
   <!-- 4. Payment -->
   <div class="ch-closure-section">
     <div class="ch-closure-section-title" style="display:flex;align-items:center;gap:6px">
-      <span><i class="fa fa-money"></i> ${__("4. Payment")}</span>
+      <span><i class="fa fa-credit-card"></i> ${__("3. Payment")}</span>
       <button class="btn btn-xs btn-outline-primary ch-cld-add-payment" style="margin-left:auto;border-radius:20px">
         <i class="fa fa-plus"></i> ${__("Add Row")}
       </button>
@@ -602,13 +632,13 @@ export class RepairWorkspace {
       <tbody class="ch-cld-payments-body">
         <tr class="ch-cld-payment-row">
           <td><select class="form-control form-control-sm ch-cld-mop">${mop_opts_html}</select></td>
-          <td><input type="number" class="form-control form-control-sm ch-cld-pay-amount text-right" min="0" placeholder="0.00"></td>
+          <td><input type="number" class="form-control form-control-sm ch-cld-pay-amount text-right" min="0" value="${est_cost}" placeholder="0.00"></td>
           <td><input type="text" class="form-control form-control-sm ch-cld-pay-ref" placeholder="${__("optional")}"></td>
           <td></td>
         </tr>
       </tbody>
     </table>
-    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted)">
+    <div class="ch-cld-payment-summary">
       <span>${__("Paid")}: ₹<span class="ch-cld-paid-total">0.00</span></span>
       <span>${__("Balance")}: ₹<span class="ch-cld-balance">0.00</span></span>
     </div>
@@ -616,7 +646,7 @@ export class RepairWorkspace {
 
   <!-- 5. Delivery -->
   <div class="ch-closure-section">
-    <div class="ch-closure-section-title"><i class="fa fa-handshake-o"></i> ${__("5. Delivery")}</div>
+    <div class="ch-closure-section-title"><i class="fa fa-handshake-o"></i> ${__("4. Delivery")}</div>
     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
       <input type="checkbox" class="ch-cld-delivery-ack" style="width:16px;height:16px">
       <span>${__("Customer has received the device")}</span>
@@ -626,10 +656,12 @@ export class RepairWorkspace {
 
 </div>
 <style>
-.ch-closure-section { border:1px solid var(--pos-border-light,#e5e7eb); border-radius:8px; padding:12px 14px; margin-bottom:10px; }
+.ch-closure-section { border:1px solid #e5e7eb; border-radius:8px; padding:12px 14px; margin-bottom:10px; }
 .ch-closure-section-title { font-weight:700; font-size:13px; margin-bottom:10px; color:#374151; }
 .ch-qc-opt input { margin:0; }
-.ch-qc-opt.active { background:#dbeafe; border-color:#2563eb; color:#2563eb; }
+.ch-qc-opt.active { background:#dbeafe; border-color:#2563eb; color:#1d4ed8; font-weight:600; }
+.ch-cld-totals-bar { text-align:right; margin-top:10px; font-size:14px; padding:8px 12px; background:#f0fdf4; border-radius:6px; border:1px solid #bbf7d0; }
+.ch-cld-payment-summary { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; font-weight:600; }
 </style>`;
 
 			const restore_btn = defaults.on_close || (() => {});
@@ -646,9 +678,8 @@ export class RepairWorkspace {
 			dlg.$wrapper.on("hidden.bs.modal", () => restore_btn());
 			dlg.$body.html(html);
 
-			// Pre-fill technician
-			const tech = defaults.technician || d.current_technician || "";
-			if (tech) dlg.$body.find(".ch-cld-technician").val(tech);
+			// Store technician from SR data (no need to show in dialog)
+			this._current_technician = d.current_technician || defaults.technician || "";
 
 			// Style QC radio buttons
 			dlg.$body.on("change", "input[name=ch_cld_qc]", (e) => {
@@ -769,6 +800,11 @@ export class RepairWorkspace {
 		const qty  = p.qty  || "";
 		const rate = p.rate || "";
 		const amount = (parseFloat(qty) * parseFloat(rate)) || "";
+		const warranty = parseInt(p.warranty_months) || 0;
+		const warranty_badge = warranty
+			? `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:10px;background:#dbeafe;color:#1d4ed8;font-weight:600;margin-top:2px">${warranty} mo warranty</span>`
+			: "";
+		const from_mapping = p.from_mapping ? `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:10px;background:#fef3c7;color:#92400e;margin-top:2px">auto</span>` : "";
 		// Display name = item_name if available, else item_code
 		const display = name || item;
 		return `<tr class="ch-cld-part-row">
@@ -776,6 +812,7 @@ export class RepairWorkspace {
 				<input type="hidden" class="ch-cld-part-code" value="${item}">
 				<input type="text" class="form-control form-control-sm ch-cld-part-name" value="${display}"
 					placeholder="${__("Type to search item…")}" autocomplete="off">
+				<div style="display:flex;gap:4px;flex-wrap:wrap">${warranty_badge}${from_mapping}</div>
 				<div class="ch-item-suggestions" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:9999;background:#fff;border:1px solid #ddd;border-radius:4px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
 			</td>
 			<td><input type="number" class="form-control form-control-sm ch-cld-part-qty" value="${qty}" min="0" placeholder="1" style="text-align:center"></td>
@@ -836,7 +873,7 @@ export class RepairWorkspace {
 			return;
 		}
 
-		const technician  = dlg.$body.find(".ch-cld-technician").val();
+		const technician  = this._current_technician || "";
 		const delivery_ack = dlg.$body.find(".ch-cld-delivery-ack").is(":checked") ? 1 : 0;
 		const delivery_note = dlg.$body.find(".ch-cld-delivery-note").val().trim();
 

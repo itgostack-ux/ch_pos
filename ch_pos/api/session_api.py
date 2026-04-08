@@ -212,6 +212,21 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
         # Validate opening cash against previous closing / expected float
         expected_float = _get_expected_float(pos_profile, store)
 
+        # Close orphaned POS Opening Entries (Open but no active CH POS Session)
+        # This prevents ERPNext's check_open_pos_exists from blocking new entries.
+        stale_entries = frappe.db.get_all(
+            "POS Opening Entry",
+            filters={
+                "pos_profile": pos_profile,
+                "status": "Open",
+                "docstatus": 1,
+                "pos_closing_entry": ("in", ["", None]),
+            },
+            pluck="name",
+        )
+        for se in stale_entries:
+            frappe.db.set_value("POS Opening Entry", se, "status", "Closed", update_modified=False)
+
         # Create ERPNext POS Opening Entry (for GL linkage)
         balance_details = []
         for p in (profile.payments or []):

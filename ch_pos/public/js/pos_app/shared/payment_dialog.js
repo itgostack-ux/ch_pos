@@ -1834,8 +1834,15 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			this._overlay.find(".ch-pay-countdown-badge").text(countdown);
 			this._auto_timer = setTimeout(tick, 1000);
 			const name = $(e.currentTarget).data("name");
-			const url  = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=Custom%20Sales%20Invoice&no_letterhead=1`;
-			window.open(url, "_blank");
+			// Check if this is a GoFix invoice by looking up the SR link
+			frappe.xcall("frappe.client.get_value", {
+				doctype: "Sales Invoice", filters: name,
+				fieldname: "custom_gofix_service_request"
+			}).then(r => {
+				const fmt = r && r.custom_gofix_service_request ? "GoFix Service Invoice" : "Custom Sales Invoice";
+				const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=1`;
+				window.open(url, "_blank");
+			});
 		});
 	}
 
