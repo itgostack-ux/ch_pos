@@ -172,167 +172,29 @@ class CustomPOSInvoice(SalesInvoice):
                     )
 
     def on_cancel(self):
-        # Reimplements Sales Invoice on_cancel with SLE/GL reversal inserted
-        # before serial bundle delinking to preserve bundle references.
-        from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
-
-        self.ignore_linked_doctypes = (
-            "GL Entry",
-            "Stock Ledger Entry",
-            "Repost Item Valuation",
-            "Repost Payment Ledger",
-            "Repost Payment Ledger Items",
-            "Repost Accounting Ledger",
-            "Repost Accounting Ledger Items",
-            "Payment Ledger Entry",
-            "Serial and Batch Bundle",
-        )
-
-        # SellingController chain (same pattern as POSInvoice.on_cancel)
-        super(SalesInvoice, self).on_cancel()
-
-        # Loyalty points cleanup (from Sales Invoice.on_cancel)
-        # Policy: returns never created any LPE on submit, so only non-returns
-        # need their LPE deleted on cancel.
-        if not self.is_return and self.loyalty_program:
-            self.delete_loyalty_point_entry()
-
-        # Reverse SLE/GL entries BEFORE delinking serial bundles
-        if self.update_stock == 1:
-            self.update_stock_ledger()
-
-        self.make_gl_entries_on_cancel()
-
-        if self.update_stock == 1:
-            self.repost_future_sle_and_gle()
-
-        self.db_set("status", "Cancelled")
-
-        coupon = getattr(self, "coupon_code", None) or getattr(self, "custom_coupon_code", None)
-        if coupon:
-            from erpnext.accounts.doctype.pricing_rule.utils import update_coupon_code_count
-
-            update_coupon_code_count(coupon, "cancelled")
-
-        # Cache serial numbers per item BEFORE delink clears the references.
-        # Doc_events (reverse_serial_lifecycle) fire after on_cancel returns,
-        # by which time serial_and_batch_bundle is already cleared.
+        # Cache serial numbers BEFORE standard on_cancel delinks serial bundles.
+        # Doc_events (reverse_serial_lifecycle, deactivate_customer_devices) fire
+        # after on_cancel returns, by which time serial_and_batch_bundle is cleared.
         self._cached_serial_nos = {}
         for item in self.items:
             self._cached_serial_nos[item.name] = _get_serial_nos_from_item(item)
 
-        # Delink serial bundles AFTER reversing stock/GL
-        self.delink_serial_and_batch_bundle()
-
-    def delink_serial_and_batch_bundle(self):
-        """Override: skip cancel if the bundle was already cancelled by SLE reversal."""
-        for row in self.items:
-            if row.serial_and_batch_bundle:
-                bundle_docstatus = frappe.db.get_value(
-                    "Serial and Batch Bundle", row.serial_and_batch_bundle, "docstatus"
-                )
-                if not getattr(self, "is_consolidated", None):
-                    frappe.db.set_value(
-                        "Serial and Batch Bundle",
-                        row.serial_and_batch_bundle,
-                        {"is_cancelled": 1, "voucher_no": ""},
-                    )
-                if bundle_docstatus == 1:
-                    frappe.get_doc("Serial and Batch Bundle", row.serial_and_batch_bundle).cancel()
-                row.db_set("serial_and_batch_bundle", None)
-
-    def make_discount_gl_entries(self, gl_entries):
-        """Override: accounts_controller only handles Sales/Purchase Invoice.
-
-        Sales Invoice is a selling document, so we read Selling Settings and
-        then delegate to the parent implementation with doctype temporarily
-        set so the if/elif branches match.
-        """
-        from erpnext.accounts.doctype.account.account import get_account_currency
-
-        enable_discount_accounting = cint(
-            frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
-        )
-
-        dr_or_cr = "debit"
-        rev_dr_cr = "credit"
-        supplier_or_customer = self.customer
-
-        if enable_discount_accounting:
-            for item in self.get("items"):
-                if item.get("discount_amount") and item.get("discount_account"):
-                    discount_amount = item.discount_amount * item.qty
-                    income_or_expense_account = (
-                        item.income_account
-                        if (not item.get("enable_deferred_revenue") or self.is_return)
-                        else item.get("deferred_revenue_account")
-                    )
-
-                    account_currency = get_account_currency(item.discount_account)
-                    gl_entries.append(
-                        self.get_gl_dict(
-                            {
-                                "account": item.discount_account,
-                                "against": supplier_or_customer,
-                                dr_or_cr: flt(
-                                    discount_amount * self.get("conversion_rate"),
-                                    item.precision("discount_amount"),
-                                ),
-                                dr_or_cr + "_in_transaction_currency": flt(
-                                    discount_amount, item.precision("discount_amount")
-                                ),
-                                "cost_center": item.cost_center,
-                                "project": item.project,
-                            },
-                            account_currency,
-                            item=item,
-                        )
-                    )
-
-                    account_currency = get_account_currency(income_or_expense_account)
-                    gl_entries.append(
-                        self.get_gl_dict(
-                            {
-                                "account": income_or_expense_account,
-                                "against": supplier_or_customer,
-                                rev_dr_cr: flt(
-                                    discount_amount * self.get("conversion_rate"),
-                                    item.precision("discount_amount"),
-                                ),
-                                rev_dr_cr + "_in_transaction_currency": flt(
-                                    discount_amount, item.precision("discount_amount")
-                                ),
-                                "cost_center": item.cost_center,
-                                "project": item.project or self.project,
-                            },
-                            account_currency,
-                            item=item,
-                        )
-                    )
-
-        if (
-            (enable_discount_accounting or self.get("is_cash_or_non_trade_discount"))
-            and self.get("additional_discount_account")
-            and self.get("discount_amount")
-        ):
-            import erpnext
-
-            gl_entries.append(
-                self.get_gl_dict(
-                    {
-                        "account": self.additional_discount_account,
-                        "against": supplier_or_customer,
-                        dr_or_cr: self.base_discount_amount,
-                        "cost_center": self.cost_center or erpnext.get_default_cost_center(self.company),
-                    },
-                    item=self,
-                )
-            )
+        # Delegate to standard SalesInvoice.on_cancel() which handles:
+        #   - check_if_return_invoice_linked_with_payment_entry
+        #   - super().on_cancel() (SellingController chain)
+        #   - update_status_updater_args / update_prevdoc_status
+        #   - update_billing_status_in_dn / update_billing_status_for_zero_amount_refdoc
+        #   - SalesTaxWithholding
+        #   - update_stock_ledger / make_gl_entries_on_cancel / repost_future_sle_and_gle
+        #   - update_stock_reservation_entries
+        #   - process_asset_depreciation
+        #   - loyalty points cleanup
+        #   - coupon code count
+        #   - delete_auto_created_batches
+        #   - delink serial bundles (implicit via SLE cancellation)
+        super().on_cancel()
 
     def get_gl_entries(self, warehouse_account=None):
-        # accounts_controller.make_discount_gl_entries only handles
-        # "Sales Invoice"/"Purchase Invoice" doctypes.  Override below
-        # ensures Sales Invoice is handled like Sales Invoice for discounts.
         gl_entries = super().get_gl_entries(warehouse_account)
         if not cint(self.get("custom_is_margin_scheme")):
             return gl_entries
@@ -590,10 +452,20 @@ def _cancel_return_serial_lifecycle(doc):
                 customer_name = doc.customer_name
                 if orig_inv:
                     sale_date = frappe.db.get_value("Sales Invoice", orig_inv, "posting_date")
-                    # Find rate from original invoice item
+                    # Find rate from original invoice item — check serial_no text or bundle
                     orig_items = frappe.db.get_all("Sales Invoice Item",
                         filters={"parent": orig_inv, "serial_no": ["like", f"%{sn}%"]},
                         fields=["rate"], limit=1)
+                    if not orig_items:
+                        # v16: serial may be in Serial and Batch Bundle instead
+                        orig_items = frappe.db.sql("""
+                            SELECT si_item.rate
+                            FROM `tabSales Invoice Item` si_item
+                            JOIN `tabSerial and Batch Entry` sbe
+                                ON sbe.parent = si_item.serial_and_batch_bundle
+                            WHERE si_item.parent = %s AND sbe.serial_no = %s
+                            LIMIT 1
+                        """, (orig_inv, sn), as_dict=True)
                     if orig_items:
                         sale_rate = flt(orig_items[0].rate)
                 _update_serial_status(
@@ -995,9 +867,10 @@ def _get_exempted_value(item):
                 SUM(pri.custom_exempted_value) / NULLIF(SUM(pri.qty), 0)
             FROM `tabSerial No` sn
             JOIN `tabPurchase Receipt Item` pri
-                ON sn.purchase_document_no = pri.parent
+                ON sn.reference_name = pri.parent
                 AND sn.item_code = pri.item_code
             WHERE sn.name = %s
+              AND sn.reference_doctype = 'Purchase Receipt'
         """, (serial,), as_list=True)
 
         exempt = flt(result[0][0]) if result and result[0] and result[0][0] else None

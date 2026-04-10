@@ -19,8 +19,8 @@ from erpnext.accounts.doctype.pos_invoice.pos_invoice import (
     get_bin_qty,
     get_bundle_availability,
     get_product_bundle_stock_availability,
-    is_negative_stock_allowed,
 )
+from erpnext.stock.stock_ledger import is_negative_stock_allowed
 
 
 def _get_pos_reserved_qty_from_table(child_table, item_code, warehouse):

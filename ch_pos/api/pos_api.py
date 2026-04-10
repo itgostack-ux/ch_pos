@@ -1121,10 +1121,11 @@ def validate_coupon(coupon_code, customer=None, cart_total=0):
 
     # Compute discount
     discount_amount = 0
+    max_disc = flt(getattr(pr, "max_discount", 0) or 0)
     if flt(pr.discount_percentage) > 0:
         discount_amount = flt(cart_total * flt(pr.discount_percentage) / 100)
-        if pr.max_discount and discount_amount > flt(pr.max_discount):
-            discount_amount = flt(pr.max_discount)
+        if max_disc and discount_amount > max_disc:
+            discount_amount = max_disc
     elif flt(pr.discount_amount) > 0:
         discount_amount = flt(pr.discount_amount)
 
@@ -1203,7 +1204,7 @@ def apply_coupon_or_voucher(code, customer=None, company=None):
             "coupon_name": coupon.name,
             "amount": flt(pr.discount_percentage),
             "is_percentage": True,
-            "max_discount": flt(pr.max_discount) if pr.max_discount else 0,
+            "max_discount": flt(getattr(pr, "max_discount", 0) or 0),
             "pricing_rule": coupon.pricing_rule,
         }
     elif flt(pr.discount_amount) > 0:
