@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\": \"sc_open_pos\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Open POS\", \"col\": 4}}, {\"id\": \"hdr_quick\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Quick Actions</b></span>\", \"col\": 12}}, {\"id\": \"sc_tokens\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Kiosk Tokens\", \"col\": 3}}, {\"id\": \"sc_guided\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Guided Sessions\", \"col\": 3}}, {\"id\": \"sc_comparisons\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Comparisons\", \"col\": 3}}, {\"id\": \"sc_repair\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Repair Intake\", \"col\": 3}}, {\"id\": \"sc_session_log\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Session Logs\", \"col\": 3}}, {\"id\": \"sc_incentive\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Incentive Ledger\", \"col\": 3}}, {\"id\": \"spacer_1\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_docs\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Documents</b></span>\", \"col\": 12}}, {\"id\": \"card_kiosk\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Kiosk\", \"col\": 4}}, {\"id\": \"card_ai\", \"type\": \"card\", \"data\": {\"card_name\": \"AI & Comparison\", \"col\": 4}}, {\"id\": \"card_repair\", \"type\": \"card\", \"data\": {\"card_name\": \"Repair\", \"col\": 4}}, {\"id\": \"card_buyback\", \"type\": \"card\", \"data\": {\"card_name\": \"Buyback\", \"col\": 4}}, {\"id\": \"spacer_2\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_reports\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Reports</b></span>\", \"col\": 12}}, {\"id\": \"card_reports\", \"type\": \"card\", \"data\": {\"card_name\": \"Store Reports\", \"col\": 6}}, {\"id\": \"spacer_3\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_config\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Configuration</b></span>\", \"col\": 12}}, {\"id\": \"card_config\", \"type\": \"card\", \"data\": {\"card_name\": \"Configuration\", \"col\": 4}}]",
+ "content": "[{\"id\": \"sc_open_pos\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Open POS\", \"col\": 4}}, {\"id\": \"hdr_quick\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Quick Actions</b></span>\", \"col\": 12}}, {\"id\": \"sc_tokens\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Kiosk Tokens\", \"col\": 3}}, {\"id\": \"sc_guided\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Guided Sessions\", \"col\": 3}}, {\"id\": \"sc_comparisons\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Comparisons\", \"col\": 3}}, {\"id\": \"sc_repair\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Repair Intake\", \"col\": 3}}, {\"id\": \"sc_session_log\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Session Logs\", \"col\": 3}}, {\"id\": \"sc_incentive\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Incentive Ledger\", \"col\": 3}}, {\"id\": \"spacer_1\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_docs\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Documents</b></span>\", \"col\": 12}}, {\"id\": \"card_kiosk\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Kiosk\", \"col\": 4}}, {\"id\": \"card_ai\", \"type\": \"card\", \"data\": {\"card_name\": \"AI & Comparison\", \"col\": 4}}, {\"id\": \"card_repair\", \"type\": \"card\", \"data\": {\"card_name\": \"Repair\", \"col\": 4}}, {\"id\": \"card_buyback\", \"type\": \"card\", \"data\": {\"card_name\": \"Buyback\", \"col\": 4}}, {\"id\": \"spacer_2\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_reports\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Reports</b></span>\", \"col\": 12}}, {\"id\": \"card_reports\", \"type\": \"card\", \"data\": {\"card_name\": \"Store Reports\", \"col\": 6}}, {\"id\": \"spacer_3\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_config\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Configuration</b></span>\", \"col\": 12}}, {\"id\": \"card_config\", \"type\": \"card\", \"data\": {\"card_name\": \"Configuration\", \"col\": 4}}, {\"id\": \"card_session\", \"type\": \"card\", \"data\": {\"card_name\": \"Session & Settlement\", \"col\": 4}}, {\"id\": \"card_masters\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Masters\", \"col\": 4}}, {\"id\": \"card_pos_reports\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Reports\", \"col\": 6}}]",
  "creation": "2026-03-08 10:00:00",
  "custom_blocks": [],
  "docstatus": 0,
@@ -255,9 +255,286 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Session & Settlement",
+   "link_count": 7,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH POS Session",
+   "link_count": 0,
+   "link_to": "CH POS Session",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH POS Settlement",
+   "link_count": 0,
+   "link_to": "CH POS Settlement",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Closing Entry",
+   "link_count": 0,
+   "link_to": "POS Closing Entry",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS EDC Settlement",
+   "link_count": 0,
+   "link_to": "POS EDC Settlement",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Cash Drop",
+   "link_count": 0,
+   "link_to": "CH Cash Drop",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Business Date",
+   "link_count": 0,
+   "link_to": "CH Business Date",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH POS User Allocation",
+   "link_count": 0,
+   "link_to": "CH POS User Allocation",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Masters",
+   "link_count": 5,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Manager PIN",
+   "link_count": 0,
+   "link_to": "CH Manager PIN",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Device Master",
+   "link_count": 0,
+   "link_to": "CH Device Master",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Finance Partner",
+   "link_count": 0,
+   "link_to": "CH Finance Partner",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Free Sale Approval",
+   "link_count": 0,
+   "link_to": "CH Free Sale Approval",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH POS Control Settings",
+   "link_count": 0,
+   "link_to": "CH POS Control Settings",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "POS Reports",
+   "link_count": 13,
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Cash Movement Report",
+   "link_count": 0,
+   "link_to": "Cash Movement Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Cash Variance Report",
+   "link_count": 0,
+   "link_to": "Cash Variance Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Closed Session Audit",
+   "link_count": 0,
+   "link_to": "Closed Session Audit",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Company Wise Daily Settlement",
+   "link_count": 0,
+   "link_to": "Company Wise Daily Settlement",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Device Wise Open Sessions",
+   "link_count": 0,
+   "link_to": "Device Wise Open Sessions",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Device Wise Settlement Summary",
+   "link_count": 0,
+   "link_to": "Device Wise Settlement Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Drop Analysis Report",
+   "link_count": 0,
+   "link_to": "Drop Analysis Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Session vs Payment Reconciliation",
+   "link_count": 0,
+   "link_to": "Session vs Payment Reconciliation",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Session vs Sales Invoice",
+   "link_count": 0,
+   "link_to": "Session vs Sales Invoice",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Staff Conversion Report",
+   "link_count": 0,
+   "link_to": "Staff Conversion Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Store Wise Business Date Closure",
+   "link_count": 0,
+   "link_to": "Store Wise Business Date Closure",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "User Wise Session Activity",
+   "link_count": 0,
+   "link_to": "User Wise Session Activity",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Walkin Conversion Report",
+   "link_count": 0,
+   "link_to": "Walkin Conversion Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
   }
  ],
- "modified": "2026-03-31 06:38:31.639236",
+ "modified": "2026-04-11 12:42:23.001493",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "POS",
