@@ -201,19 +201,25 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
                 ).format(business_date, store)
             )
 
+    # ── Mandatory validations ────────────────────────────────
+        if not opening_cash:
+            frappe.throw(_("Opening Cash is mandatory. Count the cash in the drawer before starting."))
+        if not manager_pin:
+            frappe.throw(_("Manager PIN is mandatory to open a POS session."))
+
     # Manager PIN verification for opening approval
         manager_user = None
-        if manager_pin:
-            pin_result = verify_manager_pin(manager_pin, store=store, permission="can_approve_opening")
-            if not pin_result.get("valid"):
-                frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
-            manager_user = pin_result["user"]
+        pin_result = verify_manager_pin(manager_pin, store=store, permission="can_approve_opening")
+        if not pin_result.get("valid"):
+            frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+        manager_user = pin_result["user"]
 
         # Validate opening cash against previous closing / expected float
         expected_float = _get_expected_float(pos_profile, store)
 
         # Close orphaned POS Opening Entries (Open but no active CH POS Session)
         # This prevents ERPNext's check_open_pos_exists from blocking new entries.
+        # Close stale entries for this profile AND for this user (cross-profile).
         stale_entries = frappe.db.get_all(
             "POS Opening Entry",
             filters={
@@ -224,7 +230,20 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
             },
             pluck="name",
         )
-        for se in stale_entries:
+        # Also close any Open entries for the same user on OTHER profiles
+        # (e.g. cashier logged into Velachery, now logging into Anna Nagar)
+        user_stale = frappe.db.get_all(
+            "POS Opening Entry",
+            filters={
+                "user": frappe.session.user,
+                "status": "Open",
+                "docstatus": 1,
+                "pos_closing_entry": ("in", ["", None]),
+            },
+            pluck="name",
+        )
+        all_stale = set(stale_entries + user_stale)
+        for se in all_stale:
             frappe.db.set_value("POS Opening Entry", se, "status", "Closed", update_modified=False)
 
         # Create ERPNext POS Opening Entry (for GL linkage)

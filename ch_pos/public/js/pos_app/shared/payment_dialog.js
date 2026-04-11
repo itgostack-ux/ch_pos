@@ -1129,7 +1129,14 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			this._sale_types = types || [];
 			if (this._sale_types.length) {
 				this._render_sale_type_pills();
+			} else {
+				// Show "not configured" hint so users know why pills are missing
+				const pills = this._overlay.find("#ch-pay-sale-type-pills");
+				pills.html(`<span class="text-muted small">${__("No sale types configured for {0}. Check CH Sale Type master.", [PosState.company || __("this company")])}</span>`);
 			}
+		}).catch(() => {
+			const pills = this._overlay.find("#ch-pay-sale-type-pills");
+			pills.html(`<span class="text-danger small">${__("Failed to load sale types. Please reload.")}</span>`);
 		});
 	}
 

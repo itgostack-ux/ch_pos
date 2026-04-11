@@ -106,11 +106,14 @@ def get_sale_types(company=None):
 
         # Filter by allowed companies if specified
         if company:
-            allowed = frappe.get_all(
-                "POS Allowed Company",
-                filters={"parent": st["sale_type_name"], "parenttype": "CH Sale Type"},
-                pluck="company",
-            )
+            try:
+                allowed = frappe.get_all(
+                    "POS Allowed Company",
+                    filters={"parent": st["sale_type_name"], "parenttype": "CH Sale Type"},
+                    pluck="company",
+                )
+            except Exception:
+                allowed = []
             if allowed and company not in allowed:
                 st["_skip"] = True
 

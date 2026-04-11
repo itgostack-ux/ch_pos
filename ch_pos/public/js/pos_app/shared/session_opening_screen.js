@@ -359,16 +359,16 @@ export class SessionOpeningScreen {
 				fieldname: "opening_cash",
 				fieldtype: "Currency",
 				label: __("Opening Cash (₹)"),
-				default: 0,
+				reqd: 1,
 				description: __("Count the cash in the drawer and enter the total"),
 			},
 			{ fieldtype: "Section Break", label: __("Manager Approval") },
 			{
 				fieldname: "manager_pin",
-				fieldtype: "Data",
+				fieldtype: "Password",
 				label: __("Manager PIN"),
-				options: "",
-				description: __("4-6 digit PIN for opening approval"),
+				reqd: 1,
+				description: __("4-6 digit PIN for opening approval (mandatory)"),
 			},
 		);
 
