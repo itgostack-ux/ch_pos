@@ -5247,6 +5247,7 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
 	kyc_id_type / kyc_id_number: optional KYC data saved on the order.
 	"""
 	doc = frappe.get_doc("Buyback Order", order_name)
+	doc.check_permission("write")
 
 	if method == "OTP":
 		if not otp_code:
@@ -5426,6 +5427,7 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
 def pos_submit_assessment(assessment_name) -> dict:
 	"""Submit a Draft Buyback Assessment from POS."""
 	doc = frappe.get_doc("Buyback Assessment", assessment_name)
+	doc.check_permission("write")
 
 	# If already Frappe-submitted (docstatus=1) but status stuck at Draft,
 	# just update the status field directly.
