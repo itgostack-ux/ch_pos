@@ -35,7 +35,7 @@ def pos_item_search(
     page_size=20,
     company=None,
     usage_context="sale",
-):
+) -> None:
     """Unified POS item search across item_code, item_name, barcode, model, brand."""
     if isinstance(filters, str):
         filters = frappe.parse_json(filters)
@@ -401,7 +401,7 @@ def _get_nearby_warehouses(pos_profile):
 
 
 @frappe.whitelist()
-def get_nearby_stock(item_code, pos_profile):
+def get_nearby_stock(item_code, pos_profile) -> dict:
     """Full nearby-store stock check for a single item (for item detail popup)."""
     stores = _get_nearby_warehouses(pos_profile)
     result = []
@@ -420,7 +420,7 @@ def get_nearby_stock(item_code, pos_profile):
 
 
 @frappe.whitelist()
-def get_available_serials(item_code, warehouse):
+def get_available_serials(item_code, warehouse) -> dict:
     """Return list of available serial numbers for an item in a warehouse, FIFO ordered."""
     # Primary: use SNBB inward dates for true FIFO order
     rows = frappe.db.sql("""
@@ -448,7 +448,7 @@ def get_available_serials(item_code, warehouse):
 
 
 @frappe.whitelist()
-def load_kiosk_token(token, pos_profile=None):
+def load_kiosk_token(token, pos_profile=None) -> dict:
     """Load a POS Kiosk Token and return its items for cart population.
     
     Also increments the kiosk walk-in counter on the active session log.
@@ -482,7 +482,7 @@ def load_kiosk_token(token, pos_profile=None):
 
 
 @frappe.whitelist()
-def get_item_detail_for_pos(item_code, warehouse=None, price_list=None):
+def get_item_detail_for_pos(item_code, warehouse=None, price_list=None) -> dict:
     """Detailed item info for POS item detail panel."""
     item = frappe.get_cached_doc("Item", item_code)
 

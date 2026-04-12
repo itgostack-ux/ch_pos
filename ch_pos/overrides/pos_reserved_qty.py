@@ -76,7 +76,7 @@ def _get_pos_reserved_qty(item_code, warehouse):
 
 
 @frappe.whitelist()
-def get_stock_availability(item_code, warehouse):
+def get_stock_availability(item_code, warehouse) -> dict:
     """
     Overrides erpnext.accounts.doctype.pos_invoice.pos_invoice.get_stock_availability
     using the corrected _get_pos_reserved_qty_from_table above.

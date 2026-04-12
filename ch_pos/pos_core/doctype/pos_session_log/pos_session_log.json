@@ -214,5 +214,18 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "states": []
+ "states": [
+  {
+   "color": "Green",
+   "title": "Completed"
+  },
+  {
+   "color": "Blue",
+   "title": "Active"
+  },
+  {
+   "color": "Red",
+   "title": "Error"
+  }
+ ]
 }

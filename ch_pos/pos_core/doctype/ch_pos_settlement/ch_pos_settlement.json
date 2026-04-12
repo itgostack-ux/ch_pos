@@ -222,7 +222,7 @@
    "fieldtype": "Currency",
    "label": "Expected Closing Cash",
    "read_only": 1,
-   "description": "Opening + cash sales − returns − cash drops − petty − buyback payouts"
+   "description": "Opening + cash sales \u2212 returns \u2212 cash drops \u2212 petty \u2212 buyback payouts"
   },
   {
    "fieldname": "column_break_reconciliation",
@@ -240,7 +240,7 @@
    "fieldtype": "Currency",
    "label": "Variance",
    "read_only": 1,
-   "description": "actual − expected",
+   "description": "actual \u2212 expected",
    "allow_on_submit": 1
   },
   {
@@ -365,5 +365,25 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "pos_session,store,status",
+ "title_field": "pos_session",
+ "states": [
+  {
+   "color": "Green",
+   "title": "Settled"
+  },
+  {
+   "color": "Yellow",
+   "title": "Pending"
+  },
+  {
+   "color": "Red",
+   "title": "Discrepancy"
+  },
+  {
+   "color": "Gray",
+   "title": "Draft"
+  }
+ ]
 }

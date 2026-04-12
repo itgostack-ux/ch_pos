@@ -3,7 +3,7 @@ from buyback.utils import validate_indian_phone
 
 
 @frappe.whitelist()
-def create_repair_intake(data, pos_profile=None):
+def create_repair_intake(data, pos_profile=None) -> dict:
     """Create POS Repair Intake and auto-generate Service Request on submit."""
     if isinstance(data, str):
         data = frappe.parse_json(data)

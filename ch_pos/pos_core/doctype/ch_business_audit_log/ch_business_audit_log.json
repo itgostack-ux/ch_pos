@@ -30,7 +30,8 @@
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "bold": 1
+   "bold": 1,
+   "search_index": 1
   },
   {
    "fieldname": "reference_section",
@@ -60,7 +61,8 @@
    "fieldtype": "Link",
    "label": "Store",
    "options": "Warehouse",
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "company",
@@ -75,7 +77,8 @@
    "options": "User",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "timestamp",

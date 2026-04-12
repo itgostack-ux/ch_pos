@@ -31,7 +31,7 @@ def _enforce_token_linkage(pos_profile, kiosk_token):
             title=frappe._("Token Required"))
 
 @frappe.whitelist()
-def get_pos_profile_data(pos_profile):
+def get_pos_profile_data(pos_profile) -> dict:
     """Return POS profile configuration needed by the CH POS frontend."""
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
 
@@ -84,7 +84,7 @@ def get_pos_profile_data(pos_profile):
 
 
 @frappe.whitelist()
-def get_sale_types(company=None):
+def get_sale_types(company=None) -> list:
     """Return enabled sale types with their sub-types, optionally filtered by company."""
     filters = {"enabled": 1}
     types = frappe.get_all(
@@ -121,7 +121,7 @@ def get_sale_types(company=None):
 
 
 @frappe.whitelist()
-def get_discount_reasons(company=None):
+def get_discount_reasons(company=None) -> list:
     """Return enabled discount reasons, optionally filtered by company."""
     filters = {"enabled": 1}
     if company:
@@ -137,7 +137,7 @@ def get_discount_reasons(company=None):
 
 
 @frappe.whitelist()
-def get_finance_partners():
+def get_finance_partners() -> dict:
     """Return enabled finance partners with their tenure options for POS dropdown."""
     partners = frappe.get_all(
         "CH Finance Partner",
@@ -168,7 +168,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
                        advance_amount=0, kiosk_token=None,
                        guided_session=None,
-                       exception_request=None, warranty_claim=None):
+                       exception_request=None, warranty_claim=None) -> dict:
     """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
@@ -945,7 +945,7 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
 
 
 @frappe.whitelist()
-def get_warranty_plans(item_code, item_group=None, brand=None):
+def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
     """Return active warranty plans (Own / Extended) applicable to an item."""
     today = nowdate()
     filters = {
@@ -991,7 +991,7 @@ def get_warranty_plans(item_code, item_group=None, brand=None):
 
 
 @frappe.whitelist()
-def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None):
+def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None) -> dict:
     """Find a Buyback Assessment/Order eligible for exchange at POS.
 
     Returns exchange details or None if nothing found.
@@ -1054,7 +1054,7 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None):
 
 
 @frappe.whitelist()
-def get_vas_plans():
+def get_vas_plans() -> dict:
     """Return active Value Added Service plans for POS sale."""
     today = nowdate()
     plans = frappe.get_all(
@@ -1083,7 +1083,7 @@ def get_vas_plans():
 
 
 @frappe.whitelist()
-def validate_coupon(coupon_code, customer=None, cart_total=0):
+def validate_coupon(coupon_code, customer=None, cart_total=0) -> dict:
     """Validate a coupon code and return discount details."""
     cart_total = flt(cart_total)
 
@@ -1144,7 +1144,7 @@ def validate_coupon(coupon_code, customer=None, cart_total=0):
 
 
 @frappe.whitelist()
-def apply_coupon_or_voucher(code, customer=None, company=None):
+def apply_coupon_or_voucher(code, customer=None, company=None) -> dict:
     """Validate a coupon code or CH Voucher code and return discount details."""
     if not code:
         frappe.throw(frappe._("No code provided"))
@@ -1225,7 +1225,7 @@ def apply_coupon_or_voucher(code, customer=None, company=None):
 
 
 @frappe.whitelist()
-def get_customer_credit_info(customer, company=None):
+def get_customer_credit_info(customer, company=None) -> dict:
     """Return credit limit and outstanding for a customer."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     if not customer or customer == "Walk-in Customer":
@@ -1273,7 +1273,7 @@ def get_customer_credit_info(customer, company=None):
 
 
 @frappe.whitelist()
-def get_customer_advances(customer):
+def get_customer_advances(customer) -> list:
     """Return unallocated advance payments for a customer that can be adjusted against a new sale."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     if not customer or customer == "Walk-in Customer":
@@ -1301,7 +1301,7 @@ def get_customer_advances(customer):
 
 
 @frappe.whitelist()
-def scan_barcode(barcode, pos_profile=None):
+def scan_barcode(barcode, pos_profile=None) -> dict:
     """Look up an item by exact barcode or serial number for POS scanner."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     barcode = (barcode or "").strip()
@@ -1353,7 +1353,7 @@ def scan_barcode(barcode, pos_profile=None):
 
 
 @frappe.whitelist()
-def search_invoices_for_return(search_term, pos_profile=None):
+def search_invoices_for_return(search_term, pos_profile=None) -> list:
     """Search Sales Invoices for return/exchange processing."""
     search_term = (search_term or "").strip()
     if not search_term:
@@ -1392,7 +1392,7 @@ def search_invoices_for_return(search_term, pos_profile=None):
 
 
 @frappe.whitelist()
-def get_invoice_items_for_return(invoice_name):
+def get_invoice_items_for_return(invoice_name) -> dict:
     """Get items from a Sales Invoice that can still be returned."""
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1 or inv.is_return:
@@ -1433,7 +1433,7 @@ def get_invoice_items_for_return(invoice_name):
 
 
 @frappe.whitelist()
-def create_pos_return(original_invoice, return_items, sales_executive=None):
+def create_pos_return(original_invoice, return_items, sales_executive=None) -> dict:
     """Create a Sales Invoice return (credit note) for specific items."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     if isinstance(return_items, str):
@@ -1621,7 +1621,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None):
         "incentive_clawback": incentive_clawback,
     }
 @frappe.whitelist()
-def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_override=0):
+def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_override=0) -> dict:
     """Validate a serial number can be sold from this warehouse, enforcing FIFO.
 
     If a FIFO violation is detected and allow_fifo_override is falsy, returns
@@ -1693,7 +1693,7 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
     return {"valid": True, "serial_no": serial_no, "item_code": item_code}
 
 @frappe.whitelist()
-def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_date, pos_profile=None):
+def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_date, pos_profile=None) -> dict:
     """Record a cashier-confirmed FIFO override exception.
 
     Called from the JS confirm dialog when the user chooses to proceed despite
@@ -1733,7 +1733,7 @@ def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_dat
 
 
 @frappe.whitelist()
-def check_serial_returnable(serial_no, original_invoice=None):
+def check_serial_returnable(serial_no, original_invoice=None) -> dict:
     """Check if a serial number can be returned (not scrapped, transferred, or already returned)."""
     if not frappe.db.exists("Serial No", serial_no):
         return {"returnable": False, "reason": frappe._("Serial No {0} does not exist").format(serial_no)}
@@ -1796,7 +1796,7 @@ def check_serial_returnable(serial_no, original_invoice=None):
 
 # ── Repair / Job Assignment from POS ────────────────────────
 @frappe.whitelist()
-def create_repair_job_from_pos(service_request):
+def create_repair_job_from_pos(service_request) -> dict:
     """Accept a Service Request and create Job Assignment in one step from POS."""
     frappe.has_permission("Service Request", "write", throw=True)
     try:
@@ -1831,7 +1831,7 @@ def create_repair_job_from_pos(service_request):
 
 
 @frappe.whitelist()
-def get_store_repairs(pos_profile):
+def get_store_repairs(pos_profile) -> dict:
     """Get open Service Requests and Job Assignments for the store."""
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     warehouse = profile.warehouse
@@ -1882,7 +1882,7 @@ def get_store_repairs(pos_profile):
 
 @frappe.whitelist()
 def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile,
-                           customer="Walk-in Customer", service_order=None, upi_txn_id=None):
+                           customer="Walk-in Customer", service_order=None, upi_txn_id=None) -> dict:
     """Create a Sales Invoice to collect payment for a completed repair job.
 
     Marks Service Request as billed after invoice submission.
@@ -1953,7 +1953,7 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
 
 
 @frappe.whitelist()
-def get_repair_closure_data(service_request):
+def get_repair_closure_data(service_request) -> dict:
     """Return all data needed by the Repair Closure Dialog:
     technician, spare parts, service items, solutions, estimated cost, customer, SO/JA names.
     """
@@ -2101,7 +2101,7 @@ def get_repair_closure_data(service_request):
 @frappe.whitelist()
 def close_repair_order(service_request, pos_profile, payments, qc_result,
                        qc_remarks="", delivery_ack=0, delivery_note="",
-                       technician="", spare_parts=None, service_charge=0):
+                       technician="", spare_parts=None, service_charge=0) -> None:
     """Complete the repair closure flow in one atomic call.
 
     Steps:
@@ -2319,7 +2319,7 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
 
 # ── Buyback Valuation ────────────────────────────────────────
 @frappe.whitelist()
-def check_imei_blacklist(imei):
+def check_imei_blacklist(imei) -> dict:
     """Pre-check if an IMEI is blacklisted before starting a buyback assessment."""
     if not imei:
         return {"blacklisted": False}
@@ -2334,7 +2334,7 @@ def check_imei_blacklist(imei):
 
 
 @frappe.whitelist()
-def calculate_buyback_valuation(item_code, condition_checks):
+def calculate_buyback_valuation(item_code, condition_checks) -> dict:
     """Calculate buyback valuation using ch_erp_buyback's centralized pricing engine.
 
     condition_checks: dict with keys like screen, body, buttons, charging,
@@ -2438,7 +2438,7 @@ def _fallback_buyback_valuation(item_code, grade, condition_checks):
 def create_buyback_assessment_with_grading(
     mobile_no, item_code, imei_serial=None, customer=None,
     condition_checks=None, kyc_id_type=None, kyc_id_number=None, kyc_name=None
-):
+) -> dict:
     """Create a Buyback Assessment with condition grading and KYC from POS."""
     frappe.has_permission("Buyback Assessment", "create", throw=True)
     if isinstance(condition_checks, str):
@@ -2539,7 +2539,7 @@ def _build_grading_remarks(condition_checks, valuation, kyc_id_type, kyc_id_numb
 # ── Governance: Manager Approval at POS ──────────────────────────────
 
 @frappe.whitelist()
-def request_manager_approval(mobile_no, purpose, reference_doctype=None, reference_name=None):
+def request_manager_approval(mobile_no, purpose, reference_doctype=None, reference_name=None) -> dict:
     """Generate an OTP for manager approval at POS.
 
     Used when a discount exceeds limits, exchange override is needed, etc.
@@ -2559,7 +2559,7 @@ def request_manager_approval(mobile_no, purpose, reference_doctype=None, referen
 
 
 @frappe.whitelist()
-def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None, reference_name=None):
+def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None, reference_name=None) -> dict:
     """Verify a manager OTP for POS approval.
 
     Returns {"valid": True/False, "message": str}.
@@ -2577,7 +2577,7 @@ def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None
 
 
 @frappe.whitelist()
-def get_customer_loyalty(customer, company=None):
+def get_customer_loyalty(customer, company=None) -> dict:
     """Get loyalty program details and current points for a customer."""
     if not company:
         company = frappe.defaults.get_user_default("Company")
@@ -2604,7 +2604,7 @@ def get_customer_loyalty(customer, company=None):
 
 
 @frappe.whitelist()
-def imei_history(serial_no):
+def imei_history(serial_no) -> dict:
     """Full lifecycle of a serial number / IMEI: sales, returns, service, buyback."""
     serial_no = serial_no.strip()
 
@@ -2695,7 +2695,7 @@ def imei_history(serial_no):
 
 
 @frappe.whitelist()
-def customer_360(identifier, company=None):
+def customer_360(identifier, company=None) -> dict:
     """Complete customer profile: purchases, service requests, buybacks, loyalty."""
     identifier = (identifier or "").strip()
     if not identifier:
@@ -2892,7 +2892,7 @@ def customer_360(identifier, company=None):
 
 
 @frappe.whitelist()
-def store_dashboard(pos_profile):
+def store_dashboard(pos_profile) -> dict:
     """Return today's sales summary, top items, staff performance and inventory alerts."""
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     today = nowdate()
@@ -3111,7 +3111,7 @@ def _format_delay_minutes(minutes):
 
 @frappe.whitelist()
 def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None,
-                            required_by_date=None, required_by_time=None):
+                            required_by_date=None, required_by_time=None) -> dict:
     """Create a Store Material Request from POS for stock replenishment.
 
     Source warehouse is auto-resolved from the store's zone if not provided.
@@ -3135,35 +3135,35 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
 
 
 @frappe.whitelist()
-def get_draft_material_requests(pos_profile):
+def get_draft_material_requests(pos_profile) -> dict:
     """Get Draft MRs for this POS store (store exec can append items to these)."""
     from ch_erp15.ch_erp15.store_request_api import get_draft_requests
     return get_draft_requests(pos_profile=pos_profile)
 
 
 @frappe.whitelist()
-def add_items_to_material_request(request_name, items):
+def add_items_to_material_request(request_name, items) -> dict:
     """Add items to an existing Draft Material Request from POS."""
     from ch_erp15.ch_erp15.store_request_api import add_items_to_draft
     return add_items_to_draft(request_name=request_name, items=items)
 
 
 @frappe.whitelist()
-def check_material_request_capacity(pos_profile, items):
+def check_material_request_capacity(pos_profile, items) -> dict:
     """Check Warehouse Capacity limits for requested items."""
     from ch_erp15.ch_erp15.store_request_api import check_request_capacity
     return check_request_capacity(pos_profile=pos_profile, items=items)
 
 
 @frappe.whitelist()
-def get_store_zone_info(pos_profile):
+def get_store_zone_info(pos_profile) -> dict:
     """Get zone and source warehouse info for the POS store."""
     from ch_erp15.ch_erp15.store_request_api import get_zone_source_warehouse
     return get_zone_source_warehouse(pos_profile=pos_profile)
 
 
 @frappe.whitelist()
-def get_pending_material_requests(pos_profile):
+def get_pending_material_requests(pos_profile) -> list:
     """Get recent Material Requests for this POS store with unified tracking."""
     from ch_erp15.ch_erp15.store_request_api import get_store_material_requests
 
@@ -3227,7 +3227,7 @@ def get_pending_material_requests(pos_profile):
 
 
 @frappe.whitelist()
-def get_stock_transfers(pos_profile, direction="incoming"):
+def get_stock_transfers(pos_profile, direction="incoming") -> dict:
     """Get recent stock transfers (Stock Entries of type Material Transfer)."""
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     warehouse = profile.warehouse
@@ -3261,7 +3261,7 @@ def get_stock_transfers(pos_profile, direction="incoming"):
 @frappe.whitelist()
 def create_stock_transfer(from_warehouse, to_warehouse, items,
                           courier_name=None, courier_tracking=None,
-                          handover_notes=None, expected_delivery_date=None):
+                          handover_notes=None, expected_delivery_date=None) -> dict:
     """Create a Stock Entry (Material Transfer) from POS with courier hand-over."""
     frappe.has_permission("Stock Entry", "create", throw=True)
     import json
@@ -3312,7 +3312,7 @@ CROSS_STORE_TRANSFER_ROLES = {"Store Manager", "Stock Manager", "System Manager"
 
 
 @frappe.whitelist()
-def check_nearby_stock(pos_profile, item_code):
+def check_nearby_stock(pos_profile, item_code) -> list:
     """Check stock availability at other store warehouses for cross-store transfer."""
     if not pos_profile or not item_code:
         frappe.throw(frappe._("POS Profile and Item Code are required"))
@@ -3343,7 +3343,7 @@ def check_nearby_stock(pos_profile, item_code):
 
 
 @frappe.whitelist()
-def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=None):
+def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=None) -> dict:
     """Create a Material Request for inter-store stock transfer.
 
     Restricted to Store Manager and above roles only.
@@ -3435,7 +3435,7 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
 
 
 @frappe.whitelist()
-def get_stock_transfer_items(stock_entry):
+def get_stock_transfer_items(stock_entry) -> dict:
     """Return line items of a Stock Entry for the receive dialog."""
     se = frappe.get_doc("Stock Entry", stock_entry)
     if se.stock_entry_type != "Material Transfer":
@@ -3464,7 +3464,7 @@ def get_stock_transfer_items(stock_entry):
 
 
 @frappe.whitelist()
-def receive_stock_transfer(stock_entry, received_items):
+def receive_stock_transfer(stock_entry, received_items) -> dict:
     """Accept a stock transfer with (optionally) reduced quantities.
 
     If all quantities match the original, the existing Stock Entry is submitted.
@@ -3529,21 +3529,21 @@ def receive_stock_transfer(stock_entry, received_items):
 
 
 @frappe.whitelist()
-def pos_scan_receive(stock_entry, barcode):
+def pos_scan_receive(stock_entry, barcode) -> dict:
     """Scan a barcode/IMEI during POS receive. Delegates to ch_erp15 transit workflow."""
     from ch_erp15.ch_erp15.custom.stock_entry import pos_scan_receive as _scan
     return _scan(stock_entry=stock_entry, barcode=barcode)
 
 
 @frappe.whitelist()
-def pos_confirm_receive(stock_entry):
+def pos_confirm_receive(stock_entry) -> dict:
     """Confirm receive after scanning. Delegates to ch_erp15 transit workflow."""
     from ch_erp15.ch_erp15.custom.stock_entry import pos_confirm_receive as _confirm
     return _confirm(stock_entry=stock_entry)
 
 
 @frappe.whitelist()
-def backfill_draft_documents():
+def backfill_draft_documents() -> dict:
     """One-time patch: submit all existing Draft POS Kiosk Tokens and Service Requests
     that were created from POS but left unsubmitted."""
     submitted = {"POS Kiosk Token": 0, "Service Request": 0}
@@ -3579,7 +3579,7 @@ def backfill_draft_documents():
 
 # ── Model Comparison ──────────────────────────────────────
 @frappe.whitelist()
-def get_comparison_filters():
+def get_comparison_filters() -> dict:
     """Return available filter options for model comparison."""
     brands = frappe.db.get_all(
         "Brand", fields=["name"], order_by="name", pluck="name"
@@ -3610,7 +3610,7 @@ def get_comparison_filters():
 
 
 @frappe.whitelist()
-def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, pos_profile=None):
+def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, pos_profile=None) -> list:
     """Return items matching filters with specs, prices, stock and active offers."""
     today = frappe.utils.today()
 
@@ -3779,7 +3779,7 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
 
 # ── Customer POS Info ──────────────────────────────────────────
 @frappe.whitelist()
-def get_customer_pos_info(customer, company=None):
+def get_customer_pos_info(customer, company=None) -> dict:
     """Get customer info for POS: price list, credit rules, loyalty, group type.
 
     Used when a named customer is selected to auto-apply correct pricing.
@@ -3873,7 +3873,7 @@ def get_customer_pos_info(customer, company=None):
 
 # ── Swap Eligibility ──────────────────────────────────────────
 @frappe.whitelist()
-def validate_swap_eligibility(invoice_name, swap_window_days=7):
+def validate_swap_eligibility(invoice_name, swap_window_days=7) -> dict:
     """Check if a Sales Invoice is eligible for in-store swap.
 
     Rules:
@@ -3938,7 +3938,7 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7):
 
 # ── VAS Eligibility ──────────────────────────────────────────
 @frappe.whitelist()
-def get_vas_plans_with_rules(cart_items=None):
+def get_vas_plans_with_rules(cart_items=None) -> dict:
     """Return active VAS plans with device-dependency enforcement.
 
     If a plan has requires_device=1 (or plan_type is 'Protection Plan'),
@@ -4025,7 +4025,7 @@ def create_quick_job_card(customer, contact_number, device_item,
                           issue_category=None, warranty_status=None,
                           priority="Medium", estimated_hours=None,
                           device_condition=None, accessories_received=None,
-                          data_backup_disclaimer=0):
+                          data_backup_disclaimer=0) -> dict:
     """Create a Service Request, accept it, and create Job Assignment in one call.
 
     This is the 'quick job card' flow for walk-in repairs from POS.
@@ -4085,7 +4085,7 @@ def create_quick_job_card(customer, contact_number, device_item,
 
 
 @frappe.whitelist()
-def get_central_warehouses(company=None):
+def get_central_warehouses(company=None) -> dict:
     """Return warehouses suitable as source for stock requests (non-POS, non-store)."""
     if not company:
         company = frappe.defaults.get_global_default("company")
@@ -4251,7 +4251,7 @@ def _get_executive_access(user, warehouse):
 
 
 @frappe.whitelist()
-def get_store_executives(warehouse=None, company=None):
+def get_store_executives(warehouse=None, company=None) -> dict:
     """Return active executives for a store, optionally filtered by company."""
     filters = {"is_active": 1}
 
@@ -4273,7 +4273,7 @@ def get_store_executives(warehouse=None, company=None):
 
 
 @frappe.whitelist()
-def get_executive_incentive_summary(pos_executive, from_date=None, to_date=None):
+def get_executive_incentive_summary(pos_executive, from_date=None, to_date=None) -> dict:
     """Return incentive summary for an executive — used in the POS dashboard."""
     if not from_date:
         from_date = frappe.utils.get_first_day(nowdate())
@@ -4632,7 +4632,7 @@ def calculate_attach_rate_bonus(company=None, payout_month=None):
 @frappe.whitelist()
 def update_customer_details(customer, mobile_no=None, email_id=None,
                            customer_name=None, alternate_phone=None,
-                           whatsapp_number=None):
+                           whatsapp_number=None) -> dict:
     """Update customer details from POS Customer 360 view.
 
     Only updates fields that are explicitly passed (non-None).
@@ -4704,7 +4704,7 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
                           state="", pincode="", area="", gstin="",
                           same_as_billing=1,
                           shipping_address_line1="", shipping_city="",
-                          shipping_state="", shipping_pincode=""):
+                          shipping_state="", shipping_pincode="") -> dict:
     """Create a new Customer quickly from the POS interface."""
     frappe.has_permission("Customer", "create", throw=True)
     cust = frappe.new_doc("Customer")
@@ -4790,7 +4790,7 @@ def _get_active_session_log(pos_profile):
 
 
 @frappe.whitelist()
-def log_walkin(pos_profile, source="POS Counter"):
+def log_walkin(pos_profile, source="POS Counter") -> dict:
 	"""Increment walk-in counter on the active session log.
 
 	Args:
@@ -4818,7 +4818,7 @@ def log_walkin(pos_profile, source="POS Counter"):
 
 
 @frappe.whitelist()
-def increment_repair_intake_count(pos_profile):
+def increment_repair_intake_count(pos_profile) -> dict:
 	"""Increment repair intake counter on active session log."""
 	session_log = _get_active_session_log(pos_profile)
 	if session_log:
@@ -4830,7 +4830,7 @@ def increment_repair_intake_count(pos_profile):
 
 
 @frappe.whitelist()
-def increment_buyback_count(pos_profile):
+def increment_buyback_count(pos_profile) -> dict:
 	"""Increment buyback assessment counter on active session log."""
 	session_log = _get_active_session_log(pos_profile)
 	if session_log:
@@ -4842,7 +4842,7 @@ def increment_buyback_count(pos_profile):
 
 
 @frappe.whitelist()
-def get_today_footfall(pos_profile):
+def get_today_footfall(pos_profile) -> dict:
 	"""Return today's footfall summary derived from POS Kiosk Token records."""
 	today = nowdate()
 
@@ -4907,7 +4907,7 @@ def get_today_footfall(pos_profile):
 
 
 @frappe.whitelist()
-def flag_reprint_needed(pos_invoice, reason="Print failed"):
+def flag_reprint_needed(pos_invoice, reason="Print failed") -> dict:
 	"""Mark an invoice as needing reprint.
 
 	Frontend calls this when the receipt printer is offline or errors.
@@ -4934,7 +4934,7 @@ def flag_reprint_needed(pos_invoice, reason="Print failed"):
 
 
 @frappe.whitelist()
-def get_pending_reprints(pos_profile, limit=20):
+def get_pending_reprints(pos_profile, limit=20) -> list:
 	"""Return pending reprint queue items for a POS profile.
 
 	Used by the store manager workspace shortcut.
@@ -4951,7 +4951,7 @@ def get_pending_reprints(pos_profile, limit=20):
 
 
 @frappe.whitelist()
-def mark_reprint_done(reprint_name):
+def mark_reprint_done(reprint_name) -> dict:
 	"""Mark a reprint queue item as completed."""
 	frappe.db.set_value("POS Reprint Queue", reprint_name, "status", "Done",
 		update_modified=False)
@@ -4963,7 +4963,7 @@ def mark_reprint_done(reprint_name):
 # ═══════════════════════════════════════════════════════════════════════════
 
 @frappe.whitelist()
-def get_pos_buyback_detail(assessment_name):
+def get_pos_buyback_detail(assessment_name) -> dict:
 	"""Return full buyback detail for POS: assessment + linked order + diagnostics.
 
 	Called on every stage transition so the frontend always has fresh data.
@@ -5121,7 +5121,7 @@ def get_pos_buyback_detail(assessment_name):
 
 
 @frappe.whitelist()
-def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, inspector_notes=None):
+def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, inspector_notes=None) -> dict:
 	"""Create a Buyback Order from a Buyback Assessment in POS.
 
 	Idempotent — returns existing order if one already exists for this assessment.
@@ -5184,7 +5184,7 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
 
 
 @frappe.whitelist()
-def pos_update_buyback_price(order_name, final_price, inspector_notes=None):
+def pos_update_buyback_price(order_name, final_price, inspector_notes=None) -> dict:
 	"""Update the final buyback price on an existing Buyback Order."""
 	frappe.has_permission("Buyback Order", "write", throw=True)
 
@@ -5207,7 +5207,7 @@ def pos_update_buyback_price(order_name, final_price, inspector_notes=None):
 
 
 @frappe.whitelist()
-def pos_send_customer_otp(order_name):
+def pos_send_customer_otp(order_name) -> dict:
 	"""Generate and send an OTP to the customer's mobile for buyback price approval."""
 	doc = frappe.get_doc("Buyback Order", order_name)
 	mobile_no = doc.mobile_no
@@ -5239,7 +5239,7 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
                                  settlement_type=None, payout_mode=None,
                                  upi_id=None, bank_account_holder=None,
                                  bank_account_number=None, bank_ifsc=None,
-                                 bank_name=None):
+                                 bank_name=None) -> dict:
 	"""Record customer approval of the final buyback price.
 
 	method: "In-Store Signature" | "OTP" | "Token Link"
@@ -5310,7 +5310,7 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
 
 
 @frappe.whitelist()
-def pos_send_approval_link(order_name):
+def pos_send_approval_link(order_name) -> dict:
 	"""Send a customer-facing approval link via SMS/WhatsApp.
 
 	Transitions the order to "Awaiting Customer Approval" and returns the
@@ -5351,7 +5351,7 @@ def pos_send_approval_link(order_name):
 
 
 @frappe.whitelist()
-def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
+def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
 	"""Mark a buyback order as settled via direct cashback to customer.
 
 	Records a payment entry on the order, marks it Paid, then auto-closes.
@@ -5423,7 +5423,7 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash"):
 
 
 @frappe.whitelist()
-def pos_submit_assessment(assessment_name):
+def pos_submit_assessment(assessment_name) -> dict:
 	"""Submit a Draft Buyback Assessment from POS."""
 	doc = frappe.get_doc("Buyback Assessment", assessment_name)
 
@@ -5443,7 +5443,7 @@ def pos_submit_assessment(assessment_name):
 
 
 @frappe.whitelist()
-def pos_create_inspection(assessment_name):
+def pos_create_inspection(assessment_name) -> dict:
 	"""Create or retrieve a Buyback Inspection from an assessment.
 
 	Idempotent — if inspection already exists, returns its current data.
@@ -5534,7 +5534,7 @@ def pos_create_inspection(assessment_name):
 
 @frappe.whitelist()
 def pos_complete_inspection(inspection_name, condition_grade, final_price,
-							price_override_reason="", remarks=""):
+							price_override_reason="", remarks="") -> dict:
 	"""Complete the inline POS inspection and create a Buyback Order.
 
 	Idempotent — if an order already exists for the assessment it is returned
@@ -5635,7 +5635,7 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 # ═══════════════════════════════════════════════════════════════════════════
 
 @frappe.whitelist()
-def get_todays_invoices(pos_profile, date=None, phone=None):
+def get_todays_invoices(pos_profile, date=None, phone=None) -> list:
 	"""Return POS invoices for a profile filtered by date or customer phone.
 
 	Used by the Reprint dialog in the POS frontend.
@@ -5808,7 +5808,7 @@ def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_ser
 
 # ── Bundle / Free Items ──────────────────────────────────────────
 @frappe.whitelist()
-def get_bundle_items(item_code, warehouse=None, channel="POS"):
+def get_bundle_items(item_code, warehouse=None, channel="POS") -> list:
 	"""Return free/bundled accessory items for a parent item.
 
 	Looks up Product Bundle for ``item_code``.  Returns child items

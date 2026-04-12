@@ -50,10 +50,10 @@ class CHPOSUserAllocation(Document):
             as_dict=True,
         )
         if not device:
-            frappe.throw(_("Device {0} not found.").format(self.default_device))
+            frappe.throw(_("Device {0} not found.").format(self.default_device), title=_("Ch Pos User Allocation Error"))
 
         if not device.is_active:
-            frappe.throw(_("Device {0} is inactive.").format(self.default_device))
+            frappe.throw(_("Device {0} is inactive.").format(self.default_device), title=_("Ch Pos User Allocation Error"))
 
         if device.company != self.company:
             frappe.throw(

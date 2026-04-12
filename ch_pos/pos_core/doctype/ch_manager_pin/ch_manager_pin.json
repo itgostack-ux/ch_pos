@@ -127,5 +127,7 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "user,store",
+ "title_field": "user"
 }

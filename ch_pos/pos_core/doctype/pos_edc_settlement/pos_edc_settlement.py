@@ -56,7 +56,7 @@ class POSEDCSettlement(Document):
 		self.status = "Draft" if unmatched else "Matched"
 
 	@frappe.whitelist()
-	def auto_match(self):
+	def auto_match(self) -> None:
 		"""Attempt to auto-match each Unmatched transaction to a Sales Invoice.
 
 		Match strategy (in order):
@@ -115,7 +115,7 @@ class POSEDCSettlement(Document):
 
 
 @frappe.whitelist()
-def upload_edc_transactions(settlement_name, transactions_json):
+def upload_edc_transactions(settlement_name, transactions_json) -> dict:
 	"""Bulk-upload EDC transactions (from CSV parse on frontend).
 
 	Args:
@@ -132,7 +132,7 @@ def upload_edc_transactions(settlement_name, transactions_json):
 
 	doc = frappe.get_doc("POS EDC Settlement", settlement_name)
 	if doc.docstatus != 0:
-		frappe.throw(_("Can only upload transactions to a Draft settlement"))
+		frappe.throw(_("Can only upload transactions to a Draft settlement"), title=_("Pos Edc Settlement Error"))
 
 	for txn in transactions_json:
 		doc.append("transactions", {

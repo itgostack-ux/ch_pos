@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from frappe.utils import flt
 
 
@@ -13,17 +14,17 @@ def execute(filters=None):
 
 def get_columns():
     return [
-        {"fieldname": "staff", "label": "Staff", "fieldtype": "Data", "width": 180},
-        {"fieldname": "pos_profile", "label": "Store", "fieldtype": "Link", "options": "POS Profile", "width": 150},
-        {"fieldname": "total_handled", "label": "Walk-ins Handled", "fieldtype": "Int", "width": 120},
-        {"fieldname": "engaged", "label": "Engaged", "fieldtype": "Int", "width": 90},
-        {"fieldname": "converted", "label": "Converted", "fieldtype": "Int", "width": 90},
-        {"fieldname": "dropped", "label": "Dropped", "fieldtype": "Int", "width": 80},
-        {"fieldname": "conversion_rate", "label": "Conversion %", "fieldtype": "Percent", "width": 110},
-        {"fieldname": "avg_handling_mins", "label": "Avg Handling (mins)", "fieldtype": "Float", "precision": 1, "width": 130},
-        {"fieldname": "revenue", "label": "Revenue Generated", "fieldtype": "Currency", "width": 130},
-        {"fieldname": "avg_ticket", "label": "Avg Ticket Size", "fieldtype": "Currency", "width": 120},
-        {"fieldname": "top_drop_reason", "label": "Top Drop Reason", "fieldtype": "Data", "width": 150},
+        {"fieldname": "staff", "label": _("Staff"), "fieldtype": "Data", "width": 180},
+        {"fieldname": "pos_profile", "label": _("Store"), "fieldtype": "Link", "options": "POS Profile", "width": 150},
+        {"fieldname": "total_handled", "label": _("Walk-ins Handled"), "fieldtype": "Int", "width": 120},
+        {"fieldname": "engaged", "label": _("Engaged"), "fieldtype": "Int", "width": 90},
+        {"fieldname": "converted", "label": _("Converted"), "fieldtype": "Int", "width": 90},
+        {"fieldname": "dropped", "label": _("Dropped"), "fieldtype": "Int", "width": 80},
+        {"fieldname": "conversion_rate", "label": _("Conversion %"), "fieldtype": "Percent", "width": 110},
+        {"fieldname": "avg_handling_mins", "label": _("Avg Handling (mins)"), "fieldtype": "Float", "precision": 1, "width": 130},
+        {"fieldname": "revenue", "label": _("Revenue Generated"), "fieldtype": "Currency", "width": 130},
+        {"fieldname": "avg_ticket", "label": _("Avg Ticket Size"), "fieldtype": "Currency", "width": 120},
+        {"fieldname": "top_drop_reason", "label": _("Top Drop Reason"), "fieldtype": "Data", "width": 150},
     ]
 
 
@@ -126,8 +127,8 @@ def get_summary(data):
     total_revenue = sum(r["revenue"] for r in data)
     best_staff = max(data, key=lambda r: r["conversion_rate"]) if data else {}
     return [
-        {"value": len(data), "label": "Active Staff", "datatype": "Int"},
-        {"value": flt(total_conv / total_handled * 100, 1) if total_handled else 0, "label": "Team Conversion %", "datatype": "Percent"},
-        {"value": total_revenue, "label": "Total Revenue", "datatype": "Currency"},
-        {"value": f"{best_staff.get('staff', '')} ({best_staff.get('conversion_rate', 0)}%)", "label": "Top Performer", "datatype": "Data", "indicator": "green"},
+        {"value": len(data), "label": _("Active Staff"), "datatype": "Int"},
+        {"value": flt(total_conv / total_handled * 100, 1) if total_handled else 0, "label": _("Team Conversion %"), "datatype": "Percent"},
+        {"value": total_revenue, "label": _("Total Revenue"), "datatype": "Currency"},
+        {"value": f"{best_staff.get('staff', '')} ({best_staff.get('conversion_rate', 0)}%)", "label": _("Top Performer"), "datatype": "Data", "indicator": "green"},
     ]

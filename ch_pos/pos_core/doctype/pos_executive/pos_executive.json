@@ -32,7 +32,8 @@
    "label": "Executive Name",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "user",
@@ -67,7 +68,8 @@
    "options": "CH Store",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "company",
@@ -77,7 +79,8 @@
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "description": "GoGizmo for retail / GoFix for services"
+   "description": "GoGizmo for retail / GoFix for services",
+   "search_index": 1
   },
   {
    "fieldname": "role",
@@ -88,7 +91,8 @@
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "description": "Manager can bill for all companies at the store"
+   "description": "Manager can bill for all companies at the store",
+   "search_index": 1
   },
   {
    "fieldname": "section_permissions",

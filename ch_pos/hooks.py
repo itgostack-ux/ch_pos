@@ -5,6 +5,8 @@ app_description = "POS solution for GoGizmo & GoFix retail stores"
 app_email = "admin@gofix.in"
 app_license = "MIT"
 
+boot_session = "ch_pos.boot.boot_session"
+
 required_apps = ["frappe", "erpnext", "ch_item_master"]
 
 # Each item in the list will be shown as an app in the apps page
@@ -96,6 +98,8 @@ scheduler_events = {
 }
 
 # Fixtures (install custom fields and workspaces)
+# NOTE: Consider migrating fixtures to programmatic setup (after_migrate hook)
+# Reference: India Compliance pattern — toggle_custom_fields(), setup_roles()
 fixtures = [
     {
         "dt": "Custom Field",

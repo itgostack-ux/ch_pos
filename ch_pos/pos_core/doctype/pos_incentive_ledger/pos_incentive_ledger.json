@@ -47,7 +47,8 @@
    "options": "POS Executive",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "executive_name",
@@ -62,14 +63,16 @@
    "fieldtype": "Link",
    "label": "Store",
    "options": "CH Store",
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "company",
    "fieldtype": "Link",
    "label": "Company",
    "options": "Company",
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "column_break_exec",
@@ -81,7 +84,8 @@
    "label": "Date",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "transaction_type",
@@ -90,7 +94,8 @@
    "options": "Sale\nReturn\nExchange\nSwap\nWarranty\nVAS\nAccessory",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "section_transaction",
@@ -149,7 +154,7 @@
    "fieldtype": "Currency",
    "label": "Billing Amount",
    "in_list_view": 1,
-   "description": "Net item amount (rate × qty after discounts)"
+   "description": "Net item amount (rate \u00d7 qty after discounts)"
   },
   {
    "fieldname": "section_incentive",
@@ -196,7 +201,8 @@
    "options": "Pending\nApproved\nPaid\nCancelled",
    "default": "Pending",
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "section_payout",

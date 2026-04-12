@@ -4,7 +4,7 @@ from frappe.utils import flt, cint
 
 
 @frappe.whitelist()
-def get_applicable_offers(item_code=None, item_group=None, cart_total=0, payment_mode=None):
+def get_applicable_offers(item_code=None, item_group=None, cart_total=0, payment_mode=None) -> dict:
     """Return all CH Item Offers applicable to an item or cart via POS channel."""
     today = frappe.utils.today()
     filters = {
@@ -55,7 +55,7 @@ def get_applicable_offers(item_code=None, item_group=None, cart_total=0, payment
 
 
 @frappe.whitelist()
-def get_best_offer_combination(cart_items):
+def get_best_offer_combination(cart_items) -> dict:
     """Find the best combination of non-conflicting offers for the cart."""
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
@@ -101,7 +101,7 @@ def get_best_offer_combination(cart_items):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def check_combo_offers(cart_items, company=None):
+def check_combo_offers(cart_items, company=None) -> list:
     """Detect active combo offers satisfied by the current cart items.
 
     Args:
@@ -194,7 +194,7 @@ def check_combo_offers(cart_items, company=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def check_attachment_offers(cart_items, company=None):
+def check_attachment_offers(cart_items, company=None) -> dict:
     """Detect attachment/freebie offers triggered by items in the cart.
 
     Returns list of reward items that should be added or discounted.
@@ -256,13 +256,13 @@ def check_attachment_offers(cart_items, company=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def validate_coupon_code(coupon_code, customer=None):
+def validate_coupon_code(coupon_code, customer=None) -> dict:
     """Validate a coupon code and return its details.
 
     Returns dict with coupon info, or raises an error if invalid.
     """
     if not coupon_code:
-        frappe.throw(_("Please enter a coupon code"))
+        frappe.throw(_("Please enter a coupon code"), title=_("Validation Error"))
 
     coupon = frappe.db.get_value(
         "Coupon Code",
@@ -273,17 +273,17 @@ def validate_coupon_code(coupon_code, customer=None):
     )
 
     if not coupon:
-        frappe.throw(_("Invalid coupon code: {0}").format(frappe.bold(coupon_code)))
+        frappe.throw(_("Invalid coupon code: {0}").format(frappe.bold(coupon_code)), title=_("Validation Error"))
 
     today = frappe.utils.today()
     if coupon.valid_from and str(coupon.valid_from) > today:
-        frappe.throw(_("Coupon {0} is not yet active").format(frappe.bold(coupon_code)))
+        frappe.throw(_("Coupon {0} is not yet active").format(frappe.bold(coupon_code)), title=_("Validation Error"))
     if coupon.valid_upto and str(coupon.valid_upto) < today:
-        frappe.throw(_("Coupon {0} has expired").format(frappe.bold(coupon_code)))
+        frappe.throw(_("Coupon {0} has expired").format(frappe.bold(coupon_code)), title=_("Validation Error"))
     if coupon.maximum_use and cint(coupon.used) >= cint(coupon.maximum_use):
-        frappe.throw(_("Coupon {0} usage limit reached").format(frappe.bold(coupon_code)))
+        frappe.throw(_("Coupon {0} usage limit reached").format(frappe.bold(coupon_code)), title=_("Validation Error"))
     if coupon.customer and customer and coupon.customer != customer:
-        frappe.throw(_("Coupon {0} is not valid for this customer").format(frappe.bold(coupon_code)))
+        frappe.throw(_("Coupon {0} is not valid for this customer").format(frappe.bold(coupon_code)), title=_("Validation Error"))
 
     # Get linked pricing rule details
     pr = frappe.db.get_value(
@@ -314,7 +314,7 @@ def validate_coupon_code(coupon_code, customer=None):
 
 
 @frappe.whitelist()
-def apply_coupon_code(coupon_code, customer=None):
+def apply_coupon_code(coupon_code, customer=None) -> dict:
     """Validate and return coupon details for POS cart application.
 
     The actual application happens when the Sales Invoice is created —

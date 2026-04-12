@@ -128,7 +128,7 @@ class CHPOSSettlement(Document):
     def _validate_session(self):
         """Settlement must reference a valid session."""
         if not self.session:
-            frappe.throw(_("POS Session is required."))
+            frappe.throw(_("POS Session is required."), title=_("Ch Pos Settlement Error"))
         status = frappe.db.get_value("CH POS Session", self.session, "status")
         if status == "Closed":
             frappe.throw(
@@ -177,7 +177,7 @@ class CHPOSSettlement(Document):
     def _validate_signoff(self):
         """Cashier signoff mandatory before submission."""
         if not self.signoff_by_user:
-            frappe.throw(_("Cashier sign-off is mandatory before submitting settlement."))
+            frappe.throw(_("Cashier sign-off is mandatory before submitting settlement."), title=_("Ch Pos Settlement Error"))
 
     def _validate_variance_approval(self):
         """Manager approval needed if variance exceeds threshold."""

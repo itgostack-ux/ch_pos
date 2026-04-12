@@ -268,10 +268,20 @@
  "sort_field": "closing_date",
  "sort_order": "DESC",
  "states": [
-  {"color": "Gray", "title": "Draft"},
-  {"color": "Green", "title": "Submitted"},
-  {"color": "Red", "title": "Discrepancy"}
+  {
+   "color": "Gray",
+   "title": "Draft"
+  },
+  {
+   "color": "Green",
+   "title": "Submitted"
+  },
+  {
+   "color": "Red",
+   "title": "Discrepancy"
+  }
  ],
  "title_field": "pos_profile",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "pos_profile,user,company"
 }

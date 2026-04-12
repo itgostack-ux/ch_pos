@@ -101,7 +101,7 @@ def _pick_test_item(ctx):
 		return {"item_code": preferred_code, "item_name": item_name, "rate": float(rate)}
 
 	if not ctx.get("simple_item"):
-		frappe.throw(_("No in-stock non-serial test item available for POS UI testing."))
+		frappe.throw(_("No in-stock non-serial test item available for POS UI testing."), title=_("API Error"))
 
 	return {
 		"item_code": ctx["simple_item"].name,
@@ -111,24 +111,24 @@ def _pick_test_item(ctx):
 
 
 @frappe.whitelist()
-def prepare_pos_payment_ui_test():
+def prepare_pos_payment_ui_test() -> dict:
 	frappe.only_for(("System Manager", "Sales Manager", "Sales User"))
 	setup_test_master_data()
 	ctx = get_context()
 
 	if not ctx.get("pos_profile"):
-		frappe.throw(_("No usable POS Profile found for CH POS UI testing."))
+		frappe.throw(_("No usable POS Profile found for CH POS UI testing."), title=_("API Error"))
 	if not ctx.get("customer"):
-		frappe.throw(_("No customer found for CH POS UI testing."))
+		frappe.throw(_("No customer found for CH POS UI testing."), title=_("API Error"))
 	if not ctx.get("session_name"):
-		frappe.throw(_("No active POS session available for CH POS UI testing."))
+		frappe.throw(_("No active POS session available for CH POS UI testing."), title=_("API Error"))
 
 	partner = _ensure_finance_partner()
 	finance_sale_type = _find_or_create_finance_sale_type(partner.name)
 	item = _pick_test_item(ctx)
 	rate = float(item["rate"] or 0)
 	if rate <= 0:
-		frappe.throw(_("Selected UI test item does not have a valid selling price."))
+		frappe.throw(_("Selected UI test item does not have a valid selling price."), title=_("API Error"))
 
 	qty = max(1, int(math.ceil(2000 / rate)))
 

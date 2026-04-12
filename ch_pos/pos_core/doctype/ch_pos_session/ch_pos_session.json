@@ -68,7 +68,7 @@
    "label": "Company",
    "options": "Company",
    "reqd": 1,
-   "description": "Company for this session — set from device, cannot be changed"
+   "description": "Company for this session \u2014 set from device, cannot be changed"
   },
   {
    "fieldname": "store",
@@ -412,5 +412,25 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "store,pos_profile,cashier,status",
+ "title_field": "store",
+ "states": [
+  {
+   "color": "Green",
+   "title": "Open"
+  },
+  {
+   "color": "Blue",
+   "title": "Closed"
+  },
+  {
+   "color": "Red",
+   "title": "Cancelled"
+  },
+  {
+   "color": "Gray",
+   "title": "Draft"
+  }
+ ]
 }

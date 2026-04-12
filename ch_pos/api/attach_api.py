@@ -8,7 +8,7 @@ from frappe.utils import nowdate, now_datetime, flt
 
 
 @frappe.whitelist()
-def get_attach_offers(item_code, pos_profile=None):
+def get_attach_offers(item_code, pos_profile=None) -> dict:
     """Return all applicable attach offers (Warranty, VAS, Accessory) for a sold item."""
     if not item_code:
         return {"warranty_plans": [], "attach_rules": []}
@@ -63,10 +63,10 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
 @frappe.whitelist()
 def log_attach_event(pos_invoice=None, pos_profile=None, item_code=None,
                      attach_type=None, action=None, skip_reason=None,
-                     plan_code=None):
+                     plan_code=None) -> dict:
     """Log an attach offer event (Offered/Accepted/Skipped) to CH Attach Log."""
     if not attach_type or not action:
-        frappe.throw(_("attach_type and action are required"))
+        frappe.throw(_("attach_type and action are required"), title=_("API Error"))
 
     log = frappe.new_doc("CH Attach Log")
     log.pos_invoice = pos_invoice or ""

@@ -228,5 +228,21 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "pos_session,store,cashier",
+ "title_field": "store",
+ "states": [
+  {
+   "color": "Green",
+   "title": "Submitted"
+  },
+  {
+   "color": "Yellow",
+   "title": "Pending"
+  },
+  {
+   "color": "Gray",
+   "title": "Draft"
+  }
+ ]
 }

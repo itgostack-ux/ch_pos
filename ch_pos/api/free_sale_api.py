@@ -14,7 +14,7 @@ from frappe.utils import now_datetime, get_url
 
 
 @frappe.whitelist()
-def get_category_managers_for_cart(items):
+def get_category_managers_for_cart(items) -> list:
     """Given cart items, return the unique category managers required.
 
     Args:
@@ -64,7 +64,7 @@ def get_category_managers_for_cart(items):
 
 @frappe.whitelist()
 def request_free_sale_approval(reason, customer, items, grand_total,
-                                store=None, company=None):
+                                store=None, company=None) -> dict:
     """Create a CH Free Sale Approval request and email category managers.
 
     Args:
@@ -210,7 +210,7 @@ def _send_approval_email(approval_doc, manager_info, token):
 
 
 @frappe.whitelist(allow_guest=True)
-def respond_to_approval(token, manager, action):
+def respond_to_approval(token, manager, action) -> None:
     """Handle manager's response from email link.
 
     Uses token-based authentication — the cryptographic token proves
@@ -222,7 +222,7 @@ def respond_to_approval(token, manager, action):
         action: 'approve' or 'reject'
     """
     if action not in ("approve", "reject"):
-        frappe.throw(_("Invalid action"))
+        frappe.throw(_("Invalid action"), title=_("API Error"))
 
     if not token or len(token) < 20:
         frappe.respond_as_web_page(
@@ -297,7 +297,7 @@ def respond_to_approval(token, manager, action):
 
 
 @frappe.whitelist()
-def check_approval_status(approval_name):
+def check_approval_status(approval_name) -> dict:
     """Check current status of a free sale approval request.
 
     Args:

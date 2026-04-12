@@ -35,7 +35,7 @@ def _get_executive_permissions(exec_record):
 
 
 @frappe.whitelist()
-def get_pos_context():
+def get_pos_context() -> dict:
     """Called on POS launch. Auto-detects user→company→store→device→session.
 
     Returns everything the POS frontend needs to render the correct UI.
@@ -133,7 +133,7 @@ def get_pos_context():
 
 
 @frappe.whitelist()
-def get_pos_context_for_store(store):
+def get_pos_context_for_store(store) -> dict:
     """Admin/System Manager endpoint: get POS context for a specific store.
 
     Builds a synthetic allocation so the admin can operate any store.
@@ -142,7 +142,7 @@ def get_pos_context_for_store(store):
     user = frappe.session.user
 
     if "System Manager" not in frappe.get_roles(user) and user != "Administrator":
-        frappe.throw(_("Only System Managers can use store override."))
+        frappe.throw(_("Only System Managers can use store override."), title=_("API Error"))
 
     store_doc = frappe.db.get_value(
         "CH Store", store,
@@ -150,7 +150,7 @@ def get_pos_context_for_store(store):
         as_dict=True,
     )
     if not store_doc:
-        frappe.throw(_("Store {0} not found.").format(store))
+        frappe.throw(_("Store {0} not found.").format(store), title=_("API Error"))
 
     company = store_doc.company
 
@@ -205,7 +205,7 @@ def _get_all_active_stores():
 
 
 @frappe.whitelist()
-def lock_session(session_name):
+def lock_session(session_name) -> dict:
     """Lock screen — temporary pause, no financial impact."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
@@ -215,7 +215,7 @@ def lock_session(session_name):
 
 
 @frappe.whitelist()
-def unlock_session(session_name, password=None):
+def unlock_session(session_name, password=None) -> dict:
     """Unlock session — resume from lock screen."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
@@ -229,13 +229,13 @@ def unlock_session(session_name, password=None):
 
 @frappe.whitelist()
 def create_settlement(session_name, actual_closing_cash, denominations=None,
-                      variance_reason=None, manager_pin=None):
+                      variance_reason=None, manager_pin=None) -> dict:
     """Create a CH POS Settlement for a session. Called before session close."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status not in ("Open", "Locked", "Pending Close"):
-        frappe.throw(_("Session {0} is not in a settleable state.").format(session_name))
+        frappe.throw(_("Session {0} is not in a settleable state.").format(session_name), title=_("API Error"))
 
     # Check no existing settlement
     existing = frappe.db.get_value(
@@ -244,7 +244,7 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
         "name",
     )
     if existing:
-        frappe.throw(_("Settlement {0} already exists for this session.").format(existing))
+        frappe.throw(_("Settlement {0} already exists for this session.").format(existing), title=_("API Error"))
 
     denomination_rows = frappe.parse_json(denominations) if denominations else []
 
@@ -318,23 +318,23 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
 
 @frappe.whitelist()
 def create_cash_movement(session_name, movement_type, amount, reason,
-                         manager_pin=None, remarks=None):
+                         manager_pin=None, remarks=None) -> dict:
     """Create a CH Cash Drop (cash movement) during an active session."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     amount = flt(amount)
     if amount <= 0:
-        frappe.throw(_("Amount must be positive"))
+        frappe.throw(_("Amount must be positive"), title=_("API Error"))
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status not in ("Open", "Locked"):
-        frappe.throw(_("Session is not in an active state for cash movement."))
+        frappe.throw(_("Session is not in an active state for cash movement."), title=_("API Error"))
 
     # Manager PIN for sensitive types
     from ch_pos.pos_core.doctype.ch_cash_drop.ch_cash_drop import APPROVAL_REQUIRED_TYPES
     manager_user = None
     if movement_type in APPROVAL_REQUIRED_TYPES or manager_pin:
         if not manager_pin:
-            frappe.throw(_("{0} requires manager approval.").format(movement_type))
+            frappe.throw(_("{0} requires manager approval.").format(movement_type), title=_("API Error"))
         from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
         pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_cash_drop")
         if not pin_result.get("valid"):

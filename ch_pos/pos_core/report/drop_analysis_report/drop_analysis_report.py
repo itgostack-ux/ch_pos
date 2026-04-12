@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from frappe.utils import flt
 
 
@@ -13,14 +14,14 @@ def execute(filters=None):
 
 def get_columns():
     return [
-        {"fieldname": "drop_reason", "label": "Drop Reason", "fieldtype": "Data", "width": 180},
-        {"fieldname": "pos_profile", "label": "Store", "fieldtype": "Link", "options": "POS Profile", "width": 150},
-        {"fieldname": "count", "label": "Count", "fieldtype": "Int", "width": 80},
-        {"fieldname": "pct", "label": "% of Drops", "fieldtype": "Percent", "width": 100},
-        {"fieldname": "top_category", "label": "Top Category", "fieldtype": "Data", "width": 130},
-        {"fieldname": "top_brand", "label": "Top Brand Interest", "fieldtype": "Data", "width": 140},
-        {"fieldname": "top_budget", "label": "Top Budget Range", "fieldtype": "Data", "width": 130},
-        {"fieldname": "avg_handling_mins", "label": "Avg Handling (mins)", "fieldtype": "Float", "precision": 1, "width": 130},
+        {"fieldname": "drop_reason", "label": _("Drop Reason"), "fieldtype": "Data", "width": 180},
+        {"fieldname": "pos_profile", "label": _("Store"), "fieldtype": "Link", "options": "POS Profile", "width": 150},
+        {"fieldname": "count", "label": _("Count"), "fieldtype": "Int", "width": 80},
+        {"fieldname": "pct", "label": _("% of Drops"), "fieldtype": "Percent", "width": 100},
+        {"fieldname": "top_category", "label": _("Top Category"), "fieldtype": "Data", "width": 130},
+        {"fieldname": "top_brand", "label": _("Top Brand Interest"), "fieldtype": "Data", "width": 140},
+        {"fieldname": "top_budget", "label": _("Top Budget Range"), "fieldtype": "Data", "width": 130},
+        {"fieldname": "avg_handling_mins", "label": _("Avg Handling (mins)"), "fieldtype": "Float", "precision": 1, "width": 130},
     ]
 
 
@@ -147,7 +148,7 @@ def get_summary(data, filters):
     top_reason = data[0]["drop_reason"] if data else "N/A"
 
     return [
-        {"value": total_drops, "label": "Total Drops", "datatype": "Int", "indicator": "red"},
-        {"value": flt(total_drops / total_tokens * 100, 1), "label": "Drop Rate %", "datatype": "Percent"},
-        {"value": top_reason, "label": "Top Drop Reason", "datatype": "Data", "indicator": "orange"},
+        {"value": total_drops, "label": _("Total Drops"), "datatype": "Int", "indicator": "red"},
+        {"value": flt(total_drops / total_tokens * 100, 1), "label": _("Drop Rate %"), "datatype": "Percent"},
+        {"value": top_reason, "label": _("Top Drop Reason"), "datatype": "Data", "indicator": "orange"},
     ]

@@ -5,7 +5,7 @@ from frappe.utils import cint, flt, now_datetime
 
 
 @frappe.whitelist()
-def compare_items(item_codes, customer_preferences=None):
+def compare_items(item_codes, customer_preferences=None) -> dict:
 	"""Generate AI or static comparison for 2-3 items.
 
 	Resilience: AI timeout/failure always falls back to static comparison.
@@ -17,7 +17,7 @@ def compare_items(item_codes, customer_preferences=None):
 		customer_preferences = frappe.parse_json(customer_preferences)
 
 	if not item_codes or len(item_codes) < 2:
-		frappe.throw("At least 2 items are required for comparison.")
+		frappe.throw("At least 2 items are required for comparison.", title=_("Validation Error"))
 	item_codes = item_codes[:3]
 
 	cached = _find_cached_comparison(item_codes)
@@ -40,7 +40,7 @@ def compare_items(item_codes, customer_preferences=None):
 
 
 @frappe.whitelist()
-def get_upsell_suggestions(item_code, cart_items=None):
+def get_upsell_suggestions(item_code, cart_items=None) -> list:
 	"""Hybrid upsell suggestions: smart rules (instant) + optional AI coaching tip.
 
 	Flow: smart rule engine picks best plans/accessories/upgrades from catalog
@@ -95,7 +95,7 @@ def get_upsell_suggestions(item_code, cart_items=None):
 
 
 @frappe.whitelist()
-def explain_offers(cart):
+def explain_offers(cart) -> dict:
 	"""AI-powered plain-language explanation of applied offers.
 
 	Flow: gather offer data → call AI for friendly explanation

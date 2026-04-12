@@ -151,5 +151,17 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "store,business_date,status",
+ "title_field": "store",
+ "states": [
+  {
+   "color": "Green",
+   "title": "Open"
+  },
+  {
+   "color": "Blue",
+   "title": "Closed"
+  }
+ ]
 }

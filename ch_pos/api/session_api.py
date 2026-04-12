@@ -26,7 +26,7 @@ from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
 
 
 @frappe.whitelist()
-def get_session_status(pos_profile):
+def get_session_status(pos_profile) -> dict:
     """Check if an active session exists for this profile.
     Called on POS startup to decide: show opening screen or resume."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
@@ -120,7 +120,7 @@ def get_session_status(pos_profile):
 
 
 @frappe.whitelist()
-def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
+def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> dict:
     """Open a new POS session. Called from the POS opening screen."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     opening_cash = flt(opening_cash)
@@ -135,7 +135,7 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
         if warehouse:
             store = frappe.db.get_value("CH Store", {"warehouse": warehouse}, "name")
     if not store:
-        frappe.throw(_("No CH Store configured for POS Profile {0}. Set it on POS Profile Extension.").format(pos_profile))
+        frappe.throw(_("No CH Store configured for POS Profile {0}. Set it on POS Profile Extension.").format(pos_profile), title=_("API Error"))
 
     # Resolve company from POS Profile
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
@@ -150,7 +150,7 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
             as_dict=True,
         )
         if device_doc and not device_doc.is_active:
-            frappe.throw(_("Device {0} is inactive.").format(device))
+            frappe.throw(_("Device {0} is inactive.").format(device), title=_("API Error"))
         if device_doc and device_doc.company != company:
             frappe.throw(
                 _("Device {0} belongs to company {1}, but POS Profile company is {2}.").format(
@@ -203,9 +203,9 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
 
     # ── Mandatory validations ────────────────────────────────
         if not opening_cash:
-            frappe.throw(_("Opening Cash is mandatory. Count the cash in the drawer before starting."))
+            frappe.throw(_("Opening Cash is mandatory. Count the cash in the drawer before starting."), title=_("API Error"))
         if not manager_pin:
-            frappe.throw(_("Manager PIN is mandatory to open a POS session."))
+            frappe.throw(_("Manager PIN is mandatory to open a POS session."), title=_("API Error"))
 
     # Manager PIN verification for opening approval
         manager_user = None
@@ -317,7 +317,7 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None):
 
 @frappe.whitelist()
 def close_session(session_name, closing_cash, denominations=None,
-                  variance_reason=None, manager_pin=None):
+                  variance_reason=None, manager_pin=None) -> dict:
     """Close a POS session with cash reconciliation. Called from POS closing dashboard."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
@@ -403,25 +403,25 @@ def close_session(session_name, closing_cash, denominations=None,
 
 
 @frappe.whitelist()
-def switch_user(session_name, new_user, pwd=None):
+def switch_user(session_name, new_user, pwd=None) -> dict:
     """Switch cashier — new cashier must authenticate with their credentials."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status != "Open":
-        frappe.throw(_("Session is not open"))
+        frappe.throw(_("Session is not open"), title=_("API Error"))
 
     if not frappe.db.exists("User", new_user):
-        frappe.throw(_("User {0} does not exist").format(new_user))
+        frappe.throw(_("User {0} does not exist").format(new_user), title=_("API Error"))
 
     # Authenticate the new cashier
     if not pwd:
-        frappe.throw(_("Password is required"))
+        frappe.throw(_("Password is required"), title=_("API Error"))
     from frappe.utils.password import check_password
     try:
         check_password(new_user, pwd)
     except frappe.AuthenticationError:
-        frappe.throw(_("Invalid password for {0}").format(new_user))
+        frappe.throw(_("Invalid password for {0}").format(new_user), title=_("API Error"))
 
     old_user = session.user
     session.db_set("user", new_user)
@@ -459,16 +459,16 @@ def switch_user(session_name, new_user, pwd=None):
 
 
 @frappe.whitelist()
-def create_cash_drop(session_name, amount, reason, manager_pin):
+def create_cash_drop(session_name, amount, reason, manager_pin) -> dict:
     """Create a cash drop (register → safe) during an active session."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     amount = flt(amount)
     if amount <= 0:
-        frappe.throw(_("Amount must be positive"))
+        frappe.throw(_("Amount must be positive"), title=_("API Error"))
 
     session = frappe.get_doc("CH POS Session", session_name)
     if session.status != "Open":
-        frappe.throw(_("Session is not open"))
+        frappe.throw(_("Session is not open"), title=_("API Error"))
 
     # Validate cash drop amount does not exceed estimated cash in drawer
     estimated_cash = flt(session.opening_cash) - flt(session.total_cash_drops or 0)
@@ -507,7 +507,7 @@ def create_cash_drop(session_name, amount, reason, manager_pin):
 
 
 @frappe.whitelist()
-def get_business_date(store):
+def get_business_date(store) -> dict:
     """Get the current business date for a store."""
     return {
         "business_date": str(get_store_business_date(store)),
@@ -516,7 +516,7 @@ def get_business_date(store):
 
 
 @frappe.whitelist()
-def override_business_date(store, new_date, reason, manager_pin):
+def override_business_date(store, new_date, reason, manager_pin) -> dict:
     """Override the business date. Requires manager with override permission."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
@@ -538,7 +538,7 @@ def override_business_date(store, new_date, reason, manager_pin):
 
 
 @frappe.whitelist()
-def verify_pin(pin, store=None, permission=None):
+def verify_pin(pin, store=None, permission=None) -> dict:
     """Verify a manager PIN from the POS UI."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
     return verify_manager_pin(pin, store=store, permission=permission)
@@ -548,7 +548,7 @@ def verify_pin(pin, store=None, permission=None):
 
 
 @frappe.whitelist()
-def get_x_report(session_name):
+def get_x_report(session_name) -> dict:
     """X Report — interim session report (during shift). Does not close session."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
@@ -607,7 +607,7 @@ def get_x_report(session_name):
 
 
 @frappe.whitelist()
-def get_z_report(store, business_date):
+def get_z_report(store, business_date) -> dict:
     """Z Report — end-of-day store summary across all sessions."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
     business_date = getdate(business_date)

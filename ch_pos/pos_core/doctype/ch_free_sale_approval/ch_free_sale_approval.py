@@ -9,9 +9,9 @@ from frappe.utils import now_datetime
 class CHFreeSaleApproval(Document):
     def validate(self):
         if not self.approvals:
-            frappe.throw(_("At least one category manager approval is required"))
+            frappe.throw(_("At least one category manager approval is required"), title=_("Ch Free Sale Approval Error"))
         if not self.reason:
-            frappe.throw(_("Reason is required for free sale approval"))
+            frappe.throw(_("Reason is required for free sale approval"), title=_("Ch Free Sale Approval Error"))
 
     def check_all_approved(self):
         """Return True if every category manager has approved."""

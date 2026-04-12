@@ -12,7 +12,7 @@ class CHManagerPIN(Document):
     def validate(self):
         pin = self.get_password("pin_hash") or ""
         if not pin.isdigit() or len(pin) < 4 or len(pin) > 6:
-            frappe.throw(_("PIN must be 4-6 digits"))
+            frappe.throw(_("PIN must be 4-6 digits"), title=_("Ch Manager Pin Error"))
 
 
 def verify_manager_pin(pin, store=None, permission=None):

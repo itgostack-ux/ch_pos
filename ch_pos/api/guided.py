@@ -31,7 +31,7 @@ DISCOVERY_QUESTIONS = [
 
 
 @frappe.whitelist()
-def get_guided_questions(sub_category):
+def get_guided_questions(sub_category) -> dict:
     """Return guided selling questions for a sub-category."""
     questions = list(DISCOVERY_QUESTIONS)
 
@@ -79,7 +79,7 @@ def _get_spec_options(sub_category, spec_name):
 
 
 @frappe.whitelist()
-def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8):
+def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8) -> list:
     """Given guided session responses, return ranked item recommendations."""
     if isinstance(responses, str):
         responses = frappe.parse_json(responses)
@@ -148,7 +148,7 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
 
 
 @frappe.whitelist()
-def get_guided_catalog():
+def get_guided_catalog() -> dict:
     """Return active categories and sub-categories for guided POS flow."""
     categories = frappe.get_all(
         "CH Category",
@@ -178,7 +178,7 @@ def save_guided_session(
     responses=None,
     recommendations=None,
     status="Completed",
-):
+) -> dict:
     """Create or update POS Guided Session from POS UI."""
     if isinstance(responses, str):
         responses = frappe.parse_json(responses)
@@ -189,7 +189,7 @@ def save_guided_session(
     recommendations = recommendations or []
 
     if not sub_category:
-        frappe.throw("Sub Category is required")
+        frappe.throw("Sub Category is required", title=_("Validation Error"))
 
     if session_name and frappe.db.exists("POS Guided Session", session_name):
         doc = frappe.get_doc("POS Guided Session", session_name)

@@ -190,10 +190,20 @@
  "sort_field": "settlement_date",
  "sort_order": "DESC",
  "states": [
-  {"color": "Gray", "title": "Draft"},
-  {"color": "Green", "title": "Matched"},
-  {"color": "Red", "title": "Discrepancy"}
+  {
+   "color": "Gray",
+   "title": "Draft"
+  },
+  {
+   "color": "Green",
+   "title": "Matched"
+  },
+  {
+   "color": "Red",
+   "title": "Discrepancy"
+  }
  ],
  "title_field": "bank_name",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "store,terminal_id,settlement_date"
 }

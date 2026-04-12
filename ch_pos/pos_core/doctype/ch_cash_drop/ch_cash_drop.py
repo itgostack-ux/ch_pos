@@ -36,7 +36,7 @@ class CHCashDrop(Document):
     def _validate_session_active(self):
         """Cash movement must link to an active open session."""
         if not self.session:
-            frappe.throw(_("Session is required for cash movement."))
+            frappe.throw(_("Session is required for cash movement."), title=_("Ch Cash Drop Error"))
         session_status = frappe.db.get_value("CH POS Session", self.session, "status")
         if session_status not in ("Open", "Locked"):
             frappe.throw(
@@ -57,7 +57,7 @@ class CHCashDrop(Document):
 
     def _validate_amount(self):
         if flt(self.amount) <= 0:
-            frappe.throw(_("Amount must be positive."))
+            frappe.throw(_("Amount must be positive."), title=_("Ch Cash Drop Error"))
 
     def _validate_approval(self):
         """Sensitive movement types require manager approval."""

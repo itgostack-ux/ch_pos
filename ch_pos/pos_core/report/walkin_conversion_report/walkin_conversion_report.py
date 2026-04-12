@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from frappe.utils import flt
 
 
@@ -13,19 +14,19 @@ def execute(filters=None):
 
 def get_columns():
     return [
-        {"fieldname": "date", "label": "Date", "fieldtype": "Date", "width": 110},
-        {"fieldname": "pos_profile", "label": "Store", "fieldtype": "Link", "options": "POS Profile", "width": 160},
-        {"fieldname": "total_footfall", "label": "Total Footfall", "fieldtype": "Int", "width": 110},
-        {"fieldname": "kiosk", "label": "Kiosk", "fieldtype": "Int", "width": 80},
-        {"fieldname": "counter", "label": "Counter", "fieldtype": "Int", "width": 80},
-        {"fieldname": "engaged", "label": "Engaged", "fieldtype": "Int", "width": 80},
-        {"fieldname": "converted", "label": "Converted", "fieldtype": "Int", "width": 90},
-        {"fieldname": "dropped", "label": "Dropped", "fieldtype": "Int", "width": 80},
-        {"fieldname": "expired", "label": "Expired/No Show", "fieldtype": "Int", "width": 100},
-        {"fieldname": "conversion_rate", "label": "Conversion %", "fieldtype": "Percent", "width": 110},
-        {"fieldname": "engagement_rate", "label": "Engagement %", "fieldtype": "Percent", "width": 110},
-        {"fieldname": "avg_handling_mins", "label": "Avg Handling (mins)", "fieldtype": "Float", "precision": 1, "width": 130},
-        {"fieldname": "revenue", "label": "Revenue", "fieldtype": "Currency", "width": 120},
+        {"fieldname": "date", "label": _("Date"), "fieldtype": "Date", "width": 110},
+        {"fieldname": "pos_profile", "label": _("Store"), "fieldtype": "Link", "options": "POS Profile", "width": 160},
+        {"fieldname": "total_footfall", "label": _("Total Footfall"), "fieldtype": "Int", "width": 110},
+        {"fieldname": "kiosk", "label": _("Kiosk"), "fieldtype": "Int", "width": 80},
+        {"fieldname": "counter", "label": _("Counter"), "fieldtype": "Int", "width": 80},
+        {"fieldname": "engaged", "label": _("Engaged"), "fieldtype": "Int", "width": 80},
+        {"fieldname": "converted", "label": _("Converted"), "fieldtype": "Int", "width": 90},
+        {"fieldname": "dropped", "label": _("Dropped"), "fieldtype": "Int", "width": 80},
+        {"fieldname": "expired", "label": _("Expired/No Show"), "fieldtype": "Int", "width": 100},
+        {"fieldname": "conversion_rate", "label": _("Conversion %"), "fieldtype": "Percent", "width": 110},
+        {"fieldname": "engagement_rate", "label": _("Engagement %"), "fieldtype": "Percent", "width": 110},
+        {"fieldname": "avg_handling_mins", "label": _("Avg Handling (mins)"), "fieldtype": "Float", "precision": 1, "width": 130},
+        {"fieldname": "revenue", "label": _("Revenue"), "fieldtype": "Currency", "width": 120},
     ]
 
 
@@ -109,8 +110,8 @@ def get_summary(data):
     total_dropped = sum(r["dropped"] for r in data)
     total_revenue = sum(r["revenue"] for r in data)
     return [
-        {"value": total_ff, "label": "Total Footfall", "datatype": "Int"},
-        {"value": flt(total_conv / total_ff * 100, 1) if total_ff else 0, "label": "Conversion %", "datatype": "Percent", "indicator": "green" if total_ff and total_conv / total_ff > 0.35 else "orange"},
-        {"value": total_dropped, "label": "Dropped", "datatype": "Int", "indicator": "red"},
-        {"value": total_revenue, "label": "Revenue", "datatype": "Currency", "indicator": "green"},
+        {"value": total_ff, "label": _("Total Footfall"), "datatype": "Int"},
+        {"value": flt(total_conv / total_ff * 100, 1) if total_ff else 0, "label": _("Conversion %"), "datatype": "Percent", "indicator": "green" if total_ff and total_conv / total_ff > 0.35 else "orange"},
+        {"value": total_dropped, "label": _("Dropped"), "datatype": "Int", "indicator": "red"},
+        {"value": total_revenue, "label": _("Revenue"), "datatype": "Currency", "indicator": "green"},
     ]

@@ -46,7 +46,7 @@ class CHPOSSession(Document):
         self.db_set("status", "Open")
 
     def before_cancel(self):
-        frappe.throw(_("POS Sessions cannot be cancelled. Close them instead."))
+        frappe.throw(_("POS Sessions cannot be cancelled. Close them instead."), title=_("Ch Pos Session Error"))
 
     def _validate_company_device_consistency(self):
         """Company on session must match device, store, POS Profile, and warehouse."""
@@ -56,9 +56,9 @@ class CHPOSSession(Document):
                 ["company", "store", "is_active"], as_dict=True
             )
             if not device:
-                frappe.throw(_("Device {0} not found.").format(self.device))
+                frappe.throw(_("Device {0} not found.").format(self.device), title=_("Ch Pos Session Error"))
             if not device.is_active:
-                frappe.throw(_("Device {0} is inactive. Cannot open session.").format(self.device))
+                frappe.throw(_("Device {0} is inactive. Cannot open session.").format(self.device), title=_("Ch Pos Session Error"))
             if self.company and device.company != self.company:
                 frappe.throw(
                     _("Device {0} belongs to company {1}, but session company is {2}.").format(
@@ -314,14 +314,14 @@ class CHPOSSession(Document):
     def lock_session(self):
         """Lock screen — temporary pause, no financial impact."""
         if self.status != "Open":
-            frappe.throw(_("Only an Open session can be locked."))
+            frappe.throw(_("Only an Open session can be locked."), title=_("Ch Pos Session Error"))
         self.db_set("status", "Locked")
         self.status = "Locked"
 
     def unlock_session(self):
         """Unlock session — resume from lock screen."""
         if self.status != "Locked":
-            frappe.throw(_("Session is not locked."))
+            frappe.throw(_("Session is not locked."), title=_("Ch Pos Session Error"))
         self.db_set("status", "Open")
         self.status = "Open"
 
@@ -351,7 +351,7 @@ class CHPOSSession(Document):
                       manager_pin_user=None):
         """Close this session — called from POS UI."""
         if self.status not in ("Open", "Locked", "Pending Close"):
-            frappe.throw(_("Session is not in a closable state (current: {0})").format(self.status))
+            frappe.throw(_("Session is not in a closable state (current: {0})").format(self.status), title=_("Ch Pos Session Error"))
 
         self.status = "Closing"
         self.shift_end = now_datetime()

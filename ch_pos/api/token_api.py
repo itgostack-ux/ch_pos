@@ -32,7 +32,7 @@ def _check_rate_limit(key: str):
     hits = _RATE_LIMIT_CACHE.get(key, [])
     hits = [t for t in hits if t > window_start]
     if len(hits) >= _RATE_LIMIT_MAX:
-        frappe.throw(_("Too many requests. Please try again later."), frappe.RateLimitExceededError)
+        frappe.throw(_("Too many requests. Please try again later."), frappe.RateLimitExceededError, title=_("API Error"))
     hits.append(now)
     _RATE_LIMIT_CACHE[key] = hits
 
@@ -154,7 +154,7 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist(allow_guest=True)
-def get_store_config(pos_profile: str):
+def get_store_config(pos_profile: str) -> dict:
     """
     Returns store configuration for the kiosk page dropdowns.
     Called on kiosk load with ?store=<pos_profile>.
@@ -162,7 +162,7 @@ def get_store_config(pos_profile: str):
     profile = _resolve_pos_profile(pos_profile)
 
     if not profile:
-        frappe.throw(_("Store not found"), frappe.DoesNotExistError)
+        frappe.throw(_("Store not found"), frappe.DoesNotExistError, title=_("API Error"))
 
     company = frappe.db.get_value("Company", profile.company, ["name", "abbr"], as_dict=True)
 
@@ -214,7 +214,7 @@ def get_store_config(pos_profile: str):
 
 
 @frappe.whitelist(allow_guest=True)
-def get_brand_models(brand: str):
+def get_brand_models(brand: str) -> dict:
     """
     Return distinct device model names for a given brand from Item Master.
     Uses Brand doctype as single source of truth:
@@ -266,7 +266,7 @@ def create_token(
     device_model: str,
     issue_category: str,
     issue_description: str = "",
-):
+) -> dict:
     """
     Create a new queue token. Called from the kiosk (no login required).
     Returns the token display number and doc name.
@@ -277,14 +277,14 @@ def create_token(
 
     # Input validation
     if not customer_name or not customer_phone:
-        frappe.throw(_("Customer name and phone are required"))
+        frappe.throw(_("Customer name and phone are required"), title=_("API Error"))
     if not pos_profile:
-        frappe.throw(_("Store is required"))
+        frappe.throw(_("Store is required"), title=_("API Error"))
     customer_phone = _validate_indian_phone(customer_phone)  # normalize + validate
 
     profile = _resolve_pos_profile(pos_profile)
     if not profile:
-        frappe.throw(_("Invalid POS Profile"))
+        frappe.throw(_("Invalid POS Profile"), title=_("API Error"))
 
     company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
 
@@ -337,7 +337,7 @@ def create_token(
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
-def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "today"):
+def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "today") -> dict:
     """
     Returns token queue for manager/admin view.
     date_filter: today | yesterday | this_week | all
@@ -394,7 +394,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
 
 
 @frappe.whitelist()
-def get_store_users(pos_profile: str = None, role: str = None):
+def get_store_users(pos_profile: str = None, role: str = None) -> dict:
     """
     Return users mapped to a store via CH Store.store_users child table.
     Filtered by pos_profile (looks up CH Store via pos_profile field).
@@ -437,10 +437,10 @@ def get_store_users(pos_profile: str = None, role: str = None):
 
 
 @frappe.whitelist()
-def assign_token(token_name: str, technician: str):
+def assign_token(token_name: str, technician: str) -> dict:
     """Assign a technician to a token. Status → In Progress."""
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
-        frappe.throw(_("Not permitted"), frappe.PermissionError)
+        frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     updates = {"technician": technician, "assigned_at": now_datetime()}
     if doc.status == "Waiting":
@@ -450,10 +450,10 @@ def assign_token(token_name: str, technician: str):
 
 
 @frappe.whitelist()
-def start_token(token_name: str):
+def start_token(token_name: str) -> dict:
     """Mark service as started."""
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
-        frappe.throw(_("Not permitted"), frappe.PermissionError)
+        frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "started_at": now_datetime(),
         "status": "In Progress",
@@ -462,10 +462,10 @@ def start_token(token_name: str):
 
 
 @frappe.whitelist()
-def complete_token(token_name: str):
+def complete_token(token_name: str) -> dict:
     """Mark token as completed."""
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
-        frappe.throw(_("Not permitted"), frappe.PermissionError)
+        frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "completed_at": now_datetime(),
         "status": "Completed",
@@ -474,28 +474,28 @@ def complete_token(token_name: str):
 
 
 @frappe.whitelist()
-def cancel_token(token_name: str):
+def cancel_token(token_name: str) -> dict:
     """Cancel a token (typically Waiting status)."""
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
-        frappe.throw(_("Not permitted"), frappe.PermissionError)
+        frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted"):
-        frappe.throw(_("Cannot cancel a {0} token").format(doc.status))
+        frappe.throw(_("Cannot cancel a {0} token").format(doc.status), title=_("API Error"))
     frappe.db.set_value("POS Kiosk Token", token_name, "status", "Cancelled")
     return {"status": "ok"}
 
 
 @frappe.whitelist()
-def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = "", drop_remarks: str = ""):
+def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = "", drop_remarks: str = "") -> dict:
     """Mark a token as Dropped (customer left / no-show) with mandatory reason capture."""
     user_roles = frappe.get_roles()
     if "POS User" not in user_roles and "POS Manager" not in user_roles:
-        frappe.throw(_("Not permitted"), frappe.PermissionError)
+        frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted", "Dropped"):
-        frappe.throw(_("Cannot drop a {0} token").format(doc.status))
+        frappe.throw(_("Cannot drop a {0} token").format(doc.status), title=_("API Error"))
     if not drop_reason:
-        frappe.throw(_("Drop reason is mandatory when marking a token as Dropped"))
+        frappe.throw(_("Drop reason is mandatory when marking a token as Dropped"), title=_("API Error"))
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "status": "Dropped",
         "drop_reason": drop_reason,
@@ -507,14 +507,14 @@ def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = ""
 
 
 @frappe.whitelist()
-def engage_token(token_name: str, sales_executive: str = ""):
+def engage_token(token_name: str, sales_executive: str = "") -> dict:
     """Mark a token as Engaged — staff has started interacting with the customer."""
     user_roles = frappe.get_roles()
     if "POS User" not in user_roles and "POS Manager" not in user_roles:
-        frappe.throw(_("Not permitted"), frappe.PermissionError)
+        frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status not in ("Waiting",):
-        frappe.throw(_("Can only engage a Waiting token, current status is {0}").format(doc.status))
+        frappe.throw(_("Can only engage a Waiting token, current status is {0}").format(doc.status), title=_("API Error"))
     updates = {
         "status": "Engaged",
         "engaged_at": now_datetime(),
@@ -537,7 +537,7 @@ def quick_walkin(
     customer_name: str = "",
     customer_phone: str = "",
     sales_executive: str = "",
-):
+) -> dict:
     """
     2-second retail walk-in entry — button-driven, no typing needed.
     Creates a token already in Engaged state with retail interest fields populated.
@@ -546,7 +546,7 @@ def quick_walkin(
         "POS Profile", pos_profile, ["name", "company", "warehouse"], as_dict=True
     )
     if not profile:
-        frappe.throw(_("Invalid POS Profile"))
+        frappe.throw(_("Invalid POS Profile"), title=_("API Error"))
 
     company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
 
@@ -592,7 +592,7 @@ def quick_walkin(
 
 
 @frappe.whitelist()
-def audit_orphan_invoices(pos_profile: str = "", date: str = ""):
+def audit_orphan_invoices(pos_profile: str = "", date: str = "") -> dict:
     """
     Daily audit: find POS invoices that have no linked kiosk token.
     Returns list of orphan invoices for compliance review.
@@ -621,7 +621,7 @@ def audit_orphan_invoices(pos_profile: str = "", date: str = ""):
 
 
 @frappe.whitelist()
-def get_walkin_insights(pos_profile: str = "", days: int = 30):
+def get_walkin_insights(pos_profile: str = "", days: int = 30) -> dict:
     """
     AI-style insights derived from token data — actionable observations for store managers.
     Returns structured insights with severity and recommendations.
@@ -792,7 +792,7 @@ def get_walkin_insights(pos_profile: str = "", days: int = 30):
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
-def find_customer_by_phone(phone: str):
+def find_customer_by_phone(phone: str) -> dict:
     """Return the ERPNext Customer name matching this phone number, or None."""
     if not phone or not phone.strip():
         return None
@@ -827,7 +827,7 @@ def log_counter_walkin(
     customer_name: str = "",
     customer_phone: str = "",
     remarks: str = "",
-):
+) -> dict:
     """
     Create a minimal POS Kiosk Token for a direct-counter walk-in.
     This replaces the old log_walkin counter-only approach.
@@ -837,7 +837,7 @@ def log_counter_walkin(
         "POS Profile", pos_profile, ["name", "company", "warehouse"], as_dict=True
     )
     if not profile:
-        frappe.throw(_("Invalid POS Profile"))
+        frappe.throw(_("Invalid POS Profile"), title=_("API Error"))
 
     company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
 
@@ -881,7 +881,7 @@ def log_counter_walkin(
 
 
 @frappe.whitelist()
-def get_dashboard_stats(pos_profile: str = None, date_filter: str = "today"):
+def get_dashboard_stats(pos_profile: str = None, date_filter: str = "today") -> dict:
     """
     Returns aggregate metrics for the dashboard cards.
     """
@@ -952,7 +952,7 @@ def get_dashboard_stats(pos_profile: str = None, date_filter: str = "today"):
 
 
 @frappe.whitelist()
-def get_technician_tokens(technician: str = None):
+def get_technician_tokens(technician: str = None) -> dict:
     """
     Returns tokens assigned to a specific technician (defaults to logged-in user).
     """
@@ -982,7 +982,7 @@ def get_technician_tokens(technician: str = None):
 
 
 @frappe.whitelist()
-def get_reports(pos_profile: str = None, days: int = 7):
+def get_reports(pos_profile: str = None, days: int = 7) -> dict:
     """
     Returns daily breakdown and technician performance for the manager Reports tab.
     """
@@ -1064,7 +1064,7 @@ def get_reports(pos_profile: str = None, days: int = 7):
 
 
 @frappe.whitelist(allow_guest=True)
-def get_pos_profiles():
+def get_pos_profiles() -> dict:
     """Returns list of active POS Profiles for store selector (management side)."""
     profiles = frappe.get_all(
         "POS Profile",
@@ -1080,7 +1080,7 @@ def get_pos_profiles():
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
-def get_pos_waiting_tokens(pos_profile: str):
+def get_pos_waiting_tokens(pos_profile: str) -> dict:
     """
     Returns waiting/in-progress tokens for the given POS store.
     Called by the POS Queue panel on load and after each action.
@@ -1110,7 +1110,7 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
                             device_condition: str = "Good",
                             accessories: str = "",
                             warranty_status: str = "Out of Warranty",
-                            data_disclaimer: int = 0):
+                            data_disclaimer: int = 0) -> dict:
     """
     Convert a POS Kiosk Token into a GoFix Service Request.
     - Pulls all device/issue info from the token
@@ -1119,17 +1119,17 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
     Returns the new Service Request name.
     """
     if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
-        frappe.throw(_("Not permitted"), frappe.PermissionError)
+        frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     token = frappe.get_doc("POS Kiosk Token", token_name)
     if token.status == "Converted":
-        frappe.throw(_("This token has already been converted to a GoFix request."))
+        frappe.throw(_("This token has already been converted to a GoFix request."), title=_("API Error"))
 
     profile = frappe.db.get_value(
         "POS Profile", pos_profile,
         ["company", "warehouse"], as_dict=True
     )
     if not profile:
-        frappe.throw(_("Invalid POS Profile"))
+        frappe.throw(_("Invalid POS Profile"), title=_("API Error"))
 
     # Resolve issue category — must match GoFix Issue Category doctype
     issue_cat = None
