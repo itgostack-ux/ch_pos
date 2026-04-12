@@ -3573,7 +3573,6 @@ def backfill_draft_documents() -> dict:
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"Backfill submit failed: Service Request {name}")
 
-    frappe.db.commit()
     return submitted
 
 
@@ -5433,14 +5432,12 @@ def pos_submit_assessment(assessment_name) -> dict:
 	# just update the status field directly.
 	if doc.docstatus == 1 and doc.status == "Draft":
 		doc.db_set("status", "Submitted")
-		frappe.db.commit()
 		return {"name": doc.name, "status": "Submitted"}
 
 	if doc.docstatus == 1 and doc.status != "Draft":
 		return {"name": doc.name, "status": doc.status}
 
 	doc.submit_assessment()
-	frappe.db.commit()
 	return {"name": doc.name, "status": doc.status}
 
 

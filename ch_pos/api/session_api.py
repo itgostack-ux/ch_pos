@@ -301,8 +301,6 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
-    frappe.db.commit()
-
     return {
         "session_name": session.name,
         "business_date": str(business_date),
@@ -385,8 +383,6 @@ def close_session(session_name, closing_cash, denominations=None,
         store=session.store,
         closed_business_date=getdate(session.business_date),
     )
-
-    frappe.db.commit()
 
     return {
         "status": "Closed",
@@ -494,8 +490,6 @@ def create_cash_drop(session_name, amount, reason, manager_pin) -> dict:
     })
     drop.insert(ignore_permissions=True)
     drop.submit()
-    frappe.db.commit()
-
     return {
         "drop_name": drop.name,
         "amount": amount,

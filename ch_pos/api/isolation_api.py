@@ -210,7 +210,6 @@ def lock_session(session_name) -> dict:
     frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
     session.lock_session()
-    frappe.db.commit()
     return {"status": "Locked"}
 
 
@@ -220,7 +219,6 @@ def unlock_session(session_name, password=None) -> dict:
     frappe.has_permission("Sales Invoice", "read", throw=True)
     session = frappe.get_doc("CH POS Session", session_name)
     session.unlock_session()
-    frappe.db.commit()
     return {"status": "Open"}
 
 
@@ -305,8 +303,6 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
     # Move session to Pending Close
     session.db_set("status", "Pending Close")
 
-    frappe.db.commit()
-
     return {
         "settlement_name": settlement.name,
         "expected_closing_cash": flt(settlement.expected_closing_cash),
@@ -359,8 +355,6 @@ def create_cash_movement(session_name, movement_type, amount, reason,
     })
     movement.insert(ignore_permissions=True)
     movement.submit()
-    frappe.db.commit()
-
     return {
         "movement_name": movement.name,
         "amount": amount,
