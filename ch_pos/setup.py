@@ -433,6 +433,26 @@ def after_install():
     sync_margin_receipt_format()
 
 
+def before_migrate():
+    """Skip erpnext patches that are incompatible with ch_pos's POS Closing Entry.
+
+    ch_pos owns POS Closing Entry (module POS Core) and does not carry the
+    standard erpnext fields (pos_invoices, sales_invoices, etc.).  Certain
+    erpnext patches try to rename those fields with validate=False, which
+    crashes when the fields don't exist.  Pre-inserting the Patch Log entry
+    causes the migrate runner to skip them harmlessly.
+    """
+    _skip_incompatible_patches = [
+        "erpnext.patches.v15_0.rename_pos_closing_entry_fields #2025-06-13",
+    ]
+    for patch_name in _skip_incompatible_patches:
+        if not frappe.db.exists("Patch Log", {"patch": patch_name}):
+            frappe.get_doc({"doctype": "Patch Log", "patch": patch_name}).insert(
+                ignore_permissions=True
+            )
+            frappe.db.commit()
+
+
 def after_migrate():
     create_custom_fields(CUSTOM_FIELDS, update=False)
     sync_margin_receipt_format()

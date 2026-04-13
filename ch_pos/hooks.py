@@ -20,6 +20,7 @@ add_to_apps_screen = [
 ]
 
 after_install = "ch_pos.setup.after_install"
+before_migrate = "ch_pos.setup.before_migrate"
 after_migrate = "ch_pos.setup.after_migrate"
 before_uninstall = "ch_pos.setup.before_uninstall"
 
