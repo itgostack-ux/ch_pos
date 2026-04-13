@@ -685,6 +685,58 @@ def step_6_buyback():
     _check("Buyback Assessment created", bool(ba.name))
     _context["ba_name"] = ba.name
 
+    # ── 6a½. Mobile No fallback test ──────────────────────────────────────
+    #    Verify _ensure_mobile_no() pulls from Customer alternate/whatsapp
+    #    when mobile_no is omitted.
+    print("  6a½. Testing mobile_no auto-populate fallback …")
+    try:
+        # Save customer alt phone for fallback, then clear primary mobile_no
+        _orig_mobile = frappe.db.get_value("Customer", CUSTOMER_1, "mobile_no")
+        _orig_alt = frappe.db.get_value("Customer", CUSTOMER_1, "ch_alternate_phone")
+        frappe.db.set_value("Customer", CUSTOMER_1, "mobile_no", "")
+        frappe.db.set_value("Customer", CUSTOMER_1, "ch_alternate_phone", MOBILE_NO)
+        frappe.db.commit()
+
+        ba_test = frappe.get_doc({
+            "doctype": "Buyback Assessment",
+            "source": "Store Manual",
+            "customer": CUSTOMER_1,
+            # mobile_no intentionally omitted
+            "store": WAREHOUSE,
+            "company": COMPANY,
+            "item": ITEM_CODE,
+            "imei_serial": "E2E-MOBILE-FALLBACK-TEST",
+            "estimated_grade": GRADE_B,
+            "estimated_price": BUYBACK_PRICE,
+            "quoted_price": BUYBACK_PRICE,
+        })
+        ba_test.flags.ignore_permissions = True
+        ba_test.insert()
+        _check("mobile_no auto-populated from ch_alternate_phone",
+               ba_test.mobile_no == MOBILE_NO,
+               f"mobile_no={ba_test.mobile_no}")
+
+        # Verify _update_customer_mobile wrote back to Customer.mobile_no
+        cust_mobile_after = frappe.db.get_value("Customer", CUSTOMER_1, "mobile_no")
+        _check("mobile_no written back to Customer",
+               cust_mobile_after == MOBILE_NO,
+               f"customer.mobile_no={cust_mobile_after}")
+
+        # Cleanup: delete test doc + restore original Customer fields
+        frappe.delete_doc("Buyback Assessment", ba_test.name, force=True)
+        frappe.db.set_value("Customer", CUSTOMER_1, "mobile_no", _orig_mobile or "")
+        frappe.db.set_value("Customer", CUSTOMER_1, "ch_alternate_phone", _orig_alt or "")
+        frappe.db.commit()
+    except Exception as e:
+        _warn("mobile_no fallback test", str(e))
+        # Restore originals on failure
+        try:
+            frappe.db.set_value("Customer", CUSTOMER_1, "mobile_no", _orig_mobile or "")
+            frappe.db.set_value("Customer", CUSTOMER_1, "ch_alternate_phone", _orig_alt or "")
+            frappe.db.commit()
+        except Exception:
+            pass
+
     # ── 6b. Submit Assessment ──────────────────────────────────────────────
     print("  6b. Submitting Assessment …")
     ba_result = bb_api.submit_assessment(ba.name)
