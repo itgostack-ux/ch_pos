@@ -382,6 +382,7 @@ export class MaterialRequestWorkspace {
 			// Append items to existing draft
 			const submit_btn = panel.find(".ch-mr-submit-btn");
 			submit_btn.prop("disabled", true);
+			console.log("[POS MR] Adding items to draft:", this.selected_draft, this.request_items);
 			frappe.call({
 				method: "ch_pos.api.pos_api.add_items_to_material_request",
 				args: {
@@ -391,6 +392,7 @@ export class MaterialRequestWorkspace {
 				freeze: true,
 				freeze_message: __("Adding items to {0}...", [this.selected_draft]),
 				callback: (r) => {
+					console.log("[POS MR] Add items response:", r);
 					submit_btn.prop("disabled", false);
 					if (r.message) {
 						const banner = panel.find(".ch-mr-success-banner");
@@ -407,8 +409,10 @@ export class MaterialRequestWorkspace {
 						this._update_form_mode(panel);
 					}
 				},
-				error: () => {
+				error: (err) => {
+					console.error("[POS MR] Add items error:", err);
 					submit_btn.prop("disabled", false);
+					frappe.show_alert({ message: __("Failed to add items. Check console for details."), indicator: "red" });
 				},
 			});
 			return;
