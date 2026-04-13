@@ -438,6 +438,7 @@ export class QueueWorkspace {
 					get_query: () => ({
 						filters: {
 							item_group: ["in", ["Mobiles", "Smartphones", "Tablets", "Laptops", "Devices"]],
+							has_variants: 0,
 						},
 					}),
 				},

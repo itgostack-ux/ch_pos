@@ -189,7 +189,8 @@ export class RepairWorkspace {
 			});
 		}
 		const device_field = frappe.ui.form.make_control({
-			df: { fieldname: "device_item", fieldtype: "Link", options: "Item", placeholder: __("Device model") },
+			df: { fieldname: "device_item", fieldtype: "Link", options: "Item", placeholder: __("Device model"),
+			get_query: () => ({ filters: { has_variants: 0 } }) },
 			parent: panel.find(".ch-repair-device-link"),
 			render_input: true,
 		});
@@ -759,7 +760,7 @@ export class RepairWorkspace {
 				_item_search_timer = setTimeout(() => {
 					frappe.call({
 						method: "frappe.desk.search.search_link",
-						args: { txt: q, doctype: "Item", ignore_user_permissions: 0, page_len: 8 },
+						args: { txt: q, doctype: "Item", ignore_user_permissions: 0, page_len: 8, filters: { has_variants: 0 } },
 						callback: (r) => {
 							const results = r.message || [];
 							if (!results.length) { sug.hide(); return; }

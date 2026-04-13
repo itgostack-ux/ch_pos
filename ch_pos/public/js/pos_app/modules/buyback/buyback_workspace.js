@@ -1466,7 +1466,7 @@ export class BuybackWorkspace {
 				{ fieldname: "customer", fieldtype: "Link", options: "Customer", label: __("Customer") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "item", fieldtype: "Link", options: "Item",
-					get_query: () => ({ filters: { has_serial_no: 1 } }),
+					get_query: () => ({ filters: { has_serial_no: 1, has_variants: 0 } }),
 					label: __("Device Model"), reqd: 1 },
 				{ fieldname: "imei_serial", fieldtype: "Data", label: __("IMEI / Serial No"),
 					description: __("15-digit IMEI or serial number") },

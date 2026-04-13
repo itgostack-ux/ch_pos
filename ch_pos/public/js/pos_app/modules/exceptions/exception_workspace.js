@@ -117,7 +117,8 @@ export class ExceptionWorkspace {
 
 		// Item link control
 		this._item_control = frappe.ui.form.make_control({
-			df: { fieldtype: "Link", options: "Item", fieldname: "exc_item", placeholder: __("Select Item") },
+			df: { fieldtype: "Link", options: "Item", fieldname: "exc_item", placeholder: __("Select Item"),
+			get_query: () => ({ filters: { has_variants: 0 } }) },
 			parent: panel.find(".ch-exc-item-link"),
 			render_input: true,
 		});
