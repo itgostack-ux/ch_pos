@@ -456,6 +456,64 @@ def before_migrate():
 def after_migrate():
     create_custom_fields(CUSTOM_FIELDS, update=False)
     sync_margin_receipt_format()
+    _ensure_sale_types()
+
+
+# ── Sale Type seed data ─────────────────────────────────────────────
+SALE_TYPE_SEED = [
+    {
+        "name": "Direct Sale", "code": "DS", "is_default": 1,
+        "requires_customer": 1, "requires_payment": 1,
+    },
+    {
+        "name": "Credit Sale", "code": "CS", "is_default": 0,
+        "requires_customer": 1, "requires_payment": 0,
+    },
+    {
+        "name": "Finance Sale", "code": "FS", "is_default": 0,
+        "requires_customer": 1, "requires_payment": 1,
+        "sub_types": [
+            {"sale_sub_type": "Bajaj Finance", "requires_reference": 1},
+            {"sale_sub_type": "Bajaj Finserv", "requires_reference": 1},
+            {"sale_sub_type": "HDFC", "requires_reference": 1},
+            {"sale_sub_type": "Tata Capital", "requires_reference": 1},
+        ],
+    },
+    {
+        "name": "Supplier Sale", "code": "SS", "is_default": 0,
+        "requires_customer": 1, "requires_payment": 1,
+    },
+    {
+        "name": "Free Sale", "code": "FREE", "is_default": 0,
+        "requires_customer": 0, "requires_payment": 0,
+        "sub_types": [
+            {"sale_sub_type": "Scratch Card", "requires_reference": 1},
+            {"sale_sub_type": "Spin Wheel", "requires_reference": 1},
+            {"sale_sub_type": "Loyalty Redemption", "requires_reference": 0},
+        ],
+    },
+]
+
+
+def _ensure_sale_types():
+    """Create default CH Sale Type records if they don't exist."""
+    for st in SALE_TYPE_SEED:
+        if frappe.db.exists("CH Sale Type", st["name"]):
+            continue
+        doc = frappe.new_doc("CH Sale Type")
+        doc.sale_type_name = st["name"]
+        doc.code = st["code"]
+        doc.is_default = st.get("is_default", 0)
+        doc.enabled = 1
+        doc.requires_customer = st.get("requires_customer", 1)
+        doc.requires_payment = st.get("requires_payment", 1)
+        for sub in st.get("sub_types", []):
+            doc.append("sub_types", {
+                "sale_sub_type": sub["sale_sub_type"],
+                "requires_reference": sub.get("requires_reference", 0),
+            })
+        doc.insert(ignore_permissions=True)
+    frappe.db.commit()
 
 
 def sync_margin_receipt_format():

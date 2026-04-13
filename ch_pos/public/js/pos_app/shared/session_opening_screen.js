@@ -15,11 +15,23 @@ const INDIAN_DENOMINATIONS = [2000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
 export class SessionOpeningScreen {
 	constructor() {
 		this._dialog = null;
+		this._pending_promise = null;
 		this._bind_restart();
+	}
+
+	/** Dismiss any open dialog so a new one can take focus. */
+	_dismiss_dialog() {
+		if (this._dialog) {
+			try { this._dialog.hide(); } catch (e) { /* ignore */ }
+			this._dialog = null;
+		}
 	}
 
 	_bind_restart() {
 		EventBus.on("session:restart_flow", () => {
+			// Clear any stale pending promise so show() can re-enter
+			this._pending_promise = null;
+			this._dismiss_dialog();
 			// Re-trigger the full session opening flow
 			this.show([]).then((session_data) => {
 				PosState.session_name = session_data.session_name;
@@ -145,8 +157,13 @@ export class SessionOpeningScreen {
 	 * @returns {Promise<{session_name, business_date, store}>}
 	 */
 	show(open_entries) {
-		return new Promise((resolve, reject) => {
-			this._resolve = resolve;
+		// Guard: prevent double-invocation while a flow is already pending
+		if (this._pending_promise) {
+			return this._pending_promise;
+		}
+		this._pending_promise = new Promise((resolve, reject) => {
+			const _done = (v) => { this._pending_promise = null; resolve(v); };
+			this._resolve = _done;
 			// Always check POS context first (handles admin store picker)
 			frappe.call({
 				method: "ch_pos.api.isolation_api.get_pos_context",
@@ -156,75 +173,79 @@ export class SessionOpeningScreen {
 						const resumeStore = this._consume_store_resume();
 						const stores = ctx.stores || [];
 						if (resumeStore && stores.some((s) => s.name === resumeStore)) {
-							this._continue_with_store(resumeStore, resolve);
+							this._continue_with_store(resumeStore, _done);
 							return;
 						}
-						this._show_store_picker(stores, resolve, this._get_saved_store() || ctx.default_store);
+						this._show_store_picker(stores, _done, this._get_saved_store() || ctx.default_store);
+					} else if (ctx.day_closed) {
+						// Day closed for regular user — show advance dialog immediately
+						this._show_day_closed_message({ store: ctx.store, business_date: ctx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
+					} else if (ctx.existing_session) {
+						// Active session — auto-resume using context from get_pos_context
+						const es = ctx.existing_session;
+						const entry = (open_entries && open_entries.length === 1) ? open_entries[0] : { pos_profile: es.pos_profile, company: ctx.company };
+						_done({
+							session_name: es.name,
+							business_date: ctx.business_date,
+							store: ctx.store,
+							company: ctx.company,
+							device: ctx.device,
+							pos_profile: es.pos_profile,
+							opening_entry: entry,
+						});
 					} else if (open_entries && open_entries.length === 1) {
-						this._check_existing_session(open_entries[0], resolve);
+						// No existing CH session but ERPNext entry exists — check status
+						this._check_existing_session(open_entries[0], _done, ctx);
 					} else {
-						this._show_profile_and_opening(open_entries, resolve);
+						this._show_profile_and_opening(open_entries, _done);
 					}
 				},
 				error: () => {
 					// Fallback if isolation API fails
+					this._pending_promise = null;
 					if (open_entries && open_entries.length === 1) {
-						this._check_existing_session(open_entries[0], resolve);
+						this._check_existing_session(open_entries[0], _done);
 					} else {
-						this._show_profile_and_opening(open_entries, resolve);
+						this._show_profile_and_opening(open_entries, _done);
 					}
 				},
 			});
 		});
+		return this._pending_promise;
 	}
 
-	_check_existing_session(entry, resolve) {
-		// First try get_pos_context for full isolation-aware context
+	_check_existing_session(entry, resolve, ctx) {
+		// Use context already fetched by show() when available — avoids redundant API call
+		if (ctx && ctx.status) {
+			this._check_status_and_open(entry, resolve, ctx);
+			return;
+		}
+		// Fallback: fetch context if not passed (e.g. error path)
 		frappe.call({
 			method: "ch_pos.api.isolation_api.get_pos_context",
 			callback: (r) => {
-				const ctx = r.message || {};
-				if (ctx.status === "no_allocation") {
+				const freshCtx = r.message || {};
+				if (freshCtx.status === "no_allocation") {
 					frappe.msgprint({
 						title: __("POS Setup Required"),
 						indicator: "red",
-						message: ctx.message || __("You are not allocated to any store for POS operations."),
+						message: freshCtx.message || __("You are not allocated to any store for POS operations."),
 					});
-				} else if (ctx.status === "select_store") {
-					// Admin / System Manager — reuse the just-selected store after business-date reloads.
+				} else if (freshCtx.status === "select_store") {
 					const resumeStore = this._consume_store_resume();
-					const stores = ctx.stores || [];
+					const stores = freshCtx.stores || [];
 					if (resumeStore && stores.some((s) => s.name === resumeStore)) {
 						this._continue_with_store(resumeStore, resolve);
 						return;
 					}
-					this._show_store_picker(stores, resolve, this._get_saved_store() || ctx.default_store);
-				} else if (ctx.existing_session) {
-					// Active session exists — auto resume
-					resolve({
-						session_name: ctx.existing_session,
-						business_date: ctx.business_date,
-						store: ctx.store,
-						company: ctx.company,
-						device: ctx.device,
-						pos_profile: entry.pos_profile,
-						opening_entry: entry,
-					});
-				} else if (ctx.day_closed) {
-				this._show_day_closed_message({ store: ctx.store, business_date: ctx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
-				} else if (ctx.error) {
-					frappe.msgprint({
-						title: __("POS Setup Required"),
-						indicator: "red",
-						message: ctx.error,
-					});
+					this._show_store_picker(stores, resolve, this._get_saved_store() || freshCtx.default_store);
+				} else if (freshCtx.day_closed) {
+					this._show_day_closed_message({ store: freshCtx.store, business_date: freshCtx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [freshCtx.business_date]) });
 				} else {
-					// No session — fall back to regular status check for unclosed session detection
-					this._check_status_and_open(entry, resolve, ctx);
+					this._check_status_and_open(entry, resolve, freshCtx);
 				}
 			},
 			error: () => {
-				// Fallback to legacy flow if isolation API not available
 				this._check_status_legacy(entry, resolve);
 			},
 		});
@@ -305,6 +326,7 @@ export class SessionOpeningScreen {
 	}
 
 	_show_store_picker(stores, resolve, defaultStore) {
+		this._dismiss_dialog();
 		stores = stores || [];
 		const storeOptions = stores.map(
 			s => `${s.name} — ${s.store_name || s.name}`
@@ -348,6 +370,7 @@ export class SessionOpeningScreen {
 	}
 
 	_show_profile_and_opening(open_entries, resolve) {
+		this._dismiss_dialog();
 		open_entries = open_entries || [];
 		const open_map = {};
 		open_entries.forEach((e) => { open_map[e.pos_profile] = e; });
@@ -446,6 +469,7 @@ export class SessionOpeningScreen {
 	}
 
 	_show_day_closed_message(data) {
+		this._dismiss_dialog();
 		const store = data.store;
 		const business_date = data.business_date;
 		const today = frappe.datetime.get_today();
@@ -526,6 +550,7 @@ export class SessionOpeningScreen {
 	}
 
 	_show_opening_form(pos_profile, company, resolve, ctx) {
+		this._dismiss_dialog();
 		const context_info = ctx ? `
 			<div class="text-muted" style="margin-bottom:12px">
 				${__("Profile")}: <b>${pos_profile}</b><br>
@@ -636,9 +661,7 @@ export class SessionOpeningScreen {
 	}
 
 	destroy() {
-		if (this._dialog) {
-			this._dialog.hide();
-			this._dialog = null;
-		}
+		this._dismiss_dialog();
+		this._pending_promise = null;
 	}
 }

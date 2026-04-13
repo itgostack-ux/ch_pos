@@ -98,6 +98,7 @@ def get_sale_types(company=None) -> list:
         fields=["name as sale_type_name", "code", "is_default", "requires_customer",
                 "requires_payment", "default_payment_mode", "description"],
         order_by="is_default desc, sale_type_name asc",
+        ignore_permissions=True,
     )
 
     for st in types:
@@ -107,6 +108,7 @@ def get_sale_types(company=None) -> list:
             filters={"parent": st["sale_type_name"], "parenttype": "CH Sale Type"},
             fields=["sale_sub_type", "description", "requires_reference", "reference_doctype"],
             order_by="idx",
+            ignore_permissions=True,
         )
 
         # Filter by allowed companies if specified
@@ -138,6 +140,7 @@ def get_discount_reasons(company=None) -> list:
         fields=["name", "reason_name", "discount_type", "discount_value",
                 "allow_manual_entry", "max_manual_percent"],
         order_by="allow_manual_entry asc, reason_name asc",
+        ignore_permissions=True,
     )
 
 
@@ -149,6 +152,7 @@ def get_finance_partners() -> dict:
         filters={"enabled": 1},
         fields=["name", "partner_name", "short_code", "tenure_options"],
         order_by="partner_name asc",
+        ignore_permissions=True,
     )
     for p in partners:
         # Parse comma-separated tenure options into list of integers
