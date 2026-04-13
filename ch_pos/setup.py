@@ -498,7 +498,10 @@ SALE_TYPE_SEED = [
 def _ensure_sale_types():
     """Create default CH Sale Type records if they don't exist."""
     for st in SALE_TYPE_SEED:
+        # Skip if already exists by name or by code
         if frappe.db.exists("CH Sale Type", st["name"]):
+            continue
+        if frappe.db.exists("CH Sale Type", {"code": st["code"]}):
             continue
         doc = frappe.new_doc("CH Sale Type")
         doc.sale_type_name = st["name"]
