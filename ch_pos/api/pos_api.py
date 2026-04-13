@@ -2,7 +2,12 @@ import datetime
 
 import frappe
 from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime
-from buyback.utils import validate_indian_phone
+try:
+	from buyback.utils import validate_indian_phone
+except ImportError:
+	def validate_indian_phone(phone):
+		"""Fallback: accept any phone if buyback app is not installed."""
+		return phone
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
 
