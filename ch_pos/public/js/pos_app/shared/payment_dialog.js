@@ -67,6 +67,10 @@ export class PaymentDialog {
 		this._dlg_voucher_name     = "";
 		this._dlg_voucher_balance  = 0;
 
+		// Sale types & finance partners (loaded async on overlay mount)
+		this._sale_types = [];
+		this._finance_partners = [];
+
 		this._bind_events();
 	}
 
