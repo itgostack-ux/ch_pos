@@ -46,6 +46,7 @@ export class MaterialRequestWorkspace {
 				</div>
 
 				<!-- Draft Requests Section -->
+				<div class="ch-mr-success-banner" style="display:none"></div>
 				<div class="ch-pos-section-card ch-mr-drafts-section" style="margin-bottom:var(--pos-space-md);display:none">
 					<div class="section-header"><i class="fa fa-pencil-square-o"></i> ${__("Draft Requests (add items before submitting)")}</div>
 					<div class="section-body" style="padding:0">
@@ -102,7 +103,7 @@ export class MaterialRequestWorkspace {
 								${__("Clear")}
 							</button>
 							<button class="btn btn-primary ch-mr-submit-btn" style="border-radius:var(--pos-radius-sm)">
-								<i class="fa fa-paper-plane"></i> ${__("Submit Request")}
+								<i class="fa fa-paper-plane"></i> ${__("Create Request")}
 							</button>
 						</div>
 					</div>
@@ -343,7 +344,7 @@ export class MaterialRequestWorkspace {
 		if (this.selected_draft) {
 			submit_btn.html(`<i class="fa fa-plus-circle"></i> ${__("Add to {0}", [this.selected_draft])}`);
 		} else {
-			submit_btn.html(`<i class="fa fa-paper-plane"></i> ${__("Submit Request")}`);
+			submit_btn.html(`<i class="fa fa-paper-plane"></i> ${__("Create Request")}`);
 		}
 		list.html(`
 			<table class="ch-rpt-table" style="margin:0">
@@ -379,6 +380,8 @@ export class MaterialRequestWorkspace {
 
 		if (this.selected_draft) {
 			// Append items to existing draft
+			const submit_btn = panel.find(".ch-mr-submit-btn");
+			submit_btn.prop("disabled", true);
 			frappe.call({
 				method: "ch_pos.api.pos_api.add_items_to_material_request",
 				args: {
@@ -388,11 +391,14 @@ export class MaterialRequestWorkspace {
 				freeze: true,
 				freeze_message: __("Adding items to {0}...", [this.selected_draft]),
 				callback: (r) => {
+					submit_btn.prop("disabled", false);
 					if (r.message) {
-						frappe.show_alert({
-							message: __("{0} now has {1} items", [r.message.name, r.message.item_count]),
-							indicator: "green",
-						});
+						const banner = panel.find(".ch-mr-success-banner");
+						banner.html(`<i class="fa fa-check-circle"></i> ${__("{0} updated — now has {1} items", [r.message.name, r.message.item_count])}`)
+							.css({display:"flex",alignItems:"center",gap:"8px",padding:"12px 16px",background:"#dcfce7",color:"#166534",borderRadius:"var(--pos-radius-sm)",fontWeight:600,fontSize:"var(--pos-fs-sm)",marginBottom:"12px"})
+							.show();
+						setTimeout(() => banner.fadeOut(400), 5000);
+
 						this.request_items = [];
 						this.selected_draft = null;
 						panel.find(".ch-mr-notes").val("");
@@ -400,6 +406,9 @@ export class MaterialRequestWorkspace {
 						this._load_drafts(panel);
 						this._update_form_mode(panel);
 					}
+				},
+				error: () => {
+					submit_btn.prop("disabled", false);
 				},
 			});
 			return;
@@ -414,6 +423,8 @@ export class MaterialRequestWorkspace {
 			frappe.show_alert({ message: __("Please choose the required date and time."), indicator: "orange" });
 			return;
 		}
+		const submit_btn = panel.find(".ch-mr-submit-btn");
+		submit_btn.prop("disabled", true);
 		frappe.call({
 			method: "ch_pos.api.pos_api.create_material_request",
 			args: {
@@ -427,14 +438,33 @@ export class MaterialRequestWorkspace {
 			freeze: true,
 			freeze_message: __("Creating Material Request..."),
 			callback: (r) => {
+				submit_btn.prop("disabled", false);
 				if (r.message) {
-					frappe.show_alert({ message: __("Material Request {0} created", [r.message]), indicator: "green" });
+					const mr_name = r.message;
+					// Show prominent success banner
+					const banner = panel.find(".ch-mr-success-banner");
+					banner.html(`<i class="fa fa-check-circle"></i> ${__("Request {0} created — pending manager approval", [mr_name])}`)
+						.css({display:"flex",alignItems:"center",gap:"8px",padding:"12px 16px",background:"#dcfce7",color:"#166534",borderRadius:"var(--pos-radius-sm)",fontWeight:600,fontSize:"var(--pos-fs-sm)",marginBottom:"12px"})
+						.show();
+					setTimeout(() => banner.fadeOut(400), 5000);
+
 					this.request_items = [];
 					panel.find(".ch-mr-notes").val("");
 					this._render_items(panel);
 					this._load_drafts(panel);
 					this._load_pending(panel);
+
+					// Scroll to drafts section so user can see the new draft
+					setTimeout(() => {
+						const section = panel.find(".ch-mr-drafts-section");
+						if (section.length && section.is(":visible")) {
+							section[0].scrollIntoView({ behavior: "smooth", block: "start" });
+						}
+					}, 300);
 				}
+			},
+			error: () => {
+				submit_btn.prop("disabled", false);
 			},
 		});
 	}
