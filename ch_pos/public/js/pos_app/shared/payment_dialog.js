@@ -1123,9 +1123,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 	_load_sale_types() {
 		this._sale_types = [];
+		console.log("[POS] Loading sale types for company:", PosState.company);
 		frappe.xcall("ch_pos.api.pos_api.get_sale_types", {
 			company: PosState.company,
 		}).then((types) => {
+			console.log("[POS] Sale types loaded:", types);
 			this._sale_types = types || [];
 			if (this._sale_types.length) {
 				this._render_sale_type_pills();
@@ -1134,7 +1136,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				const pills = this._overlay.find("#ch-pay-sale-type-pills");
 				pills.html(`<span class="text-muted small">${__("No sale types configured for {0}. Check CH Sale Type master.", [PosState.company || __("this company")])}</span>`);
 			}
-		}).catch(() => {
+		}).catch((err) => {
+			console.error("[POS] Sale type load error:", err);
 			const pills = this._overlay.find("#ch-pay-sale-type-pills");
 			pills.html(`<span class="text-danger small">${__("Failed to load sale types. Please reload.")}</span>`);
 		});
