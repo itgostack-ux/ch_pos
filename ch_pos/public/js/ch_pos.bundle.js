@@ -67,6 +67,11 @@ ch_pos.PosApp = class PosApp {
 		this.session_opening_screen = new SessionOpeningScreen();
 		this.session_controls = new SessionControls();
 		this._check_pos_profile();
+
+		// Allow session restart from the "No Company Selected" overlay
+		EventBus.on("session:profile_reload", (entry) => {
+			this._load_profile(entry);
+		});
 	}
 
 	_init_cart_panel() {

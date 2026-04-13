@@ -365,10 +365,9 @@ export class SessionControls {
 				{ fieldtype: "Section Break", label: __("Manager Approval") },
 				{
 					fieldname: "manager_pin",
-					fieldtype: "Data",
+					fieldtype: "Password",
 					label: __("Manager PIN"),
 					reqd: 1,
-					options: "",
 				},
 			],
 			primary_action_label: __("Submit Cash Drop"),

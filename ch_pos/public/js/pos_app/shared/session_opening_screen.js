@@ -15,6 +15,26 @@ const INDIAN_DENOMINATIONS = [2000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
 export class SessionOpeningScreen {
 	constructor() {
 		this._dialog = null;
+		this._bind_restart();
+	}
+
+	_bind_restart() {
+		EventBus.on("session:restart_flow", () => {
+			// Re-trigger the full session opening flow
+			this.show([]).then((session_data) => {
+				PosState.session_name = session_data.session_name;
+				PosState.business_date = session_data.business_date;
+				PosState.store = session_data.store;
+				EventBus.emit("session:loaded", session_data);
+
+				const entry = session_data.opening_entry || {
+					pos_profile: session_data.pos_profile,
+					company: session_data.company,
+				};
+				// Trigger profile load via PosApp — emit event for it
+				EventBus.emit("session:profile_reload", entry);
+			});
+		});
 	}
 
 	_get_saved_store() {
@@ -463,10 +483,9 @@ export class SessionOpeningScreen {
 				{ fieldtype: "Section Break", label: __("Manager Authorization") },
 				{
 					fieldname: "manager_pin",
-					fieldtype: "Data",
+					fieldtype: "Password",
 					label: __("Manager PIN"),
 					reqd: 1,
-					options: "",
 					description: __("Manager PIN required to advance business date"),
 				},
 			],
@@ -535,10 +554,15 @@ export class SessionOpeningScreen {
 			{ fieldtype: "Section Break", label: __("Manager Approval") },
 			{
 				fieldname: "manager_pin",
-				fieldtype: "Data",
+				fieldtype: "Password",
 				label: __("Manager PIN"),
-				options: "",
+				reqd: 1,
 				description: __("4-6 digit PIN for opening approval"),
+			},
+			{
+				fieldname: "error_area",
+				fieldtype: "HTML",
+				options: "",
 			},
 		];
 
@@ -555,6 +579,10 @@ export class SessionOpeningScreen {
 	}
 
 	_create_session(dlg, pos_profile, values, open_map, resolve, company, ctx) {
+		// Clear previous error
+		if (dlg.fields_dict.error_area) {
+			dlg.fields_dict.error_area.$wrapper.html("");
+		}
 		dlg.disable_primary_action();
 		const args = {
 			pos_profile: pos_profile,
@@ -586,8 +614,23 @@ export class SessionOpeningScreen {
 					});
 				}
 			},
-			error: () => {
+			error: (r) => {
 				dlg.enable_primary_action();
+				// Show error inside the dialog so user can see it
+				const msg = (r && r.exc_type)
+					? (r._server_messages
+						? JSON.parse(r._server_messages).map(m => {
+							try { return JSON.parse(m).message || m; } catch(e) { return m; }
+						}).join("<br>")
+						: __("Session could not be opened. Check the error and try again."))
+					: __("Session could not be opened. Check the error and try again.");
+				if (dlg.fields_dict.error_area) {
+					dlg.fields_dict.error_area.$wrapper.html(
+						`<div class="alert alert-danger" style="margin-top:10px">
+							<i class="fa fa-exclamation-circle"></i> ${msg}
+						</div>`
+					);
+				}
 			},
 		});
 	}

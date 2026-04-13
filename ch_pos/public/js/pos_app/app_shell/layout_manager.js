@@ -58,10 +58,13 @@ export class LayoutManager {
 			<div class="ch-pos-offline-bar"></div>
 			<div class="ch-pos-main-area">
 				<div class="ch-pos-no-company-overlay">
-					<div class="ch-pos-no-company-box">
+					<div class="ch-pos-no-company-box" style="cursor:pointer">
 						<i class="fa fa-building-o"></i>
 						<h3>${__("No Company Selected")}</h3>
-						<p>${__("Use the profile menu in the top-right corner to select a company.")}</p>
+						<p>${__("Click here to select a store and open a session.")}</p>
+						<button class="btn btn-primary btn-sm ch-btn-retry-session" style="margin-top:12px">
+							<i class="fa fa-refresh"></i> ${__("Select Store")}
+						</button>
 					</div>
 				</div>
 				<div class="ch-pos-container">
@@ -95,6 +98,11 @@ export class LayoutManager {
 		EventBus.on("profile:loaded", update);
 		EventBus.on("company:switched", update);
 		EventBus.on("session:loaded", update);
+
+		// Click overlay to restart the session opening flow
+		this.$no_company_overlay.on("click", ".ch-btn-retry-session, .ch-pos-no-company-box", () => {
+			EventBus.emit("session:restart_flow");
+		});
 	}
 
 	/** Initialize child components */
