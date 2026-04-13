@@ -118,6 +118,7 @@ def get_sale_types(company=None) -> list:
                     "POS Allowed Company",
                     filters={"parent": st["sale_type_name"], "parenttype": "CH Sale Type"},
                     pluck="company",
+                    ignore_permissions=True,
                 )
             except Exception:
                 allowed = []
