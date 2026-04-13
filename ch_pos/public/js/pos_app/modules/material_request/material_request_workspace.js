@@ -138,7 +138,7 @@ export class MaterialRequestWorkspace {
 				fieldtype: "Link",
 				options: "Item",
 				placeholder: __("Search model / item..."),
-				get_query: () => ({ filters: { disabled: 0, is_stock_item: 1 }, page_length: 99 }),
+				get_query: () => ({ filters: { disabled: 0, is_stock_item: 1, has_variants: 0 }, page_length: 99 }),
 			},
 			parent: el,
 			render_input: true,
