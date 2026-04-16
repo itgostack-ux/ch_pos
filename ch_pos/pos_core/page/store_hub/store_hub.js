@@ -58,6 +58,12 @@ class StoreHub {
 		this.$root = $(`<div class="hub-root"></div>`).appendTo(this.page.body);
 	}
 
+	_go_list(doctype, filters = {}) {
+		const co = this.company_field?.get_value();
+		if (co) filters.company = co;
+		frappe.set_route("List", doctype, filters);
+	}
+
 	refresh() {
 		const company = this.company_field?.get_value() || "";
 		const store = this.store_field?.get_value() || "";
@@ -151,15 +157,28 @@ class StoreHub {
 			<div class="hub-section">
 				<h5 class="hub-section-title"><i class="fa fa-bolt"></i> ${__("Quick Actions")}</h5>
 				<div class="hub-actions-grid">
-					<button class="hub-action-btn" onclick="frappe.set_route('List','CH POS Session')"><i class="fa fa-desktop"></i> ${__("POS Sessions")}</button>
-					<button class="hub-action-btn" onclick="frappe.set_route('List','CH POS Settlement')"><i class="fa fa-money"></i> ${__("Settlements")}</button>
-					<button class="hub-action-btn" onclick="frappe.set_route('List','POS Invoice',{docstatus:1})"><i class="fa fa-shopping-bag"></i> ${__("POS Invoices")}</button>
-					<button class="hub-action-btn" onclick="frappe.set_route('app','ch-pos-app')"><i class="fa fa-tv"></i> ${__("Open POS App")}</button>
-					<button class="hub-action-btn" onclick="frappe.set_route('List','Bin',{warehouse:['like','%Store%']})"><i class="fa fa-cubes"></i> ${__("Store Inventory")}</button>
-					<button class="hub-action-btn" onclick="frappe.set_route('List','CH Store')"><i class="fa fa-building-o"></i> ${__("Store List")}</button>
+					<button class="hub-action-btn" data-act="pos_sessions"><i class="fa fa-desktop"></i> ${__("POS Sessions")}</button>
+					<button class="hub-action-btn" data-act="settlements"><i class="fa fa-money"></i> ${__("Settlements")}</button>
+					<button class="hub-action-btn" data-act="pos_invoices"><i class="fa fa-shopping-bag"></i> ${__("POS Invoices")}</button>
+					<button class="hub-action-btn" data-act="open_pos"><i class="fa fa-tv"></i> ${__("Open POS App")}</button>
+					<button class="hub-action-btn" data-act="store_inv"><i class="fa fa-cubes"></i> ${__("Store Inventory")}</button>
+					<button class="hub-action-btn" data-act="store_list"><i class="fa fa-building-o"></i> ${__("Store List")}</button>
 				</div>
 			</div>
 		`);
+
+		this.$root.on("click", ".hub-action-btn", (e) => {
+			const actions = {
+				pos_sessions: () => this._go_list("CH POS Session"),
+				settlements:  () => this._go_list("CH POS Settlement"),
+				pos_invoices: () => this._go_list("POS Invoice", { docstatus: 1 }),
+				open_pos:     () => frappe.set_route("app", "ch-pos-app"),
+				store_inv:    () => this._go_list("Bin", { warehouse: ["like", "%Store%"] }),
+				store_list:   () => this._go_list("CH Store"),
+			};
+			const fn = actions[$(e.currentTarget).data("act")];
+			if (fn) fn();
+		});
 	}
 
 	_render_intelligence(insights, financial) {
