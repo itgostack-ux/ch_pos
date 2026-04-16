@@ -26,7 +26,7 @@
    "fieldname": "event_type",
    "fieldtype": "Select",
    "label": "Event Type",
-   "options": "Price Change\nOffer Applied\nOffer Removed\nDiscount Override\nReturn Approved\nBuyback Value Edit\nRepair Estimate Revision\nSales Invoice Cancelled\nExchange Conversion\nSerial Reassignment\nManual Stock Adjustment\nExecutive Reassignment\nIncentive Reversal\nToken Expiry\nVoucher Redemption\nScheme Write-Off\nVoucher GL Entry\nSession Closed\nBusiness Date Change\nCash Drop\nBuyback Cashback\nCashier Switch\nOther",
+   "options": "Price Change\nOffer Applied\nOffer Removed\nDiscount Override\nReturn Approved\nBuyback Value Edit\nRepair Estimate Revision\nSales Invoice Cancelled\nExchange Conversion\nSerial Reassignment\nManual Stock Adjustment\nExecutive Reassignment\nIncentive Reversal\nToken Expiry\nVoucher Redemption\nScheme Write-Off\nVoucher GL Entry\nSession Closed\nBusiness Date Change\nCash Drop\nBuyback Cashback\nCashier Switch\nException Applied\nException Approved\nException Rejected\nWarranty Fee Collected\nPlan Expired\nClaim Used\nPickup Scheduled\nPickup Completed\nReturn Dispatched\nReturn Delivered\nOther",
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,

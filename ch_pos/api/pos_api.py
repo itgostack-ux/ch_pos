@@ -1,6 +1,7 @@
 import datetime
 
 import frappe
+from frappe import _
 from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime
 try:
 	from buyback.utils import validate_indian_phone
@@ -160,6 +161,118 @@ def get_finance_partners() -> dict:
         raw = (p.get("tenure_options") or "").strip()
         p["tenures"] = sorted([cint(t.strip()) for t in raw.split(",") if t.strip()]) if raw else []
     return partners
+
+
+def _ensure_pre_booking_sale_type():
+    """Best-effort bootstrap of the Pre Booking sale type master."""
+    if not frappe.db.exists("DocType", "CH Sale Type"):
+        return None
+
+    existing = frappe.db.get_value("CH Sale Type", {"sale_type_name": "Pre Booking"}, "name")
+    if existing:
+        return existing
+
+    try:
+        doc = frappe.get_doc({
+            "doctype": "CH Sale Type",
+            "sale_type_name": "Pre Booking",
+            "code": "PB",
+            "enabled": 1,
+            "requires_customer": 1,
+            "requires_payment": 0,
+            "description": "Advance reservation order created before final billing.",
+        })
+        doc.insert(ignore_permissions=True)
+        return doc.name
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Failed to create Pre Booking sale type")
+        return None
+
+
+@frappe.whitelist()
+def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=None,
+                       delivery_date=None, sales_executive=None, sale_reference=None,
+                       reserve_stock=1, client_request_id=None) -> dict:
+    """Create a reservation-style Sales Order for pre-booking / advance orders."""
+    frappe.has_permission("Sales Order", "create", throw=True)
+
+    if isinstance(items, str):
+        items = frappe.parse_json(items)
+    if not items:
+        frappe.throw(frappe._("At least one item is required for pre-booking"))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    _ensure_pre_booking_sale_type()
+
+    requested_delivery = delivery_date or str(datetime.date.today() + datetime.timedelta(days=7))
+    so = frappe.new_doc("Sales Order")
+    so.customer = customer or profile.customer
+    so.company = profile.company
+    so.transaction_date = nowdate()
+    so.delivery_date = requested_delivery
+    so.currency = profile.currency or frappe.get_cached_value("Company", profile.company, "default_currency")
+    so.selling_price_list = profile.selling_price_list
+    so.ignore_pricing_rule = 1
+    so.order_type = "Sales"
+    if so.meta.has_field("reserve_stock"):
+        so.reserve_stock = cint(reserve_stock)
+
+    if notes and so.meta.has_field("note"):
+        so.note = notes
+    elif notes and so.meta.has_field("remarks"):
+        so.remarks = notes
+
+    if sale_reference and so.meta.has_field("tracking_number"):
+        so.tracking_number = sale_reference
+
+    for item in items:
+        so.append("items", {
+            "item_code": item.get("item_code"),
+            "qty": flt(item.get("qty", 1)),
+            "rate": flt(item.get("rate", 0)),
+            "uom": item.get("uom") or "Nos",
+            "warehouse": item.get("warehouse") or profile.warehouse,
+            "delivery_date": item.get("delivery_date") or requested_delivery,
+        })
+
+    if sales_executive and so.meta.has_field("custom_sales_executive"):
+        so.custom_sales_executive = sales_executive
+    if client_request_id and so.meta.has_field("custom_client_request_id"):
+        so.custom_client_request_id = str(client_request_id)[:140]
+
+    so.flags.ignore_permissions = True
+    so.insert(ignore_permissions=True)
+
+    submit_warning = None
+    try:
+        so.submit()
+    except Exception:
+        # Keep the order saved even if stock reservation cannot fully complete yet.
+        submit_warning = frappe.get_traceback()
+        frappe.log_error(submit_warning, f"Pre-booking submit failed for {so.name}")
+        so.reload()
+
+    if flt(advance_amount) > 0 or notes:
+        comment = _("Pre-booking created")
+        if flt(advance_amount) > 0:
+            comment += _(" with advance of {0}").format(fmt_money(advance_amount, currency=so.currency))
+        if notes:
+            comment += _(". Notes: {0}").format(notes)
+        try:
+            so.add_comment("Comment", comment)
+        except Exception:
+            pass
+
+    return {
+        "doctype": "Sales Order",
+        "name": so.name,
+        "docstatus": so.docstatus,
+        "status": so.status,
+        "reserve_stock": cint(getattr(so, "reserve_stock", 0)),
+        "advance_amount": flt(advance_amount),
+        "delivery_date": requested_delivery,
+        "warning": _("Saved as draft") if so.docstatus == 0 and submit_warning else None,
+    }
 
 
 @frappe.whitelist()
@@ -2557,6 +2670,11 @@ def request_manager_approval(mobile_no, purpose, reference_doctype=None, referen
     before the transaction can proceed.
     """
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+    from ch_pos.audit import log_business_event
+
+    mobile_no = validate_indian_phone(mobile_no, "Manager Mobile Number")
+    if not (purpose or "").strip():
+        frappe.throw(frappe._("Approval purpose is required."), title=frappe._("Missing Purpose"))
 
     otp = CHOTPLog.generate_otp(
         mobile_no=mobile_no,
@@ -2564,18 +2682,31 @@ def request_manager_approval(mobile_no, purpose, reference_doctype=None, referen
         reference_doctype=reference_doctype,
         reference_name=reference_name,
     )
+    try:
+        log_business_event(
+            event_type="Other",
+            ref_doctype=reference_doctype or "CH OTP Log",
+            ref_name=reference_name,
+            before="OTP Requested",
+            after=purpose,
+            remarks=f"Manager approval OTP requested for {purpose}",
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Manager approval request audit failed")
     # In production, send OTP via SMS here
-    return {"sent": True, "mobile": mobile_no[:3] + "****" + mobile_no[-3:]}
+    return {"sent": True, "mobile": mobile_no[:3] + "****" + mobile_no[-3:], "otp_generated": bool(otp)}
 
 
 @frappe.whitelist()
-def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None, reference_name=None) -> dict:
+def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None, reference_name=None, approval_reason=None) -> dict:
     """Verify a manager OTP for POS approval.
 
     Returns {"valid": True/False, "message": str}.
     """
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+    from ch_pos.audit import log_business_event
 
+    mobile_no = validate_indian_phone(mobile_no, "Manager Mobile Number")
     result = CHOTPLog.verify_otp(
         mobile_no=mobile_no,
         purpose=purpose,
@@ -2583,6 +2714,18 @@ def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None
         reference_doctype=reference_doctype,
         reference_name=reference_name,
     )
+
+    try:
+        log_business_event(
+            event_type="Exception Approved" if result.get("valid") else "Other",
+            ref_doctype=reference_doctype or "CH OTP Log",
+            ref_name=reference_name,
+            before="OTP Pending",
+            after="Verified" if result.get("valid") else "Rejected",
+            remarks=(approval_reason or purpose or "Manager approval verification").strip(),
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Manager approval verification audit failed")
     return result
 
 

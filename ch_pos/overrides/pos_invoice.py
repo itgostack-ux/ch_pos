@@ -2,29 +2,7 @@ import frappe
 from frappe.utils import flt, cint, now_datetime
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
 
-
-def _get_serial_nos_from_item(item, parent_doc=None):
-    """Extract serial numbers from item row, checking serial_no field first,
-    then falling back to Serial and Batch Bundle (ERPNext v15 clears serial_no
-    on returns after bundle creation).
-
-    If parent_doc has _cached_serial_nos (set during on_cancel before delink),
-    use that instead — the bundle reference may already be cleared.
-    """
-    if parent_doc and hasattr(parent_doc, "_cached_serial_nos"):
-        cached = parent_doc._cached_serial_nos.get(item.name, [])
-        if cached:
-            return cached
-
-    serial_nos = (item.serial_no or "").strip()
-    if serial_nos:
-        return [s.strip() for s in serial_nos.split("\n") if s.strip()]
-
-    if item.serial_and_batch_bundle:
-        from erpnext.stock.serial_batch_bundle import get_serial_nos
-        return get_serial_nos(item.serial_and_batch_bundle) or []
-
-    return []
+from ch_item_master.ch_item_master.serial_utils import get_serial_nos_from_item as _get_serial_nos_from_item
 
 
 def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=None):
