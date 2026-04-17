@@ -1785,7 +1785,7 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
         if oldest_serial and oldest_serial != serial_no:
             # Determine the receipt date of the selected serial (for display in the dialog).
             selected_date_row = frappe.db.sql("""
-                SELECT MIN(sbb.posting_date) AS received_date
+                SELECT MIN(DATE(sbb.posting_datetime)) AS received_date
                 FROM `tabSerial and Batch Entry` sbe
                 JOIN `tabSerial and Batch Bundle` sbb
                     ON sbe.parent = sbb.name
@@ -5868,7 +5868,7 @@ def _get_oldest_fifo_serial(item_code, warehouse):
 	rows = frappe.db.sql("""
 		SELECT
 			available.serial_no,
-			MIN(sbb_in.posting_date) AS received_date
+			MIN(DATE(sbb_in.posting_datetime)) AS received_date
 		FROM (
 			SELECT sbe.serial_no
 			FROM `tabSerial and Batch Entry` sbe

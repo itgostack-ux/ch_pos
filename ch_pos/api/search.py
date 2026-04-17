@@ -427,7 +427,7 @@ def get_available_serials(item_code, warehouse) -> dict:
         SELECT
             sn.name AS serial_no,
             sn.warranty_expiry_date,
-            MIN(sbb.posting_date) AS inward_date
+            MIN(DATE(sbb.posting_datetime)) AS inward_date
         FROM `tabSerial No` sn
         LEFT JOIN `tabSerial and Batch Entry` sbe ON sbe.serial_no = sn.name
         LEFT JOIN `tabSerial and Batch Bundle` sbb
