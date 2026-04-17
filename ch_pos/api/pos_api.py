@@ -5464,7 +5464,7 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
 
 @frappe.whitelist()
 def pos_send_approval_link(order_name) -> dict:
-	"""Send a customer-facing approval link via SMS/WhatsApp.
+	"""Send a customer-facing approval link via WhatsApp + Email.
 
 	Transitions the order to "Awaiting Customer Approval" and returns the
 	masked mobile number so the UI can confirm which number was contacted.
@@ -5478,18 +5478,88 @@ def pos_send_approval_link(order_name) -> dict:
 
 	approval_url = f"{frappe.utils.get_url()}/buyback-approval?token={doc.approval_token}"
 
-	# Compose message
 	item_label = doc.item_name or doc.item or "your device"
 	price_fmt = f"₹{flt(doc.final_price):,.0f}"
-	message = (
-		f"GoFix Buyback: We offer {price_fmt} for {item_label}. "
-		f"Tap to review & approve: {approval_url}"
-	)
+	customer_name = doc.customer_name or "Customer"
 
-	# Send SMS (wire up your gateway — currently logs to console in dev)
-	frappe.logger().info(f"[pos_send_approval_link] SMS to {doc.mobile_no}: {message}")
-	# Example: from ch_item_master.ch_core.sms_gateway import send_sms
-	# send_sms(doc.mobile_no, message)
+	# ── Send WhatsApp ────────────────────────────────────────────
+	try:
+		from ch_item_master.ch_core.whatsapp import send_template_message
+
+		settings = None
+		try:
+			s = frappe.get_cached_doc("CH WhatsApp Settings")
+			if s.enabled:
+				settings = s
+		except frappe.DoesNotExistError:
+			pass
+
+		template_name = getattr(settings, "buyback_customer_approval", "") if settings else ""
+		if template_name:
+			send_template_message(
+				phone=doc.mobile_no,
+				template_name=template_name,
+				body_values={
+					"1": customer_name,
+					"2": item_label,
+					"3": price_fmt,
+					"4": approval_url,
+				},
+				customer_name=customer_name,
+				ref_doctype="Buyback Order",
+				ref_name=doc.name,
+			)
+			frappe.logger().info(f"[pos_send_approval_link] WhatsApp sent to {doc.mobile_no}")
+		else:
+			frappe.logger().warning(
+				f"[pos_send_approval_link] No buyback_customer_approval template configured, skipping WhatsApp"
+			)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"Buyback approval WhatsApp failed for {doc.name}")
+
+	# ── Send Email ───────────────────────────────────────────────
+	try:
+		customer_email = None
+		if doc.customer:
+			customer_email = frappe.db.get_value("Customer", doc.customer, "email_id")
+		if not customer_email and doc.mobile_no:
+			customer_email = frappe.db.get_value(
+				"Customer", {"mobile_no": doc.mobile_no}, "email_id"
+			)
+
+		if customer_email:
+			subject = f"GoGizmo Buyback — Approve {price_fmt} offer for {item_label}"
+			html = f"""
+			<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto">
+				<h2 style="color:#1a1a2e">Buyback Offer for Your Approval</h2>
+				<p>Hi {frappe.utils.escape_html(customer_name)},</p>
+				<p>We have evaluated your <strong>{frappe.utils.escape_html(item_label)}</strong>
+				   and are offering <strong>{price_fmt}</strong>.</p>
+				<p>Please review and approve the offer by clicking the button below:</p>
+				<p style="text-align:center;margin:24px 0">
+					<a href="{frappe.utils.escape_html(approval_url)}"
+					   style="background:#28a745;color:#fff;padding:12px 32px;
+					   text-decoration:none;border-radius:6px;font-size:16px;
+					   display:inline-block">
+						Review &amp; Approve
+					</a>
+				</p>
+				<p style="color:#6b7280;font-size:13px">
+					Or copy this link: {frappe.utils.escape_html(approval_url)}
+				</p>
+				<p style="color:#6b7280;font-size:12px">
+					Order: {doc.name} | This link is unique to your transaction.
+				</p>
+			</div>
+			"""
+			frappe.sendmail(
+				recipients=[customer_email],
+				subject=subject,
+				message=html,
+			)
+			frappe.logger().info(f"[pos_send_approval_link] Email sent to {customer_email}")
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"Buyback approval email failed for {doc.name}")
 
 	# Advance order status so the UI reflects "waiting for customer"
 	if doc.status == "Approved":
