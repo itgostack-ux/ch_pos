@@ -288,6 +288,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        sale_reference=None, finance_tenure=None, discount_reason=None,
                        client_request_id=None,
                        is_credit_sale=0, credit_days=0,
+                       credit_reference=None, credit_notes=None,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
                        advance_amount=0, kiosk_token=None,
                        guided_session=None,
@@ -502,6 +503,12 @@ def create_pos_invoice(pos_profile, customer, items,
     if cint(is_credit_sale) and not cint(is_free_sale):
         inv.custom_is_credit_sale = 1
         inv.custom_credit_days = cint(credit_days) or 30
+        if credit_reference:
+            inv.custom_credit_reference = str(credit_reference)[:140]
+        if credit_notes:
+            inv.custom_credit_notes = str(credit_notes)[:500]
+        # Set due date based on credit days
+        inv.due_date = frappe.utils.add_days(nowdate(), cint(credit_days) or 30)
 
     # Advance adjustment — reduce effective amount due
     if flt(advance_amount) > 0 and not cint(is_free_sale):
@@ -1349,7 +1356,7 @@ def apply_coupon_or_voucher(code, customer=None, company=None) -> dict:
 
 @frappe.whitelist()
 def get_customer_credit_info(customer, company=None) -> dict:
-    """Return credit limit and outstanding for a customer."""
+    """Return credit limit, outstanding, payment history and overdue info for a customer."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
     if not customer or customer == "Walk-in Customer":
         return None
@@ -1379,20 +1386,110 @@ def get_customer_credit_info(customer, company=None) -> dict:
         return None
 
     # Get outstanding from GL
+    company_filter = f"AND company = {frappe.db.escape(company)}" if company else ""
     outstanding = flt(frappe.db.sql("""
         SELECT SUM(debit - credit) FROM `tabGL Entry`
         WHERE party_type = 'Customer' AND party = %s
           AND is_cancelled = 0
           {company_filter}
     """.format(  # noqa: UP032
-        company_filter=f"AND company = {frappe.db.escape(company)}" if company else ""
+        company_filter=company_filter
     ), customer)[0][0] or 0)
+
+    # Overdue invoices count
+    overdue_count = cint(frappe.db.count("Sales Invoice", {
+        "customer": customer,
+        "docstatus": 1,
+        "outstanding_amount": [">", 0],
+        "due_date": ["<", nowdate()],
+        "is_return": 0,
+    }))
+
+    # Average payment days (from paid invoices in last 12 months)
+    avg_payment_days = 0
+    last_payment_date = None
+    paid_data = frappe.db.sql("""
+        SELECT AVG(DATEDIFF(modified, posting_date)) as avg_days,
+               MAX(modified) as last_payment
+        FROM `tabSales Invoice`
+        WHERE customer = %s AND docstatus = 1 AND outstanding_amount = 0
+          AND is_return = 0 AND posting_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+          {company_filter}
+    """.format(company_filter=company_filter), customer, as_dict=True)
+    if paid_data and paid_data[0].avg_days is not None:
+        avg_payment_days = cint(paid_data[0].avg_days)
+    if paid_data and paid_data[0].last_payment:
+        last_payment_date = str(getdate(paid_data[0].last_payment))
 
     return {
         "credit_limit": credit_limit,
         "outstanding": outstanding,
         "available": max(0, credit_limit - outstanding),
+        "overdue_count": overdue_count,
+        "avg_payment_days": avg_payment_days,
+        "last_payment_date": last_payment_date,
     }
+
+
+@frappe.whitelist()
+def approve_credit_override(customer, company, manager_pin, override_reason,
+                            cart_total=0, store=None) -> dict:
+    """Validate manager PIN and approve an over-limit credit sale.
+
+    Returns {approved: True, manager_name: "..."} on success.
+    """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+
+    if not manager_pin or not override_reason:
+        return {"approved": False, "message": _("PIN and reason are required")}
+
+    # Find a user whose PIN matches — check POS Profile Extension managers
+    # or fall back to checking if the PIN matches any user with Store Manager role
+    manager_user = None
+    manager_name = None
+
+    # Method 1: Check against POS-specific manager PINs
+    pins = frappe.get_all(
+        "CH POS Manager PIN",
+        filters={"pin": manager_pin, "disabled": 0},
+        fields=["user", "full_name"],
+        limit=1,
+    ) if frappe.db.exists("DocType", "CH POS Manager PIN") else []
+
+    if pins:
+        manager_user = pins[0].user
+        manager_name = pins[0].full_name
+    else:
+        # Method 2: Check against user password (for managers with Store Manager role)
+        from frappe.utils.password import check_password
+        try:
+            user_doc = check_password(None, manager_pin)
+            if user_doc:
+                user = user_doc if isinstance(user_doc, str) else user_doc.name
+                roles = frappe.get_roles(user)
+                if "Store Manager" in roles or "Sales Manager" in roles or "System Manager" in roles:
+                    manager_user = user
+                    manager_name = frappe.db.get_value("User", user, "full_name")
+        except frappe.AuthenticationError:
+            pass
+
+    if not manager_user:
+        return {"approved": False, "message": _("Invalid PIN or insufficient permissions")}
+
+    # Log the override
+    frappe.get_doc({
+        "doctype": "Comment",
+        "comment_type": "Info",
+        "reference_doctype": "Customer",
+        "reference_name": customer,
+        "content": (
+            f"Credit override approved by {manager_name} ({manager_user}). "
+            f"Cart: ₹{flt(cart_total):,.0f}, Store: {store or '—'}, "
+            f"Reason: {override_reason}"
+        ),
+    }).insert(ignore_permissions=True)
+
+    return {"approved": True, "manager_user": manager_user, "manager_name": manager_name}
 
 
 @frappe.whitelist()
