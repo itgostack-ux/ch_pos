@@ -67,10 +67,13 @@ export class Customer360Workspace {
 				callback: (r) => {
 					const d = r.message;
 					if (!d || d.error) {
-						panel.find(".ch-cust360-result").html(`
-							<div class="ch-pos-empty-state" style="padding:30px 16px;">
-								<div class="empty-icon"><i class="fa fa-search"></i></div>
-								<div class="empty-title">${d?.error || __("No customer for")} "${frappe.utils.escape_html(q)}"</div>
+					const errMsg = d?.error
+						? frappe.utils.escape_html(d.error)
+						: `${__("No customer found for")} "${frappe.utils.escape_html(q)}"`;
+					panel.find(".ch-cust360-result").html(`
+						<div class="ch-pos-empty-state" style="padding:30px 16px;">
+							<div class="empty-icon"><i class="fa fa-search"></i></div>
+							<div class="empty-title">${errMsg}</div>
 							</div>`);
 						return;
 					}

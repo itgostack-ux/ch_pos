@@ -2966,13 +2966,26 @@ def customer_360(identifier, company=None) -> dict:
             "name",
         )
         if not customer:
-            # Try Dynamic Link → Contact with phone
+            # Search by alternate phone / whatsapp custom fields
+            customer = frappe.db.get_value(
+                "Customer",
+                {"ch_alternate_phone": identifier},
+                "name",
+            )
+        if not customer:
+            customer = frappe.db.get_value(
+                "Customer",
+                {"ch_whatsapp_number": identifier},
+                "name",
+            )
+        if not customer:
+            # Try Dynamic Link → Contact with phone or mobile_no
             contact_phone = frappe.db.sql("""
                 SELECT dl.link_name
                 FROM `tabContact Phone` cp
                 JOIN `tabContact` c ON c.name = cp.parent
                 JOIN `tabDynamic Link` dl ON dl.parent = c.name AND dl.link_doctype = 'Customer'
-                WHERE cp.phone = %(phone)s
+                WHERE cp.phone = %(phone)s OR cp.mobile_no = %(phone)s
                 LIMIT 1
             """, {"phone": identifier}, as_dict=True)
             if contact_phone:
