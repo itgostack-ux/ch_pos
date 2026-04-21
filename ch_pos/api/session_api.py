@@ -615,33 +615,80 @@ def get_z_report(store, business_date) -> dict:
         order_by="shift_start asc",
     )
 
-    # Aggregate payment modes across all sessions (sales only — returns tracked separately)
-    payment_rows = frappe.db.sql("""
-        SELECT sip.mode_of_payment, SUM(sip.amount) AS total
-        FROM `tabSales Invoice` pi
-        JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
-        WHERE pi.docstatus = 1
-          AND pi.is_consolidated = 0
-          AND pi.is_return = 0
-          AND pi.posting_date = %(bd)s
-          AND pi.pos_profile IN (
-              SELECT pos_profile FROM `tabCH POS Session`
-              WHERE store = %(store)s AND business_date = %(bd)s AND docstatus = 1
-          )
-        GROUP BY sip.mode_of_payment
-    """, {"store": store, "bd": business_date}, as_dict=True)
+    session_names = [s.name for s in sessions]
 
-    total_invoices = sum(s.total_invoices or 0 for s in sessions)
-    total_net_sales = sum(flt(s.net_sales) for s in sessions)
-    total_variance = sum(flt(s.cash_variance) for s in sessions)
-    total_drops = sum(flt(s.total_cash_drops) for s in sessions)
-    all_closed = all(s.status == "Closed" for s in sessions) if sessions else False
+    invoice_map = {}
+    if session_names:
+        invoice_rows = frappe.db.sql(
+            """
+            SELECT pi.custom_pos_session AS session_name,
+                   SUM(CASE WHEN pi.is_return = 0 THEN 1 ELSE 0 END) AS total_invoices,
+                   SUM(CASE WHEN pi.is_return = 0 THEN pi.grand_total ELSE 0 END) AS total_sales,
+                   SUM(CASE WHEN pi.is_return = 1 THEN ABS(pi.grand_total) ELSE 0 END) AS total_returns,
+                   SUM(CASE WHEN pi.is_return = 0 THEN pi.total_taxes_and_charges ELSE 0 END) AS total_tax
+            FROM `tabSales Invoice` pi
+            WHERE pi.docstatus = 1
+              AND pi.is_consolidated = 0
+              AND pi.custom_pos_session IN %(sessions)s
+            GROUP BY pi.custom_pos_session
+            """,
+            {"sessions": session_names},
+            as_dict=True,
+        )
+        invoice_map = {
+            row.session_name: {
+                "total_invoices": cint(row.total_invoices),
+                "total_sales": flt(row.total_sales),
+                "total_returns": flt(row.total_returns),
+                "total_tax": flt(row.total_tax),
+                "net_sales": flt(row.total_sales) - flt(row.total_returns),
+            }
+            for row in invoice_rows
+        }
+
+    live_sessions = []
+    for session in sessions:
+        row = dict(session)
+        live = invoice_map.get(session.name)
+        if live:
+            row["total_invoices"] = live["total_invoices"]
+            row["net_sales"] = live["net_sales"]
+        else:
+            row["total_invoices"] = cint(session.total_invoices)
+            row["net_sales"] = flt(session.net_sales)
+        row["cash_variance"] = flt(session.cash_variance)
+        row["total_cash_drops"] = flt(session.total_cash_drops)
+        live_sessions.append(row)
+
+    # Aggregate payment modes across all sessions (sales only — returns tracked separately)
+    payment_rows = []
+    if session_names:
+        payment_rows = frappe.db.sql(
+            """
+            SELECT sip.mode_of_payment, SUM(sip.amount) AS total
+            FROM `tabSales Invoice` pi
+            JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
+            WHERE pi.docstatus = 1
+              AND pi.is_consolidated = 0
+              AND pi.is_return = 0
+              AND pi.custom_pos_session IN %(sessions)s
+            GROUP BY sip.mode_of_payment
+            """,
+            {"sessions": session_names},
+            as_dict=True,
+        )
+
+    total_invoices = sum(cint(s.get("total_invoices")) for s in live_sessions)
+    total_net_sales = sum(flt(s.get("net_sales")) for s in live_sessions)
+    total_variance = sum(flt(s.get("cash_variance")) for s in live_sessions)
+    total_drops = sum(flt(s.get("total_cash_drops")) for s in live_sessions)
+    all_closed = all(s.get("status") == "Closed" for s in live_sessions) if live_sessions else False
 
     return {
         "store": store,
         "business_date": str(business_date),
-        "sessions": sessions,
-        "total_sessions": len(sessions),
+        "sessions": live_sessions,
+        "total_sessions": len(live_sessions),
         "total_invoices": total_invoices,
         "total_net_sales": total_net_sales,
         "total_variance": total_variance,
