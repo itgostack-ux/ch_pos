@@ -66,6 +66,7 @@ def pos_item_search(
     is_service_company = bool(company and any(tag in company.lower() for tag in ("gofix", "service")))
     has_lifecycle_status = frappe.db.has_column("Item", "ch_lifecycle_status")
     has_pos_usage = frappe.db.has_column("Item", "custom_pos_usage")
+    brand_expr = "IFNULL(NULLIF(i.brand, ''), IFNULL(tmpl.brand, ''))"
 
     conditions = ["i.disabled = 0", "i.is_sales_item = 1", "i.has_variants = 0"]
     # Lifecycle status rules:
@@ -92,7 +93,7 @@ def pos_item_search(
     if search_term:
         conditions.append(
             "(i.name LIKE %(search)s OR i.item_name LIKE %(search)s"
-            " OR i.brand LIKE %(search)s"
+            f" OR {brand_expr} LIKE %(search)s"
             " OR EXISTS (SELECT 1 FROM `tabItem Barcode` ib"
             "   WHERE ib.parent = i.name AND ib.barcode LIKE %(search)s))"
         )
@@ -103,7 +104,7 @@ def pos_item_search(
         values["item_group"] = filters["item_group"]
 
     if filters.get("brand"):
-        conditions.append("i.brand = %(brand)s")
+        conditions.append(f"{brand_expr} = %(brand)s")
         values["brand"] = filters["brand"]
 
     if filters.get("in_stock_only") and warehouse:
@@ -157,7 +158,7 @@ def pos_item_search(
     where = " AND ".join(conditions)
 
     total = frappe.db.sql(
-        "SELECT COUNT(*) FROM `tabItem` i WHERE {where}".format(where=where),
+        "SELECT COUNT(*) FROM `tabItem` i LEFT JOIN `tabItem` tmpl ON tmpl.name = i.variant_of WHERE {where}".format(where=where),
         values,
     )[0][0]
 
@@ -165,7 +166,7 @@ def pos_item_search(
         "i.name as item_code",
         "i.item_name",
         "i.image",
-        "i.brand",
+        f"{brand_expr} as brand",
         "i.item_group",
         "i.stock_uom",
         "i.has_serial_no",
@@ -183,6 +184,7 @@ def pos_item_search(
     items_raw = frappe.db.sql(
         """SELECT {select_clause}
             FROM `tabItem` i
+            LEFT JOIN `tabItem` tmpl ON tmpl.name = i.variant_of
             WHERE {where}
             ORDER BY i.item_name
             LIMIT %(limit)s OFFSET %(offset)s""".format(select_clause=select_clause, where=where),  # noqa: UP032
