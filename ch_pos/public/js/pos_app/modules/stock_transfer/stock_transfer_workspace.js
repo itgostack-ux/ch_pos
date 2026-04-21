@@ -74,6 +74,45 @@ export class StockTransferWorkspace {
 			panel.trigger("st:accept", [name]);
 		});
 		panel.on("st:accept", (e, name) => this._accept_transfer(panel, name));
+
+		panel.on("click", ".ch-st-handover-btn", (e) => {
+			const name = $(e.currentTarget).data("name");
+			frappe.confirm(
+				__("Confirm handover of {0}? This will move stock to the transit warehouse.", [name]),
+				() => {
+					frappe.call({
+						method: "ch_erp15.ch_erp15.custom.stock_entry.set_pending_qty",
+						args: { StockEntry: name },
+						freeze: true,
+						freeze_message: __("Moving stock to transit..."),
+						callback: (r) => {
+							if (r.message) {
+								frappe.show_alert({ message: __("Handover complete — {0} is now Pending With Goods", [name]), indicator: "orange" });
+								this._load_tab(panel, "outgoing");
+							}
+						},
+					});
+				}
+			);
+		});
+
+		panel.on("click", ".ch-st-cancel-btn", (e) => {
+			const name = $(e.currentTarget).data("name");
+			frappe.confirm(
+				__("Cancel transfer {0}? This will delete the draft Stock Entry.", [name]),
+				() => {
+					frappe.call({
+						method: "frappe.client.delete",
+						args: { doctype: "Stock Entry", name },
+						freeze: true,
+						callback: () => {
+							frappe.show_alert({ message: __("Transfer {0} cancelled", [name]), indicator: "red" });
+							this._load_tab(panel, "outgoing");
+						},
+					});
+				}
+			);
+		});
 	}
 
 	_load_tab(panel, tab) {
@@ -139,6 +178,22 @@ export class StockTransferWorkspace {
 			   </button>`
 			: "";
 
+		// Outgoing: Handover button when goods are still at source (Draft, no custom_status yet)
+		const can_handover = tab === "outgoing" && se.docstatus === 0 && !cs;
+		const handover_btn = can_handover
+			? `<button class="btn btn-xs btn-warning ch-st-handover-btn" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
+				<i class="fa fa-sign-out"></i> ${__("Handover")}
+			   </button>`
+			: "";
+
+		// Outgoing: Cancel button when still Draft (goods not yet handed over)
+		const can_cancel = tab === "outgoing" && se.docstatus === 0 && !cs;
+		const cancel_btn = can_cancel
+			? `<button class="btn btn-xs btn-danger ch-st-cancel-btn" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
+				<i class="fa fa-times"></i> ${__("Cancel")}
+			   </button>`
+			: "";
+
 		// Logistics status badge
 		let logistics_badge = "";
 		if (ls) {
@@ -184,6 +239,8 @@ export class StockTransferWorkspace {
 							<span class="ch-pos-badge ${status_cls}">${frappe.utils.escape_html(status_label)}</span>
 							${logistics_badge}
 							${accept_btn}
+							${handover_btn}
+							${cancel_btn}
 							<button class="btn btn-xs btn-outline-secondary ch-st-view-detail" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
 								<i class="fa fa-external-link"></i>
 							</button>

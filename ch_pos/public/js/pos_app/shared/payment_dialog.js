@@ -582,14 +582,20 @@ placeholder="${__("Enter code...")}">
 
 		ov.on("click", ".ch-pay-close", () => this._close());
 
-		// MOP button → add/top-up payment row
+		// MOP button → switch (single-mode) or add/top-up (split)
 		ov.on("click", ".ch-pay-mop-btn", e => {
 			const mop = $(e.currentTarget).data("mop");
 			const due = this._calc_balance_due();
 			const idx = this._payments.findIndex(p => p.mode === mop);
 			if (idx >= 0) {
+				// Already present — top-up with remaining balance
 				this._payments[idx].amount = flt(this._payments[idx].amount) + Math.max(0, due);
+			} else if (this._payments.length === 1 && this._calc_balance_due() >= 0) {
+				// Single payment, no split yet — switch mode entirely (clear + replace)
+				const total = this._payments[0].amount;
+				this._payments = [{ mode: mop, amount: total, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
 			} else {
+				// Split payment — add new row for remaining due
 				this._payments.push({ mode: mop, amount: Math.max(0, due), upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 });
 			}
 			this._render_payments();

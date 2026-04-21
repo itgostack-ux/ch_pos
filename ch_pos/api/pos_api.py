@@ -3566,8 +3566,12 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     if remark_parts:
         se.remarks = " | ".join(remark_parts)
 
+    # Create as Draft only — do NOT submit here.
+    # Submitting would run the standard SLE and move stock source→destination immediately,
+    # even though goods may physically still be at the source store waiting for pickup.
+    # Instead, the transit workflow applies exactly as on desk:
+    #   Draft → "Handover" (Pending With Goods) → logistics → receive → submit
     se.insert()
-    se.submit()
     return se.name
 
 
