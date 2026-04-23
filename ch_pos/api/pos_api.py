@@ -289,7 +289,11 @@ def create_pos_invoice(pos_profile, customer, items,
                        client_request_id=None,
                        is_credit_sale=0, credit_days=0,
                        credit_reference=None, credit_notes=None,
+                       credit_terms=None, credit_interest_rate=0,
+                       credit_grace_period=0, credit_partial_payment=0,
+                       credit_approved_by=None,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
+                       free_sale_approved_at=None,
                        advance_amount=0, kiosk_token=None,
                        guided_session=None,
                        exception_request=None, warranty_claim=None) -> dict:
@@ -458,6 +462,8 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.custom_is_free_sale = 1
         inv.custom_free_sale_reason = (free_sale_reason or "")[:200]
         inv.custom_free_sale_approved_by = (free_sale_approved_by or "")[:140]
+        if free_sale_approved_at:
+            inv.custom_free_sale_approved_at = free_sale_approved_at
         # Add a zero-amount payment so ERPNext validation passes
         default_mop = "Cash"
         for pm in (profile.payments or []):
@@ -502,13 +508,37 @@ def create_pos_invoice(pos_profile, customer, items,
     # Credit sale — allow partial/zero payment, track credit terms
     if cint(is_credit_sale) and not cint(is_free_sale):
         inv.custom_is_credit_sale = 1
-        inv.custom_credit_days = cint(credit_days) or 30
+        # Resolve credit days from terms preset or explicit value
+        _credit_days = cint(credit_days) or 30
+        terms_days_map = {
+            "Net 15": 15, "Net 30": 30, "Net 45": 45,
+            "Net 60": 60, "Net 90": 90,
+        }
+        if credit_terms and credit_terms in terms_days_map:
+            _credit_days = terms_days_map[credit_terms]
+        inv.custom_credit_days = _credit_days
+        inv.custom_credit_terms = credit_terms or "Custom"
+        # Base due-date on posting_date (= session business_date), not wall-clock today.
+        # This prevents ERPNext rejecting due_date < posting_date when a QA/future session is used.
+        _base_date = str(inv.posting_date) if inv.posting_date else nowdate()
+        inv.due_date = frappe.utils.add_days(_base_date, _credit_days)
+        # Payment reminder — 5 days before due date (clamp to base_date if due is too soon)
+        reminder_date = frappe.utils.add_days(inv.due_date, -5)
+        if str(reminder_date) < _base_date:
+            reminder_date = _base_date
+        inv.custom_credit_reminder_date = reminder_date
         if credit_reference:
             inv.custom_credit_reference = str(credit_reference)[:140]
         if credit_notes:
             inv.custom_credit_notes = str(credit_notes)[:500]
-        # Set due date based on credit days
-        inv.due_date = frappe.utils.add_days(nowdate(), cint(credit_days) or 30)
+        if flt(credit_interest_rate) > 0:
+            inv.custom_credit_interest_rate = flt(credit_interest_rate)
+        if cint(credit_grace_period) > 0:
+            inv.custom_credit_grace_period = cint(credit_grace_period)
+        if flt(credit_partial_payment) > 0:
+            inv.custom_credit_partial_payment = flt(credit_partial_payment)
+        if credit_approved_by:
+            inv.custom_credit_approved_by = str(credit_approved_by)[:140]
 
     # Advance adjustment — reduce effective amount due
     if flt(advance_amount) > 0 and not cint(is_free_sale):
@@ -662,8 +692,10 @@ def create_pos_invoice(pos_profile, customer, items,
                 "allocated_percentage": 100,
             })
 
-    # Sale type classification
-    if sale_type:
+    # Sale type classification — free sale overrides sale_type to "Free Sale"
+    if cint(is_free_sale):
+        inv.custom_ch_sale_type = "Free Sale"
+    elif sale_type:
         inv.custom_ch_sale_type = sale_type
     if sale_sub_type:
         inv.custom_ch_sale_sub_type = sale_sub_type

@@ -44,14 +44,20 @@ export class PaymentDialog {
 		// Credit Sale state
 		this._is_credit_sale = false;
 		this._credit_days = 30;
+		this._credit_terms = "Net 30";
 		this._credit_reference = "";
 		this._credit_notes = "";
+		this._credit_interest_rate = 0;
+		this._credit_grace_period = 0;
+		this._credit_partial_payment = 0;
+		this._credit_approved_by = "";
 		this._credit_approved = false;  // true when credit limit OK or manager approved
 
 		// Free Sale state
 		this._is_free_sale = false;
 		this._free_sale_reason = "";
 		this._free_sale_approved_by = "";
+		this._free_sale_approved_at = null;
 
 		// Advance Adjustment
 		this._advance_amount = 0;
@@ -100,9 +106,15 @@ export class PaymentDialog {
 			this._redeem_loyalty = saved.redeem_loyalty || false;
 			this._is_credit_sale = saved.is_credit_sale || false;
 			this._credit_days = saved.credit_days || 30;
+			this._credit_terms = saved.credit_terms || "Net 30";
+			this._credit_interest_rate = saved.credit_interest_rate || 0;
+			this._credit_grace_period = saved.credit_grace_period || 0;
+			this._credit_partial_payment = saved.credit_partial_payment || 0;
+			this._credit_approved_by = saved.credit_approved_by || "";
 			this._is_free_sale = saved.is_free_sale || false;
 			this._free_sale_reason = saved.free_sale_reason || "";
 			this._free_sale_approved_by = saved.free_sale_approved_by || "";
+			this._free_sale_approved_at = saved.free_sale_approved_at || null;
 			this._free_sale_approval_name = saved.free_sale_approval_name || null;
 			this._required_managers = saved.required_managers || [];
 			this._advance_amount = saved.advance_amount || 0;
@@ -122,9 +134,15 @@ export class PaymentDialog {
 			this._redeem_loyalty = false;
 			this._is_credit_sale = false;
 			this._credit_days = 30;
+			this._credit_terms = "Net 30";
+			this._credit_interest_rate = 0;
+			this._credit_grace_period = 0;
+			this._credit_partial_payment = 0;
+			this._credit_approved_by = "";
 			this._is_free_sale = false;
 			this._free_sale_reason = "";
 			this._free_sale_approved_by = "";
+			this._free_sale_approved_at = null;
 			this._free_sale_approval_name = null;
 			this._required_managers = [];
 			this._advance_amount = 0;
@@ -207,6 +225,16 @@ export class PaymentDialog {
 			ov.find("#ch-pay-credit-chk").prop("checked", true);
 			ov.find("#ch-pay-credit-section").show();
 			ov.find("#ch-pay-credit-days").val(this._credit_days);
+			ov.find("#ch-pay-credit-interest").val(this._credit_interest_rate || 0);
+			ov.find("#ch-pay-credit-grace").val(this._credit_grace_period || 0);
+			ov.find("#ch-pay-credit-partial").val(this._credit_partial_payment || 0);
+			ov.find("#ch-pay-credit-approved-by").val(this._credit_approved_by || "");
+			// Highlight active term pill
+			if (this._credit_terms) {
+				ov.find(".ch-pay-credit-term-btn")
+					.filter((_, el) => $(el).data("term") === this._credit_terms)
+					.addClass("active");
+			}
 		}
 		if (this._is_free_sale) {
 			ov.find("#ch-pay-free-chk").prop("checked", true);
@@ -278,10 +306,24 @@ export class PaymentDialog {
 					<i class="fa fa-handshake-o"></i> ${__("Credit Sale Details")}
 				</div>
 				<div class="ch-pay-credit-body">
+					<!-- Credit limit / outstanding info (loaded async) -->
 					<div class="ch-pay-credit-info" id="ch-pay-credit-info"></div>
 					<div id="ch-pay-credit-history" class="ch-pay-credit-history" style="display:none"></div>
+
+					<!-- Credit Terms presets -->
+					<div class="ch-pay-credit-terms-row" style="margin-bottom:8px">
+						<div class="ch-pay-credit-terms-label">${__("Credit Terms")}</div>
+						<div class="ch-pay-credit-terms-pills" id="ch-pay-credit-terms-pills">
+							${["Net 15","Net 30","Net 45","Net 60"].map(t =>
+								`<button class="ch-pay-credit-term-btn" data-days="${t.split(' ')[1]}" data-term="${t}">${t}</button>`
+							).join("")}
+							<button class="ch-pay-credit-term-btn" data-days="custom" data-term="Custom">${__("Custom")}</button>
+						</div>
+					</div>
+
 					<div class="ch-pay-credit-fields">
 						<div class="row" style="gap:8px 0">
+							<!-- Row 1: Credit Days + Due Date -->
 							<div class="col-6">
 								<label>${__("Credit Days")} <span class="text-danger">*</span></label>
 								<input type="number" class="form-control form-control-sm" id="ch-pay-credit-days"
@@ -289,17 +331,62 @@ export class PaymentDialog {
 							</div>
 							<div class="col-6">
 								<label>${__("Due Date")}</label>
-								<div id="ch-pay-credit-due-date" class="form-control form-control-sm" style="background:#f9fafb;font-weight:600"></div>
+								<div id="ch-pay-credit-due-date" class="form-control form-control-sm ch-pay-credit-readonly"></div>
 							</div>
-							<div class="col-12" style="margin-top:8px">
-								<label>${__("Credit Reference / PO No")}</label>
+							<!-- Row 2: Interest Rate + Grace Period -->
+							<div class="col-6" style="margin-top:8px">
+								<label title="${__("Annual interest rate charged on overdue amounts (Indian standard: 18% p.a.)")}">
+									${__("Interest Rate (% p.a.)")} <i class="fa fa-info-circle text-muted"></i>
+								</label>
+								<div class="input-group input-group-sm">
+									<input type="number" class="form-control" id="ch-pay-credit-interest"
+										value="0" min="0" max="48" step="0.5"
+										placeholder="${__("0 = no interest")}">
+									<span class="input-group-addon">%</span>
+								</div>
+							</div>
+							<div class="col-6" style="margin-top:8px">
+								<label title="${__("Days after due date before interest starts accruing")}">
+									${__("Grace Period (days)")} <i class="fa fa-info-circle text-muted"></i>
+								</label>
+								<input type="number" class="form-control form-control-sm" id="ch-pay-credit-grace"
+									value="0" min="0" max="30" step="1">
+							</div>
+							<!-- Row 3: Partial Payment + Reminder Date -->
+							<div class="col-6" style="margin-top:8px">
+								<label title="${__("Cash / UPI collected now. Rest goes on credit.")}">
+									${__("Down Payment")} <i class="fa fa-info-circle text-muted"></i>
+								</label>
+								<div class="input-group input-group-sm">
+									<span class="input-group-addon">₹</span>
+									<input type="number" class="form-control" id="ch-pay-credit-partial"
+										value="0" min="0" step="1"
+										placeholder="${__("0 = full credit")}">
+								</div>
+							</div>
+							<div class="col-6" style="margin-top:8px">
+								<label title="${__("Auto: due date minus 5 days")}">
+									${__("Reminder Date")} <i class="fa fa-info-circle text-muted"></i>
+								</label>
+								<div id="ch-pay-credit-reminder" class="form-control form-control-sm ch-pay-credit-readonly"></div>
+							</div>
+							<!-- Row 4: Credit Reference + Approved By -->
+							<div class="col-6" style="margin-top:8px">
+								<label>${__("Credit Ref / PO No")}</label>
 								<input type="text" class="form-control form-control-sm" id="ch-pay-credit-ref"
-									placeholder="${__("e.g. PO-2026-001, Verbal-John")}">
+									placeholder="${__("PO-2026-001 or Verbal-John")}">
 							</div>
+							<div class="col-6" style="margin-top:8px">
+								<label>${__("Approved By")}</label>
+								<input type="text" class="form-control form-control-sm ch-pay-credit-readonly"
+									id="ch-pay-credit-approved-by" readonly
+									placeholder="${__("Auto-filled on manager override")}">
+							</div>
+							<!-- Row 5: Notes (full width) -->
 							<div class="col-12" style="margin-top:8px">
-								<label>${__("Credit Notes")}</label>
+								<label>${__("Credit Notes / Payment Conditions")}</label>
 								<input type="text" class="form-control form-control-sm" id="ch-pay-credit-notes"
-									placeholder="${__("Payment terms, special conditions...")}">
+									placeholder="${__("e.g. Payment by NEFT on or before due date")}">
 							</div>
 						</div>
 					</div>
@@ -324,6 +411,10 @@ export class PaymentDialog {
 						<i class="fa fa-paper-plane"></i> ${__("Request Approval")}
 					</button>
 					<div id="ch-pay-free-status" class="ch-pay-free-status" style="display:none"></div>
+					<!-- Approval timestamp (shown after approval) -->
+					<div id="ch-pay-free-approved-at" style="display:none;margin-top:6px;font-size:11px;color:#6b7280">
+						<i class="fa fa-clock-o"></i> <span id="ch-pay-free-approved-at-txt"></span>
+					</div>
 				</div>
 			</div>` : "";
 
@@ -680,6 +771,11 @@ placeholder="${__("Enter code...")}">
 				this._is_free_sale = false;
 				ov.find("#ch-pay-free-chk").prop("checked", false);
 				ov.find("#ch-pay-free-section").hide();
+				// Default to Net 30 and activate pill
+				this._credit_terms = "Net 30";
+				this._credit_days = 30;
+				ov.find("#ch-pay-credit-days").val(30);
+				ov.find(".ch-pay-credit-term-btn[data-term='Net 30']").addClass("active");
 				this._load_credit_info();
 				this._update_credit_due_date();
 			}
@@ -689,9 +785,50 @@ placeholder="${__("Enter code...")}">
 			}
 			this._update_totals();
 		});
+
+		// ── Credit Terms pills ────────────────────────
+		ov.on("click", ".ch-pay-credit-term-btn", e => {
+			const btn = $(e.currentTarget);
+			const days = btn.data("days");
+			const term = btn.data("term");
+			ov.find(".ch-pay-credit-term-btn").removeClass("active");
+			btn.addClass("active");
+			this._credit_terms = term;
+			if (days !== "custom") {
+				this._credit_days = parseInt(days) || 30;
+				ov.find("#ch-pay-credit-days").val(this._credit_days);
+				this._update_credit_due_date();
+			} else {
+				// Focus days input for manual entry
+				ov.find("#ch-pay-credit-days").focus().select();
+			}
+		});
+
 		ov.on("input", "#ch-pay-credit-days", e => {
 			this._credit_days = parseInt($(e.currentTarget).val()) || 30;
+			// If days don't match a preset, switch to Custom
+			const preset_map = { 15: "Net 15", 30: "Net 30", 45: "Net 45", 60: "Net 60", 90: "Net 90" };
+			const matched_term = preset_map[this._credit_days];
+			if (matched_term) {
+				this._credit_terms = matched_term;
+				ov.find(".ch-pay-credit-term-btn").removeClass("active");
+				ov.find(`.ch-pay-credit-term-btn[data-term='${matched_term}']`).addClass("active");
+			} else {
+				this._credit_terms = "Custom";
+				ov.find(".ch-pay-credit-term-btn").removeClass("active");
+				ov.find(".ch-pay-credit-term-btn[data-term='Custom']").addClass("active");
+			}
 			this._update_credit_due_date();
+		});
+		ov.on("input", "#ch-pay-credit-interest", e => {
+			this._credit_interest_rate = parseFloat($(e.currentTarget).val()) || 0;
+		});
+		ov.on("input", "#ch-pay-credit-grace", e => {
+			this._credit_grace_period = parseInt($(e.currentTarget).val()) || 0;
+		});
+		ov.on("input", "#ch-pay-credit-partial", e => {
+			this._credit_partial_payment = parseFloat($(e.currentTarget).val()) || 0;
+			this._update_totals();
 		});
 		ov.on("input", "#ch-pay-credit-ref", e => {
 			this._credit_reference = $(e.currentTarget).val().trim();
@@ -1572,9 +1709,15 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			redeem_loyalty: this._redeem_loyalty,
 			is_credit_sale: this._is_credit_sale,
 			credit_days: this._credit_days,
+			credit_terms: this._credit_terms,
+			credit_interest_rate: this._credit_interest_rate,
+			credit_grace_period: this._credit_grace_period,
+			credit_partial_payment: this._credit_partial_payment,
+			credit_approved_by: this._credit_approved_by,
 			is_free_sale: this._is_free_sale,
 			free_sale_reason: this._free_sale_reason,
 			free_sale_approved_by: this._free_sale_approved_by,
+			free_sale_approved_at: this._free_sale_approved_at,
 			free_sale_approval_name: this._free_sale_approval_name,
 			required_managers: this._required_managers,
 			advance_amount: this._advance_amount,
@@ -1750,11 +1893,17 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			// New payment type fields
 			is_credit_sale:                 this._is_credit_sale ? 1 : 0,
 			credit_days:                    this._is_credit_sale ? this._credit_days : 0,
+			credit_terms:                   this._is_credit_sale ? (this._credit_terms || "Custom") : "",
+			credit_interest_rate:           this._is_credit_sale ? (this._credit_interest_rate || 0) : 0,
+			credit_grace_period:            this._is_credit_sale ? (this._credit_grace_period || 0) : 0,
+			credit_partial_payment:         this._is_credit_sale ? (this._credit_partial_payment || 0) : 0,
+			credit_approved_by:             this._is_credit_sale ? (this._credit_approved_by || "") : "",
 			credit_reference:               this._is_credit_sale ? this._credit_reference : "",
 			credit_notes:                   this._is_credit_sale ? this._credit_notes : "",
 			is_free_sale:                   this._is_free_sale ? 1 : 0,
 			free_sale_reason:               this._is_free_sale ? this._free_sale_reason : "",
 			free_sale_approved_by:          this._is_free_sale ? this._free_sale_approved_by : "",
+			free_sale_approved_at:          this._is_free_sale ? (this._free_sale_approved_at || null) : null,
 			free_sale_approval_name:        this._is_free_sale ? (this._free_sale_approval_name || "") : "",
 			advance_amount:                 advance > 0 ? advance : 0,
 			kiosk_token:                    PosState.kiosk_token || null,
@@ -2086,6 +2235,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const days = parseInt(this._credit_days) || 30;
 		const due = frappe.datetime.add_days(frappe.datetime.nowdate(), days);
 		this._overlay.find("#ch-pay-credit-due-date").text(frappe.datetime.str_to_user(due));
+		// Payment reminder = due_date - 5 days (min today)
+		const today = frappe.datetime.nowdate();
+		let reminder = frappe.datetime.add_days(due, -5);
+		if (reminder < today) reminder = today;
+		this._overlay.find("#ch-pay-credit-reminder").text(frappe.datetime.str_to_user(reminder));
 	}
 
 	_request_credit_override(cart_total, available, overdue_count) {
@@ -2119,6 +2273,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			}).then(r => {
 				if (r && r.approved) {
 					me._credit_approved = true;
+					// Store approver name for audit trail
+					me._credit_approved_by = r.manager_name || "";
+					if (me._overlay) {
+						me._overlay.find("#ch-pay-credit-approved-by").val(me._credit_approved_by);
+					}
 					me._credit_notes = (me._credit_notes ? me._credit_notes + "; " : "") +
 						`Override: ${values.override_reason} (by ${r.manager_name})`;
 					if (me._overlay) {
@@ -2248,6 +2407,15 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Update approval state
 		if (all_approved) {
 			this._free_sale_approved_by = managers.map(m => m.manager_name).join(", ");
+			// Capture approval timestamp for audit trail
+			this._free_sale_approved_at = frappe.datetime.now_datetime();
+			if (this._overlay) {
+				const $at = this._overlay.find("#ch-pay-free-approved-at");
+				$at.find("#ch-pay-free-approved-at-txt").text(
+					__("Approved at {0}", [frappe.datetime.str_to_user(this._free_sale_approved_at)])
+				);
+				$at.show();
+			}
 			clearInterval(this._approval_poll);
 		}
 		this._update_totals();
