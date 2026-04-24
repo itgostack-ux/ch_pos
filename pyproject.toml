@@ -8,6 +8,9 @@ description = "POS solution for GoGizmo & GoFix retail stores"
 requires-python = ">=3.14,<3.15"
 readme = "README.md"
 license = { text = "MIT" }
+dependencies = [
+    "PyMuPDF>=1.23.0",  # PDF parsing — provides `import fitz`
+]
 
 [build-system]
 requires = ["flit_core >=3.4,<4"]
