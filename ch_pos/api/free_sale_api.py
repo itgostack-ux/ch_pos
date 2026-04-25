@@ -13,6 +13,30 @@ from frappe import _
 from frappe.utils import now_datetime, get_url
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _rate_limit_token_attempt(token: str) -> None:
+    """Raise PermissionError if this token has been attempted too many times.
+
+    Tracks attempts in Redis with a 15-minute TTL.  After 10 failed
+    attempts the endpoint returns a locked response.  Successful
+    responses clear the counter (see respond_to_approval).
+    """
+    cache_key = f"free_sale_token_attempts:{token}"
+    attempts = frappe.cache().get_value(cache_key) or 0
+    if int(attempts) >= 10:
+        frappe.respond_as_web_page(
+            _("Too Many Attempts"),
+            _("This approval link has been accessed too many times. "
+              "Please contact your administrator."),
+            indicator_color="red",
+        )
+        raise frappe.PermissionError
+    frappe.cache().set_value(cache_key, int(attempts) + 1, expires_in_sec=900)
+
+
 @frappe.whitelist()
 def get_category_managers_for_cart(items) -> list:
     """Given cart items, return the unique category managers required.
@@ -210,19 +234,29 @@ def _send_approval_email(approval_doc, manager_info, token):
 
 
 @frappe.whitelist(allow_guest=True)
-def respond_to_approval(token, manager, action) -> None:
+def respond_to_approval(token: str, manager: str, action: str) -> None:
     """Handle manager's response from email link.
 
-    Uses token-based authentication — the cryptographic token proves
-    the request came from the correct email recipient.
+    Token-based authentication — the cryptographic token (32+ chars) proves
+    the request came from the correct email recipient.  This endpoint must
+    remain guest-accessible because managers click links in email without
+    being logged into Frappe.
+
+    Brute-force protection: max 10 attempts per token per 15 minutes via
+    Redis cache.  Tokens older than 24 h are automatically expired.
 
     Args:
-        token: Approval token (cryptographic, 32 bytes)
-        manager: Manager's user/email
+        token: Approval token (cryptographic, ≥32 chars)
+        manager: Manager's Frappe user/email
         action: 'approve' or 'reject'
     """
     if action not in ("approve", "reject"):
-        frappe.throw(_("Invalid action"), title=_("API Error"))
+        frappe.respond_as_web_page(
+            _("Invalid Request"),
+            _("Action must be 'approve' or 'reject'."),
+            indicator_color="red",
+        )
+        return
 
     if not token or len(token) < 20:
         frappe.respond_as_web_page(
@@ -231,6 +265,9 @@ def respond_to_approval(token, manager, action) -> None:
             indicator_color="red",
         )
         return
+
+    # Rate-limit: max 10 attempts per token in a 15-minute window
+    _rate_limit_token_attempt(token)
 
     approval = frappe.get_all(
         "CH Free Sale Approval",
@@ -246,22 +283,22 @@ def respond_to_approval(token, manager, action) -> None:
         )
         return
 
-    # POS-5 fix: Token expiry — reject tokens older than 24 hours
+    # Token TTL — reject links older than configured hours (default 24)
     from frappe.utils import time_diff_in_hours
+    ttl_hours = frappe.db.get_single_value("CH POS Control Settings", "approval_token_ttl_hours") or 24
     age_hours = time_diff_in_hours(now_datetime(), approval[0].creation)
-    if age_hours > 24:
+    if age_hours > ttl_hours:
         frappe.respond_as_web_page(
             _("Expired"),
-            _("This approval link has expired (valid for 24 hours). "
-              "Please request a new approval."),
+            _("This approval link has expired (valid for {0} hours). "
+              "Please request a new approval.").format(int(ttl_hours)),
             indicator_color="red",
         )
         return
 
     doc = frappe.get_doc("CH Free Sale Approval", approval[0].name)
 
-    # Verify the manager email matches a row in this approval
-    # This prevents token reuse with a different manager email
+    # Verify the manager matches a pending row — prevents token reuse by a different person
     found = False
     for row in doc.approvals:
         if row.manager == manager and row.status == "Pending":
@@ -277,6 +314,9 @@ def respond_to_approval(token, manager, action) -> None:
             indicator_color="orange",
         )
         return
+
+    # Clear rate-limit counter on successful response
+    frappe.cache().delete_value(f"free_sale_token_attempts:{token}")
 
     doc.update_status()
 

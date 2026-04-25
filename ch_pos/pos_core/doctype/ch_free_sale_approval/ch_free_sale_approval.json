@@ -21,7 +21,9 @@
   "cart_snapshot",
   "approval_token",
   "section_approvals",
-  "approvals"
+  "approvals",
+  "used",
+  "used_in_invoice"
  ],
  "fields": [
   {
@@ -137,6 +139,22 @@
    "label": "Approvals",
    "options": "CH Free Sale Approval Detail",
    "reqd": 1
+  },
+  {
+   "fieldname": "used",
+   "fieldtype": "Check",
+   "label": "Used",
+   "default": "0",
+   "read_only": 1,
+   "in_list_view": 0,
+   "description": "Set to 1 when the approval is consumed by a POS invoice. Prevents replay."
+  },
+  {
+   "fieldname": "used_in_invoice",
+   "fieldtype": "Link",
+   "options": "Sales Invoice",
+   "label": "Used in Invoice",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,

@@ -621,7 +621,7 @@ def get_z_report(store, business_date) -> dict:
     if session_names:
         invoice_rows = frappe.db.sql(
             """
-            SELECT pi.custom_pos_session AS session_name,
+            SELECT pi.custom_ch_pos_session AS session_name,
                    SUM(CASE WHEN pi.is_return = 0 THEN 1 ELSE 0 END) AS total_invoices,
                    SUM(CASE WHEN pi.is_return = 0 THEN pi.grand_total ELSE 0 END) AS total_sales,
                    SUM(CASE WHEN pi.is_return = 1 THEN ABS(pi.grand_total) ELSE 0 END) AS total_returns,
@@ -629,8 +629,8 @@ def get_z_report(store, business_date) -> dict:
             FROM `tabSales Invoice` pi
             WHERE pi.docstatus = 1
               AND pi.is_consolidated = 0
-              AND pi.custom_pos_session IN %(sessions)s
-            GROUP BY pi.custom_pos_session
+              AND pi.custom_ch_pos_session IN %(sessions)s
+            GROUP BY pi.custom_ch_pos_session
             """,
             {"sessions": session_names},
             as_dict=True,
@@ -671,7 +671,7 @@ def get_z_report(store, business_date) -> dict:
             WHERE pi.docstatus = 1
               AND pi.is_consolidated = 0
               AND pi.is_return = 0
-              AND pi.custom_pos_session IN %(sessions)s
+              AND pi.custom_ch_pos_session IN %(sessions)s
             GROUP BY sip.mode_of_payment
             """,
             {"sessions": session_names},

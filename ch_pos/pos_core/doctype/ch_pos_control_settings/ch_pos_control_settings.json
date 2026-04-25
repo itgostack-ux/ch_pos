@@ -24,7 +24,13 @@
   "sales_enforcement_section",
   "enforce_attach_rules",
   "column_break_attach",
-  "enforce_token_linkage_globally"
+  "enforce_token_linkage_globally",
+  "gl_accounts_section",
+  "safe_account",
+  "petty_expense_account",
+  "col_break_gl_accounts",
+  "promotional_expense_account",
+  "approval_token_ttl_hours"
  ],
  "fields": [
   {
@@ -151,6 +157,44 @@
    "label": "Enforce Token Linkage Globally",
    "default": "0",
    "description": "Override per-store setting \u2014 require kiosk token on ALL stores."
+  },
+  {
+   "fieldname": "gl_accounts_section",
+   "fieldtype": "Section Break",
+   "label": "GL Accounts",
+   "description": "Accounts used for POS-generated journal entries (cash drop, petty expense, free sale write-off)."
+  },
+  {
+   "fieldname": "safe_account",
+   "fieldtype": "Link",
+   "label": "Safe / Vault Account",
+   "options": "Account",
+   "description": "Debited when cash is dropped from register to safe (Dr this \u2192 Cr POS Cash)."
+  },
+  {
+   "fieldname": "petty_expense_account",
+   "fieldtype": "Link",
+   "label": "Petty Expense Account",
+   "options": "Account",
+   "description": "Debited when petty cash is paid out from register (Dr this \u2192 Cr POS Cash)."
+  },
+  {
+   "fieldname": "col_break_gl_accounts",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "promotional_expense_account",
+   "fieldtype": "Link",
+   "label": "Promotional Expense Account",
+   "options": "Account",
+   "description": "Debited when a free sale is created to reclassify COGS as promotional expense."
+  },
+  {
+   "fieldname": "approval_token_ttl_hours",
+   "fieldtype": "Int",
+   "label": "Approval Token TTL (Hours)",
+   "default": "24",
+   "description": "Free sale approval token expires after this many hours."
   }
  ],
  "index_web_pages_for_search": 0,

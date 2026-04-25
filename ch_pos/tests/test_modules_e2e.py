@@ -418,11 +418,12 @@ def test_offers_engine(ctx):
 
     # OF-06: Validate real coupon if any exist
     try:
-        coupon = frappe.db.get_value("Coupon Code", {"used": 0}, "name")
-        if coupon:
-            result = offers.validate_coupon_code(coupon)
+        # Must pass the coupon_code field value (not the document name)
+        coupon_code_val = frappe.db.get_value("Coupon Code", {"used": 0}, "coupon_code")
+        if coupon_code_val:
+            result = offers.validate_coupon_code(coupon_code_val)
             assert_true(result.get("valid"), "valid coupon should return valid=True")
-            log_pass("OF-06 validate_coupon_code valid", coupon)
+            log_pass("OF-06 validate_coupon_code valid", coupon_code_val)
         else:
             log_skip("OF-06 validate_coupon_code valid", "no unused coupons")
     except Exception as e:

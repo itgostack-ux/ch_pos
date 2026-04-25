@@ -159,6 +159,12 @@ def _ensure_customer_loyalty():
     if not lp:
         frappe.db.set_value("Customer", CUSTOMER, "loyalty_program", "QA Loyalty Program")
         frappe.db.commit()
+    # Ensure loyalty program has correct company and cost center for GL posting
+    frappe.db.set_value("Loyalty Program", "QA Loyalty Program", {
+        "company": COMPANY,
+        "cost_center": "Main - GGR",
+    })
+    frappe.db.commit()
 
     total_pts = frappe.db.sql(
         """SELECT IFNULL(SUM(loyalty_points), 0)
@@ -556,6 +562,25 @@ def test_b11_loyalty_points():
 
 def test_b12_free_sale():
     """Zero-payment free sale with reason + approver."""
+    # Create a test approval doc for the session user so FIN-3 validation passes
+    approval = frappe.get_doc({
+        "doctype": "CH Free Sale Approval",
+        "requested_by": frappe.session.user,
+        "status": "Approved",
+        "pos_profile": POS_PROFILE,
+        "reason": "QA Test Free Sale",
+        "used": 0,
+        "approvals": [{
+            "doctype": "CH Free Sale Approval Detail",
+            "category": "Mobiles",
+            "manager": "Administrator",
+            "manager_name": "Administrator",
+            "status": "Approved",
+        }],
+    })
+    approval.insert(ignore_permissions=True)
+    frappe.db.commit()
+
     result = _create_invoice(
         pos_profile=POS_PROFILE, customer=CUSTOMER,
         items=[_item_row()],

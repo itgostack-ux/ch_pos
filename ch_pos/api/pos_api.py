@@ -347,7 +347,7 @@ def create_pos_invoice(pos_profile, customer, items,
     _enforce_token_linkage(pos_profile, kiosk_token)
 
     inv = frappe.new_doc("Sales Invoice")
-    inv.custom_pos_session = session_name
+    inv.custom_ch_pos_session = session_name
     inv.pos_profile = pos_profile
     inv.customer = customer
     inv.company = profile.company
@@ -438,25 +438,34 @@ def create_pos_invoice(pos_profile, customer, items,
     # Payment — supports split payments (new) and single mode (legacy)
     # Free sales may have no payments
     if cint(is_free_sale):
-        # POS-3 fix: Server-side verification of free sale approval
-        if free_sale_approved_by:
-            # Verify there's an approved CH Free Sale Approval for this user
-            approved = frappe.db.exists("CH Free Sale Approval", {
-                "requested_by": frappe.session.user,
-                "status": "Approved",
-            })
-            if not approved:
-                frappe.throw(
-                    frappe._("Free sale requires an approved CH Free Sale Approval. "
-                             "No approved request found for the current user."),
-                    title=frappe._("Free Sale Not Approved"),
-                )
-        else:
+        # Server-side verification: find the most recent unused approved CH Free Sale Approval
+        # for this cashier.  Mark it used atomically so it cannot be replayed.
+        if not free_sale_approved_by:
             frappe.throw(
                 frappe._("Free sale requires manager approval. "
                          "Please request approval before proceeding."),
                 title=frappe._("Free Sale Not Approved"),
             )
+        approval_name = frappe.db.get_value(
+            "CH Free Sale Approval",
+            {
+                "requested_by": frappe.session.user,
+                "status": "Approved",
+                "used": 0,
+            },
+            "name",
+            order_by="modified desc",
+        )
+        if not approval_name:
+            frappe.throw(
+                frappe._("Free sale requires an approved CH Free Sale Approval. "
+                         "No unused approved request found for the current user."),
+                title=frappe._("Free Sale Not Approved"),
+            )
+        # Mark the approval as used immediately — prevents the same approval
+        # from being submitted twice (e.g. double-click or network retry).
+        frappe.db.set_value("CH Free Sale Approval", approval_name, "used", 1)
+        frappe.db.set_value("CH Free Sale Approval", approval_name, "used_in_invoice", inv.name or "pending")
 
         # Free sale — set custom fields, no payment required
         inv.custom_is_free_sale = 1
@@ -566,12 +575,16 @@ def create_pos_invoice(pos_profile, customer, items,
         )
         if not ba:
             frappe.throw(frappe._("Buyback Assessment {0} not found").format(exchange_assessment))
-        # POS-4 fix: Validate assessment status — only allow Approved/QC Passed
-        allowed_statuses = ("Approved", "QC Passed", "Ready", "Quote Accepted")
-        if ba.status in ("Expired", "Cancelled", "Rejected", "Draft"):
+        # Only assessments where the customer has accepted a price quote are valid for exchange credit.
+        # Use a whitelist (not a blacklist) so new statuses don't accidentally pass through.
+        _VALID_EXCHANGE_STATUSES = frozenset({"Quoted", "Quote Accepted"})
+        if ba.status not in _VALID_EXCHANGE_STATUSES:
             frappe.throw(
-                frappe._("Buyback Assessment {0} is {1} and cannot be used as exchange credit").format(
-                    exchange_assessment, ba.status))
+                frappe._("Buyback Assessment {0} cannot be used as exchange credit "
+                         "(current status: {1}; must be Quoted or Quote Accepted).").format(
+                    frappe.bold(exchange_assessment), frappe.bold(ba.status)),
+                title=frappe._("Invalid Exchange Assessment"),
+            )
         if ba.linked_pos_invoice:
             frappe.throw(
                 frappe._("Buyback Assessment {0} was already used in invoice {1}").format(
@@ -654,22 +667,16 @@ def create_pos_invoice(pos_profile, customer, items,
 
     # Loyalty points redemption
     if cint(redeem_loyalty_points):
-        # POS-9 fix: Verify customer has sufficient loyalty points before redemption
         requested_points = cint(loyalty_points)
         if requested_points > 0 and customer and customer != "Walk-in Customer":
-            try:
-                loyalty_info = get_customer_loyalty(customer, company)
-                available_points = cint(loyalty_info.get("points", 0))
-                if requested_points > available_points:
-                    frappe.throw(
-                        frappe._("Insufficient loyalty points. Requested: {0}, Available: {1}").format(
-                            requested_points, available_points),
-                        title=frappe._("Loyalty Points"),
-                    )
-            except frappe.ValidationError:
-                raise
-            except Exception:
-                frappe.log_error(frappe.get_traceback(), "Loyalty balance check failed")
+            loyalty_info = get_customer_loyalty(customer, profile.company)
+            available_points = cint(loyalty_info.get("points", 0))
+            if requested_points > available_points:
+                frappe.throw(
+                    frappe._("Insufficient loyalty points. Requested: {0}, Available: {1}").format(
+                        requested_points, available_points),
+                    title=frappe._("Loyalty Points"),
+                )
 
         inv.redeem_loyalty_points = 1
         inv.loyalty_points = requested_points
@@ -1826,31 +1833,22 @@ def create_pos_return(original_invoice, return_items, sales_executive=None) -> d
             )
         raise
 
-    # POS-8 fix: Create return incentive (clawback) entries — configurable strict mode
+    # Create return incentive (clawback) entries
     incentive_clawback = 0
     if sales_executive:
         try:
             incentive_clawback = _create_return_incentive_entries(ret, sales_executive)
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"Incentive clawback failed for {ret.name}")
-            # POS-8 fix: Check if strict clawback mode is enabled
-            strict_clawback = frappe.db.get_single_value("POS Settings", "strict_incentive_clawback") if \
-                frappe.get_meta("POS Settings").has_field("strict_incentive_clawback") else 0
-            if strict_clawback:
-                frappe.throw(
-                    frappe._("Return blocked: Incentive clawback failed for {0}. "
-                             "Cannot process return until clawback is resolved. "
-                             "Contact the store manager.").format(ret.name),
-                    title=frappe._("Incentive Clawback Required"),
-                )
-            else:
-                frappe.msgprint(
-                    frappe._("Warning: Return processed but incentive clawback failed for {0}. "
-                             "Please notify the store manager to review incentive entries manually."
-                    ).format(ret.name),
-                    indicator="orange",
-                    title=frappe._("Incentive Clawback Failed"),
-                )
+            # Always raise — a return without incentive recovery is a financial integrity failure.
+            # The store manager must resolve this before the return is processed.
+            frappe.throw(
+                frappe._("Return blocked: Incentive clawback journal entry failed for {0}. "
+                         "Contact the store manager to resolve incentive entries before retrying.").format(
+                    frappe.bold(ret.name)
+                ),
+                title=frappe._("Incentive Clawback Required"),
+            )
 
     # Audit
     try:
@@ -2042,6 +2040,17 @@ def check_serial_returnable(serial_no, original_invoice=None) -> dict:
         return {"returnable": False, "reason": frappe._("Serial No {0} was used in buyback {1}").format(
             serial_no, buyback
         )}
+
+    # Check CH Serial Lifecycle status — only "Sold" or "Delivered" devices can be returned
+    if frappe.db.exists("CH Serial Lifecycle", serial_no):
+        lifecycle_status = frappe.db.get_value("CH Serial Lifecycle", serial_no, "lifecycle_status")
+        if lifecycle_status and lifecycle_status not in ("Sold", "Delivered"):
+            return {
+                "returnable": False,
+                "reason": frappe._("Serial No {0} cannot be returned — current lifecycle status is {1}").format(
+                    serial_no, lifecycle_status
+                ),
+            }
 
     return {"returnable": True, "serial_no": serial_no, "item_code": sn.item_code}
 
@@ -3017,7 +3026,7 @@ def customer_360(identifier, company=None) -> dict:
                 FROM `tabContact Phone` cp
                 JOIN `tabContact` c ON c.name = cp.parent
                 JOIN `tabDynamic Link` dl ON dl.parent = c.name AND dl.link_doctype = 'Customer'
-                WHERE cp.phone = %(phone)s OR cp.mobile_no = %(phone)s
+                WHERE cp.phone = %(phone)s
                 LIMIT 1
             """, {"phone": identifier}, as_dict=True)
             if contact_phone:

@@ -68,6 +68,7 @@ export class CartPanel {
 				<div class="ch-pos-product-exchange-banner" style="display:none"></div>
 				<div class="ch-pos-exception-banner" style="display:none"></div>
 				<div class="ch-pos-warranty-claim-banner" style="display:none"></div>
+				<div class="ch-pos-combo-banner" style="display:none"></div>
 				<div class="ch-pos-credit-warning" style="display:none"></div>
 			</div>
 
@@ -224,6 +225,28 @@ export class CartPanel {
 		} else {
 			banner.hide().empty();
 		}
+	}
+
+	_update_combo_banner(combos) {
+		const banner = this.wrapper.find(".ch-pos-combo-banner");
+		if (!banner.length) return;
+		if (!combos || !combos.length) {
+			banner.hide().empty();
+			return;
+		}
+		const rows = combos.map((c) =>
+			`<div style="display:flex;align-items:center;gap:8px;">
+				<i class="fa fa-gift"></i>
+				<span><strong>${frappe.utils.escape_html(c.offer_title)}</strong> —
+				${__("Save")} <strong>₹${format_number(c.savings, null, 0)}</strong></span>
+			</div>`
+		).join("");
+		banner.html(`
+			<div style="padding:6px 10px;background:rgba(39,174,96,0.1);border-radius:var(--pos-radius-sm,6px);
+				margin-bottom:6px;font-size:12px;color:#27ae60;">
+				${rows}
+			</div>
+		`).show();
 	}
 
 	_render_customer_selector() {
@@ -464,6 +487,9 @@ export class CartPanel {
 		EventBus.on("mode:switch", () => this._update_token_banner());
 		EventBus.on("state:transaction_reset", () => this._update_token_banner());
 		this._update_token_banner();
+
+		// H-11: Combo offer banner
+		EventBus.on("combo_offers:detected", (combos) => this._update_combo_banner(combos));
 
 		// Exception & Warranty banners
 		w.on("click", ".ch-pos-unlink-exception", () => {

@@ -152,6 +152,11 @@ export class CartService {
 		// POS-10 fix: Auto-persist cart to localStorage on every update
 		EventBus.on("cart:updated", () => this._persist_active_cart());
 
+		// H-11: Combo offer detection — runs after any item is added or qty changed
+		EventBus.on("cart:item_added", () => this._check_combo_offers());
+		EventBus.on("cart:qty_set", () => this._check_combo_offers());
+		EventBus.on("cart:qty_plus", () => this._check_combo_offers());
+
 		EventBus.on("exchange:open", () => this._show_exchange_dialog());
 		EventBus.on("vas:open", () => this._show_vas_dialog());
 		EventBus.on("product_exchange:open", () => this._show_product_exchange_dialog());
@@ -610,6 +615,42 @@ export class CartService {
 			cart_item.discount_amount = flt(cart_item.rate - best.value);
 			cart_item.discount_percentage = cart_item.rate ? flt(cart_item.discount_amount / cart_item.rate * 100) : 0;
 		}
+	}
+
+	// ── Combo Offer Detection (H-11) ────────────────────
+	_check_combo_offers() {
+		if (!PosState.cart.length) {
+			EventBus.emit("combo_offers:detected", []);
+			return;
+		}
+		const cart_items = PosState.cart.map((i) => ({
+			item_code: i.item_code,
+			qty: i.qty,
+			rate: i.rate,
+			amount: flt(i.qty * i.rate),
+		}));
+		frappe.call({
+			method: "ch_pos.api.offers.check_combo_offers",
+			args: {
+				cart_items: JSON.stringify(cart_items),
+				company: PosState.company,
+			},
+			callback: (r) => {
+				const combos = r.message || [];
+				EventBus.emit("combo_offers:detected", combos);
+				if (combos.length) {
+					combos.forEach((combo) => {
+						frappe.show_alert({
+							message: __("Combo offer available: {0} — Save ₹{1}", [
+								combo.offer_title,
+								format_number(combo.savings, null, 0),
+							]),
+							indicator: "green",
+						});
+					});
+				}
+			},
+		});
 	}
 
 	// ── Warranty Prompt ─────────────────────────────────
