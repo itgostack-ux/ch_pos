@@ -4134,22 +4134,28 @@ def get_customer_pos_info(customer, company=None) -> dict:
             price_list = group_pl
 
     # Determine customer type (B2B / B2C)
-    # Priority: saved GSTIN on billing address → customer_type == Company → group heuristics
+    # Priority: custom_gstin on Customer doc → company type → group heuristics
     customer_type = "B2C"
     customer_gstin = ""
 
-    # Fetch GSTIN from the customer's primary billing address
-    billing_addr_name = frappe.db.get_value(
-        "Dynamic Link",
-        {"link_doctype": "Customer", "link_name": customer, "parenttype": "Address"},
-        "parent",
-        order_by="modified desc",
-    )
-    if billing_addr_name:
-        saved_gstin = frappe.db.get_value("Address", billing_addr_name, "gstin") or ""
-        if saved_gstin.strip():
-            customer_gstin = saved_gstin.strip().upper()
-            customer_type = "B2B"
+    # Prefer GSTIN stored directly on Customer master (set by POS quick-create or
+    # desk form).  Falls back to billing address lookup for legacy customers.
+    if cust.custom_gstin:
+        customer_gstin = cust.custom_gstin.strip().upper()
+        customer_type = "B2B"
+    else:
+        # Legacy fallback: check billing address (for customers created before this feature)
+        billing_addr_name = frappe.db.get_value(
+            "Dynamic Link",
+            {"link_doctype": "Customer", "link_name": customer, "parenttype": "Address"},
+            "parent",
+            order_by="modified desc",
+        )
+        if billing_addr_name:
+            saved_gstin = frappe.db.get_value("Address", billing_addr_name, "gstin") or ""
+            if saved_gstin.strip():
+                customer_gstin = saved_gstin.strip().upper()
+                customer_type = "B2B"
 
     if not customer_gstin:
         if cust.customer_type == "Company":
@@ -5077,6 +5083,9 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         cust.ch_whatsapp_number = whatsapp_number.strip()
     cust.flags.ignore_permissions = True
     cust.flags.ignore_mandatory = True
+    # Store GSTIN directly on Customer master for instant lookup
+    if gstin:
+        cust.custom_gstin = gstin.strip().upper()
     cust.save()
 
     # Add contact details if provided
