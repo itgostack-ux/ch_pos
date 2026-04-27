@@ -560,6 +560,37 @@ CUSTOM_FIELDS = {
             "description": "Down payment amount collected for EMI/Finance",
             "module": "POS Core",
         },
+        {
+            "fieldname": "custom_gateway_provider",
+            "fieldtype": "Data",
+            "label": "Gateway Provider",
+            "insert_after": "custom_finance_down_payment",
+            "description": "Payment gateway provider used for this payment line",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_payment_machine",
+            "fieldtype": "Link",
+            "options": "CH Payment Machine",
+            "label": "Payment Machine",
+            "insert_after": "custom_gateway_provider",
+            "description": "Selected machine / terminal for Pay Now",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_gateway_order_id",
+            "fieldtype": "Data",
+            "label": "Gateway Order ID",
+            "insert_after": "custom_payment_machine",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_gateway_status",
+            "fieldtype": "Data",
+            "label": "Gateway Status",
+            "insert_after": "custom_gateway_order_id",
+            "module": "POS Core",
+        },
     ],
     # Company — gift card liability account for GL posting
     "Company": [

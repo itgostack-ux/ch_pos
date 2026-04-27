@@ -76,9 +76,10 @@ export class PaymentDialog {
 		this._dlg_voucher_name     = "";
 		this._dlg_voucher_balance  = 0;
 
-		// Sale types & finance partners (loaded async on overlay mount)
+		// Sale types, finance partners, and payment machines (loaded async on overlay mount)
 		this._sale_types = [];
 		this._finance_partners = [];
+		this._payment_machine_data = { providers: [], machines: [] };
 
 		this._bind_events();
 	}
@@ -199,6 +200,7 @@ export class PaymentDialog {
 		this._restore_payment_ui();
 		this._load_disc_reasons();
 		this._load_finance_partners();
+		this._load_payment_machines();
 	}
 
 	/** Re-render the Add Payment buttons from PosState.payment_modes.
@@ -722,6 +724,20 @@ placeholder="${__("Enter code...")}">
 		// Card last 4
 		ov.on("input", ".ch-pay-row-card4", e => {
 			this._payments[parseInt($(e.currentTarget).data("idx"))].card_last_four = $(e.currentTarget).val().trim();
+		});
+		ov.on("change", ".ch-pay-row-gateway-provider", e => {
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			this._payments[idx].gateway_provider = $(e.currentTarget).val();
+			this._payments[idx].payment_machine = "";
+			this._render_payments();
+			this._update_totals();
+		});
+		ov.on("change", ".ch-pay-row-machine", e => {
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			this._payments[idx].payment_machine = $(e.currentTarget).val();
+		});
+		ov.on("click", ".ch-pay-row-paynow", e => {
+			this._initiate_gateway_payment(parseInt($(e.currentTarget).data("idx")));
 		});
 
 		// Finance/EMI fields
@@ -1281,6 +1297,91 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		});
 	}
 
+	_load_payment_machines() {
+		this._payment_machine_data = { providers: [], machines: [] };
+		if (!PosState.company || !PosState.store) return;
+		frappe.xcall("ch_pos.api.payment_gateway_api.get_payment_machines", {
+			company: PosState.company,
+			store: PosState.store,
+			pos_profile: PosState.pos_profile,
+		}).then((data) => {
+			this._payment_machine_data = data || { providers: [], machines: [] };
+			if (this._payments.some(p => ["upi", "card"].includes(this._mop_type(p.mode)))) {
+				this._render_payments();
+				this._update_totals();
+			}
+		}).catch((err) => {
+			console.error("Payment machines load failed:", err);
+		});
+	}
+
+	_gateway_providers_for_mode(mode) {
+		const target = this._normalize_gateway_mode(mode);
+		const providers = new Set();
+		(this._payment_machine_data.machines || []).forEach((machine) => {
+			const supported = (machine.supported_payment_modes || "").toUpperCase();
+			if (!supported || supported.includes(target)) {
+				providers.add(machine.provider);
+			}
+		});
+		return Array.from(providers);
+	}
+
+	_machines_for_row(payment) {
+		const target = this._normalize_gateway_mode(payment.mode);
+		return (this._payment_machine_data.machines || []).filter((machine) => {
+			if (payment.gateway_provider && machine.provider !== payment.gateway_provider) return false;
+			const supported = (machine.supported_payment_modes || "").toUpperCase();
+			return !supported || supported.includes(target);
+		});
+	}
+
+	_normalize_gateway_mode(mop_name) {
+		const type = this._mop_type(mop_name);
+		if (type === "upi") return "UPI";
+		if (type === "card") return "CARD";
+		if (type === "cash") return "CASH";
+		return (mop_name || "").toUpperCase();
+	}
+
+	_initiate_gateway_payment(idx) {
+		const payment = this._payments[idx];
+		if (!payment) return;
+		if (flt(payment.amount) <= 0) {
+			frappe.show_alert({ message: __("Enter amount before Pay Now"), indicator: "orange" });
+			return;
+		}
+		if (!payment.payment_machine) {
+			frappe.show_alert({ message: __("Select a payment machine"), indicator: "orange" });
+			return;
+		}
+
+		frappe.xcall("ch_pos.api.payment_gateway_api.initiate_payment", {
+			machine_name: payment.payment_machine,
+			amount: flt(payment.amount),
+			payment_mode: payment.mode,
+			customer: PosState.customer,
+			customer_name: PosState.customer_info?.customer_name || PosState.customer,
+			customer_email: PosState.customer_info?.email_id || "",
+			customer_phone: PosState.customer_info?.mobile_no || PosState.customer_info?.mobile || "",
+			merchant_order_reference: this._gen_uuid(),
+			notes: `POS ${payment.mode} payment for ${PosState.customer || "Customer"}`,
+		}).then((res) => {
+			payment.gateway_provider = res.provider || payment.gateway_provider || "";
+			payment.payment_machine = res.machine || payment.payment_machine || "";
+			payment.gateway_order_id = res.order_id || "";
+			payment.gateway_status = res.status || "CREATED";
+			this._render_payments();
+			this._update_totals();
+			frappe.show_alert({
+				message: __("{0} order {1} created on {2}", [payment.mode, res.order_id || res.merchant_order_reference || "", res.machine_name || res.machine || "machine"]),
+				indicator: "green",
+			});
+		}).catch((err) => {
+			console.error("Gateway initiation failed:", err);
+		});
+	}
+
 	/** Sync finance sale type selections into the payment row's finance fields */
 	_sync_finance_to_payment(provider, tenure, approval_id) {
 		for (let i = 0; i < this._payments.length; i++) {
@@ -1417,11 +1518,46 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			const type = this._mop_type(p.mode);
 			let ref_html = "";
 			if (type === "upi") {
-				ref_html = `<input type="text" class="form-control form-control-sm ch-pay-row-utr mt-1" data-idx="${idx}"
-					placeholder="${__("UPI UTR / Txn ID")}" value="${frappe.utils.escape_html(p.upi_transaction_id || "")}">`;
+				const providers = this._gateway_providers_for_mode(p.mode);
+				const machines = this._machines_for_row(p);
+				ref_html = `
+					<div class="ch-pay-gateway-refs mt-1">
+						<div class="ch-pay-fin-row">
+							<select class="form-control form-control-sm ch-pay-row-gateway-provider" data-idx="${idx}">
+								<option value="">${__("Select Provider")}</option>
+								${providers.map((provider) => `<option value="${frappe.utils.escape_html(provider)}" ${provider === (p.gateway_provider || "") ? "selected" : ""}>${frappe.utils.escape_html(provider)}</option>`).join("")}
+							</select>
+							<select class="form-control form-control-sm ch-pay-row-machine" data-idx="${idx}">
+								<option value="">${__("Select Machine")}</option>
+								${machines.map((machine) => `<option value="${frappe.utils.escape_html(machine.name)}" ${machine.name === (p.payment_machine || "") ? "selected" : ""}>${frappe.utils.escape_html(machine.machine_name)}${machine.terminal_id ? ` (${frappe.utils.escape_html(machine.terminal_id)})` : ""}</option>`).join("")}
+							</select>
+						</div>
+						<div class="ch-pay-fin-row">
+							<button class="btn btn-xs btn-default ch-pay-row-paynow" data-idx="${idx}"><i class="fa fa-bolt"></i> ${__("Pay Now")}</button>
+							<div class="text-muted small" style="padding-top:6px;">${p.gateway_order_id ? `${__("Order")}: ${frappe.utils.escape_html(p.gateway_order_id)}${p.gateway_status ? ` | ${frappe.utils.escape_html(p.gateway_status)}` : ""}` : __("Choose provider + machine to send amount")}</div>
+						</div>
+						<input type="text" class="form-control form-control-sm ch-pay-row-utr" data-idx="${idx}"
+							placeholder="${__("UPI UTR / Txn ID")}" value="${frappe.utils.escape_html(p.upi_transaction_id || "")}">
+					</div>`;
 			} else if (type === "card") {
+				const providers = this._gateway_providers_for_mode(p.mode);
+				const machines = this._machines_for_row(p);
 				ref_html = `
 					<div class="ch-pay-card-refs mt-1">
+						<div class="ch-pay-fin-row">
+							<select class="form-control form-control-sm ch-pay-row-gateway-provider" data-idx="${idx}">
+								<option value="">${__("Select Provider")}</option>
+								${providers.map((provider) => `<option value="${frappe.utils.escape_html(provider)}" ${provider === (p.gateway_provider || "") ? "selected" : ""}>${frappe.utils.escape_html(provider)}</option>`).join("")}
+							</select>
+							<select class="form-control form-control-sm ch-pay-row-machine" data-idx="${idx}">
+								<option value="">${__("Select Machine")}</option>
+								${machines.map((machine) => `<option value="${frappe.utils.escape_html(machine.name)}" ${machine.name === (p.payment_machine || "") ? "selected" : ""}>${frappe.utils.escape_html(machine.machine_name)}${machine.terminal_id ? ` (${frappe.utils.escape_html(machine.terminal_id)})` : ""}</option>`).join("")}
+							</select>
+						</div>
+						<div class="ch-pay-fin-row">
+							<button class="btn btn-xs btn-default ch-pay-row-paynow" data-idx="${idx}"><i class="fa fa-bolt"></i> ${__("Pay Now")}</button>
+							<div class="text-muted small" style="padding-top:6px;">${p.gateway_order_id ? `${__("Order")}: ${frappe.utils.escape_html(p.gateway_order_id)}${p.gateway_status ? ` | ${frappe.utils.escape_html(p.gateway_status)}` : ""}` : __("Choose provider + machine to send amount")}</div>
+						</div>
 						<input type="text" class="form-control form-control-sm ch-pay-row-rrn" data-idx="${idx}"
 							placeholder="${__("Card RRN")}" value="${frappe.utils.escape_html(p.card_reference || "")}">
 						<input type="text" class="form-control form-control-sm ch-pay-row-card4" data-idx="${idx}"
@@ -1865,6 +2001,10 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			finance_tenure:       p.finance_tenure || "",
 			finance_approval_id:  p.finance_approval_id || "",
 			finance_down_payment: flt(p.finance_down_payment) || 0,
+			gateway_provider:     p.gateway_provider || "",
+			payment_machine:      p.payment_machine || "",
+			gateway_order_id:     p.gateway_order_id || "",
+			gateway_status:       p.gateway_status || "",
 		}));
 
 		const invoice_data = {

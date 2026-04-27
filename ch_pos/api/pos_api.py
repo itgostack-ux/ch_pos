@@ -510,6 +510,14 @@ def create_pos_invoice(pos_profile, customer, items,
                 row["custom_finance_approval_id"] = p["finance_approval_id"]
             if flt(p.get("finance_down_payment")):
                 row["custom_finance_down_payment"] = flt(p["finance_down_payment"])
+            if p.get("gateway_provider"):
+                row["custom_gateway_provider"] = p["gateway_provider"]
+            if p.get("payment_machine"):
+                row["custom_payment_machine"] = p["payment_machine"]
+            if p.get("gateway_order_id"):
+                row["custom_gateway_order_id"] = p["gateway_order_id"]
+            if p.get("gateway_status"):
+                row["custom_gateway_status"] = p["gateway_status"]
             inv.append("payments", row)
     elif mode_of_payment:
         inv.append("payments", {

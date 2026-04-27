@@ -1,0 +1,223 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:machine_id",
+ "creation": "2026-04-27 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "machine_id",
+  "machine_name",
+  "provider",
+  "enabled",
+  "column_break_identity",
+  "company",
+  "store",
+  "pos_profile",
+  "payment_scope_section",
+  "supported_payment_modes",
+  "environment",
+  "terminal_id",
+  "column_break_scope",
+  "merchant_id",
+  "client_id",
+  "client_secret",
+  "url_section",
+  "callback_url",
+  "failure_callback_url",
+  "webhook_url",
+  "column_break_urls",
+  "api_base_url",
+  "remarks"
+ ],
+ "fields": [
+  {
+   "fieldname": "machine_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Machine ID",
+   "reqd": 1,
+   "unique": 1,
+   "description": "Unique payment terminal identifier exposed to POS users"
+  },
+  {
+   "fieldname": "machine_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Machine Name",
+   "reqd": 1,
+   "description": "Human-readable payment machine name shown in Pay Now"
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Provider",
+   "options": "Pine Labs\nPaytm\nOther",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Store",
+   "options": "CH Store",
+   "reqd": 1
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "label": "POS Profile",
+   "options": "POS Profile",
+   "description": "Optional: restrict this machine to a specific POS Profile"
+  },
+  {
+   "fieldname": "payment_scope_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Scope"
+  },
+  {
+   "fieldname": "supported_payment_modes",
+   "fieldtype": "Small Text",
+   "label": "Supported Payment Modes",
+   "description": "Comma-separated gateway modes. Example: UPI, CARD, NETBANKING, WALLET",
+   "default": "UPI, CARD"
+  },
+  {
+   "fieldname": "environment",
+   "fieldtype": "Select",
+   "label": "Environment",
+   "options": "UAT\nProduction",
+   "default": "UAT",
+   "reqd": 1
+  },
+  {
+   "fieldname": "terminal_id",
+   "fieldtype": "Data",
+   "label": "Terminal ID",
+   "description": "Provider-side machine or terminal identifier"
+  },
+  {
+   "fieldname": "column_break_scope",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "merchant_id",
+   "fieldtype": "Data",
+   "label": "Merchant ID",
+   "description": "Merchant / MID issued by the provider"
+  },
+  {
+   "fieldname": "client_id",
+   "fieldtype": "Data",
+   "label": "Client ID"
+  },
+  {
+   "fieldname": "client_secret",
+   "fieldtype": "Password",
+   "label": "Client Secret"
+  },
+  {
+   "fieldname": "url_section",
+   "fieldtype": "Section Break",
+   "label": "URLs"
+  },
+  {
+   "fieldname": "callback_url",
+   "fieldtype": "Data",
+   "label": "Return URL",
+   "options": "URL",
+   "description": "Provider success redirect URL"
+  },
+  {
+   "fieldname": "failure_callback_url",
+   "fieldtype": "Data",
+   "label": "Failure URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "webhook_url",
+   "fieldtype": "Data",
+   "label": "Webhook URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "column_break_urls",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "api_base_url",
+   "fieldtype": "Data",
+   "label": "API Base URL",
+   "options": "URL",
+   "description": "Optional override. Leave blank to use provider defaults"
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-04-27 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH Payment Machine",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "POS User"
+  },
+  {
+   "read": 1,
+   "role": "Sales User"
+  }
+ ],
+ "quick_entry": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1,
+ "search_fields": "machine_name,provider,store,terminal_id",
+ "title_field": "machine_name"
+}

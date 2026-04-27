@@ -51,6 +51,10 @@ export class SessionControls {
 			this._container = wrapper;
 			this.render(wrapper);
 		});
+
+		EventBus.on("session:force_close", (session_name) => {
+			this._closing_dashboard.show(session_name);
+		});
 	}
 
 	_get_container(container) {
