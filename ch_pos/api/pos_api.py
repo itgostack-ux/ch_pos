@@ -664,6 +664,9 @@ def create_pos_invoice(pos_profile, customer, items,
             frappe.throw(frappe._("Voucher amount ₹{0} exceeds available balance ₹{1}").format(
                 frappe.utils.fmt_money(voucher_amount), frappe.utils.fmt_money(v_balance)))
         inv.discount_amount = flt(inv.discount_amount or 0) + flt(voucher_amount)
+        # BRD Voucher & Promotion Accounting: store voucher as distinct fields on SI
+        inv.custom_voucher_code = voucher_code
+        inv.custom_voucher_amount = flt(voucher_amount)
 
     # Loyalty points redemption
     if cint(redeem_loyalty_points):
@@ -687,6 +690,10 @@ def create_pos_invoice(pos_profile, customer, items,
         if flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
             frappe.throw(frappe._("Bank offer cannot be combined with additional discounts"))
         inv.discount_amount = flt(inv.discount_amount or 0) + flt(bank_offer_discount)
+        # BRD: store bank offer details as distinct fields for campaign reconciliation
+        if bank_offer_name:
+            inv.custom_bank_offer_name = bank_offer_name
+        inv.custom_bank_offer_discount = flt(bank_offer_discount)
 
     # Sales executive attribution
     if sales_executive:
@@ -753,6 +760,11 @@ def create_pos_invoice(pos_profile, customer, items,
                     update_modified=False,
                 )
                 inv.reload()  # pick up corrected totals before GL creation
+        # BRD POS exception: POS invoices bypass Maker-Checker approval workflow.
+        # Set workflow state to Approved before submission so the before_submit
+        # hook does not block the POS flow (BRD Section 3.1).
+        inv.workflow_state = "Approved"
+        inv.custom_si_approval_state = "Approved"
         inv.submit()
     except Exception as _submit_exc:
         # Re-raise with a cleaner message so the POS shows the actual reason
@@ -796,6 +808,10 @@ def create_pos_invoice(pos_profile, customer, items,
             {"processing_fee_invoice": inv.name, "processing_fee_status": "Paid"},
             update_modified=False,
         )
+
+    # Free sale: reclassify stock cost as promotional expense
+    if cint(is_free_sale):
+        _post_free_sale_write_off(inv)
 
     # Redeem voucher after successful submit
     if voucher_code and flt(voucher_amount) > 0:
@@ -2196,6 +2212,9 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
         })
 
     inv.insert(ignore_permissions=True)
+    # BRD POS exception: POS invoices bypass Maker-Checker (BRD Section 3.1)
+    inv.workflow_state = "Approved"
+    inv.custom_si_approval_state = "Approved"
     inv.submit()
 
     # Mark service request as billed
@@ -2528,6 +2547,9 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
         inv.taxes_and_charges = profile.taxes_and_charges
 
     inv.insert(ignore_permissions=True)
+    # BRD POS exception: POS invoices bypass Maker-Checker (BRD Section 3.1)
+    inv.workflow_state = "Approved"
+    inv.custom_si_approval_state = "Approved"
     inv.submit()
 
     # 5 — Stock Entry for spare parts consumption
@@ -6249,3 +6271,93 @@ def get_bundle_items(item_code, warehouse=None, channel="POS") -> list:
 		})
 
 	return result
+
+
+def _post_free_sale_write_off(inv) -> None:
+	"""Reclassify COGS of free-sale items as Promotional Expense.
+
+	ERPNext already debits Cost of Goods Sold when the SI with update_stock=1
+	is submitted.  This JE moves that cost into a distinct Promotional Expense
+	account so Finance can see the true P&L impact of free promotions.
+
+	Silently skips (logs warning) if accounts are not configured.
+	"""
+	settings = frappe.get_cached_doc("CH POS Control Settings")
+	promo_account = settings.get("promotional_expense_account")
+	if not promo_account:
+		frappe.log_error(
+			f"Free sale write-off GL skipped for {inv.name}: "
+			"'Promotional Expense Account' not set in CH POS Control Settings → GL Accounts.",
+			"Free Sale GL"
+		)
+		return
+
+	company = inv.company
+	cost_center = frappe.db.get_value("Company", company, "cost_center")
+	total_cost = flt(0)
+	je_accounts = []
+
+	for item in inv.items:
+		if flt(item.qty) <= 0:
+			continue
+		# Get the valuation rate from the Bin (current cost) as approximation
+		# Stock Ledger Entry incoming_rate would be more precise but requires SLE query
+		val_rate = flt(frappe.db.get_value(
+			"Bin",
+			{"item_code": item.item_code, "warehouse": item.warehouse or inv.set_warehouse},
+			"valuation_rate",
+		) or 0)
+		if val_rate <= 0:
+			continue
+
+		item_cost = flt(val_rate * flt(item.qty), 2)
+		total_cost += item_cost
+
+		# Credit: expense_account on item (the COGS account ERPNext used)
+		cogs_account = item.expense_account or frappe.db.get_value(
+			"Item", item.item_code, "expense_account"
+		) or frappe.db.get_value("Company", company, "default_expense_account")
+
+		if cogs_account:
+			je_accounts.append({
+				"account": cogs_account,
+				"credit_in_account_currency": item_cost,
+				"cost_center": cost_center,
+				"reference_type": "Sales Invoice",
+				"reference_name": inv.name,
+			})
+
+	if total_cost <= 0 or not je_accounts:
+		return
+
+	# Debit side: single Promotional Expense line for the total
+	je_accounts.insert(0, {
+		"account": promo_account,
+		"debit_in_account_currency": total_cost,
+		"cost_center": cost_center,
+		"reference_type": "Sales Invoice",
+		"reference_name": inv.name,
+	})
+
+	try:
+		je = frappe.new_doc("Journal Entry")
+		je.update({
+			"voucher_type": "Journal Entry",
+			"company": company,
+			"posting_date": inv.posting_date or frappe.utils.today(),
+			"cheque_no": inv.name,
+			"cheque_date": inv.posting_date or frappe.utils.today(),
+			"remark": frappe._("Free sale promotional write-off — {0}").format(inv.name),
+			"accounts": je_accounts,
+		})
+		je.flags.ignore_permissions = True
+		je.insert(ignore_permissions=True)
+		je.submit()
+		frappe.db.set_value(
+			"Sales Invoice", inv.name,
+			"custom_promo_write_off_je", je.name,
+			update_modified=False,
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(),
+		                 f"Free sale write-off GL failed for {inv.name}")

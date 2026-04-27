@@ -26,7 +26,8 @@
   "column_break_approval",
   "approved_by",
   "approved_at",
-  "amended_from"
+  "amended_from",
+  "gl_entry"
  ],
  "fields": [
   {
@@ -189,6 +190,15 @@
    "options": "CH Cash Drop",
    "print_hide": 1,
    "read_only": 1
+  },
+  {
+   "fieldname": "gl_entry",
+   "fieldtype": "Link",
+   "label": "GL Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1,
+   "no_copy": 1,
+   "print_hide": 1
   }
  ],
  "index_web_pages_for_search": 0,

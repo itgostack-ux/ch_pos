@@ -159,7 +159,7 @@ class CHCashDrop(Document):
             je.flags.ignore_permissions = True
             je.insert(ignore_permissions=True)
             je.submit()
-            self.db_set("custom_gl_entry", je.name, update_modified=False)
+            self.db_set("gl_entry", je.name, update_modified=False)
         except Exception:
             frappe.log_error(frappe.get_traceback(),
                              f"Cash Drop GL failed for {self.name}")
