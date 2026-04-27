@@ -45,6 +45,15 @@ export class CartPanel {
 			<!-- A2. Customer Info Badges -->
 			<div class="ch-pos-customer-info" style="display:none">
 				<div class="ch-pos-cust-badges"></div>
+				<div class="ch-pos-gstin-row" style="margin-top:4px;display:flex;align-items:center;gap:6px">
+					<label style="font-size:10px;font-weight:600;color:var(--text-muted);white-space:nowrap;margin:0">${__("GST Invoice (GSTIN):")}</label>
+					<input type="text"
+						class="ch-pos-gstin-input form-control form-control-sm"
+						placeholder="${__("Enter GSTIN for B2B")}"
+						maxlength="15"
+						style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;max-width:180px;padding:2px 6px;height:24px">
+					<span class="ch-pos-gstin-status" style="font-size:10px"></span>
+				</div>
 			</div>
 
 			<!-- B. Quick Retail Actions -->
@@ -426,6 +435,19 @@ export class CartPanel {
 			}
 		});
 
+		// GSTIN input — live B2B/B2C toggle
+		w.on("input", ".ch-pos-gstin-input", (e) => {
+			const raw = $(e.currentTarget).val().trim().toUpperCase();
+			PosState.billing_gstin = raw;
+			this._update_gstin_badge(raw);
+		});
+		// Force uppercase on blur and trim
+		w.on("blur", ".ch-pos-gstin-input", (e) => {
+			const cleaned = $(e.currentTarget).val().trim().toUpperCase();
+			$(e.currentTarget).val(cleaned);
+			PosState.billing_gstin = cleaned;
+		});
+
 		// Cart actions
 		w.on("click", ".ch-pos-btn-cancel", () => EventBus.emit("cart:cancel"));
 		w.on("click", ".ch-pos-btn-hold", () => EventBus.emit("cart:hold"));
@@ -519,6 +541,9 @@ export class CartPanel {
 			tag.removeClass("existing loyalty").addClass("walk-in")
 				.html(`<i class="fa fa-user-o" style="font-size:10px"></i> ${__("Walk-in")}`);
 			this.wrapper.find(".ch-pos-customer-info").hide().find(".ch-pos-cust-badges").empty();
+			this.wrapper.find(".ch-pos-gstin-input").val("");
+			this.wrapper.find(".ch-pos-gstin-status").html("");
+			PosState.billing_gstin = "";
 			this.wrapper.find(".ch-pos-credit-warning").hide();
 			// Reset sale type to default
 			PosState.sale_type = null;
@@ -699,6 +724,14 @@ export class CartPanel {
 		badges.html(html);
 		row.show();
 
+		// Pre-fill GSTIN input from customer's saved GSTIN (or retain billing-time entry)
+		const gstin_input = row.find(".ch-pos-gstin-input");
+		if (!PosState.billing_gstin && info.customer_gstin) {
+			PosState.billing_gstin = info.customer_gstin;
+		}
+		gstin_input.val(PosState.billing_gstin || "");
+		this._update_gstin_badge(PosState.billing_gstin || "");
+
 		// Credit warning if outstanding exceeds limit
 		if (info.credit_limit > 0 && info.outstanding >= info.credit_limit) {
 			warning.html(`<div class="alert alert-danger" style="margin:4px 0;padding:6px 10px;font-size:11px;border-radius:var(--pos-radius-sm)">
@@ -712,6 +745,21 @@ export class CartPanel {
 		const tag = this.wrapper.find(".ch-pos-customer-tag");
 		if (info.loyalty && info.loyalty.points > 0) {
 			tag.addClass("loyalty");
+		}
+	}
+
+	/** Update the GSTIN status badge (valid/invalid/empty) next to the input */
+	_update_gstin_badge(gstin) {
+		const status = this.wrapper.find(".ch-pos-gstin-status");
+		const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+		if (!gstin) {
+			status.html(`<span style="color:var(--text-muted)">${__("B2C")}</span>`);
+		} else if (GSTIN_RE.test(gstin)) {
+			status.html(`<span style="color:var(--green)"><i class="fa fa-check"></i> ${__("B2B")}</span>`);
+		} else if (gstin.length === 15) {
+			status.html(`<span style="color:var(--red)"><i class="fa fa-times"></i> ${__("Invalid")}</span>`);
+		} else {
+			status.html(`<span style="color:var(--text-muted)">${gstin.length}/15</span>`);
 		}
 	}
 

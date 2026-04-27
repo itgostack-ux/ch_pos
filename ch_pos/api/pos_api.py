@@ -296,7 +296,8 @@ def create_pos_invoice(pos_profile, customer, items,
                        free_sale_approved_at=None,
                        advance_amount=0, kiosk_token=None,
                        guided_session=None,
-                       exception_request=None, warranty_claim=None) -> dict:
+                       exception_request=None, warranty_claim=None,
+                       customer_gstin=None) -> dict:
     """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
@@ -357,6 +358,10 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.posting_date = str(active.get("business_date")) if active.get("business_date") else nowdate()
     inv.is_pos = 1
     inv.update_stock = 1
+
+    # B2B/B2C — GSTIN provided at billing time overrides saved GSTIN
+    if customer_gstin:
+        inv.custom_customer_gstin = customer_gstin.strip().upper()
 
     # Kiosk token link (from queue panel billing)
     if kiosk_token:
@@ -4129,16 +4134,33 @@ def get_customer_pos_info(customer, company=None) -> dict:
             price_list = group_pl
 
     # Determine customer type (B2B / B2C)
+    # Priority: saved GSTIN on billing address → customer_type == Company → group heuristics
     customer_type = "B2C"
-    if cust.customer_type == "Company":
-        customer_type = "B2B"
-    elif customer_group:
-        b2b_groups = frappe.get_hooks("b2b_customer_groups") or []
-        if not b2b_groups:
-            # Heuristic: groups containing Wholesale, Corporate, Enterprise → B2B
-            group_lower = customer_group.lower()
-            if any(kw in group_lower for kw in ("wholesale", "corporate", "enterprise", "b2b", "dealer")):
-                customer_type = "B2B"
+    customer_gstin = ""
+
+    # Fetch GSTIN from the customer's primary billing address
+    billing_addr_name = frappe.db.get_value(
+        "Dynamic Link",
+        {"link_doctype": "Customer", "link_name": customer, "parenttype": "Address"},
+        "parent",
+        order_by="modified desc",
+    )
+    if billing_addr_name:
+        saved_gstin = frappe.db.get_value("Address", billing_addr_name, "gstin") or ""
+        if saved_gstin.strip():
+            customer_gstin = saved_gstin.strip().upper()
+            customer_type = "B2B"
+
+    if not customer_gstin:
+        if cust.customer_type == "Company":
+            customer_type = "B2B"
+        elif customer_group:
+            b2b_groups = frappe.get_hooks("b2b_customer_groups") or []
+            if not b2b_groups:
+                # Heuristic: groups containing Wholesale, Corporate, Enterprise → B2B
+                group_lower = customer_group.lower()
+                if any(kw in group_lower for kw in ("wholesale", "corporate", "enterprise", "b2b", "dealer")):
+                    customer_type = "B2B"
 
     # Credit limit & outstanding
     credit_limit = 0
@@ -4189,6 +4211,7 @@ def get_customer_pos_info(customer, company=None) -> dict:
         "customer_name": cust.customer_name,
         "customer_group": customer_group,
         "customer_type": customer_type,
+        "customer_gstin": customer_gstin,
         "price_list": price_list,
         "credit_limit": credit_limit,
         "outstanding": outstanding,

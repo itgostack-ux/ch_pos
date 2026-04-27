@@ -101,6 +101,9 @@ export const PosState = {
 	exception_request: null,    // linked CH Exception Request name (approved, within validity)
 	warranty_claim: null,       // linked CH Warranty Claim name (approved, processing fee billing)
 
+	// ── B2B/B2C ─────────────────────────────────────────
+	billing_gstin: "",          // GSTIN entered at billing time (overrides customer's saved GSTIN)
+
 	// ── Customer Summary (enriched) ─────────────────────
 	customer_summary: null,     // { order_count, active_warranties, active_service_jobs }
 
@@ -141,6 +144,7 @@ export const PosState = {
 		this.guided_session = null;
 		this.exception_request = null;
 		this.warranty_claim = null;
+		this.billing_gstin = "";
 		// POS-10 fix: Clear persisted cart on transaction reset
 		try { localStorage.removeItem("ch_pos_active_cart"); } catch (e) {}
 		// Keep executive and company selection across transactions

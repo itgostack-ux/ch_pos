@@ -1910,6 +1910,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			guided_session:                 PosState.guided_session || null,
 			exception_request:              PosState.exception_request || null,
 			warranty_claim:                 PosState.warranty_claim || null,
+			customer_gstin:                 PosState.billing_gstin || "",
 		};
 
 		if (!navigator.onLine) {
