@@ -356,7 +356,7 @@ def pos_item_search(
 
 
 def _get_nearby_warehouses(pos_profile):
-    """Return nearby store warehouses based on city/pincode of the current store."""
+    """Return nearby store warehouses based on zone, then city/pincode fallback."""
     ext = frappe.db.get_value(
         "POS Profile Extension", pos_profile, ["store"], as_dict=True
     )
@@ -365,17 +365,20 @@ def _get_nearby_warehouses(pos_profile):
 
     current = frappe.db.get_value(
         "CH Store", ext.store,
-        ["store_code", "city", "pincode", "warehouse"],
+        ["store_code", "city", "zone", "pincode", "warehouse"],
         as_dict=True,
     )
     if not current or not current.warehouse:
         return []
 
-    # Find other stores in same city (or same pincode prefix for nearby)
+    # Prefer same zone. Fall back to same city, then pincode prefix for legacy/unmapped stores.
     conditions = ["s.disabled = 0", "s.warehouse IS NOT NULL", "s.store_code != %(cur)s"]
     values = {"cur": current.store_code}
 
-    if current.city:
+    if current.zone:
+        conditions.append("s.zone = %(zone)s")
+        values["zone"] = current.zone
+    elif current.city:
         conditions.append("s.city = %(city)s")
         values["city"] = current.city
     elif current.pincode:
@@ -387,7 +390,7 @@ def _get_nearby_warehouses(pos_profile):
 
     where = " AND ".join(conditions)
     stores = frappe.db.sql(
-        """SELECT s.store_code, s.store_name, s.city, s.pincode, s.warehouse
+        """SELECT s.store_code, s.store_name, s.city, s.zone, s.pincode, s.warehouse
             FROM `tabCH Store` s
             WHERE {where}
             ORDER BY
