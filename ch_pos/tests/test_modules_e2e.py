@@ -71,6 +71,11 @@ def _get_ctx():
         store = frappe.db.get_value("POS Profile Extension", {"pos_profile": p.name}, "store")
         if not store and p.warehouse:
             store = frappe.db.get_value("CH Store", {"warehouse": p.warehouse}, "name")
+        # Reject store whose company doesn't match the POS profile company
+        if store and p.company:
+            store_company = frappe.db.get_value("CH Store", store, "company")
+            if store_company and store_company != p.company:
+                return None
         return store
 
     # Sort profiles: prefer active sessions, then open business dates, filter by POS Executive access
@@ -133,6 +138,12 @@ def _get_ctx():
 
         # Advance business date past all closed sessions
         biz_date = get_store_business_date(store)
+        # Reset future business dates to today
+        if getdate(biz_date) > getdate(nowdate()):
+            frappe.db.set_value("CH Business Date", store, "business_date", nowdate())
+            frappe.db.set_value("CH Business Date", store, "status", "Open")
+            frappe.db.commit()
+            biz_date = nowdate()
         # Also reset BD status if it's Closed
         bd_status = frappe.db.get_value("CH Business Date", store, "status")
         if bd_status == "Closed":
@@ -146,7 +157,7 @@ def _get_ctx():
         )
         max_closed_date = max_closed[0].d if max_closed and max_closed[0].d else None
         if max_closed_date and getdate(biz_date) <= getdate(max_closed_date):
-            new_date = add_days(max_closed_date, 1)
+            new_date = min(str(add_days(max_closed_date, 1)), nowdate())
             frappe.db.set_value("CH Business Date", store, "business_date", new_date)
             frappe.db.commit()
 
@@ -250,6 +261,12 @@ def test_session_management(ctx):
     # Advance business date past all closed sessions
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
     biz_date = get_store_business_date(store)
+    # Reset future business dates to today
+    if getdate(biz_date) > getdate(nowdate()):
+        frappe.db.set_value("CH Business Date", store, "business_date", nowdate())
+        frappe.db.set_value("CH Business Date", store, "status", "Open")
+        frappe.db.commit()
+        biz_date = nowdate()
     # Reset BD status if Closed
     bd_status = frappe.db.get_value("CH Business Date", store, "status")
     if bd_status == "Closed":
@@ -262,7 +279,7 @@ def test_session_management(ctx):
     )
     max_closed_date = max_closed[0].d if max_closed and max_closed[0].d else None
     if max_closed_date and getdate(biz_date) <= getdate(max_closed_date):
-        new_date = add_days(max_closed_date, 1)
+        new_date = min(str(add_days(max_closed_date, 1)), nowdate())
         frappe.db.set_value("CH Business Date", store, "business_date", new_date)
         frappe.db.commit()
 
@@ -593,11 +610,8 @@ def test_exception_requests(ctx):
             # No company restriction
             exc_type = et.name
             break
-    if not exc_type and exc_types:
-        exc_type = exc_types[0].name  # fallback
-
     if not exc_type:
-        log_skip("EX-01 raise_exception", "no enabled CH Exception Type")
+        log_skip("EX-01 raise_exception", f"no enabled CH Exception Type applicable to {company}")
         return
 
     # EX-01: Raise exception (small value → auto-approve)

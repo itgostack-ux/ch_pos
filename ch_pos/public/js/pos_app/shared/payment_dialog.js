@@ -80,6 +80,7 @@ export class PaymentDialog {
 		this._sale_types = [];
 		this._finance_partners = [];
 		this._payment_machine_data = { providers: [], machines: [] };
+		this._last_grand_total = null;
 
 		this._bind_events();
 	}
@@ -305,93 +306,82 @@ export class PaymentDialog {
 		const credit_html = !is_walkin ? `
 			<div id="ch-pay-credit-section" class="ch-pay-credit-section" style="display:none">
 				<div class="ch-pay-credit-header">
-					<i class="fa fa-handshake-o"></i> ${__("Credit Sale Details")}
+					<i class="fa fa-handshake-o"></i> ${__("Credit Sale")}
+					<span id="ch-pay-credit-limit-badge" class="ch-pay-credit-limit-badge"></span>
 				</div>
 				<div class="ch-pay-credit-body">
-					<!-- Credit limit / outstanding info (loaded async) -->
+					<!-- Credit limit / outstanding info (loaded async, shown as compact badge row) -->
 					<div class="ch-pay-credit-info" id="ch-pay-credit-info"></div>
 					<div id="ch-pay-credit-history" class="ch-pay-credit-history" style="display:none"></div>
 
-					<!-- Credit Terms presets -->
-					<div class="ch-pay-credit-terms-row" style="margin-bottom:8px">
-						<div class="ch-pay-credit-terms-label">${__("Credit Terms")}</div>
+					<!-- Essential row: Terms + Reference inline -->
+					<div class="ch-pay-credit-essentials">
 						<div class="ch-pay-credit-terms-pills" id="ch-pay-credit-terms-pills">
 							${["Net 15","Net 30","Net 45","Net 60"].map(t =>
 								`<button class="ch-pay-credit-term-btn" data-days="${t.split(' ')[1]}" data-term="${t}">${t}</button>`
 							).join("")}
 							<button class="ch-pay-credit-term-btn" data-days="custom" data-term="Custom">${__("Custom")}</button>
 						</div>
-					</div>
-
-					<div class="ch-pay-credit-fields">
-						<div class="row" style="gap:8px 0">
-							<!-- Row 1: Credit Days + Due Date -->
-							<div class="col-6">
-								<label>${__("Credit Days")} <span class="text-danger">*</span></label>
-								<input type="number" class="form-control form-control-sm" id="ch-pay-credit-days"
-									value="30" min="1" max="365" step="1">
-							</div>
-							<div class="col-6">
-								<label>${__("Due Date")}</label>
-								<div id="ch-pay-credit-due-date" class="form-control form-control-sm ch-pay-credit-readonly"></div>
-							</div>
-							<!-- Row 2: Interest Rate + Grace Period -->
-							<div class="col-6" style="margin-top:8px">
-								<label title="${__("Annual interest rate charged on overdue amounts (Indian standard: 18% p.a.)")}">
-									${__("Interest Rate (% p.a.)")} <i class="fa fa-info-circle text-muted"></i>
-								</label>
-								<div class="input-group input-group-sm">
-									<input type="number" class="form-control" id="ch-pay-credit-interest"
-										value="0" min="0" max="48" step="0.5"
-										placeholder="${__("0 = no interest")}">
-									<span class="input-group-addon">%</span>
-								</div>
-							</div>
-							<div class="col-6" style="margin-top:8px">
-								<label title="${__("Days after due date before interest starts accruing")}">
-									${__("Grace Period (days)")} <i class="fa fa-info-circle text-muted"></i>
-								</label>
-								<input type="number" class="form-control form-control-sm" id="ch-pay-credit-grace"
-									value="0" min="0" max="30" step="1">
-							</div>
-							<!-- Row 3: Partial Payment + Reminder Date -->
-							<div class="col-6" style="margin-top:8px">
-								<label title="${__("Cash / UPI collected now. Rest goes on credit.")}">
-									${__("Down Payment")} <i class="fa fa-info-circle text-muted"></i>
-								</label>
-								<div class="input-group input-group-sm">
-									<span class="input-group-addon">₹</span>
-									<input type="number" class="form-control" id="ch-pay-credit-partial"
-										value="0" min="0" step="1"
-										placeholder="${__("0 = full credit")}">
-								</div>
-							</div>
-							<div class="col-6" style="margin-top:8px">
-								<label title="${__("Auto: due date minus 5 days")}">
-									${__("Reminder Date")} <i class="fa fa-info-circle text-muted"></i>
-								</label>
-								<div id="ch-pay-credit-reminder" class="form-control form-control-sm ch-pay-credit-readonly"></div>
-							</div>
-							<!-- Row 4: Credit Reference + Approved By -->
-							<div class="col-6" style="margin-top:8px">
-								<label>${__("Credit Ref / PO No")}</label>
-								<input type="text" class="form-control form-control-sm" id="ch-pay-credit-ref"
-									placeholder="${__("PO-2026-001 or Verbal-John")}">
-							</div>
-							<div class="col-6" style="margin-top:8px">
-								<label>${__("Approved By")}</label>
-								<input type="text" class="form-control form-control-sm ch-pay-credit-readonly"
-									id="ch-pay-credit-approved-by" readonly
-									placeholder="${__("Auto-filled on manager override")}">
-							</div>
-							<!-- Row 5: Notes (full width) -->
-							<div class="col-12" style="margin-top:8px">
-								<label>${__("Credit Notes / Payment Conditions")}</label>
-								<input type="text" class="form-control form-control-sm" id="ch-pay-credit-notes"
-									placeholder="${__("e.g. Payment by NEFT on or before due date")}">
-							</div>
+						<div class="ch-pay-credit-due-row">
+							<span class="ch-pay-credit-due-label">${__("Due")}</span>
+							<div id="ch-pay-credit-due-date" class="ch-pay-credit-due-val"></div>
 						</div>
 					</div>
+
+					<!-- Advanced fields (collapsible) -->
+					<details class="ch-pay-credit-advanced" id="ch-pay-credit-advanced">
+						<summary>${__("More options")}</summary>
+						<div class="ch-pay-credit-fields">
+							<div class="ch-pay-credit-grid">
+								<div class="ch-pay-credit-field-item">
+									<label>${__("Credit Days")}</label>
+									<input type="number" class="form-control form-control-sm" id="ch-pay-credit-days"
+										value="30" min="1" max="365" step="1">
+								</div>
+								<div class="ch-pay-credit-field-item">
+									<label>${__("Down Payment")}</label>
+									<div class="input-group input-group-sm">
+										<span class="input-group-addon">₹</span>
+										<input type="number" class="form-control" id="ch-pay-credit-partial"
+											value="0" min="0" step="1" placeholder="0">
+									</div>
+								</div>
+								<div class="ch-pay-credit-field-item">
+									<label>${__("Interest % p.a.")}</label>
+									<div class="input-group input-group-sm">
+										<input type="number" class="form-control" id="ch-pay-credit-interest"
+											value="0" min="0" max="48" step="0.5" placeholder="0">
+										<span class="input-group-addon">%</span>
+									</div>
+								</div>
+								<div class="ch-pay-credit-field-item">
+									<label>${__("Grace Period (days)")}</label>
+									<input type="number" class="form-control form-control-sm" id="ch-pay-credit-grace"
+										value="0" min="0" max="30" step="1">
+								</div>
+								<div class="ch-pay-credit-field-item">
+									<label>${__("Ref / PO No")}</label>
+									<input type="text" class="form-control form-control-sm" id="ch-pay-credit-ref"
+										placeholder="${__("PO-2026-001")}">
+								</div>
+								<div class="ch-pay-credit-field-item">
+									<label>${__("Reminder Date")}</label>
+									<div id="ch-pay-credit-reminder" class="form-control form-control-sm ch-pay-credit-readonly"></div>
+								</div>
+								<div class="ch-pay-credit-field-item ch-pay-credit-field-full">
+									<label>${__("Notes")}</label>
+									<input type="text" class="form-control form-control-sm" id="ch-pay-credit-notes"
+										placeholder="${__("e.g. Payment by NEFT on or before due date")}">
+								</div>
+								<div class="ch-pay-credit-field-item ch-pay-credit-field-full">
+									<label>${__("Approved By")}</label>
+									<input type="text" class="form-control form-control-sm ch-pay-credit-readonly"
+										id="ch-pay-credit-approved-by" readonly
+										placeholder="${__("Auto-filled on manager override")}">
+								</div>
+							</div>
+						</div>
+					</details>
 					<div id="ch-pay-credit-approval" class="ch-pay-credit-approval" style="display:none"></div>
 				</div>
 			</div>` : "";
@@ -427,6 +417,15 @@ export class PaymentDialog {
 					<i class="fa fa-history"></i> ${__("Customer Advances")}
 				</div>
 				<div id="ch-pay-advance-list" class="ch-pay-advance-list"></div>
+			</div>
+			<div id="ch-pay-ss-advance-section" class="ch-pay-ss-advance-section" style="display:none">
+				<div class="ch-pay-ss-advance-row">
+					<label class="ch-pay-ss-advance-label"><i class="fa fa-money"></i> ${__("Advance Paid")}</label>
+					<div class="ch-pay-fin-down-inp">
+						<span>₹</span>
+						<input type="number" id="ch-pay-ss-advance-amt" placeholder="0.00" min="0" step="0.01">
+					</div>
+				</div>
 			</div>` : "";
 
 		// Sale type selector (DS, CS, FS, FREE, SS)
@@ -442,8 +441,8 @@ export class PaymentDialog {
 				</div>
 			</div>`;
 
-// ── Discount section (collapsed accordion) ────────────────────────────
-const disc_html = `
+		// ── Discount / Coupon controls in setup zone ──────────────────────────
+		const disc_html = `
 <div class="ch-pay-section-block" id="ch-pay-disc-block">
 <button class="ch-pay-section-hdr" type="button" data-target="ch-pay-disc-body">
 <span><i class="fa fa-percent"></i> ${__("Discount")}</span>
@@ -473,7 +472,6 @@ placeholder="0.00" min="0" step="1">
 <div id="ch-pay-disc-info" class="ch-pay-field-hint" style="display:none"></div>
 </div>
 </div>`;
-// ── Coupon / Voucher section (collapsed accordion) ─────────────────────
 const coupon_html = `
 <div class="ch-pay-section-block" id="ch-pay-coupon-block">
 <button class="ch-pay-section-hdr" type="button" data-target="ch-pay-coupon-body">
@@ -489,12 +487,23 @@ placeholder="${__("Enter code...")}">
 <div id="ch-pay-coupon-msg" class="ch-pay-field-hint"></div>
 </div>
 </div>`;
+		const commercial_controls_html = `
+			<div class="ch-pay-commercials" id="ch-pay-commercials">
+				<div class="ch-pay-commercials-head">
+					<div class="ch-pay-commercials-title">${__("Commercial Controls")}</div>
+					<div class="ch-pay-commercials-copy">${__("Apply pricing decisions before choosing payment instruments")}</div>
+				</div>
+				<div class="ch-pay-commercials-grid">
+					${disc_html}
+					${coupon_html}
+				</div>
+			</div>`;
 
 
 		return `
 		<div id="ch-pos-payment-overlay" class="ch-pay-overlay">
 			<div class="ch-pay-screen">
-				<!-- ── LEFT: Bill Summary ───────────────────────────────── -->
+				<!-- ── LEFT: Bill Summary + Commercial Controls ────────────────── -->
 				<div class="ch-pay-left">
 					<div class="ch-pay-left-header">
 						<button class="ch-pay-close" title="${__("Back to cart")}">
@@ -518,10 +527,23 @@ placeholder="${__("Enter code...")}">
 					<div class="ch-pay-totals-block">
 						${this._build_totals_html()}
 					</div>
-				</div>
 
-				<!-- ── RIGHT: Payment Panel ─────────────────────────────── -->
+					<!-- Loyalty: redeem points above commercial controls -->
+					${loyalty_html}
+
+					<!-- Commercial Controls pinned at bottom of left panel -->
+					${commercial_controls_html}
+
+				<!-- Grand Total after all commercial deductions -->
+				<div class="ch-pay-commercials-grand" id="ch-pay-commercials-grand">
+					<span class="ch-pay-commercials-grand-label">${__('Grand Total')}</span>
+					<span class="ch-pay-commercials-grand-value" id="ch-pay-commercials-grand-value">₹0</span>
+				</div>
+				</div><!-- /.ch-pay-left -->
+
+			<!-- ── RIGHT: Payment Panel ─────────────────────────────── -->
 				<div class="ch-pay-right">
+					<!-- Hero amount -->
 					<div class="ch-pay-right-header">
 						<span class="ch-pay-right-label">${__("Amount Due")}</span>
 						<span class="ch-pay-grand-display" id="ch-pay-amount-due">
@@ -529,70 +551,62 @@ placeholder="${__("Enter code...")}">
 						</span>
 					</div>
 
-					<!-- ─ Pinned top: Sale type + MOP buttons + bank offers ─ -->
-					<div class="ch-pay-right-pinned">
-
-						<!-- Sale mode toggles (Credit / Free) -->
-						${sale_modes_html}
-
-						<!-- Credit sale details -->
-						${credit_html}
-
-						<!-- Free sale details -->
-						${free_html}
-
-						<!-- Sale type selector -->
-						${sale_type_html}
-
-						<!-- MOP quick-add buttons -->
-						<div class="ch-pay-mop-section" id="ch-pay-mop-section">
-							<div class="ch-pay-mop-label">${__("Add Payment")}</div>
-							<div class="ch-pay-mop-btns">${mop_btns}</div>
-						</div>
-
-						<!-- Bank / card offers (loaded dynamically) -->
-						<div id="ch-pay-bank-offers" class="ch-pay-bank-offers"></div>
-
-					</div><!-- /.ch-pay-right-pinned -->
-
-					<!-- ─ Scrollable: payment rows + loyalty + quick cash ─ -->
+					<!-- Everything scrollable -->
 					<div class="ch-pay-right-scroll">
 
-						<!-- Payment rows -->
-						<div id="ch-pay-rows" class="ch-pay-rows"></div>
+						<!-- Hidden sale mode checkboxes (driven by pills) -->
+						${sale_modes_html}
 
-						<!-- Loyalty -->
-						${loyalty_html}
+						<!-- ─ Step 1: Sale Type ─ -->
+						${sale_type_html}
 
-						<!-- Quick cash amounts -->
-						<div id="ch-pay-quick-cash" class="ch-pay-quick-cash" style="display:none">
-							<div class="ch-pay-quick-label">${__("Quick Cash")}</div>
-							<div id="ch-pay-quick-btns" class="ch-pay-quick-btns"></div>
+						<!-- ─ Step 2: Sale-mode specific details ─ -->
+						${credit_html}
+						${free_html}
+
+						<!-- ─ Step 3: Payment Instruments ─ -->
+						<div class="ch-pay-instruments-zone">
+							<div class="ch-pay-zone-label">${__("Payment")}</div>
+
+							<!-- MOP quick-add buttons -->
+							<div class="ch-pay-mop-section" id="ch-pay-mop-section">
+								<div class="ch-pay-mop-btns">${mop_btns}</div>
+							</div>
+
+							<!-- Bank / card offers (loaded dynamically) -->
+							<div id="ch-pay-bank-offers" class="ch-pay-bank-offers"></div>
+
+							<!-- Payment rows -->
+							<div id="ch-pay-rows" class="ch-pay-rows"></div>
+
+							<!-- Quick cash amounts -->
+							<div id="ch-pay-quick-cash" class="ch-pay-quick-cash" style="display:none">
+								<div class="ch-pay-quick-label">${__("Quick Cash")}</div>
+								<div id="ch-pay-quick-btns" class="ch-pay-quick-btns"></div>
+							</div>
+
+							<!-- Advance adjustment (walk-in hidden) -->
+							${advance_html}
 						</div>
-
-						<!-- Advance adjustment (walk-in hidden) -->
-						${advance_html}
 
 					</div><!-- /.ch-pay-right-scroll -->
 
-					<!-- ─ Pinned bottom: Discount + Coupon always visible ─ -->
-					<div class="ch-pay-right-discounts">
-						${disc_html}
-						${coupon_html}
-					</div>
-
-					<!-- Balance bar — always visible above submit -->
+					<!-- Balance bar — sticky above submit -->
 					<div class="ch-pay-balance-bar">
 						<div class="ch-pay-bal-row">
 							<span>${__("Total Paid")}</span>
 							<b id="ch-pay-total-paid">₹0</b>
+						</div>
+						<div class="ch-pay-bal-row" id="ch-pay-loyalty-bal-row" style="display:none">
+							<span>🎁 ${__("Loyalty Applied")}</span>
+							<b id="ch-pay-loyalty-applied" style="color:#7c3aed">₹0</b>
 						</div>
 						<div class="ch-pay-bal-row" id="ch-pay-advance-bal-row" style="display:none">
 							<span>${__("Advance Applied")}</span>
 							<b id="ch-pay-advance-applied" style="color:#7c3aed">₹0</b>
 						</div>
 						<div class="ch-pay-bal-row ch-pay-bal-due-row">
-							<span id="ch-pay-balance-label">${__("Balance Due")}</span>
+							<span id="ch-pay-balance-label">${__("Remaining")}</span>
 							<b id="ch-pay-balance-due" class="ch-pay-bal-positive">₹${format_number(total)}</b>
 						</div>
 						<div class="ch-pay-bal-row ch-pay-change-row" id="ch-pay-change-row" style="display:none">
@@ -663,8 +677,15 @@ placeholder="${__("Enter code...")}">
 		if (exchange > 0)    rows += `<div class="ch-pay-total-row ch-pay-deduct" style="color:var(--pos-success,#16a34a)"><span><i class="fa fa-exchange"></i> ${__("Exchange Credit")}</span><span>-₹${format_number(exchange)}</span></div>`;
 		if (pe_cr > 0)       rows += `<div class="ch-pay-total-row ch-pay-deduct" style="color:var(--pos-success,#16a34a)"><span><i class="fa fa-retweet"></i> ${__("Swap Credit")}</span><span>-₹${format_number(pe_cr)}</span></div>`;
 		if (offer_d > 0)     rows += `<div class="ch-pay-total-row ch-pay-deduct"><span>🏦 ${__("Bank Offer")}</span><span>-₹${format_number(offer_d)}</span></div>`;
-		rows += `<div class="ch-pay-total-grand"><span>${__("Grand Total")}</span><span>₹${format_number(grand)}</span></div>`;
+		// Loyalty redemption shown as a deduction (market standard: negative line in red)
+		const loyalty_redeemed = this._redeem_loyalty ? Math.min(this._loyalty_amount || 0, grand) : 0;
+		if (loyalty_redeemed > 0) {
+			rows += `<div class="ch-pay-total-row ch-pay-deduct ch-pay-loyalty-deduct"><span>🎁 ${__("Loyalty Redeemed")}</span><span>-₹${format_number(loyalty_redeemed)}</span></div>`;
+		}
 		rows += `<div class="ch-pay-tax-note"><i class="fa fa-info-circle"></i> ${__("GST auto-applied per POS Profile")}</div>`;
+		// Update the Grand Total bar below commercial controls too
+		const net_after_loyalty = Math.max(0, grand - loyalty_redeemed);
+		this._overlay?.find("#ch-pay-commercials-grand-value").text(`₹${format_number(net_after_loyalty)}`);
 		return rows;
 	}
 
@@ -678,6 +699,33 @@ placeholder="${__("Enter code...")}">
 		// MOP button → switch (single-mode) or add/top-up (split)
 		ov.on("click", ".ch-pay-mop-btn", e => {
 			const mop = $(e.currentTarget).data("mop");
+			const is_finance_mode = this._is_finance_sale_type(PosState.sale_type);
+
+			if (is_finance_mode) {
+				// In Finance mode: MOP buttons add/top-up DOWN PAYMENT rows (never touch Finance row)
+				const due = this._calc_balance_due();
+				const idx = this._payments.findIndex(p => p.mode === mop && this._mop_type(p.mode) !== "finance");
+				if (idx >= 0) {
+					// Already have this MOP as down payment — top-up with remaining due
+					this._payments[idx].amount = flt(this._payments[idx].amount) + Math.max(0, due);
+					this._payments[idx].is_down_payment = true;
+				} else {
+					// Add new down payment row before the Finance row
+					const finance_idx = this._payments.findIndex(p => this._mop_type(p.mode) === "finance");
+					const new_row = { mode: mop, amount: Math.max(0, due), upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0, is_down_payment: true };
+					if (finance_idx >= 0) {
+						this._payments.splice(finance_idx, 0, new_row);
+					} else {
+						this._payments.push(new_row);
+					}
+				}
+				this._sync_finance_payments();
+				this._render_payments();
+				this._update_totals();
+				this._load_bank_offers(mop);
+				return;
+			}
+
 			const due = this._calc_balance_due();
 			const idx = this._payments.findIndex(p => p.mode === mop);
 			if (idx >= 0) {
@@ -696,18 +744,26 @@ placeholder="${__("Enter code...")}">
 			this._load_bank_offers(mop);
 		});
 
-		// Remove a row
+		// Remove a row (Finance row cannot be removed)
 		ov.on("click", ".ch-pay-row-remove", e => {
 			const idx = parseInt($(e.currentTarget).data("idx"));
+			if (this._mop_type(this._payments[idx]?.mode) === "finance") return;
 			this._payments.splice(idx, 1);
+			if (this._is_finance_sale_type(PosState.sale_type)) {
+				this._sync_finance_payments();
+			}
 			this._render_payments();
 			this._update_totals();
 		});
 
-		// Amount edit
+		// Amount edit (not for Finance row — it is read-only/auto-calculated)
 		ov.on("input", ".ch-pay-row-amount", e => {
 			const idx = parseInt($(e.currentTarget).data("idx"));
+			if (this._mop_type(this._payments[idx]?.mode) === "finance") return; // read-only
 			this._payments[idx].amount = flt($(e.currentTarget).val()) || 0;
+			if (this._is_finance_sale_type(PosState.sale_type)) {
+				this._sync_finance_payments();
+			}
 			this._update_totals();
 		});
 
@@ -759,22 +815,6 @@ placeholder="${__("Enter code...")}">
 		});
 		ov.on("input", ".ch-pay-row-fin-approval", e => {
 			this._payments[parseInt($(e.currentTarget).data("idx"))].finance_approval_id = $(e.currentTarget).val().trim();
-			this._update_totals();
-		});
-		ov.on("input", ".ch-pay-row-fin-down", e => {
-			const idx = parseInt($(e.currentTarget).data("idx"));
-			this._payments[idx].finance_down_payment = flt($(e.currentTarget).val()) || 0;
-			const down = flt(this._payments[idx].finance_down_payment);
-			const cash_idx = this._payments.findIndex((p, i) => i !== idx && p.auto_created_by_finance && this._mop_type(p.mode) === "cash");
-			if (down > 0 && cash_idx < 0) {
-				this._payments.push({ mode: "Cash", amount: down, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0, auto_created_by_finance: true });
-			} else if (cash_idx >= 0 && down > 0) {
-				this._payments[cash_idx].amount = down;
-			} else if (cash_idx >= 0 && down <= 0) {
-				this._payments.splice(cash_idx, 1);
-			}
-			this._sync_finance_payments();
-			this._render_payments();
 			this._update_totals();
 		});
 
@@ -899,21 +939,34 @@ placeholder="${__("Enter code...")}">
 			this._update_totals();
 		});
 
+		// ── SS manual advance input ───────────────────
+		ov.on("input", "#ch-pay-ss-advance-amt", e => {
+			const val = flt($(e.currentTarget).val()) || 0;
+			const grand = this._calc_grand_total();
+			this._advance_amount = Math.min(val, grand);
+			this._set_cash_amount(this._calc_balance_due());
+			this._update_totals();
+		});
+
 		// Loyalty
 		ov.on("change", "#ch-pay-loyalty-chk", e => {
 			this._redeem_loyalty = $(e.currentTarget).is(":checked");
 			ov.find("#ch-pay-loyalty-input").toggle(this._redeem_loyalty);
 			this._loyalty_amount = this._redeem_loyalty ? flt(ov.find("#ch-pay-loyalty-amt").val()) : 0;
-			// Auto-adjust cash row so total_paid stays equal to grand_total (not double)
-			this._set_cash_amount(this._calc_balance_due());
+			// Finance mode: don't auto-adjust down payment rows — just recalc Finance row
+			if (!this._is_finance_sale_type(PosState.sale_type)) {
+				this._set_cash_amount(this._calc_balance_due());
+			}
 			this._update_totals();
 		});
 		ov.on("input", "#ch-pay-loyalty-amt", e => {
 			const max = flt(PosState.loyalty_points) * flt(PosState.conversion_factor);
 			const max_usable = Math.min(max, this._calc_grand_total());
 			this._loyalty_amount = Math.min(flt($(e.currentTarget).val()) || 0, max_usable);
-			// Auto-adjust cash row so total_paid stays equal to grand_total (not double)
-			this._set_cash_amount(this._calc_balance_due());
+			// Finance mode: don't auto-adjust down payment rows — just recalc Finance row
+			if (!this._is_finance_sale_type(PosState.sale_type)) {
+				this._set_cash_amount(this._calc_balance_due());
+			}
 			this._update_totals();
 		});
 
@@ -946,8 +999,10 @@ placeholder="${__("Enter code...")}">
 			if (st) {
 				// requires_payment may come back as 0 (int) or false (bool)
 				const is_free   = !st.requires_payment;
+				// FS (Finance Sale) is NOT a credit sale — it has its own finance flow
 				const is_credit = !!(st.triggers_credit_sale ||
-					["CS", "FS"].includes((st.code || "").toUpperCase()));
+					["CS"].includes((st.code || "").toUpperCase())) &&
+					!this._is_finance_sale_type(type);
 
 				// Toggle free sale (only if changed — avoids re-triggering)
 				if (is_free !== this._is_free_sale) {
@@ -963,6 +1018,63 @@ placeholder="${__("Enter code...")}">
 					if (this._is_credit_sale) ov.find("#ch-pay-credit-chk").prop("checked", false).trigger("change");
 				}
 			}
+
+			// ── Always reconcile payment rows after type switch ──
+			const is_finance = this._is_finance_sale_type(type);
+			const had_finance = this._payments.some(p => this._mop_type(p.mode) === "finance");
+			if (is_finance) {
+				// Switching TO finance:
+				// Strip any stale is_down_payment flags from previous session
+				this._payments.forEach(p => { delete p.is_down_payment; });
+				// Remove existing finance rows first (to let _sync re-add correctly)
+				this._payments = this._payments.filter(p => this._mop_type(p.mode) !== "finance");
+				// If no rows remain, seed an empty Cash row as the down payment placeholder
+				if (!this._payments.length) {
+					this._payments = [{ mode: "Cash", amount: 0, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0, is_down_payment: true }];
+				} else {
+					// Existing rows become down-payment rows — zero out amounts so Finance carries full
+					this._payments.forEach(p => {
+						p.amount = 0;
+						p.is_down_payment = true;
+					});
+				}
+				this._sync_finance_payments();
+			} else if (had_finance) {
+				// Switching AWAY from finance — remove Finance row, restore single Cash row
+				const grand = this._calc_grand_total();
+				this._payments = this._payments.filter(p => this._mop_type(p.mode) !== "finance");
+				// Clean up down payment flags
+				this._payments.forEach(p => { delete p.is_down_payment; });
+				// Ensure at least one row covering full grand total
+				if (!this._payments.length) {
+					this._payments = [{ mode: "Cash", amount: grand, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
+				} else if (this._payments.length === 1) {
+					// Re-seed to full amount
+					this._payments[0].amount = grand;
+				}
+			}
+			// Always re-render rows and ensure #ch-pay-rows / #ch-pay-mop-section are visible
+			ov.find("#ch-pay-mop-section").show();
+			ov.find("#ch-pay-rows").show();
+			this._render_payments();
+
+			// Show/hide SS advance section
+			const st_code = (this._sale_types.find(t => t.sale_type_name === type)?.code || "").toUpperCase();
+			if (st_code === "SS") {
+				ov.find("#ch-pay-ss-advance-section").show();
+				ov.find("#ch-pay-ss-advance-amt").val("");
+				this._advance_amount = 0;
+			} else {
+				ov.find("#ch-pay-ss-advance-section").hide();
+				if (!this._payments.some(() => true) || st_code !== "SS") {
+					// Reset SS advance when leaving SS type
+					if (!ov.find(".ch-pay-advance-chk:checked").length) {
+						this._advance_amount = 0;
+					}
+				}
+			}
+
+			this._update_totals();
 		});
 		ov.on("change", "#ch-pay-sale-sub-select", e => {
 			const val = $(e.currentTarget).val();
@@ -1213,11 +1325,63 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	}
 
 	_set_cash_amount(amt) {
-		const cash_idx = this._payments.findIndex(p => this._mop_type(p.mode) === "cash");
-		if (cash_idx < 0) return;
-		this._payments[cash_idx].amount = amt;
-		this._overlay.find(`.ch-pay-row-amount[data-idx="${cash_idx}"]`).val(amt.toFixed(2));
+		// Prefer a Cash row; if none exists fall back to the first non-finance, non-frozen row
+		let idx = this._payments.findIndex(p => this._mop_type(p.mode) === "cash");
+		if (idx < 0) {
+			idx = this._payments.findIndex(p => this._mop_type(p.mode) !== "finance" && !p.gateway_initiated);
+		}
+		if (idx < 0) return;
+		this._payments[idx].amount = amt;
+		this._sync_payment_amount_inputs();
 		this._update_totals();
+	}
+
+	_sync_payment_amount_inputs() {
+		if (!this._overlay) return;
+		this._payments.forEach((payment, idx) => {
+			this._overlay.find(`.ch-pay-row-amount[data-idx="${idx}"]`).val(flt(payment.amount, 2).toFixed(2));
+		});
+	}
+
+	_rebalance_payments_after_total_change(previousGrand, nextGrand) {
+		if (this._is_free_sale || previousGrand == null) return;
+		if (Math.abs(flt(nextGrand) - flt(previousGrand)) <= 0.005) return;
+		if (!this._payments.length) return;
+
+		// In Finance mode, _sync_finance_payments handles the Finance row — skip rebalance
+		if (this._is_finance_sale_type(PosState.sale_type)) return;
+
+		// Net amount the tender rows must cover (grand minus any non-cash instruments)
+		const loyalty  = this._redeem_loyalty ? Math.min(this._loyalty_amount, nextGrand) : 0;
+		const advance  = Math.min(this._advance_amount, Math.max(0, nextGrand - loyalty));
+		const net_due  = Math.max(0, nextGrand - loyalty - advance);
+
+		const total_tendered = this._payments.reduce((s, p) => s + flt(p.amount), 0);
+
+		if (total_tendered > net_due + 0.005) {
+			// Over-tendered vs new payable: reduce last non-frozen rows first
+			let excess = flt(total_tendered - net_due);
+			for (let i = this._payments.length - 1; i >= 0 && excess > 0.005; i--) {
+				if (this._payments[i].gateway_initiated) continue;  // frozen — skip
+				const current   = flt(this._payments[i].amount);
+				const reduction = Math.min(current, excess);
+				this._payments[i].amount = flt(current - reduction, 2);
+				excess = flt(excess - reduction, 2);
+			}
+			if (excess > 0.005) {
+				// Remaining excess is locked in gateway rows — warn cashier
+				frappe.show_alert({
+					message: __("Gateway payment initiated — reduce tender manually if needed"),
+					indicator: "orange",
+				});
+			}
+		} else if (total_tendered < net_due - 0.005 && this._payments.length === 1
+				   && !this._payments[0].gateway_initiated) {
+			// Single unfrozen row: auto-fill to match new net due
+			this._payments[0].amount = flt(net_due, 2);
+		}
+
+		this._sync_payment_amount_inputs();
 	}
 
 	_refresh_totals_block() {
@@ -1228,27 +1392,38 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (!this._is_finance_sale_type(PosState.sale_type) || this._is_free_sale) return;
 
 		const grand = this._calc_grand_total();
+		// Loyalty reduces the amount that must be financed
+		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount || 0, grand) : 0;
+		const net_payable = Math.max(0, grand - loyalty);
 		const finance_idx = this._payments.findIndex(p => this._mop_type(p.mode) === "finance");
 		const non_finance_paid = this._payments.reduce((sum, payment, idx) => {
 			if (idx === finance_idx) return sum;
 			return sum + flt(payment.amount);
 		}, 0);
-		const financed_amount = Math.max(0, grand - non_finance_paid);
+		const financed_amount = Math.max(0, net_payable - non_finance_paid);
 
 		if (finance_idx >= 0) {
+			// Finance row exists — just update amount (it is non-editable / auto-calc)
 			this._payments[finance_idx].amount = financed_amount;
+			// Sync DOM input immediately so Finance row always shows the correct amount
+			this._overlay?.find(`.ch-pay-row-amount[data-idx="${finance_idx}"]`).val(flt(financed_amount, 2).toFixed(2));
 			return;
 		}
 
-		if (this._payments.length === 0) {
-			this._payments.push({ mode: "Finance", amount: financed_amount, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 });
-			return;
+		// No finance row yet: push one. Existing rows (any mode) become down payment rows.
+		// If there is a single row that covers the full net_payable with no intended down payment,
+		// reset it to 0 so the Finance row carries the whole amount.
+		if (this._payments.length === 1 && !this._payments[0].is_down_payment) {
+			this._payments[0].amount = 0;
+			this._payments[0].is_down_payment = true;
 		}
-
-		if (this._payments.length === 1 && this._mop_type(this._payments[0].mode) === "cash") {
-			this._payments[0].mode = "Finance";
-			this._payments[0].amount = financed_amount;
-		}
+		this._payments.push({
+			mode: "Finance",
+			amount: financed_amount,
+			upi_transaction_id: "", card_reference: "", card_last_four: "",
+			finance_provider: "", finance_tenure: "", finance_approval_id: "",
+			finance_down_payment: 0,
+		});
 	}
 
 	// ───────────────────────────────────── Discount Reasons ──
@@ -1371,6 +1546,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			payment.payment_machine = res.machine || payment.payment_machine || "";
 			payment.gateway_order_id = res.order_id || "";
 			payment.gateway_status = res.status || "CREATED";
+			payment.gateway_initiated = true;   // amount is committed — freeze from auto-rebalance
 			this._render_payments();
 			this._update_totals();
 			frappe.show_alert({
@@ -1386,14 +1562,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	_sync_finance_to_payment(provider, tenure, approval_id) {
 		for (let i = 0; i < this._payments.length; i++) {
 			const p = this._payments[i];
-			// Set on all payment rows (the finance fields will be stored on the primary payment)
+			// Provider, tenure, approval are captured in the Sale Type section —
+			// store on payment object for submission but don't re-render the row.
 			p.finance_provider = provider || "";
 			p.finance_tenure = tenure || "";
 			p.finance_approval_id = approval_id || "";
-		}
-		// Re-render if any finance-type payment row has dropdowns
-		if (this._payments.some(p => this._mop_type(p.mode) === "finance")) {
-			this._render_payments();
 		}
 		this._update_totals();
 	}
@@ -1444,8 +1617,10 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const cur = this._sale_types.find(t => t.sale_type_name === PosState.sale_type);
 		if (cur) {
 			const should_free   = !cur.requires_payment;
+			// FS (Finance Sale) is NOT a credit sale
 			const should_credit = !!(cur.triggers_credit_sale ||
-				["CS", "FS"].includes((cur.code || "").toUpperCase()));
+				["CS"].includes((cur.code || "").toUpperCase())) &&
+				!this._is_finance_sale_type(PosState.sale_type);
 			if (should_free !== this._is_free_sale) {
 				this._overlay.find("#ch-pay-free-chk").prop("checked", should_free).trigger("change");
 			}
@@ -1522,7 +1697,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				const machines = this._machines_for_row(p);
 				ref_html = `
 					<div class="ch-pay-gateway-refs mt-1">
-						<div class="ch-pay-fin-row">
+						<div class="ch-pay-gateway-grid ch-pay-gateway-grid-two">
 							<select class="form-control form-control-sm ch-pay-row-gateway-provider" data-idx="${idx}">
 								<option value="">${__("Select Provider")}</option>
 								${providers.map((provider) => `<option value="${frappe.utils.escape_html(provider)}" ${provider === (p.gateway_provider || "") ? "selected" : ""}>${frappe.utils.escape_html(provider)}</option>`).join("")}
@@ -1532,9 +1707,9 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 								${machines.map((machine) => `<option value="${frappe.utils.escape_html(machine.name)}" ${machine.name === (p.payment_machine || "") ? "selected" : ""}>${frappe.utils.escape_html(machine.machine_name)}${machine.terminal_id ? ` (${frappe.utils.escape_html(machine.terminal_id)})` : ""}</option>`).join("")}
 							</select>
 						</div>
-						<div class="ch-pay-fin-row">
+						<div class="ch-pay-gateway-actions">
 							<button class="btn btn-xs btn-default ch-pay-row-paynow" data-idx="${idx}"><i class="fa fa-bolt"></i> ${__("Pay Now")}</button>
-							<div class="text-muted small" style="padding-top:6px;">${p.gateway_order_id ? `${__("Order")}: ${frappe.utils.escape_html(p.gateway_order_id)}${p.gateway_status ? ` | ${frappe.utils.escape_html(p.gateway_status)}` : ""}` : __("Choose provider + machine to send amount")}</div>
+							<div class="ch-pay-gateway-status">${p.gateway_order_id ? `${__("Order")}: ${frappe.utils.escape_html(p.gateway_order_id)}${p.gateway_status ? ` | ${frappe.utils.escape_html(p.gateway_status)}` : ""}` : __("Choose provider and machine before sending the amount")}</div>
 						</div>
 						<input type="text" class="form-control form-control-sm ch-pay-row-utr" data-idx="${idx}"
 							placeholder="${__("UPI UTR / Txn ID")}" value="${frappe.utils.escape_html(p.upi_transaction_id || "")}">
@@ -1544,7 +1719,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				const machines = this._machines_for_row(p);
 				ref_html = `
 					<div class="ch-pay-card-refs mt-1">
-						<div class="ch-pay-fin-row">
+						<div class="ch-pay-gateway-grid ch-pay-gateway-grid-two">
 							<select class="form-control form-control-sm ch-pay-row-gateway-provider" data-idx="${idx}">
 								<option value="">${__("Select Provider")}</option>
 								${providers.map((provider) => `<option value="${frappe.utils.escape_html(provider)}" ${provider === (p.gateway_provider || "") ? "selected" : ""}>${frappe.utils.escape_html(provider)}</option>`).join("")}
@@ -1554,64 +1729,46 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 								${machines.map((machine) => `<option value="${frappe.utils.escape_html(machine.name)}" ${machine.name === (p.payment_machine || "") ? "selected" : ""}>${frappe.utils.escape_html(machine.machine_name)}${machine.terminal_id ? ` (${frappe.utils.escape_html(machine.terminal_id)})` : ""}</option>`).join("")}
 							</select>
 						</div>
-						<div class="ch-pay-fin-row">
+						<div class="ch-pay-gateway-actions">
 							<button class="btn btn-xs btn-default ch-pay-row-paynow" data-idx="${idx}"><i class="fa fa-bolt"></i> ${__("Pay Now")}</button>
-							<div class="text-muted small" style="padding-top:6px;">${p.gateway_order_id ? `${__("Order")}: ${frappe.utils.escape_html(p.gateway_order_id)}${p.gateway_status ? ` | ${frappe.utils.escape_html(p.gateway_status)}` : ""}` : __("Choose provider + machine to send amount")}</div>
+							<div class="ch-pay-gateway-status">${p.gateway_order_id ? `${__("Order")}: ${frappe.utils.escape_html(p.gateway_order_id)}${p.gateway_status ? ` | ${frappe.utils.escape_html(p.gateway_status)}` : ""}` : __("Choose provider and machine before sending the amount")}</div>
 						</div>
-						<input type="text" class="form-control form-control-sm ch-pay-row-rrn" data-idx="${idx}"
-							placeholder="${__("Card RRN")}" value="${frappe.utils.escape_html(p.card_reference || "")}">
-						<input type="text" class="form-control form-control-sm ch-pay-row-card4" data-idx="${idx}"
-							placeholder="${__("Last 4 digits")}" maxlength="4" value="${frappe.utils.escape_html(p.card_last_four || "")}">
+						<div class="ch-pay-gateway-grid ch-pay-gateway-grid-two">
+							<input type="text" class="form-control form-control-sm ch-pay-row-rrn" data-idx="${idx}"
+								placeholder="${__("Card RRN")}" value="${frappe.utils.escape_html(p.card_reference || "")}">
+							<input type="text" class="form-control form-control-sm ch-pay-row-card4" data-idx="${idx}"
+								placeholder="${__("Last 4 digits")}" maxlength="4" value="${frappe.utils.escape_html(p.card_last_four || "")}">
+						</div>
 					</div>`;
 			} else if (type === "finance") {
-				const partners = this._finance_partners || [];
-				const sel_partner = partners.find(fp => fp.partner_name === p.finance_provider);
-				const tenures = sel_partner ? sel_partner.tenures : [];
-				ref_html = `
-					<div class="ch-pay-finance-refs mt-1">
-						<div class="ch-pay-fin-row">
-							<select class="form-control form-control-sm ch-pay-row-fin-provider" data-idx="${idx}">
-								<option value="">${__("Select Finance Partner")}</option>
-								${partners.map(fp => `<option value="${frappe.utils.escape_html(fp.partner_name)}" ${fp.partner_name === p.finance_provider ? 'selected' : ''}>${frappe.utils.escape_html(fp.partner_name)}</option>`).join('')}
-							</select>
-							<select class="form-control form-control-sm ch-pay-row-fin-tenure" data-idx="${idx}">
-								<option value="">${__("Select Tenure")}</option>
-								${tenures.map(t => `<option value="${t}" ${String(p.finance_tenure) === String(t) ? 'selected' : ''}>${t} Months</option>`).join('')}
-							</select>
-						</div>
-						<div class="ch-pay-fin-row">
-							<input type="text" class="form-control form-control-sm ch-pay-row-fin-approval" data-idx="${idx}"
-								placeholder="${__("Approval / Loan ID")} *" value="${frappe.utils.escape_html(p.finance_approval_id || "")}">
-							<div class="input-group input-group-sm">
-								<span class="input-group-addon">₹</span>
-								<input type="number" class="form-control ch-pay-row-fin-down" data-idx="${idx}"
-									placeholder="${__("Down Payment")}" value="${flt(p.finance_down_payment) || ""}" min="0" step="0.01">
-							</div>
-						</div>
-					</div>`;
+				// Amount is auto-calculated (net_payable - down payments); show as read-only.
+				ref_html = `<div class="ch-pay-fin-auto-note"><i class="fa fa-info-circle"></i> ${__("Auto-calculated. Add Cash/UPI/Card rows above for down payment.")}</div>`;
 			}
 
+			// Finance row: amount is read-only (auto-calc). All other rows are editable.
+			const is_finance_row = type === "finance";
 			container.append(`
-				<div class="ch-pay-row${type === "finance" ? " ch-pay-row-finance" : ""}" data-idx="${idx}">
+				<div class="ch-pay-row${is_finance_row ? " ch-pay-row-finance" : ""}" data-idx="${idx}">
 					<div class="ch-pay-row-header">
 						<span class="ch-pay-row-mop-label">${_mop_icon(p.mode)} ${frappe.utils.escape_html(p.mode)}</span>
-						${this._payments.length > 1
+						${(!is_finance_row && this._payments.length > 1)
 							? `<button class="ch-pay-row-remove" data-idx="${idx}" title="${__("Remove")}"><i class="fa fa-times-circle"></i></button>`
 							: ""}
 					</div>
-					<div class="input-group ch-pay-row-amt-group">
-						<span class="input-group-addon">₹</span>
-						<input type="number" class="form-control ch-pay-row-amount" data-idx="${idx}"
-							value="${flt(p.amount, 2)}" min="0" step="0.01">
+					<div class="ch-pay-row-amt-group${is_finance_row ? " ch-pay-row-amt-readonly" : ""}">
+						<span class="ch-pay-amt-prefix">₹</span>
+						<input type="number" class="ch-pay-row-amount" data-idx="${idx}"
+							value="${flt(p.amount, 2)}" min="0" step="0.01"${is_finance_row ? " readonly tabindex=\"-1\"" : ""}>
 					</div>
 					${ref_html}
 				</div>`);
 		});
 
-		// Show/hide quick cash section
+		// Show/hide quick cash section — hide in Finance mode (down payment amounts are entered directly)
 		const has_cash = this._payments.some(p => this._mop_type(p.mode) === "cash");
-		this._overlay.find("#ch-pay-quick-cash").toggle(has_cash && !this._is_free_sale);
-		if (has_cash && !this._is_free_sale) this._render_quick_cash();
+		const show_quick_cash = has_cash && !this._is_free_sale && !this._is_finance_sale_type(PosState.sale_type);
+		this._overlay.find("#ch-pay-quick-cash").toggle(show_quick_cash);
+		if (show_quick_cash) this._render_quick_cash();
 	}
 
 	_render_quick_cash() {
@@ -1645,10 +1802,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (this._is_finance_sale_type(PosState.sale_type) && !this._is_free_sale) {
 			this._sync_finance_payments();
 		}
+		const grand = this._is_free_sale ? 0 : this._calc_grand_total();
+		this._rebalance_payments_after_total_change(this._last_grand_total, grand);
+		this._last_grand_total = grand;
 		const finance_amount = this._payments.reduce((sum, payment) => {
 			return sum + (this._mop_type(payment.mode) === "finance" ? flt(payment.amount) : 0);
 		}, 0);
-		const grand      = this._is_free_sale ? 0 : this._calc_grand_total();
 
 		// Sync loyalty amount — clamp to current payable grand
 		if (this._redeem_loyalty && this._loyalty_amount > grand) {
@@ -1662,10 +1821,15 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const loyalty    = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
 		const advance    = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
 		const net_due    = Math.max(0, grand - loyalty - advance);
-		const cash_paid  = this._is_free_sale ? 0 : this._payments.reduce((s, p) => s + flt(p.amount), 0);
+		// In Finance mode: cash_paid for display = only down payment rows (not Finance row)
+		const is_finance_mode = this._is_finance_sale_type(PosState.sale_type);
+		const cash_paid  = this._is_free_sale ? 0 : this._payments.reduce((s, p) => {
+			if (is_finance_mode && this._mop_type(p.mode) === "finance") return s;
+			return s + flt(p.amount);
+		}, 0);
 		const total_paid = cash_paid + loyalty + advance;
-		const balance    = Math.max(0, grand - total_paid);
-		const change     = Math.max(0, total_paid - grand);
+		const balance    = Math.max(0, grand - total_paid - finance_amount);
+		const change     = Math.max(0, total_paid - (grand - finance_amount));
 		const refs_valid = this._validate_payment_refs();
 
 		// Ready logic:
@@ -1682,9 +1846,15 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		}
 
 		this._overlay.find("#ch-pay-amount-due").text(`₹${format_number(Math.max(0, net_due))}`);
-		this._overlay.find("#ch-pay-total-paid").text(`₹${format_number(total_paid)}`);
-
-		// Advance applied row
+		// "Total Paid" shows only actual tender (cash/card/UPI/finance).
+		// Loyalty is already shown as a red deduction in the bill totals on the left.
+		this._overlay.find("#ch-pay-total-paid").text(`₹${format_number(cash_paid + advance)}`);
+		if (loyalty > 0) {
+			this._overlay.find("#ch-pay-loyalty-bal-row").show();
+			this._overlay.find("#ch-pay-loyalty-applied").text(`₹${format_number(loyalty)}`);
+		} else {
+			this._overlay.find("#ch-pay-loyalty-bal-row").hide();
+		}
 		if (advance > 0) {
 			this._overlay.find("#ch-pay-advance-bal-row").show();
 			this._overlay.find("#ch-pay-advance-applied").text(`₹${format_number(advance)}`);
@@ -1709,14 +1879,15 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			$label.text(__("Balance Due"));
 			$bal.text("₹0").removeClass("ch-pay-bal-positive ch-pay-bal-credit").addClass("ch-pay-bal-zero");
 		} else {
-			$label.text(__("Balance Due"));
+			$label.text(balance > 0 ? __("Remaining") : __("Paid in Full"));
 			$bal.text(`₹${format_number(balance)}`)
 				.removeClass("ch-pay-bal-positive ch-pay-bal-zero ch-pay-bal-credit")
 				.addClass(balance > 0 ? "ch-pay-bal-positive" : "ch-pay-bal-zero");
 		}
 
 		const $cr = this._overlay.find("#ch-pay-change-row");
-		if (change > 0.005 && !this._is_free_sale) {
+		// Finance sales: don't show "Change to Return" — balance is handled by finance company
+		if (change > 0.005 && !this._is_free_sale && !this._is_finance_sale_type(PosState.sale_type)) {
 			$cr.show();
 			this._overlay.find("#ch-pay-change").text(`₹${format_number(change)}`);
 		} else {
@@ -1743,13 +1914,37 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Refresh quick cash buttons if cash row present
 		const has_cash = this._payments.some(p => this._mop_type(p.mode) === "cash");
 		if (has_cash && !this._is_free_sale) this._render_quick_cash();
+
+		// Lock commercial controls once a gateway payment has been initiated
+		const gateway_active = this._payments.some(p => p.gateway_initiated);
+		const $commercials = this._overlay.find("#ch-pay-commercials");
+		if (gateway_active) {
+			$commercials.find("input, select").prop("disabled", true);
+			$commercials.find(".ch-pay-section-hdr").prop("disabled", true);
+			if (!$commercials.find(".ch-pay-gateway-lock-msg").length) {
+				$commercials.prepend(`<div class="ch-pay-gateway-lock-msg"><i class="fa fa-lock"></i> ${__("Payment initiated — discounts locked")}</div>`);
+			}
+		} else {
+			$commercials.find("input, select").prop("disabled", false);
+			$commercials.find(".ch-pay-section-hdr").prop("disabled", false);
+			$commercials.find(".ch-pay-gateway-lock-msg").remove();
+		}
 	}
 
 	_calc_balance_due() {
 		const grand   = this._is_free_sale ? 0 : this._calc_grand_total();
 		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
 		const advance = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
-		const paid    = this._payments.reduce((s, p) => s + flt(p.amount), 0);
+		const net_payable = Math.max(0, grand - loyalty - advance);
+		if (this._is_finance_sale_type(PosState.sale_type)) {
+			// In Finance mode: balance = what's left after non-finance down payment rows
+			// (Finance row itself auto-covers the remainder — don't count it as "paid")
+			const down_paid = this._payments.reduce((s, p) => {
+				return this._mop_type(p.mode) === "finance" ? s : s + flt(p.amount);
+			}, 0);
+			return Math.max(0, net_payable - down_paid);
+		}
+		const paid = this._payments.reduce((s, p) => s + flt(p.amount), 0);
 		return Math.max(0, grand - loyalty - advance - paid);
 	}
 
@@ -1902,7 +2097,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		}
 
 		// Normal/credit sale validations
-		if (!this._is_free_sale && !this._is_credit_sale && balance > 0.005) {
+		if (!this._is_free_sale && !this._is_credit_sale && !this._is_finance_sale_type(PosState.sale_type) && balance > 0.005) {
 			frappe.show_alert({ message: __("Payment not complete — ₹{0} still due", [format_number(balance)]), indicator: "red" });
 			this._submitting = false;
 			return;

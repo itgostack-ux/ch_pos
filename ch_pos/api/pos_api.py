@@ -359,6 +359,11 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.is_pos = 1
     inv.update_stock = 1
 
+    # Tax Category — required by india_compliance GST validation.
+    # Pull from customer record; fall back to "In-State" for all POS retail sales.
+    cust_tax_cat = frappe.db.get_value("Customer", customer, "tax_category") if customer else None
+    inv.tax_category = cust_tax_cat or "In-State"
+
     # B2B/B2C — GSTIN provided at billing time overrides saved GSTIN
     if customer_gstin:
         inv.custom_customer_gstin = customer_gstin.strip().upper()
@@ -490,9 +495,23 @@ def create_pos_invoice(pos_profile, customer, items,
             payments = frappe.parse_json(payments)
         if not payments:
             frappe.throw(frappe._("At least one payment mode is required"))
+        # Build the set of valid Mode of Payment names once to avoid per-row DB calls
+        _valid_mops = set(frappe.db.get_all("Mode of Payment", pluck="name"))
         for p in payments:
+            mop_name = p.get("mode_of_payment") or ""
+            if mop_name not in _valid_mops:
+                # Finance rows (e.g. "Finance") are auto-calc rows representing the amount
+                # to be received from the finance company later — they are NOT collected at
+                # POS and have no valid Mode of Payment in ERPNext.  Skip adding them as a
+                # payment row; the financed amount will show as outstanding_amount on the
+                # invoice (which is correct — the finance company settles it via bank transfer).
+                frappe.logger().info(
+                    f"POS Finance Sale: skipping payment row with unknown MOP '{mop_name}' "
+                    f"(amount {flt(p.get('amount',0))}) — will appear as outstanding"
+                )
+                continue
             row = {
-                "mode_of_payment": p.get("mode_of_payment"),
+                "mode_of_payment": mop_name,
                 "amount": flt(p.get("amount", 0)),
             }
             if p.get("upi_transaction_id"):
@@ -501,7 +520,7 @@ def create_pos_invoice(pos_profile, customer, items,
                 row["custom_card_reference"] = p["card_reference"]
             if p.get("card_last_four"):
                 row["custom_card_last_four"] = p["card_last_four"]
-            # Finance/EMI fields
+            # Finance/EMI fields on down-payment rows
             if p.get("finance_provider"):
                 row["custom_finance_provider"] = p["finance_provider"]
             if p.get("finance_tenure"):
@@ -519,6 +538,16 @@ def create_pos_invoice(pos_profile, customer, items,
             if p.get("gateway_status"):
                 row["custom_gateway_status"] = p["gateway_status"]
             inv.append("payments", row)
+        # After filtering, ensure at least one payment row exists
+        if not inv.get("payments"):
+            # Pure Finance sale with zero down payment — add a ₹0 Cash row so ERPNext
+            # validate_pos_paid_amount() passes (it requires at least one row)
+            default_mop = "Cash"
+            for pm in (profile.payments or []):
+                if cint(pm.default):
+                    default_mop = pm.mode_of_payment
+                    break
+            inv.append("payments", {"mode_of_payment": default_mop, "amount": 0})
     elif mode_of_payment:
         inv.append("payments", {
             "mode_of_payment": mode_of_payment,
@@ -729,7 +758,8 @@ def create_pos_invoice(pos_profile, customer, items,
     if sale_reference:
         inv.custom_ch_sale_reference = sale_reference
 
-    # For Finance Sale: ensure payment rows carry finance fields from sale type
+    # For Finance Sale: stamp finance partner/tenure/loan-id on down-payment rows if not set
+    # (The Finance row itself is excluded from inv.payments — it's tracked via outstanding_amount)
     if sale_type and "finance" in (sale_type or "").lower() and sale_sub_type:
         for pay_row in inv.payments:
             if not pay_row.get("custom_finance_provider"):
@@ -749,7 +779,8 @@ def create_pos_invoice(pos_profile, customer, items,
         # After insert, ERPNext has computed rounded_total including taxes.
         # The POS frontend sends pre-tax totals, so adjust the primary payment
         # row to cover the full amount (tax gap + rounding).
-        if not cint(is_free_sale) and not cint(is_credit_sale):
+        _is_finance_sale = sale_type and ("finance" in (sale_type or "").lower() or "emi" in (sale_type or "").lower())
+        if not cint(is_free_sale) and not cint(is_credit_sale) and not _is_finance_sale:
             rt = flt(inv.rounded_total or inv.grand_total)
             total_paid = sum(flt(p.amount) for p in inv.payments)
             rounding_diff = rt - total_paid

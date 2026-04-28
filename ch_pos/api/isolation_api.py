@@ -31,6 +31,62 @@ def _get_executive_permissions(exec_record):
     }
 
 
+def _get_store_pos_profile(store, company=None):
+    """Resolve the active POS Profile for a store.
+
+    Prefer enabled mappings whose POS Profile company matches the store company.
+    This avoids ambiguous results when legacy profiles still point to the same store.
+    """
+    filters = {"store": store}
+    if frappe.get_meta("POS Profile Extension").has_field("disabled"):
+        filters["disabled"] = 0
+
+    mappings = frappe.get_all(
+        "POS Profile Extension",
+        filters=filters,
+        fields=["pos_profile"],
+        order_by="modified desc",
+    )
+    if not mappings:
+        return None
+
+    for row in mappings:
+        profile_name = row.pos_profile
+        profile = frappe.db.get_value(
+            "POS Profile",
+            profile_name,
+            ["name", "company", "disabled"],
+            as_dict=True,
+        )
+        if not profile or cint(profile.disabled):
+            continue
+        if company and profile.company == company:
+            return profile.name
+
+    for row in mappings:
+        profile_name = row.pos_profile
+        if not cint(frappe.db.get_value("POS Profile", profile_name, "disabled") or 0):
+            return profile_name
+
+    return None
+
+
+def _ensure_store_business_date_is_not_future(store):
+    business_date = getdate(frappe.db.get_value(
+        "CH Business Date",
+        {"store": store, "is_active": 1},
+        "business_date",
+    ) or nowdate())
+    if business_date > getdate(nowdate()):
+        frappe.throw(
+            _("Store {0} has an invalid future business date {1}. Reset it before using POS.").format(
+                store, business_date
+            ),
+            title=_("Invalid Business Date"),
+        )
+    return business_date
+
+
 # ── POS Launch / Context ─────────────────────────────────────────────────────
 
 
@@ -86,7 +142,7 @@ def get_pos_context() -> dict:
 
     # Get business date
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
-    business_date = get_store_business_date(store) if store else None
+    business_date = _ensure_store_business_date_is_not_future(store) if store else None
 
     # Check for existing open session
     existing_session = None
@@ -155,7 +211,7 @@ def get_pos_context_for_store(store) -> dict:
     company = store_doc.company
 
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_store_business_date
-    business_date = get_store_business_date(store)
+    business_date = _ensure_store_business_date_is_not_future(store)
 
     # Check if day is closed
     day_closed = False
@@ -167,9 +223,7 @@ def get_pos_context_for_store(store) -> dict:
         day_closed = True
 
     # Find POS Profile for this store
-    pos_profile = frappe.db.get_value(
-        "POS Profile Extension", {"store": store}, "pos_profile"
-    )
+    pos_profile = _get_store_pos_profile(store, company=company)
 
     return {
         "status": "ok",

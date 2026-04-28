@@ -22,6 +22,19 @@ from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
 )
 
 
+def _ensure_store_business_date_is_not_future(store):
+    business_date = getdate(get_store_business_date(store))
+    today = getdate(nowdate())
+    if business_date > today:
+        frappe.throw(
+            _(
+                "Store {0} has an invalid future business date {1}. Reset it to today or an earlier date before opening POS."
+            ).format(store, business_date),
+            title=_("Invalid Business Date"),
+        )
+    return business_date
+
+
 # ── Session Lifecycle ────────────────────────────────────────────────────────
 
 
@@ -33,6 +46,7 @@ def get_session_status(pos_profile) -> dict:
 
     session = get_active_session(pos_profile)
     if session:
+        _ensure_store_business_date_is_not_future(session.store)
         return {
             "has_session": True,
             "session_name": session.name,
@@ -85,7 +99,7 @@ def get_session_status(pos_profile) -> dict:
 
     # If the day is already closed for this store, don't allow reopening.
     if store:
-        business_date = get_store_business_date(store)
+        business_date = _ensure_store_business_date_is_not_future(store)
         day_closed = False
         bd_status = frappe.db.get_value("CH Business Date", {"store": store}, "status")
         if bd_status == "Closed":
@@ -159,7 +173,7 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
             )
 
     # Get business date
-    business_date = get_store_business_date(store)
+    business_date = _ensure_store_business_date_is_not_future(store)
 
     # Acquire advisory lock to prevent race condition on session creation
     lock_key = f"pos_session_{store}_{business_date}"

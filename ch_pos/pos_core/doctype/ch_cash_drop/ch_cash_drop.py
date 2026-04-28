@@ -87,11 +87,7 @@ class CHCashDrop(Document):
             return
 
         # POS Profile cash account is the Cr side (money leaves the till)
-        pos_cash_account = frappe.db.get_value(
-            "POS Profile", self.pos_profile, "cash_bank_account"
-        ) if self.pos_profile else None
-        if not pos_cash_account:
-            pos_cash_account = frappe.db.get_value("Company", company, "default_cash_account")
+        pos_cash_account = frappe.db.get_value("Company", company, "default_cash_account")
         if not pos_cash_account:
             frappe.log_error(
                 f"Cash Drop GL skipped for {self.name}: no POS cash account found.",

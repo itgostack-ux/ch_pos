@@ -6,8 +6,9 @@ All POS transactions are tagged with this business date.
 """
 
 import frappe
+from frappe import _
 from frappe.model.document import Document
-from frappe.utils import getdate, now_datetime
+from frappe.utils import getdate, now_datetime, nowdate
 
 
 class CHBusinessDate(Document):
@@ -22,6 +23,11 @@ def advance_business_date(store, new_date, reason=None, manager_user=None):
 	"""Advance the business date for a store. Requires manager override."""
 	frappe.has_permission("CH Business Date", "write", throw=True)
 	new_date = getdate(new_date)
+	if new_date > getdate(nowdate()):
+		frappe.throw(
+			_("Business date cannot be set in the future. Choose today or an earlier operational date."),
+			title=_("Invalid Business Date"),
+		)
 	timestamp = now_datetime()
 	acting_user = manager_user or frappe.session.user
 
