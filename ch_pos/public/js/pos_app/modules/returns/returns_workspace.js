@@ -149,17 +149,34 @@ export class ReturnsWorkspace {
 					},
 				];
 
+				// Build a row-name -> index map so we can wire device <-> VAS auto-fill
+				const idx_by_row = {};
+				items.forEach((it, i) => { idx_by_row[it.name] = i; });
+
 				items.forEach((item, i) => {
 					const has_serial = !!(item.serial_no);
+					const bound_vas = item.has_attached_vas && (item.attached_vas || []).length;
+					const is_bound_vas = !!item.is_bound_vas;
+					const vas_badge = bound_vas
+						? `<span class="badge badge-warning" style="margin-left:4px" title="${__("Linked Extended Warranty / VAS will be auto-refunded with this device")}">${__("+ VAS auto-refund")}</span>`
+						: "";
+					const vas_bound_badge = is_bound_vas
+						? `<span class="badge badge-info" style="margin-left:4px" title="${__("Bound to a device on this invoice -- qty follows the device")}">${__("Bound to device")}</span>`
+						: "";
+					const attached_list = bound_vas
+						? `<div class="text-muted" style="font-size:11px;margin-top:2px">${__("Auto-included on return:")} ${(item.attached_vas || []).map(v => frappe.utils.escape_html(v.item_name || v.item_code)).join(", ")}</div>`
+						: "";
 					fields.push({ fieldtype: "Section Break", collapsible: 0 });
 					fields.push({
 						fieldtype: "HTML",
 						fieldname: `item_label_${i}`,
-						options: `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;">
+						options: `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:4px 0;">
 							<div>
 								<b>${frappe.utils.escape_html(item.item_name)}</b>
 								<span class="text-muted"> (${frappe.utils.escape_html(item.item_code)})</span>
 								${has_serial ? `<span class="badge badge-info" style="margin-left:4px">IMEI: ${frappe.utils.escape_html(item.serial_no)}</span>` : ""}
+								${vas_badge}${vas_bound_badge}
+								${attached_list}
 							</div>
 							<div class="text-muted">
 								Sold: ${item.qty} @ ₹${format_number(item.rate)}
@@ -180,7 +197,10 @@ export class ReturnsWorkspace {
 						fieldtype: "Int",
 						label: __("Return Qty"),
 						default: 0,
-						description: __("Max: {0}", [item.returnable_qty]),
+						description: is_bound_vas
+							? __("Auto-set from device. Max: {0}", [item.returnable_qty])
+							: __("Max: {0}", [item.returnable_qty]),
+						read_only: is_bound_vas ? 1 : 0,
 					});
 				});
 
@@ -280,6 +300,29 @@ export class ReturnsWorkspace {
 					},
 				});
 				dlg.show();
+
+				// Auto-mirror device qty -> bound VAS rows so the cashier sees
+				// exactly what will be refunded before clicking Process.
+				items.forEach((dev, dev_idx) => {
+					if (!(dev.has_attached_vas && (dev.attached_vas || []).length)) return;
+					const dev_field = dlg.get_field(`return_qty_${dev_idx}`);
+					if (!dev_field || !dev_field.df) return;
+					dev_field.df.onchange = () => {
+						const dev_qty = cint(dlg.get_value(`return_qty_${dev_idx}`));
+						(dev.attached_vas || []).forEach(v => {
+							const vas_idx = idx_by_row[v.vas_si_row];
+							if (vas_idx === undefined) return;
+							const vas_item = items[vas_idx];
+							if (!vas_item) return;
+							const ratio = dev.qty ? Math.min(1, dev_qty / dev.qty) : 1;
+							const new_vas_qty = Math.min(
+								Math.round(vas_item.qty * ratio),
+								vas_item.returnable_qty
+							);
+							dlg.set_value(`return_qty_${vas_idx}`, new_vas_qty);
+						});
+					};
+				});
 			},
 		});
 	}

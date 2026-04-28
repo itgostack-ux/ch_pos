@@ -641,6 +641,42 @@ def create_pos_invoice(pos_profile, customer, items,
         exchange_credit = flt(ba.revised_price) or flt(ba.quoted_price) or flt(ba.estimated_price)
         inv.custom_exchange_amount = exchange_credit
 
+        # ── MARKET-PARITY GUARD (Oracle Xstore / SAP Retail / MS D365 Commerce) ──
+        # When exchange/return credit exceeds the new purchase value, the system
+        # must NEVER silently drop the surplus -- the customer is owed money.
+        # Compute provisional grand_total (with items + taxes + other discounts
+        # already applied) and refuse to bill if the credit exceeds it.
+        # The cashier must either (a) add items to absorb the full credit, or
+        # (b) cancel exchange and use the Buyback -> Cashback flow to refund
+        # the surplus to the customer.
+        try:
+            inv.run_method("calculate_taxes_and_totals")
+        except Exception:
+            # If calculation fails at this stage, fall through -- the regular
+            # save() below will surface the underlying error with full context.
+            pass
+        pre_exchange_total = flt(inv.rounded_total or inv.grand_total or 0)
+        if exchange_credit - pre_exchange_total > 0.5:  # 50p tolerance for rounding
+            surplus = exchange_credit - pre_exchange_total
+            _cur = inv.currency or "INR"
+            frappe.throw(
+                frappe._(
+                    "Exchange credit {credit} exceeds the new purchase value {total}. "
+                    "Customer is owed {surplus} as refund and the sale cannot be billed "
+                    "with surplus credit silently dropped."
+                    "<br><br>Resolve by either:"
+                    "<br>&bull; Adding items to the cart so the new purchase value "
+                    "matches or exceeds the exchange credit, OR"
+                    "<br>&bull; Cancelling exchange and using <b>Buyback &rarr; Cashback</b> "
+                    "to pay the customer {surplus} directly."
+                ).format(
+                    credit=fmt_money(exchange_credit, currency=_cur),
+                    total=fmt_money(pre_exchange_total, currency=_cur),
+                    surplus=fmt_money(surplus, currency=_cur),
+                ),
+                title=frappe._("Exchange Credit Surplus -- Cannot Bill"),
+            )
+
         # Apply exchange credit as a discount so ERPNext reduces grand_total
         # and payment validation (paid_amount >= grand_total) passes.
         inv.discount_amount = flt(inv.discount_amount or 0) + exchange_credit
@@ -1673,49 +1709,81 @@ def scan_barcode(barcode, pos_profile=None) -> dict:
 
 @frappe.whitelist()
 def search_invoices_for_return(search_term, pos_profile=None) -> list:
-    """Search Sales Invoices for return/exchange processing."""
-    search_term = (search_term or "").strip()
-    if not search_term:
-        return []
+	"""Search Sales Invoices for return/exchange processing.
 
-    filters = {
-        "docstatus": 1,
-        "is_return": 0,
-    }
+	Company isolation: results are constrained to the active POS Session's company
+	so a cashier on a GoFix POS Profile cannot see GoGizmo invoices for the same
+	customer (and vice-versa). pos_profile is required for this guarantee.
+	"""
+	search_term = (search_term or "").strip()
+	if not search_term:
+		return []
 
-    or_filters = [
-        ["name", "like", f"%{search_term}%"],
-        ["customer", "like", f"%{search_term}%"],
-        ["customer_name", "like", f"%{search_term}%"],
-        ["contact_mobile", "like", f"%{search_term}%"],
-    ]
+	if not pos_profile:
+		frappe.throw(frappe._("POS Profile is required to search invoices for return."))
 
-    invoices = frappe.get_all(
-        "Sales Invoice",
-        filters=filters,
-        or_filters=or_filters,
-        fields=[
-            "name", "customer", "customer_name", "posting_date",
-            "grand_total", "status", "pos_profile",
-        ],
-        order_by="posting_date desc, creation desc",
-        limit_page_length=20,
-    )
+	company = frappe.db.get_value("POS Profile", pos_profile, "company")
+	if not company:
+		frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
 
-    for inv in invoices:
-        inv["items_count"] = frappe.db.count(
-            "Sales Invoice Item", {"parent": inv["name"]}
-        )
+	filters = {
+		"docstatus": 1,
+		"is_return": 0,
+		"company": company,
+	}
 
-    return invoices
+	or_filters = [
+		["name", "like", f"%{search_term}%"],
+		["customer", "like", f"%{search_term}%"],
+		["customer_name", "like", f"%{search_term}%"],
+		["contact_mobile", "like", f"%{search_term}%"],
+	]
+
+	invoices = frappe.get_all(
+		"Sales Invoice",
+		filters=filters,
+		or_filters=or_filters,
+		fields=[
+			"name", "customer", "customer_name", "posting_date",
+			"grand_total", "status", "pos_profile", "company",
+		],
+		order_by="posting_date desc, creation desc",
+		limit_page_length=20,
+	)
+
+	for inv in invoices:
+		inv["items_count"] = frappe.db.count(
+			"Sales Invoice Item", {"parent": inv["name"]}
+		)
+
+	return invoices
 
 
 @frappe.whitelist()
 def get_invoice_items_for_return(invoice_name) -> dict:
-    """Get items from a Sales Invoice that can still be returned."""
+    """Get items from a Sales Invoice that can still be returned.
+
+    Each row also includes coverage-binding metadata so the POS UI can show the
+    cashier which VAS / Extended Warranty rows will be auto-refunded when a
+    device is returned. Linkage is derived from `tabCH Sold Plan` -- see
+    :func:`_get_linked_plans_for_invoice`.
+    """
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1 or inv.is_return:
         frappe.throw(frappe._("Only submitted non-return invoices can be returned"))
+
+    # Build coverage map: { device_si_row_name: [{plan, service_item, vas_si_row, ...}, ...] }
+    plan_links = _get_linked_plans_for_invoice(inv)
+    # Reverse: { vas_si_row_name: device_si_row_name }
+    vas_to_device = {}
+    for dev_row, plans in plan_links.items():
+        for p in plans:
+            if p.get("vas_si_row"):
+                vas_to_device[p["vas_si_row"]] = {
+                    "device_row": dev_row,
+                    "device_item_code": p["device_item_code"],
+                    "sold_plan": p["sold_plan"],
+                }
 
     returnable = []
     for item in inv.items:
@@ -1734,6 +1802,10 @@ def get_invoice_items_for_return(invoice_name) -> dict:
         if returnable_qty <= 0:
             continue
 
+        # Coverage badges
+        bound_to_device = vas_to_device.get(item.name)  # this row IS a VAS bound to a device
+        covered_plans = plan_links.get(item.name, [])    # this row IS a device with VAS attached
+
         returnable.append({
             "name": item.name,
             "item_code": item.item_code,
@@ -1746,9 +1818,212 @@ def get_invoice_items_for_return(invoice_name) -> dict:
             "warehouse": item.warehouse,
             "already_returned": already_returned,
             "returnable_qty": returnable_qty,
+            # Linkage metadata (consumed by returns_workspace.js)
+            "is_bound_vas": 1 if bound_to_device else 0,
+            "bound_to_device_row": bound_to_device.get("device_row") if bound_to_device else None,
+            "bound_to_device_item": bound_to_device.get("device_item_code") if bound_to_device else None,
+            "sold_plan": (bound_to_device or {}).get("sold_plan"),
+            "has_attached_vas": 1 if covered_plans else 0,
+            "attached_vas": [
+                {
+                    "item_code": p["service_item"],
+                    "item_name": p.get("service_item_name") or p["service_item"],
+                    "vas_si_row": p.get("vas_si_row"),
+                    "sold_plan": p["sold_plan"],
+                    "plan_type": p.get("plan_type"),
+                }
+                for p in covered_plans
+            ],
         })
 
     return returnable
+
+
+def _get_linked_plans_for_invoice(inv) -> dict:
+    """Return { device_si_row_name: [ {sold_plan, service_item, vas_si_row, ...}, ... ] }.
+
+    Looks up CH Sold Plan rows born from this invoice, then maps each plan's
+    service item back to the SI row that originally sold it. This is the
+    source of truth for "Extended Warranty / VAS X is bound to device row Y".
+    """
+    if not frappe.db.exists("DocType", "CH Sold Plan"):
+        return {}
+
+    try:
+        plans = frappe.db.sql("""
+            SELECT sp.name AS sold_plan, sp.item_code AS device_item_code,
+                   sp.warranty_plan, sp.plan_type, sp.serial_no,
+                   wp.service_item, wp.plan_name AS plan_label
+            FROM `tabCH Sold Plan` sp
+            LEFT JOIN `tabCH Warranty Plan` wp ON wp.name = sp.warranty_plan
+            WHERE sp.sales_invoice = %s
+              AND sp.docstatus = 1
+              AND sp.status = 'Active'
+        """, (inv.name,), as_dict=True)
+    except Exception:
+        # If the schema is missing fields in some env, fall back to no linking.
+        return {}
+
+    if not plans:
+        return {}
+
+    # Build quick lookup of items by item_code in this invoice
+    items_by_code = {}
+    for it in inv.items:
+        items_by_code.setdefault(it.item_code, []).append(it)
+
+    out = {}
+    used_vas_rows = set()
+    for p in plans:
+        device_rows = items_by_code.get(p["device_item_code"]) or []
+        if not device_rows:
+            continue
+        device_row = device_rows[0].name  # first occurrence; SI normally has 1
+
+        vas_row = None
+        if p.get("service_item"):
+            for cand in items_by_code.get(p["service_item"], []) or []:
+                if cand.name in used_vas_rows:
+                    continue
+                vas_row = cand.name
+                used_vas_rows.add(cand.name)
+                break
+
+        out.setdefault(device_row, []).append({
+            "sold_plan": p["sold_plan"],
+            "device_item_code": p["device_item_code"],
+            "service_item": p.get("service_item"),
+            "service_item_name": p.get("plan_label"),
+            "vas_si_row": vas_row,
+            "plan_type": p.get("plan_type"),
+        })
+
+    return out
+
+
+def _auto_include_bound_vas_rows(orig, return_items):
+    """Append VAS / Extended Warranty rows automatically when the device
+    they protect is being returned.
+
+    Parity with how Apple Retail / Samsung Care+ POS systems behave: returning
+    a covered device automatically refunds its bound protection plan rather
+    than leaving an "orphan" warranty active for a device the customer no
+    longer owns.
+
+    Returns ``(updated_return_items, auto_added_summary)``. ``auto_added_summary``
+    is a list of dicts the caller surfaces back to the UI so the cashier can see
+    exactly what was auto-included.
+    """
+    plan_links = _get_linked_plans_for_invoice(orig)
+    if not plan_links:
+        return return_items, []
+
+    rows_by_name = {it.name: it for it in orig.items}
+    already_in_return = {ri.get("original_item_row") for ri in return_items if ri.get("original_item_row")}
+    device_rows_in_return = {ri.get("original_item_row"): flt(ri.get("qty", 0))
+                             for ri in return_items
+                             if ri.get("original_item_row") and flt(ri.get("qty", 0)) > 0}
+
+    auto_added = []
+    for dev_row_name, return_qty in device_rows_in_return.items():
+        for link in plan_links.get(dev_row_name, []):
+            vas_row_name = link.get("vas_si_row")
+            if not vas_row_name or vas_row_name in already_in_return:
+                continue
+            vas_item = rows_by_name.get(vas_row_name)
+            if not vas_item:
+                continue
+            # Cap by available returnable qty proportional to device qty
+            dev_item = rows_by_name.get(dev_row_name)
+            dev_qty = flt(dev_item.qty) if dev_item else 1
+            ratio = min(1.0, return_qty / dev_qty) if dev_qty else 1.0
+            vas_qty = max(0, flt(vas_item.qty) * ratio)
+            if vas_qty <= 0:
+                continue
+            return_items.append({
+                "item_code": vas_item.item_code,
+                "item_name": vas_item.item_name,
+                "qty": vas_qty,
+                "rate": flt(vas_item.rate),
+                "original_item_row": vas_item.name,
+                "_auto_included_for_device_row": dev_row_name,
+                "_sold_plan": link.get("sold_plan"),
+            })
+            already_in_return.add(vas_row_name)
+            auto_added.append({
+                "item_code": vas_item.item_code,
+                "item_name": vas_item.item_name,
+                "qty": vas_qty,
+                "amount": vas_qty * flt(vas_item.rate),
+                "sold_plan": link.get("sold_plan"),
+                "device_row": dev_row_name,
+            })
+
+    return return_items, auto_added
+
+
+def _collect_plans_to_cancel(orig, return_items) -> list:
+    """Return a de-duped list of CH Sold Plan names whose origin items are part
+    of this return -- either because the device is being returned, or because
+    the cashier explicitly returned the VAS row itself.
+    """
+    plan_links = _get_linked_plans_for_invoice(orig)
+    if not plan_links:
+        return []
+
+    # All plans by either device row or vas row
+    by_device_row = plan_links  # {dev_row: [link, ...]}
+    by_vas_row = {}
+    for dev_row, links in plan_links.items():
+        for link in links:
+            if link.get("vas_si_row"):
+                by_vas_row[link["vas_si_row"]] = link
+
+    plans = set()
+    for ri in return_items:
+        if flt(ri.get("qty", 0)) <= 0:
+            continue
+        row_name = ri.get("original_item_row")
+        if not row_name:
+            continue
+        # Device row -> cancel all attached plans
+        for link in by_device_row.get(row_name, []):
+            if link.get("sold_plan"):
+                plans.add(link["sold_plan"])
+        # VAS row -> cancel that one plan
+        link = by_vas_row.get(row_name)
+        if link and link.get("sold_plan"):
+            plans.add(link["sold_plan"])
+
+    return sorted(plans)
+
+
+def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
+    """Cancel each CH Sold Plan name. Cancellation triggers the doctype's own
+    ``on_cancel`` which sets status='Cancelled', clears the Serial Lifecycle
+    warranty fields, and writes a 'Plan Cancelled' entry to CH VAS Ledger.
+
+    Failures are logged but never raised -- the credit note is already in the
+    ledger and we don't want a coverage-bookkeeping issue to corrupt the GL.
+    """
+    cancelled = []
+    for plan_name in plan_names or []:
+        try:
+            plan = frappe.get_doc("CH Sold Plan", plan_name)
+            if plan.docstatus == 1 and plan.status not in ("Cancelled", "Void"):
+                plan.flags.ignore_permissions = True
+                if hasattr(plan, "remarks"):
+                    suffix = f"\nAuto-cancelled: device returned via {return_invoice_name}"
+                    plan.db_set("remarks", (plan.remarks or "") + suffix, update_modified=False)
+                plan.cancel()
+                cancelled.append(plan_name)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Auto-cancel of CH Sold Plan {plan_name} failed (return: {return_invoice_name})",
+            )
+    return cancelled
+
 
 
 @frappe.whitelist()
@@ -1762,11 +2037,26 @@ def create_pos_return(original_invoice, return_items, sales_executive=None) -> d
     if orig.docstatus != 1 or orig.is_return:
         frappe.throw(frappe._("Can only create returns for submitted non-return invoices"))
 
+    # Auto-include any VAS / Extended Warranty rows that are bound to the
+    # devices being returned (parity with Apple Care, Samsung Care+ behavior).
+    # If the cashier returns a device, the protection plans sold against that
+    # device on the same invoice are automatically refunded and their
+    # corresponding CH Sold Plan rows are cancelled below (after submit).
+    return_items, _auto_added_plans = _auto_include_bound_vas_rows(orig, return_items)
+    # Plans we'll cancel after the return is submitted. We collect them upfront
+    # so we know which to void even if the cashier explicitly added the VAS row
+    # (instead of relying on auto-include).
+    _plans_to_cancel = _collect_plans_to_cancel(orig, return_items)
+
     # Use session business_date if available
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
     _active = get_active_session(orig.pos_profile) if orig.pos_profile else None
 
     ret = frappe.new_doc("Sales Invoice")
+    # Bind to active POS session so the workflow's "POS Direct Submit"
+    # transition condition (doc.custom_ch_pos_session) evaluates true.
+    if _active and _active.get("name"):
+        ret.custom_ch_pos_session = _active.get("name")
     ret.pos_profile = orig.pos_profile
     ret.customer = orig.customer
     ret.company = orig.company
@@ -1870,7 +2160,12 @@ def create_pos_return(original_invoice, return_items, sales_executive=None) -> d
     ret.paid_amount = correct_payment
 
     ret.flags.ignore_permissions = True
-    ret.save()
+    # Insert first with default Draft workflow state so _doc_before_save is
+    # populated before we transition to Approved (matches create_pos_invoice
+    # pattern at line ~846). POS exception: returns bypass Maker-Checker.
+    ret.insert(ignore_permissions=True)
+    ret.workflow_state = "Approved"
+    ret.custom_si_approval_state = "Approved"
     try:
         ret.submit()
     except Exception:
@@ -1923,13 +2218,342 @@ def create_pos_return(original_invoice, return_items, sales_executive=None) -> d
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Return audit log failed")
 
+    # Cancel any CH Sold Plan rows whose protected device or service item was
+    # part of this return. Failures here are logged but do not roll back the
+    # return -- the credit note is already submitted; plan cancellation can be
+    # retried by the warranty manager from CH Sold Plan list.
+    cancelled_plans = _cancel_linked_sold_plans(_plans_to_cancel, ret.name)
+
     return {
         "name": ret.name,
         "grand_total": ret.grand_total,
         "customer": ret.customer,
         "customer_name": ret.customer_name,
         "incentive_clawback": incentive_clawback,
+        "auto_included_vas_rows": _auto_added_plans,
+        "cancelled_sold_plans": cancelled_plans,
     }
+
+
+@frappe.whitelist()
+def preview_return_with_replacement(original_invoice, return_items,
+                                    replacement_total=0) -> dict:
+    """Compute the net delta when a customer returns items and re-buys others.
+
+    Returns a structured preview that the POS frontend uses to decide whether
+    the cashier must collect cash from the customer (positive delta) or
+    refund cash to the customer (negative delta).
+
+    Mirrors how Oracle Xstore / SAP Retail / MS D365 Commerce present the
+    'tender summary' before the cashier clicks Pay.
+    """
+    if isinstance(return_items, str):
+        return_items = frappe.parse_json(return_items)
+    return_items = return_items or []
+
+    # Compute return value (taxes inclusive) using original invoice item rates
+    orig = frappe.get_doc("Sales Invoice", original_invoice)
+    return_subtotal = 0.0
+    for ri in return_items:
+        return_subtotal += flt(ri.get("qty", 0)) * flt(ri.get("rate", 0))
+
+    # Apply original invoice's effective tax rate to the return subtotal
+    base_total = flt(orig.net_total) or 0.01
+    tax_factor = (flt(orig.grand_total) / base_total) if base_total else 1.0
+    return_value = round(return_subtotal * tax_factor, 2)
+    replacement_total = flt(replacement_total)
+
+    delta = round(replacement_total - return_value, 2)
+    if delta > 0.5:
+        action = "collect"
+        message = frappe._(
+            "Customer must pay {0} (replacement {1} - return {2})."
+        ).format(
+            fmt_money(delta, currency=orig.currency or "INR"),
+            fmt_money(replacement_total, currency=orig.currency or "INR"),
+            fmt_money(return_value, currency=orig.currency or "INR"),
+        )
+    elif delta < -0.5:
+        action = "refund"
+        message = frappe._(
+            "Customer must be refunded {0} (return {1} > replacement {2})."
+        ).format(
+            fmt_money(abs(delta), currency=orig.currency or "INR"),
+            fmt_money(return_value, currency=orig.currency or "INR"),
+            fmt_money(replacement_total, currency=orig.currency or "INR"),
+        )
+    else:
+        action = "even"
+        message = frappe._("Even exchange -- no cash movement required.")
+
+    return {
+        "return_value": return_value,
+        "replacement_total": replacement_total,
+        "delta": delta,
+        "action": action,           # "collect" | "refund" | "even"
+        "message": message,
+        "currency": orig.currency or "INR",
+    }
+
+
+@frappe.whitelist()
+def process_return_with_replacement(
+    original_invoice,
+    return_items,
+    replacement_payload,
+    settlement_payments=None,
+    refund_mode_of_payment=None,
+    sales_executive=None,
+) -> dict:
+    """Atomically process a return + replacement sale, refusing to bill until
+    the cash difference is fully accounted for.
+
+    Industry-parity behaviour (Oracle Xstore / SAP Retail / MS D365 Commerce):
+      - Replacement total > Return value  -> cashier collects the difference
+        via ``settlement_payments`` (list of {mode_of_payment, amount, ...}).
+      - Replacement total < Return value  -> cashier refunds the difference
+        via ``refund_mode_of_payment`` (defaults to original invoice MOP).
+      - Replacement total == Return value -> even exchange, no cash movement.
+
+    The system BLOCKS submission if the difference is not fully settled,
+    preventing the silent loss-of-money bug where surplus credit was dropped.
+
+    Args:
+        original_invoice: Sales Invoice being returned against.
+        return_items: list of {item_code, qty, rate, original_item_row, serial_no?}.
+        replacement_payload: dict accepted by ``create_pos_invoice``
+            (items, pos_profile, customer, etc.) -- WITHOUT the payments array
+            for the replacement; settlement_payments below covers it.
+        settlement_payments: list of payment rows to collect from customer
+            when delta > 0. Sum must equal delta exactly.
+        refund_mode_of_payment: MOP used to issue the refund row when delta < 0.
+            Defaults to the original invoice's default MOP.
+        sales_executive: passed through to both legs.
+
+    Returns:
+        {
+          "return_invoice": <name>,
+          "replacement_invoice": <name>,
+          "delta": <signed amount>,
+          "action": "collect" | "refund" | "even",
+          "settled": True,
+        }
+
+    Raises:
+        ValidationError if the settlement does not match the computed delta.
+    """
+    if isinstance(return_items, str):
+        return_items = frappe.parse_json(return_items)
+    if isinstance(replacement_payload, str):
+        replacement_payload = frappe.parse_json(replacement_payload)
+    if isinstance(settlement_payments, str):
+        settlement_payments = frappe.parse_json(settlement_payments)
+    settlement_payments = settlement_payments or []
+
+    if not return_items:
+        frappe.throw(frappe._("At least one item must be returned"))
+    if not replacement_payload or not replacement_payload.get("items"):
+        frappe.throw(frappe._(
+            "Replacement payload with at least one item is required. "
+            "For pure returns without replacement, use create_pos_return instead."
+        ))
+
+    orig = frappe.get_doc("Sales Invoice", original_invoice)
+
+    # ── 1. Compute provisional totals to determine net delta ───────────────
+    replacement_items = replacement_payload.get("items") or []
+    replacement_total_raw = sum(
+        flt(it.get("qty", 0)) * flt(it.get("rate", 0)) for it in replacement_items
+    )
+    # Apply original invoice's effective tax factor as a quick estimate.
+    # The exact total is recomputed by ERPNext on save() -- this preview is
+    # only used to validate the settlement payload before any DB writes.
+    base_total = flt(orig.net_total) or 0.01
+    tax_factor = (flt(orig.grand_total) / base_total) if base_total else 1.0
+    replacement_total_est = round(replacement_total_raw * tax_factor, 2)
+
+    return_subtotal = sum(
+        flt(ri.get("qty", 0)) * flt(ri.get("rate", 0)) for ri in return_items
+    )
+    return_value = round(return_subtotal * tax_factor, 2)
+
+    delta = round(replacement_total_est - return_value, 2)
+
+    # ── 2. Validate settlement matches delta BEFORE any DB writes ──────────
+    settle_sum = round(sum(flt(p.get("amount", 0)) for p in settlement_payments), 2)
+    _cur = orig.currency or "INR"
+
+    if delta > 0.5:  # Customer owes us
+        if abs(settle_sum - delta) > 0.5:
+            frappe.throw(
+                frappe._(
+                    "Settlement mismatch: customer must pay {expected} "
+                    "for the replacement vs return difference, but tendered {got}. "
+                    "Adjust the payment rows so they sum exactly to {expected}."
+                ).format(
+                    expected=fmt_money(delta, currency=_cur),
+                    got=fmt_money(settle_sum, currency=_cur),
+                ),
+                title=frappe._("Cannot Bill -- Difference Not Settled"),
+            )
+    elif delta < -0.5:  # We owe customer
+        if settle_sum > 0.5:
+            frappe.throw(
+                frappe._(
+                    "When the return value exceeds the replacement, no payment "
+                    "can be collected -- the customer is owed {0}. "
+                    "Leave settlement_payments empty and set refund_mode_of_payment instead."
+                ).format(fmt_money(abs(delta), currency=_cur)),
+                title=frappe._("Cannot Bill -- Refund Required"),
+            )
+    else:  # Even exchange
+        if settle_sum > 0.5:
+            frappe.throw(
+                frappe._(
+                    "Even exchange: replacement and return values match "
+                    "({0}). No payment should be collected."
+                ).format(fmt_money(return_value, currency=_cur)),
+                title=frappe._("Cannot Bill -- Even Exchange"),
+            )
+
+    # ── 3. Create the return leg (negative invoice for original items) ─────
+    return_result = create_pos_return(
+        original_invoice=original_invoice,
+        return_items=return_items,
+        sales_executive=sales_executive,
+    )
+    return_inv_name = return_result["name"]
+    actual_return_value = abs(flt(return_result["grand_total"]))
+
+    # ── 4. Build the replacement-invoice payload ───────────────────────────
+    # If delta < 0, the customer is owed cash -> add a refund payment row of
+    # |delta| value on the replacement invoice using refund_mode_of_payment.
+    # ERPNext rejects negative MOP rows on a positive invoice, so we instead
+    # create the refund as a separate Payment Entry below.
+    rp = dict(replacement_payload)  # shallow copy
+    rp.pop("payments", None)
+    rp.pop("mode_of_payment", None)
+    rp.pop("amount_paid", None)
+
+    if delta > 0.5:
+        # Use settlement payments to cover the difference
+        rp["payments"] = settlement_payments
+    else:
+        # Replacement is fully (or more than fully) covered by the return.
+        # Pay the full replacement_total via Cash placeholder; the actual cash
+        # settlement is the netted return + (optional) refund Payment Entry.
+        # We use a placeholder Cash row matching the replacement total so
+        # ERPNext payment validation passes; net cash to drawer is handled by
+        # the linked Payment Entry created in step 5.
+        default_mop = "Cash"
+        for p in (orig.payments or []):
+            if p.default:
+                default_mop = p.mode_of_payment
+                break
+        # Use rough estimate; create_pos_invoice will reject if items
+        # actually sum to a different amount post-tax.
+        rp["payments"] = [{
+            "mode_of_payment": default_mop,
+            "amount": replacement_total_est,
+        }]
+
+    rp["sales_executive"] = sales_executive
+
+    # ── 5. Create the replacement invoice ──────────────────────────────────
+    try:
+        replacement_result = create_pos_invoice(**rp)
+    except Exception:
+        # Replacement failed -- roll back the return so the customer's
+        # original invoice is restored.
+        try:
+            ri_doc = frappe.get_doc("Sales Invoice", return_inv_name)
+            if ri_doc.docstatus == 1:
+                ri_doc.flags.ignore_permissions = True
+                if hasattr(ri_doc, "custom_cancel_reason"):
+                    ri_doc.custom_cancel_reason = (
+                        "System: auto-rollback -- replacement leg failed"
+                    )
+                ri_doc.cancel()
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Return rollback failed for {return_inv_name}",
+            )
+        raise
+
+    replacement_inv_name = replacement_result["name"]
+
+    # ── 6. If we owe the customer, create a refund Payment Entry ───────────
+    refund_pe_name = None
+    if delta < -0.5:
+        refund_amount = round(abs(delta), 2)
+        refund_mop = refund_mode_of_payment
+        if not refund_mop:
+            for p in (orig.payments or []):
+                if p.default:
+                    refund_mop = p.mode_of_payment
+                    break
+            refund_mop = refund_mop or "Cash"
+        try:
+            from erpnext.accounts.doctype.payment_entry.payment_entry import (
+                get_payment_entry,
+            )
+            pe = get_payment_entry("Sales Invoice", return_inv_name)
+            pe.payment_type = "Pay"  # paying the customer
+            pe.paid_amount = refund_amount
+            pe.received_amount = refund_amount
+            pe.mode_of_payment = refund_mop
+            pe.reference_no = f"REFUND-{return_inv_name}"
+            pe.reference_date = nowdate()
+            pe.flags.ignore_permissions = True
+            pe.insert()
+            pe.submit()
+            refund_pe_name = pe.name
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Refund Payment Entry failed for {return_inv_name}",
+            )
+            # Don't roll back -- the return + replacement are already valid.
+            # Surface as an explicit error so cashier resolves the refund manually.
+            frappe.throw(
+                frappe._(
+                    "Return and replacement processed, but the refund Payment Entry "
+                    "for {0} failed. Issue the {1} refund manually before closing the till."
+                ).format(
+                    fmt_money(refund_amount, currency=_cur),
+                    fmt_money(refund_amount, currency=_cur),
+                ),
+                title=frappe._("Manual Refund Required"),
+            )
+
+    # ── 7. Audit ───────────────────────────────────────────────────────────
+    try:
+        from ch_pos.audit import log_business_event
+        log_business_event(
+            event_type="Return + Replacement Settled",
+            ref_doctype="Sales Invoice", ref_name=replacement_inv_name,
+            before=f"Return {return_inv_name} ({fmt_money(actual_return_value, currency=_cur)})",
+            after=(
+                f"Replacement {replacement_inv_name} | "
+                f"delta {fmt_money(delta, currency=_cur)} | "
+                f"refund_pe {refund_pe_name or 'n/a'}"
+            ),
+            company=orig.company,
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Return+Replacement audit failed")
+
+    return {
+        "return_invoice": return_inv_name,
+        "replacement_invoice": replacement_inv_name,
+        "refund_payment_entry": refund_pe_name,
+        "delta": delta,
+        "action": "collect" if delta > 0.5 else ("refund" if delta < -0.5 else "even"),
+        "settled": True,
+    }
+
+
 @frappe.whitelist()
 def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_override=0) -> dict:
     """Validate a serial number can be sold from this warehouse, enforcing FIFO.
@@ -6108,9 +6732,18 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 def get_todays_invoices(pos_profile, date=None, phone=None) -> list:
 	"""Return POS invoices for a profile filtered by date or customer phone.
 
-	Used by the Reprint dialog in the POS frontend.
+	Used by the Reprint dialog in the POS frontend. Company isolation is enforced
+	via the POS Profile's company so the same customer's invoices in another
+	company (e.g. GoFix vs GoGizmo) are never exposed to this profile.
 	"""
 	from frappe.utils import getdate
+
+	if not pos_profile:
+		frappe.throw(frappe._("POS Profile is required."))
+
+	company = frappe.db.get_value("POS Profile", pos_profile, "company")
+	if not company:
+		frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
 
 	if phone:
 		# Search by customer phone number — find matching customers first
@@ -6139,12 +6772,13 @@ def get_todays_invoices(pos_profile, date=None, phone=None) -> list:
 			FROM `tabSales Invoice` pi
 			JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
 			WHERE pi.pos_profile = %s
+			  AND pi.company = %s
 			  AND pi.customer IN ({cust_placeholders})
 			  AND pi.docstatus = 1
 			GROUP BY pi.name
 			ORDER BY pi.posting_date DESC, pi.posting_time DESC
 			LIMIT 50
-		""".format(cust_placeholders=cust_placeholders), [pos_profile] + customers, as_dict=True)  # noqa: UP032
+		""".format(cust_placeholders=cust_placeholders), [pos_profile, company] + customers, as_dict=True)  # noqa: UP032
 		return rows
 
 	# Default: search by date
@@ -6164,11 +6798,12 @@ def get_todays_invoices(pos_profile, date=None, phone=None) -> list:
 		FROM `tabSales Invoice` pi
 		JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
 		WHERE pi.pos_profile = %s
+		  AND pi.company = %s
 		  AND pi.posting_date = %s
 		  AND pi.docstatus = 1
 		GROUP BY pi.name
 		ORDER BY pi.posting_time DESC
-	""", (pos_profile, filter_date), as_dict=True)
+	""", (pos_profile, company, filter_date), as_dict=True)
 
 	return rows
 

@@ -1546,15 +1546,36 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			payment.payment_machine = res.machine || payment.payment_machine || "";
 			payment.gateway_order_id = res.order_id || "";
 			payment.gateway_status = res.status || "CREATED";
+			payment.gateway_test_mode = !!res.test_mode;
 			payment.gateway_initiated = true;   // amount is committed — freeze from auto-rebalance
 			this._render_payments();
 			this._update_totals();
+			const tag = res.test_mode ? __("[TEST] ") : "";
 			frappe.show_alert({
-				message: __("{0} order {1} created on {2}", [payment.mode, res.order_id || res.merchant_order_reference || "", res.machine_name || res.machine || "machine"]),
-				indicator: "green",
+				message: tag + __("{0} order {1} created on {2}", [payment.mode, res.order_id || res.merchant_order_reference || "", res.machine_name || res.machine || "machine"]),
+				indicator: res.test_mode ? "orange" : "green",
 			});
 		}).catch((err) => {
 			console.error("Gateway initiation failed:", err);
+			// Surface the real backend message to the cashier instead of silent failure.
+			let msg = "";
+			if (err) {
+				if (typeof err === "string") msg = err;
+				else if (err.message) msg = err.message;
+				else if (err._server_messages) {
+					try {
+						const parsed = JSON.parse(err._server_messages);
+						const first = parsed && parsed[0];
+						const obj = typeof first === "string" ? JSON.parse(first) : first;
+						msg = (obj && (obj.message || obj.title)) || "";
+					} catch (e) { /* ignore */ }
+				}
+			}
+			frappe.msgprint({
+				title: __("Payment Could Not Be Started"),
+				message: msg || __("Gateway did not respond. Please retry or use cash."),
+				indicator: "red",
+			});
 		});
 	}
 

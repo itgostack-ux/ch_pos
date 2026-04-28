@@ -6,6 +6,7 @@ import frappe
 import requests
 from frappe import _
 from frappe.utils import cint, flt, get_url
+from frappe.utils.password import get_decrypted_password
 
 
 PINE_AUTH_URLS = {
@@ -17,6 +18,38 @@ PINE_ORDER_URLS = {
     "UAT": "https://pluraluat.v2.pinepg.in/api/pay/v1/orders",
     "PRODUCTION": "https://api.pluralpay.in/api/pay/v1/orders",
 }
+
+
+# ── Credential helpers ───────────────────────────────────────────────
+
+
+def _safe_get_password(doctype, name, fieldname):
+    """Return decrypted password or None — never raises."""
+    try:
+        return get_decrypted_password(doctype, name, fieldname, raise_exception=False)
+    except Exception:
+        return None
+
+
+def _machine_has_pine_credentials(machine):
+    """All three are required to talk to Pine Labs."""
+    if not (machine.client_id and machine.merchant_id):
+        return False
+    return bool(_safe_get_password("CH Payment Machine", machine.name, "client_secret"))
+
+
+def _is_test_mode_machine(machine):
+    """Test mode: explicit 'Other' provider, or UAT machine without configured creds.
+
+    Lets QA stores test the full POS flow without real gateway secrets.
+    """
+    provider = (machine.provider or "").strip()
+    if provider == "Other":
+        return True
+    env = (machine.environment or "UAT").upper()
+    if env == "UAT" and provider == "Pine Labs" and not _machine_has_pine_credentials(machine):
+        return True
+    return False
 
 
 def _utc_now_iso():
@@ -93,6 +126,15 @@ def get_payment_machines(company=None, store=None, pos_profile=None, payment_mod
 
 def _pine_generate_token(machine):
     env = (machine.environment or "UAT").upper()
+    client_secret = _safe_get_password("CH Payment Machine", machine.name, "client_secret")
+    if not (machine.client_id and client_secret):
+        frappe.throw(
+            _(
+                "Pine Labs credentials are not configured on machine {0}. "
+                "Set Client ID, Client Secret, and Merchant ID, or change provider to 'Other' for test mode."
+            ).format(machine.machine_name or machine.name),
+            title=_("Payment Machine Not Configured"),
+        )
     headers = {
         "Content-Type": "application/json",
         "accept": "application/json",
@@ -101,17 +143,35 @@ def _pine_generate_token(machine):
     }
     payload = {
         "client_id": machine.client_id,
-        "client_secret": machine.get_password("client_secret"),
+        "client_secret": client_secret,
         "grant_type": "client_credentials",
     }
-    response = requests.post(
-        machine.api_base_url or PINE_AUTH_URLS[env],
-        headers=headers,
-        json=payload,
-        timeout=20,
-    )
-    response.raise_for_status()
-    return response.json()["access_token"]
+    try:
+        response = requests.post(
+            machine.api_base_url or PINE_AUTH_URLS[env],
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+        token = response.json().get("access_token")
+    except requests.exceptions.RequestException as exc:
+        frappe.log_error(
+            title="Pine Labs token failed",
+            message=f"machine={machine.name}\nerror={exc}",
+        )
+        frappe.throw(
+            _("Could not reach Pine Labs ({0}). Check network or credentials and retry.").format(env),
+            title=_("Gateway Unavailable"),
+        )
+    if not token:
+        frappe.throw(
+            _("Pine Labs did not return an access token. Verify Client ID / Secret on machine {0}.").format(
+                machine.machine_name or machine.name
+            ),
+            title=_("Gateway Auth Failed"),
+        )
+    return token
 
 
 def _pine_create_order(machine, access_token, payload):
@@ -123,14 +183,52 @@ def _pine_create_order(machine, access_token, payload):
         "Request-Timestamp": _utc_now_iso(),
         "Request-ID": str(uuid.uuid4()),
     }
-    response = requests.post(
-        PINE_ORDER_URLS[env],
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.post(
+            PINE_ORDER_URLS[env],
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as exc:
+        frappe.log_error(
+            title="Pine Labs order failed",
+            message=f"machine={machine.name}\nerror={exc}",
+        )
+        frappe.throw(
+            _("Pine Labs order creation failed. Please retry or use cash."),
+            title=_("Gateway Order Failed"),
+        )
+
+
+def _build_test_order(machine, amount, payment_mode, merchant_order_reference, customer, customer_name):
+    """Deterministic mock order for test-mode machines (Other provider or UAT without creds).
+
+    Matches the shape of a real initiate_payment response so the POS UI flow is identical.
+    """
+    merchant_ref = _sanitize_reference(merchant_order_reference)
+    order_id = f"TEST-{uuid.uuid4().hex[:18].upper()}"
+    return {
+        "provider": (machine.provider or "Other").strip() or "Other",
+        "machine": machine.name,
+        "machine_name": machine.machine_name,
+        "status": "TEST_CREATED",
+        "test_mode": True,
+        "order_id": order_id,
+        "merchant_order_reference": merchant_ref,
+        "allowed_payment_methods": [_normalize_mode(payment_mode)],
+        "callback_url": machine.callback_url or get_url("/api/method/ch_pos.api.payment_gateway_api.pine_labs_return"),
+        "webhook_url": machine.webhook_url or "",
+        "amount": round(flt(amount), 2),
+        "currency": "INR",
+        "customer": customer or "",
+        "customer_name": customer_name or customer or "Customer",
+        "raw": {
+            "note": "Simulated order \u2014 no gateway call was made (test-mode machine).",
+        },
+    }
 
 
 @frappe.whitelist()
@@ -143,6 +241,10 @@ def initiate_payment(machine_name, amount, payment_mode, customer=None, customer
         frappe.throw(_("Amount must be greater than zero."))
     if not _machine_supported(machine, payment_mode):
         frappe.throw(_("Machine {0} does not support {1} payments.").format(machine.machine_name, payment_mode))
+
+    # Test-mode shortcut: 'Other' provider, or UAT Pine Labs machine without configured credentials.
+    if _is_test_mode_machine(machine):
+        return _build_test_order(machine, amount, payment_mode, merchant_order_reference, customer, customer_name)
 
     if provider == "Pine Labs":
         access_token = _pine_generate_token(machine)
