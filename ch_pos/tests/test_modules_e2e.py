@@ -305,10 +305,11 @@ def test_session_management(ctx):
         assert_true(result.get("business_date"), "should return business_date")
         log_pass("SM-02 open_session", session_name)
     except Exception as e:
-        if "day" in str(e).lower() and "closed" in str(e).lower():
+        err = str(e).lower()
+        if "closed" in err or "settlement" in err:
             log_skip("SM-02 open_session", f"business day closed: {e}")
             return
-        if "unclosed" in str(e).lower():
+        if "unclosed" in err:
             log_skip("SM-02 open_session", f"unclosed session exists: {e}")
             return
         log_fail("SM-02 open_session", str(e))

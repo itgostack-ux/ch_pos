@@ -771,6 +771,13 @@ def _auto_advance_business_date_after_eod(store, closed_business_date):
         }
 
     next_bd = getdate(add_days(closed_business_date, 1))
+    if next_bd > getdate(nowdate()):
+        return {
+            "advanced": False,
+            "message": _("Next business date {0} is in the future; advance manually when ready.").format(next_bd),
+            "next_business_date": next_bd,
+        }
+
     from ch_pos.pos_core.doctype.ch_business_date.ch_business_date import advance_business_date
 
     advance_business_date(
