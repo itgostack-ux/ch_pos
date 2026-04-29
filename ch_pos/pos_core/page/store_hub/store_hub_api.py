@@ -52,6 +52,19 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
     if store:
         store_flt = " AND store = %(store)s"
 
+    # Alias-qualified company filters for queries that JOIN `tabCH Store`
+    # (which also has a `company` column — bare {co} is ambiguous).
+    s_co = " AND s.company = %(company)s" if company else ""
+    st_co = " AND st.company = %(company)s" if company else ""
+    cd_co = " AND cd.company = %(company)s" if company else ""
+    al_co = " AND al.company = %(company)s" if company else ""
+    pi_co = " AND pi.company = %(company)s" if company else ""
+    posi_co = " AND pos_invoice.company = %(company)s" if company else ""
+    s_store_flt = " AND s.store = %(store)s" if store else ""
+    st_store_flt = " AND st.store = %(store)s" if store else ""
+    cd_store_flt = " AND cd.store = %(store)s" if store else ""
+    al_store_flt = " AND al.store = %(store)s" if store else ""
+
     # ── Pipeline ──
     # Sessions today
     sessions_today = frappe.db.sql(
@@ -162,8 +175,8 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
                    total_sales, total_invoices, cash_variance
             FROM `tabCH POS Session` s
             LEFT JOIN `tabCH Store` cs ON cs.name = s.store
-            WHERE 1=1 {store_flt} {co}
-            ORDER BY shift_start DESC LIMIT 30""", prm, as_dict=True
+            WHERE 1=1 {s_store_flt} {s_co}
+            ORDER BY s.shift_start DESC LIMIT 30""", prm, as_dict=True
     )
 
     settlements = frappe.db.sql(
@@ -173,22 +186,22 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
                    total_sales_upi, total_sales_wallet, variance_amount
             FROM `tabCH POS Settlement` st
             LEFT JOIN `tabCH Store` cs ON cs.name = st.store
-            WHERE 1=1 {store_flt} {co} {dc('business_date')}
-            ORDER BY business_date DESC LIMIT 30""", prm, as_dict=True
+            WHERE 1=1 {st_store_flt} {st_co} {dc('st.business_date')}
+            ORDER BY st.business_date DESC LIMIT 30""", prm, as_dict=True
     )
 
     daily_summary = frappe.db.sql(
-        f"""SELECT posting_date, set_warehouse AS warehouse,
-                   COALESCE(cs.store_name, set_warehouse) AS warehouse_name,
+        f"""SELECT pos_invoice.posting_date, pos_invoice.set_warehouse AS warehouse,
+                   COALESCE(cs.store_name, pos_invoice.set_warehouse) AS warehouse_name,
                    COUNT(*) AS txn_count,
-                   SUM(grand_total) AS revenue,
-                   AVG(grand_total) AS avg_ticket
-            FROM `tabPOS Invoice`
-            LEFT JOIN `tabCH Store` cs ON cs.warehouse = set_warehouse
-            WHERE docstatus=1 AND is_return=0
-            {co} {wh} {dc('posting_date')}
-            GROUP BY posting_date, set_warehouse, cs.store_name
-            ORDER BY posting_date DESC LIMIT 30""", prm, as_dict=True
+                   SUM(pos_invoice.grand_total) AS revenue,
+                   AVG(pos_invoice.grand_total) AS avg_ticket
+            FROM `tabPOS Invoice` pos_invoice
+            LEFT JOIN `tabCH Store` cs ON cs.warehouse = pos_invoice.set_warehouse
+            WHERE pos_invoice.docstatus=1 AND pos_invoice.is_return=0
+            {posi_co} {(' AND pos_invoice.set_warehouse = %(store)s' if store else '')} {dc('pos_invoice.posting_date')}
+            GROUP BY pos_invoice.posting_date, pos_invoice.set_warehouse, cs.store_name
+            ORDER BY pos_invoice.posting_date DESC LIMIT 30""", prm, as_dict=True
     )
 
     top_items = frappe.db.sql(
@@ -198,7 +211,7 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
             FROM `tabPOS Invoice Item` pii
             JOIN `tabPOS Invoice` pi ON pi.name = pii.parent
             WHERE pi.docstatus=1 AND pi.is_return=0
-            {co} {wh.replace('set_warehouse','pi.set_warehouse') if wh else ''} {dc('pi.posting_date')}
+            {pi_co} {(' AND pi.set_warehouse = %(store)s' if store else '')} {dc('pi.posting_date')}
             GROUP BY pii.item_code, pii.item_name
             ORDER BY revenue DESC LIMIT 20""", prm, as_dict=True
     )
@@ -236,8 +249,8 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
                    amount, status, user, reason, approved_by
             FROM `tabCH Cash Drop` cd
             LEFT JOIN `tabCH Store` cs ON cs.name = cd.store
-            WHERE 1=1 {store_flt} {co} {dc('business_date')}
-            ORDER BY business_date DESC, creation DESC LIMIT 30""", prm, as_dict=True
+            WHERE 1=1 {cd_store_flt} {cd_co} {dc('cd.business_date')}
+            ORDER BY cd.business_date DESC, cd.creation DESC LIMIT 30""", prm, as_dict=True
     )
 
     # ── Incentive Tracker ──
@@ -257,8 +270,8 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
                al.user, al.timestamp, al.remarks
             FROM `tabCH Business Audit Log` al
             LEFT JOIN `tabCH Store` cs ON cs.name = al.store
-            WHERE 1=1 {store_flt} {co} {dc('DATE(timestamp)')}
-            ORDER BY timestamp DESC LIMIT 30""", prm, as_dict=True
+            WHERE 1=1 {al_store_flt} {al_co} {dc('DATE(al.timestamp)')}
+            ORDER BY al.timestamp DESC LIMIT 30""", prm, as_dict=True
     )
 
     # ── AI Insights ──
