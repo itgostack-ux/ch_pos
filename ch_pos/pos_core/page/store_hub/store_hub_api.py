@@ -157,31 +157,37 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
 
     # ── Detail tables ──
     sessions = frappe.db.sql(
-        f"""SELECT name, store, shift_start, shift_end, status,
+        f"""SELECT s.name, s.store, COALESCE(cs.store_name, s.store) AS store_name,
+                   s.shift_start, s.shift_end, s.status,
                    total_sales, total_invoices, cash_variance
             FROM `tabCH POS Session` s
+            LEFT JOIN `tabCH Store` cs ON cs.name = s.store
             WHERE 1=1 {store_flt} {co}
             ORDER BY shift_start DESC LIMIT 30""", prm, as_dict=True
     )
 
     settlements = frappe.db.sql(
-        f"""SELECT name, store, business_date, settlement_status,
+        f"""SELECT st.name, st.store, COALESCE(cs.store_name, st.store) AS store_name,
+                   st.business_date, st.settlement_status,
                    total_gross_sales, total_sales_cash, total_sales_card,
                    total_sales_upi, total_sales_wallet, variance_amount
-            FROM `tabCH POS Settlement`
+            FROM `tabCH POS Settlement` st
+            LEFT JOIN `tabCH Store` cs ON cs.name = st.store
             WHERE 1=1 {store_flt} {co} {dc('business_date')}
             ORDER BY business_date DESC LIMIT 30""", prm, as_dict=True
     )
 
     daily_summary = frappe.db.sql(
         f"""SELECT posting_date, set_warehouse AS warehouse,
+                   COALESCE(cs.store_name, set_warehouse) AS warehouse_name,
                    COUNT(*) AS txn_count,
                    SUM(grand_total) AS revenue,
                    AVG(grand_total) AS avg_ticket
             FROM `tabPOS Invoice`
+            LEFT JOIN `tabCH Store` cs ON cs.warehouse = set_warehouse
             WHERE docstatus=1 AND is_return=0
             {co} {wh} {dc('posting_date')}
-            GROUP BY posting_date, set_warehouse
+            GROUP BY posting_date, set_warehouse, cs.store_name
             ORDER BY posting_date DESC LIMIT 30""", prm, as_dict=True
     )
 
@@ -202,9 +208,11 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
     if store:
         stock_alerts = frappe.db.sql(
             """SELECT b.item_code, i.item_name, b.warehouse,
+                      COALESCE(cs.store_name, b.warehouse) AS warehouse_name,
                       b.actual_qty, ir.warehouse_reorder_level AS reorder_level
                FROM `tabBin` b
                JOIN `tabItem` i ON i.name = b.item_code
+               LEFT JOIN `tabCH Store` cs ON cs.warehouse = b.warehouse
                LEFT JOIN `tabItem Reorder` ir ON ir.parent = b.item_code AND ir.warehouse = b.warehouse
                WHERE b.warehouse = %(store)s
                AND b.actual_qty <= COALESCE(ir.warehouse_reorder_level, 0)
@@ -223,9 +231,11 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
 
     # ── Cash Drops ──
     cash_drops = frappe.db.sql(
-        f"""SELECT name, store, session, business_date, movement_type,
+        f"""SELECT cd.name, cd.store, COALESCE(cs.store_name, cd.store) AS store_name,
+                   cd.session, cd.business_date, cd.movement_type,
                    amount, status, user, reason, approved_by
-            FROM `tabCH Cash Drop`
+            FROM `tabCH Cash Drop` cd
+            LEFT JOIN `tabCH Store` cs ON cs.name = cd.store
             WHERE 1=1 {store_flt} {co} {dc('business_date')}
             ORDER BY business_date DESC, creation DESC LIMIT 30""", prm, as_dict=True
     )
@@ -242,9 +252,11 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
 
     # ── Audit Log ──
     audit_logs = frappe.db.sql(
-        f"""SELECT name, event_type, reference_doctype, reference_name,
-                   store, user, timestamp, remarks
-            FROM `tabCH Business Audit Log`
+        f"""SELECT al.name, al.event_type, al.reference_doctype, al.reference_name,
+               al.store, COALESCE(cs.store_name, al.store) AS store_name,
+               al.user, al.timestamp, al.remarks
+            FROM `tabCH Business Audit Log` al
+            LEFT JOIN `tabCH Store` cs ON cs.name = al.store
             WHERE 1=1 {store_flt} {co} {dc('DATE(timestamp)')}
             ORDER BY timestamp DESC LIMIT 30""", prm, as_dict=True
     )

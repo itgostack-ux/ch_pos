@@ -1119,18 +1119,25 @@ def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
         f"<td style='padding:8px 12px;color:#6b7280'>₹{int(v['balance'])} · Valid 1 year</td></tr>"
         for v in vouchers
     )
+    invoice_url = frappe.utils.get_url_to_form("Sales Invoice", invoice_name)
     html = f"""
-    <div style='font-family:sans-serif;max-width:500px;margin:0 auto'>
-        <h2 style='color:#4f46e5'>Your VAS Vouchers are here! 🎉</h2>
-        <p>Thank you for purchasing a VAS plan (Invoice: <b>{invoice_name}</b>).</p>
-        <p>You've earned <b>{len(vouchers)} × ₹500 voucher(s)</b> to redeem on accessories at our store.</p>
-        <table style='width:100%;border-collapse:collapse;margin:16px 0'>
-            {codes_html}
-        </table>
-        <p style='color:#6b7280;font-size:13px'>
-            Each ₹500 voucher gives you ₹125 off when purchasing accessories.
-            Visit any GoGizmo store and quote your voucher code at checkout.
-        </p>
+    <div style='font-family:Segoe UI,Arial,sans-serif;max-width:620px;margin:0 auto;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden'>
+        <div style='background:#0f172a;color:#fff;padding:14px 18px;font-size:14px;font-weight:600'>GoGizmo Retail Pvt Ltd</div>
+        <div style='padding:18px'>
+            <h2 style='margin:0 0 10px;color:#111827'>Your VAS Vouchers Are Ready</h2>
+            <p>Thank you for purchasing a VAS plan against invoice <b>{invoice_name}</b>.</p>
+            <p>You have earned <b>{len(vouchers)} × ₹500 voucher(s)</b> for accessory redemption.</p>
+            <table style='width:100%;border-collapse:collapse;margin:16px 0'>
+                {codes_html}
+            </table>
+            <p style='color:#4b5563;font-size:13px'>
+                Each ₹500 voucher gives you ₹125 off when purchasing accessories.
+                Visit any GoGizmo store and share voucher code at checkout.
+            </p>
+            <p style='margin-top:18px'>
+                <a href='{invoice_url}' style='background:#0b57d0;color:#fff;text-decoration:none;padding:10px 14px;border-radius:6px;display:inline-block;font-weight:600'>Open Invoice</a>
+            </p>
+        </div>
     </div>
     """
     try:
@@ -4414,11 +4421,24 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
             "POS Profile", source_pos_profile, "custom_store_manager"
         )
         if source_store_mgr:
+            request_url = frappe.utils.get_url_to_form("Material Request", mr.name)
             frappe.sendmail(
                 recipients=[source_store_mgr],
                 subject=frappe._("Cross-Store Transfer Request {0} — Approval Required").format(mr.name),
-                message=frappe._("A cross-store transfer request has been raised from your store. "
-                                  "Please review and approve Material Request {0}.").format(mr.name),
+                message=frappe._(
+                    """
+                    <div style='font-family:Segoe UI,Arial,sans-serif;max-width:620px;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden'>
+                        <div style='background:#0f172a;color:#ffffff;padding:14px 18px;font-weight:600'>Congruence Holdings</div>
+                        <div style='padding:18px'>
+                            <h3 style='margin:0 0 10px'>Cross-Store Transfer Approval Required</h3>
+                            <p>A cross-store transfer request <strong>{0}</strong> has been raised and requires your approval.</p>
+                            <p style='margin-top:16px'>
+                                <a href='{1}' style='background:#0b57d0;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:6px;display:inline-block;font-weight:600'>Open Material Request</a>
+                            </p>
+                        </div>
+                    </div>
+                    """
+                ).format(mr.name, request_url),
                 now=True,
             )
     except Exception:
@@ -6400,36 +6420,39 @@ def pos_send_approval_link(order_name) -> dict:
 			)
 
 		if customer_email:
-			subject = f"GoGizmo Buyback — Approve {price_fmt} offer for {item_label}"
-			html = f"""
-			<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto">
-				<h2 style="color:#1a1a2e">Buyback Offer for Your Approval</h2>
-				<p>Hi {frappe.utils.escape_html(customer_name)},</p>
-				<p>We have evaluated your <strong>{frappe.utils.escape_html(item_label)}</strong>
-				   and are offering <strong>{price_fmt}</strong>.</p>
-				<p>Please review and approve the offer by clicking the button below:</p>
-				<p style="text-align:center;margin:24px 0">
-					<a href="{frappe.utils.escape_html(approval_url)}"
-					   style="background:#28a745;color:#fff;padding:12px 32px;
-					   text-decoration:none;border-radius:6px;font-size:16px;
-					   display:inline-block">
-						Review &amp; Approve
-					</a>
-				</p>
-				<p style="color:#6b7280;font-size:13px">
-					Or copy this link: {frappe.utils.escape_html(approval_url)}
-				</p>
-				<p style="color:#6b7280;font-size:12px">
-					Order: {doc.name} | This link is unique to your transaction.
-				</p>
-			</div>
-			"""
-			frappe.sendmail(
-				recipients=[customer_email],
-				subject=subject,
-				message=html,
-			)
-			frappe.logger().info(f"[pos_send_approval_link] Email sent to {customer_email}")
+                        subject = f"Congruence Holdings | GoGizmo Buyback Approval | {doc.name}"
+                        html = f"""
+                        <div style="font-family:Segoe UI,Arial,sans-serif;max-width:620px;margin:auto;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
+                            <div style="background:#0f172a;color:#ffffff;padding:12px 16px;font-weight:600">Congruence Holdings - GoGizmo Buyback</div>
+                            <div style="padding:16px">
+                                <h2 style="color:#1a1a2e;margin-top:0">Buyback Offer for Your Approval</h2>
+                                <p>Hi {frappe.utils.escape_html(customer_name)},</p>
+                                <p>We have evaluated your <strong>{frappe.utils.escape_html(item_label)}</strong>
+                                   and are offering <strong>{price_fmt}</strong>.</p>
+                                <p>Please review and approve the offer by clicking the button below:</p>
+                                <p style="text-align:center;margin:24px 0">
+                                    <a href="{frappe.utils.escape_html(approval_url)}"
+                                       style="background:#28a745;color:#fff;padding:12px 32px;
+                                       text-decoration:none;border-radius:6px;font-size:16px;
+                                       display:inline-block">
+                                        Review &amp; Approve
+                                    </a>
+                                </p>
+                                <p style="color:#6b7280;font-size:13px">
+                                    Or copy this link: {frappe.utils.escape_html(approval_url)}
+                                </p>
+                                <p style="color:#6b7280;font-size:12px">
+                                    Order: {doc.name} | This link is unique to your transaction.
+                                </p>
+                            </div>
+                        </div>
+                        """
+                        frappe.sendmail(
+                            recipients=[customer_email],
+                            subject=subject,
+                            message=html,
+                        )
+                        frappe.logger().info(f"[pos_send_approval_link] Email sent to {customer_email}")
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), f"Buyback approval email failed for {doc.name}")
 

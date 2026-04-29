@@ -278,14 +278,17 @@ class StoreHub {
 		return `<div class="hub-table-wrap"><table class="hub-table"><thead><tr>
 			<th>${__("Session")}</th><th>${__("Store")}</th><th>${__("Opened")}</th>
 			<th>${__("Status")}</th><th class="text-right">${__("Sales")}</th><th class="text-right">${__("Transactions")}</th>
-		</tr></thead><tbody>${rows.map((r) => `<tr>
+		</tr></thead><tbody>${rows.map((r) => {
+			const store_name = r.store_name || r.store || "";
+			return `<tr>
 			<td>${this._lnk("CH POS Session", r.name)}</td>
-			<td>${r.store || ""}</td>
+			<td>${store_name}</td>
 			<td>${r.shift_start ? frappe.datetime.str_to_user(r.shift_start) : "-"}</td>
 			<td>${this._badge(r.status)}</td>
 			<td class="text-right">${frappe.format(r.total_sales || 0, {fieldtype:"Currency"})}</td>
 			<td class="text-right">${r.total_invoices || 0}</td>
-		</tr>`).join("")}</tbody></table></div>`;
+		</tr>`;
+		}).join("")}</tbody></table></div>`;
 	}
 
 	_table_settlements(rows) {
@@ -294,15 +297,18 @@ class StoreHub {
 			<th>${__("Settlement")}</th><th>${__("Store")}</th><th>${__("Date")}</th>
 			<th>${__("Status")}</th><th class="text-right">${__("Total Sales")}</th>
 			<th class="text-right">${__("Cash")}</th><th class="text-right">${__("Variance")}</th>
-		</tr></thead><tbody>${rows.map((r) => `<tr>
+		</tr></thead><tbody>${rows.map((r) => {
+			const store_name = r.store_name || r.store || "";
+			return `<tr>
 			<td>${this._lnk("CH POS Settlement", r.name)}</td>
-			<td>${r.store || ""}</td>
+			<td>${store_name}</td>
 			<td>${r.business_date ? frappe.datetime.str_to_user(r.business_date) : "-"}</td>
 			<td>${this._badge(r.settlement_status)}</td>
 			<td class="text-right">${frappe.format(r.total_gross_sales || 0, {fieldtype:"Currency"})}</td>
 			<td class="text-right">${frappe.format(r.total_sales_cash || 0, {fieldtype:"Currency"})}</td>
 			<td class="text-right ${(r.variance_amount || 0) != 0 ? 'text-danger' : ''}">${frappe.format(r.variance_amount || 0, {fieldtype:"Currency"})}</td>
-		</tr>`).join("")}</tbody></table></div>`;
+		</tr>`;
+		}).join("")}</tbody></table></div>`;
 	}
 
 	_table_daily(rows) {
@@ -310,13 +316,16 @@ class StoreHub {
 		return `<div class="hub-table-wrap"><table class="hub-table"><thead><tr>
 			<th>${__("Date")}</th><th>${__("Store")}</th><th class="text-right">${__("Transactions")}</th>
 			<th class="text-right">${__("Revenue")}</th><th class="text-right">${__("Avg Ticket")}</th>
-		</tr></thead><tbody>${rows.map((r) => `<tr>
+		</tr></thead><tbody>${rows.map((r) => {
+			const warehouse_name = r.warehouse_name || r.warehouse || "";
+			return `<tr>
 			<td>${frappe.datetime.str_to_user(r.posting_date)}</td>
-			<td>${r.warehouse || ""}</td>
+			<td>${warehouse_name}</td>
 			<td class="text-right">${r.txn_count}</td>
 			<td class="text-right">${frappe.format(r.revenue, {fieldtype:"Currency"})}</td>
 			<td class="text-right">${frappe.format(r.avg_ticket, {fieldtype:"Currency"})}</td>
-		</tr>`).join("")}</tbody></table></div>`;
+		</tr>`;
+		}).join("")}</tbody></table></div>`;
 	}
 
 	_table_top_items(rows) {
@@ -337,13 +346,16 @@ class StoreHub {
 		return `<div class="hub-table-wrap"><table class="hub-table"><thead><tr>
 			<th>${__("Item")}</th><th>${__("Item Name")}</th><th>${__("Warehouse")}</th>
 			<th class="text-right">${__("In Stock")}</th><th class="text-right">${__("Reorder Level")}</th>
-		</tr></thead><tbody>${rows.map((r) => `<tr>
+		</tr></thead><tbody>${rows.map((r) => {
+			const warehouse_name = r.warehouse_name || r.warehouse || "";
+			return `<tr>
 			<td><a href="/app/item/${r.item_code}">${r.item_code}</a></td>
 			<td>${r.item_name || ""}</td>
-			<td>${r.warehouse}</td>
+			<td>${warehouse_name}</td>
 			<td class="text-right text-danger">${r.actual_qty}</td>
 			<td class="text-right">${r.reorder_level || "-"}</td>
-		</tr>`).join("")}</tbody></table></div>`;
+		</tr>`;
+		}).join("")}</tbody></table></div>`;
 	}
 
 	_table_kiosk(rows) {
@@ -368,16 +380,19 @@ class StoreHub {
 			<th>${__("Cash Drop")}</th><th>${__("Store")}</th><th>${__("Date")}</th>
 			<th>${__("Type")}</th><th class="text-right">${__("Amount")}</th>
 			<th>${__("Status")}</th><th>${__("Cashier")}</th><th>${__("Approved By")}</th>
-		</tr></thead><tbody>${rows.map((r) => `<tr>
+		</tr></thead><tbody>${rows.map((r) => {
+			const store_name = r.store_name || r.store || "";
+			return `<tr>
 			<td>${this._lnk("CH Cash Drop", r.name)}</td>
-			<td>${r.store || ""}</td>
+			<td>${store_name}</td>
 			<td>${r.business_date ? frappe.datetime.str_to_user(r.business_date) : "-"}</td>
 			<td>${r.movement_type || ""}</td>
 			<td class="text-right">${frappe.format(r.amount || 0, {fieldtype:"Currency"})}</td>
 			<td>${this._badge(r.status)}</td>
 			<td>${r.user || ""}</td>
 			<td>${r.approved_by || "-"}</td>
-		</tr>`).join("")}</tbody></table></div>`;
+		</tr>`;
+		}).join("")}</tbody></table></div>`;
 	}
 
 	_table_incentives(rows) {
@@ -403,13 +418,16 @@ class StoreHub {
 		return `<div class="hub-table-wrap"><table class="hub-table"><thead><tr>
 			<th>${__("Event")}</th><th>${__("Reference")}</th><th>${__("Store")}</th>
 			<th>${__("User")}</th><th>${__("Time")}</th><th>${__("Remarks")}</th>
-		</tr></thead><tbody>${rows.map((r) => `<tr>
+		</tr></thead><tbody>${rows.map((r) => {
+			const store_name = r.store_name || r.store || "";
+			return `<tr>
 			<td><span class="hub-badge hub-badge-grey">${r.event_type || ""}</span></td>
 			<td>${r.reference_doctype && r.reference_name ? `<a href="/app/${frappe.router.slug(r.reference_doctype)}/${r.reference_name}">${r.reference_name}</a>` : "-"}</td>
-			<td>${r.store || ""}</td>
+			<td>${store_name}</td>
 			<td>${r.user || ""}</td>
 			<td>${r.timestamp ? frappe.datetime.str_to_user(r.timestamp) : "-"}</td>
 			<td>${r.remarks || ""}</td>
-		</tr>`).join("")}</tbody></table></div>`;
+		</tr>`;
+		}).join("")}</tbody></table></div>`;
 	}
 }

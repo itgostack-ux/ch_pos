@@ -177,14 +177,15 @@ def _send_approval_email(approval_doc, manager_info, token):
         if not i.get("is_warranty") and not i.get("is_vas")
     )
 
-    subject = _("Free Sale Approval Required — {0} — ₹{1}").format(
-        approval_doc.store or approval_doc.company or "",
-        frappe.utils.fmt_money(approval_doc.grand_total),
+    subject = _("Congruence Holdings | Free Sale Approval | {0}").format(
+        approval_doc.name,
     )
 
     message = f"""
-    <div style="font-family:sans-serif;max-width:600px">
-        <h3 style="color:#7c3aed">🎁 Free Sale Approval Required</h3>
+    <div style="font-family:Segoe UI,Arial,sans-serif;max-width:680px;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
+        <div style="background:#0f172a;color:#ffffff;padding:12px 16px;font-weight:600">Congruence Holdings - CH POS Approval Desk</div>
+        <div style="padding:16px">
+        <h3 style="color:#111827;margin-top:0">Free Sale Approval Required</h3>
         <p>A free sale has been requested and needs your approval as
         <b>{frappe.utils.escape_html(manager_info['category'])}</b> Category Manager.</p>
 
@@ -208,22 +209,29 @@ def _send_approval_email(approval_doc, manager_info, token):
 
         <div style="margin:24px 0;text-align:center">
             <a href="{approve_url}"
-               style="display:inline-block;padding:12px 32px;background:#16a34a;color:#fff;
-                      text-decoration:none;border-radius:6px;font-weight:bold;margin-right:12px">
-                ✅ Approve
+               style="display:inline-block;padding:12px 24px;background:#16a34a;color:#fff;
+                      text-decoration:none;border-radius:6px;font-weight:600;margin-right:12px">
+                Approve
             </a>
             <a href="{reject_url}"
-               style="display:inline-block;padding:12px 32px;background:#dc2626;color:#fff;
-                      text-decoration:none;border-radius:6px;font-weight:bold">
-                ❌ Reject
+               style="display:inline-block;padding:12px 24px;background:#dc2626;color:#fff;
+                      text-decoration:none;border-radius:6px;font-weight:600">
+                Reject
             </a>
         </div>
 
         <p class="text-muted" style="font-size:12px;color:#6b7280">
-            Approval request: {approval_doc.name}
+            Approval request: {approval_doc.name} | Store: {frappe.utils.escape_html(approval_doc.store or approval_doc.company or '')}
         </p>
+        </div>
     </div>
     """
+
+    # Keep legacy context in subject text for quick mailbox scanning.
+    subject = subject + _(" — {0} — ₹{1}").format(
+        approval_doc.store or approval_doc.company or "",
+        frappe.utils.fmt_money(approval_doc.grand_total),
+    )
 
     frappe.sendmail(
         recipients=[manager_info["manager"]],
