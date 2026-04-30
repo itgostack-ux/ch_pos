@@ -439,7 +439,7 @@ def get_store_users(pos_profile: str = None, role: str = None) -> dict:
 @frappe.whitelist()
 def assign_token(token_name: str, technician: str) -> dict:
     """Assign a technician to a token. Status → In Progress."""
-    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+    if not (set(frappe.get_roles()) & {"POS User", "POS Manager"}):
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     updates = {"technician": technician, "assigned_at": now_datetime()}
@@ -452,7 +452,7 @@ def assign_token(token_name: str, technician: str) -> dict:
 @frappe.whitelist()
 def start_token(token_name: str) -> dict:
     """Mark service as started."""
-    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+    if not (set(frappe.get_roles()) & {"POS User", "POS Manager"}):
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "started_at": now_datetime(),
@@ -464,7 +464,7 @@ def start_token(token_name: str) -> dict:
 @frappe.whitelist()
 def complete_token(token_name: str) -> dict:
     """Mark token as completed."""
-    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+    if not (set(frappe.get_roles()) & {"POS User", "POS Manager"}):
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "completed_at": now_datetime(),
@@ -476,7 +476,7 @@ def complete_token(token_name: str) -> dict:
 @frappe.whitelist()
 def cancel_token(token_name: str) -> dict:
     """Cancel a token (typically Waiting status)."""
-    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+    if not (set(frappe.get_roles()) & {"POS User", "POS Manager"}):
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted"):
@@ -1118,7 +1118,7 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
     - Marks the token as Converted with a link back
     Returns the new Service Request name.
     """
-    if not frappe.has_role("POS User") and not frappe.has_role("POS Manager"):
+    if not (set(frappe.get_roles()) & {"POS User", "POS Manager"}):
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     token = frappe.get_doc("POS Kiosk Token", token_name)
     if token.status == "Converted":
