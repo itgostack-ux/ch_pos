@@ -121,6 +121,15 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
         {
+            "fieldname": "custom_ch_sale_type",
+            "fieldtype": "Link",
+            "label": "Sale Type",
+            "options": "CH Sale Type",
+            "insert_after": "custom_sales_executive",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
             "fieldname": "custom_discount_reason",
             "fieldtype": "Link",
             "label": "Discount Reason",
@@ -175,6 +184,15 @@ CUSTOM_FIELDS = {
             "read_only": 1,
             "depends_on": "eval:doc.custom_bank_offer_name",
             "description": "Bank offer discount amount. Stored separately for campaign reconciliation.",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_coupon_code",
+            "fieldtype": "Link",
+            "label": "Coupon Code",
+            "options": "Coupon Code",
+            "insert_after": "custom_bank_offer_discount",
+            "read_only": 1,
             "module": "POS Core",
         },
         {
