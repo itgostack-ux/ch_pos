@@ -6265,9 +6265,12 @@ def pos_send_customer_otp(order_name) -> dict:
 		reference_doctype="Buyback Order",
 		reference_name=order_name,
 	)
-	# In production: send OTP via SMS gateway here
-	# from ch_item_master.ch_core.sms_gateway import send_sms
-	# send_sms(mobile_no, f"Your GoFix buyback OTP: {otp}. Valid 5 min.")
+	# Deliver OTP via WhatsApp (same path as Buyback Hub send_otp)
+	try:
+		from buyback.buyback.whatsapp_notifications import send_otp_whatsapp
+		send_otp_whatsapp(mobile_no, otp, order_name)
+	except Exception:
+		frappe.log_error(title="POS Buyback OTP WhatsApp delivery failed")
 	return {
 		"sent": True,
 		"masked_mobile": mobile_no[:2] + "****" + mobile_no[-2:],
