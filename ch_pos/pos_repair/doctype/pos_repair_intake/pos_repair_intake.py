@@ -55,7 +55,8 @@ class POSRepairIntake(Document):
         sr.mode_of_service = self.mode_of_service
         sr.password = self.password_pattern
         sr.walkin_source = "POS Counter"
-        sr.device_condition = self.device_condition or ""
+		sr.status = "Draft"
+		sr.priority = "Medium"
         sr.accessories_received = self.accessories_received or ""
         sr.data_backup_disclaimer = self.data_backup_disclaimer or 0
         sr.insert(ignore_permissions=True)

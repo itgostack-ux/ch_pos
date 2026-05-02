@@ -251,7 +251,7 @@ export class SessionClosingDashboard {
 								}
 							});
 						}
-						frappe.set_route("/desk/pos-session");
+							frappe.set_route("app", "ch-pos-app");
 						// Force page refresh to fully clear POS state
 						setTimeout(() => { window.location.reload(); }, 500);
 					}, 1500);
