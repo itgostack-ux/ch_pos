@@ -122,9 +122,26 @@ export class ExceptionWorkspace {
 			parent: panel.find(".ch-exc-item-link"),
 			render_input: true,
 		});
-
-		
 		this._item_control.$input.addClass("form-control");
+
+		// Issue #6a: Auto-fetch item selling price into Original Value when item is selected
+		this._item_control.df.onchange = () => {
+			const item_code = this._item_control.get_value();
+			if (!item_code) {
+				panel.find(".ch-exc-original").val("").prop("readonly", true);
+				return;
+			}
+			const price_list = frappe.defaults.get_default("selling_price_list") || "Standard Selling";
+			frappe.xcall("frappe.client.get_value", {
+				doctype: "Item Price",
+				filters: { item_code, price_list, selling: 1 },
+				fieldname: "price_list_rate",
+			}).then((r) => {
+				if (r && r.price_list_rate) {
+					panel.find(".ch-exc-original").val(flt(r.price_list_rate, 2));
+				}
+			}).catch(() => {});
+		};
 
 		// Customer link control
 		this._customer_control = frappe.ui.form.make_control({
@@ -171,6 +188,17 @@ export class ExceptionWorkspace {
 			return;
 		}
 
+		// Issue #1 & #6b: company is mandatory in CH Exception Request;
+		// PosState.company can be null/undefined before session is fully loaded.
+		// JS JSON.stringify drops undefined values → missing required positional arg in Python.
+		const company = PosState.company || "";
+		const store_warehouse = PosState.warehouse || "";
+		const pos_profile = PosState.pos_profile || "";
+		if (!company) {
+			frappe.show_alert({ message: __("POS session not active. Please open a session first."), indicator: "red" });
+			return;
+		}
+
 		const btn = panel.find(".ch-exc-submit");
 		btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Submitting...")}`);
 
@@ -178,15 +206,15 @@ export class ExceptionWorkspace {
 			"ch_item_master.ch_item_master.exception_api.raise_exception",
 			{
 				exception_type,
-				company: PosState.company,
+				company,
 				reason,
 				requested_value,
 				original_value,
-				item_code,
-				serial_no,
-				store_warehouse: PosState.warehouse,
-				pos_profile: PosState.pos_profile,
-				customer,
+				item_code: item_code || "",
+				serial_no: serial_no || "",
+				store_warehouse,
+				pos_profile,
+				customer: customer || "",
 			}
 		).then((res) => {
 			btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Submit Request")}`);
