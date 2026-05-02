@@ -57,8 +57,11 @@ export class ModelCompareWorkspace {
 					</select>
 					<button class="btn btn-primary ch-compare-search-btn">
 						<i class="fa fa-search"></i> ${__("Find")}
-					</button>
-				</div>
+					</button>				<label class="ch-pos-stock-toggle" style="white-space:nowrap;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px;">
+					<input type="checkbox" class="ch-compare-instock-check">
+					<i class="fa fa-check-circle" style="font-size:11px"></i>
+					<span>${__("In Stock Only")}</span>
+				</label>				</div>
 
 				<!-- Compare Bar (shows when items selected) -->
 				<div class="ch-compare-bar" style="display:none">
@@ -131,6 +134,10 @@ export class ModelCompareWorkspace {
 			this._do_search();
 		});
 
+		panel.find(".ch-compare-instock-check").on("change", () => {
+			this._do_search();
+		});
+
 		panel.find(".ch-compare-search-btn").on("click", () => this._do_search());
 
 		panel.find(".ch-compare-search").on("keydown", (e) => {
@@ -155,6 +162,12 @@ export class ModelCompareWorkspace {
 			this.panel.find(".ch-compare-filters").show();
 			this.panel.find(".ch-compare-bar").show();
 		});
+
+		// Toggle nearby stock detail expand
+		panel.on("click", ".ch-compare-nearby", (e) => {
+			$(e.currentTarget).closest(".ch-compare-card-body")
+				.find(".ch-nearby-detail").slideToggle(150);
+		});
 	}
 
 	// ── Search ──────────────────────────────────────────
@@ -165,6 +178,7 @@ export class ModelCompareWorkspace {
 			ram: p.find(".ch-compare-ram").val(),
 			storage: p.find(".ch-compare-storage").val(),
 			search: p.find(".ch-compare-search").val().trim(),
+			in_stock_only: p.find(".ch-compare-instock-check").prop("checked") ? 1 : 0,
 		};
 
 		// Need at least one filter
@@ -183,6 +197,7 @@ export class ModelCompareWorkspace {
 				storage: this.filters.storage || undefined,
 				search_text: this.filters.search || undefined,
 				pos_profile: PosState.pos_profile || undefined,
+				in_stock_only: this.filters.in_stock_only || undefined,
 			},
 			callback: (r) => {
 				this.loading = false;
@@ -265,6 +280,26 @@ export class ModelCompareWorkspace {
 				offerBadges += `<span class="ch-offer-badge other-offer"><i class="fa fa-percent"></i> ${item.other_offers.length} ${__("Other")}</span>`;
 			}
 
+			// Nearby stock
+			const nearby = item.nearby_stock || [];
+			let nearbyHtml = "";
+			if (nearby.length) {
+				const totalNearby = nearby.reduce((s, n) => s + (n.qty || 0), 0);
+				const rows = nearby.map(n =>
+					`<span style="font-size:10px;color:#374151">${frappe.utils.escape_html(n.pos_profile)}: ${n.qty}</span>`
+				).join(" · ");
+				nearbyHtml = `
+					<div class="ch-compare-nearby" style="margin-top:4px;font-size:11px;color:#0369a1;cursor:pointer" title="${rows}">
+						<i class="fa fa-map-marker"></i> ${totalNearby} ${__("nearby")}
+						<span class="ch-nearby-expand" style="font-size:10px;color:#94a3b8"> (${nearby.length} store${nearby.length > 1 ? "s" : ""})</span>
+					</div>
+					<div class="ch-nearby-detail" style="display:none;margin-top:2px;padding:4px 8px;background:#f0f9ff;border-radius:6px;font-size:10px;color:#374151">
+						${rows}
+					</div>`;
+			} else if (item.stock === 0) {
+				nearbyHtml = `<div style="font-size:11px;color:#9ca3af;margin-top:4px"><i class="fa fa-times-circle"></i> ${__("Not available at other stores")}</div>`;
+			}
+
 			html += `
 				<div class="ch-compare-card${isSelected ? " selected" : ""}" data-item="${frappe.utils.escape_html(item.item_code)}">
 					<div class="ch-compare-card-top">
@@ -284,6 +319,7 @@ export class ModelCompareWorkspace {
 						<div class="ch-compare-card-stock ${stockClass}">
 							<i class="fa ${item.stock > 0 ? "fa-check-circle" : "fa-times-circle"}"></i> ${stockText}
 						</div>
+						${nearbyHtml}
 						${item.variant_count ? `<div class="ch-compare-card-variants">${item.variant_count} ${__("variant(s)")}</div>` : ""}
 					</div>
 					${offerBadges ? `<div class="ch-compare-card-offers">${offerBadges}</div>` : ""}

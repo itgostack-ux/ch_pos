@@ -77,11 +77,21 @@ export class ReturnsWorkspace {
 					const cards = invoices.map((inv) => {
 						const status_cls = inv.status === "Paid" ? "success" :
 							inv.status === "Credit Note Issued" ? "warning" : "info";
+						const days = cint(inv.days_since_purchase);
+						const expired = inv.return_window_expired;
+						const window_badge = expired
+							? `<span style="font-size:10px;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:999px;border:1px solid #fcd34d;" title="${__("Purchase was {0} days ago — beyond 14-day return window", [days])}">
+									<i class="fa fa-clock-o"></i> ${days}d
+								</span>`
+							: `<span style="font-size:10px;background:#dcfce7;color:#166534;padding:2px 6px;border-radius:999px;border:1px solid #86efac;" title="${__("{0} days since purchase — within 14-day return window", [days])}">
+									<i class="fa fa-check-circle"></i> ${days}d
+								</span>`;
 						return `<div class="ch-ret-inv-card" data-name="${inv.name}">
 							<div class="ch-ret-inv-top">
 								<div style="display:flex;align-items:center;gap:6px">
 									<span class="ch-ret-inv-id">${inv.name}</span>
 									<span class="ch-pos-badge badge-${status_cls}">${inv.status}</span>
+									${window_badge}
 								</div>
 								<span class="ch-ret-inv-total">₹${format_number(inv.grand_total)}</span>
 							</div>
@@ -89,6 +99,9 @@ export class ReturnsWorkspace {
 								<span style="font-weight:600;color:var(--pos-text)">${frappe.utils.escape_html(inv.customer_name || inv.customer)}</span>
 								<span>${inv.posting_date} · ${inv.items_count || 0} items</span>
 							</div>
+							${expired ? `<div style="font-size:11px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:4px 8px;margin-top:4px;">
+								<i class="fa fa-exclamation-triangle"></i> ${__("{0} days since purchase — outside 14-day return window. Manager approval may be required.", [days])}
+							</div>` : ""}
 							<div class="ch-ret-inv-actions">
 								<button class="btn btn-sm btn-warning ch-ret-select-return"
 									data-name="${inv.name}" ${inv.status === "Credit Note Issued" ? "disabled" : ""}

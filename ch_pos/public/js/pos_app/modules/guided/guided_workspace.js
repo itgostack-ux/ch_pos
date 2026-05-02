@@ -324,6 +324,19 @@ export class GuidedWorkspace {
 			const price = Number(r.price || 0);
 			const stock = Number(r.stock_qty || 0);
 			const inStock = stock > 0;
+			const specs = r.specs || {};
+			let specPills = "";
+			if (specs.RAM) specPills += `<span style="font-size:11px;background:#f0f4ff;color:#1e40af;padding:2px 7px;border-radius:999px;border:1px solid #c7d2fe"><i class="fa fa-microchip"></i> ${frappe.utils.escape_html(specs.RAM)}</span>`;
+			if (specs.Storage) specPills += `<span style="font-size:11px;background:#f0fdf4;color:#166534;padding:2px 7px;border-radius:999px;border:1px solid #bbf7d0"><i class="fa fa-database"></i> ${frappe.utils.escape_html(specs.Storage)}</span>`;
+			if (specs.Battery) specPills += `<span style="font-size:11px;background:#fefce8;color:#854d0e;padding:2px 7px;border-radius:999px;border:1px solid #fde68a"><i class="fa fa-battery-three-quarters"></i> ${frappe.utils.escape_html(specs.Battery)}</span>`;
+			if (specs.Color) specPills += `<span style="font-size:11px;background:#fdf4ff;color:#6b21a8;padding:2px 7px;border-radius:999px;border:1px solid #e9d5ff"><i class="fa fa-paint-brush"></i> ${frappe.utils.escape_html(specs.Color)}</span>`;
+			// Any other specs not already shown
+			const shownKeys = new Set(["RAM", "Storage", "Battery", "Color"]);
+			for (const [k, v] of Object.entries(specs)) {
+				if (!shownKeys.has(k)) {
+					specPills += `<span style="font-size:11px;background:#f8fafc;color:#475569;padding:2px 7px;border-radius:999px;border:1px solid #e2e8f0">${frappe.utils.escape_html(k)}: ${frappe.utils.escape_html(v)}</span>`;
+				}
+			}
 			return `
 				<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px;background:#fff;display:flex;gap:12px;align-items:flex-start;margin-bottom:8px;">
 					<div style="width:54px;height:54px;border-radius:8px;background:#f9fafb;border:1px solid #f1f5f9;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
@@ -338,6 +351,7 @@ export class GuidedWorkspace {
 								${inStock ? __("In stock") : __("Out of stock")}
 							</span>
 						</div>
+						${specPills ? `<div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;">${specPills}</div>` : ""}
 						${r.reason ? `<div style="font-size:12px;color:#475569;margin-top:6px">${frappe.utils.escape_html(r.reason)}</div>` : ""}
 					</div>
 					<div style="text-align:right;min-width:130px;">

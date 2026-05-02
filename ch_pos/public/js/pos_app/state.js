@@ -72,6 +72,7 @@ export const PosState = {
 	// ── Item Search ─────────────────────────────────────
 	search_term: "",
 	item_group_filter: "",
+	brand_filter: "",
 	view_mode: "list",
 	in_stock_only: false,
 	item_page: 0,

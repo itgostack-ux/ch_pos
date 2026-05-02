@@ -92,7 +92,7 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
     # Base query — items in stock at this warehouse
     items = frappe.db.sql(
         """SELECT i.name as item_code, i.item_name, i.image, i.brand, i.item_group,
-                  i.has_serial_no, i.stock_uom,
+                  i.has_serial_no, i.stock_uom, i.ch_model,
                   b.actual_qty as stock_qty
            FROM `tabItem` i
            LEFT JOIN `tabBin` b ON b.item_code = i.name AND b.warehouse = %(wh)s
@@ -133,6 +133,7 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
                     "item_name": item.item_name,
                     "image": item.image,
                     "brand": item.brand,
+                    "ch_model": item.ch_model or None,
                     "price": price,
                     "stock_qty": flt(item.stock_qty),
                     "has_serial_no": cint(item.has_serial_no),
@@ -144,7 +145,31 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
             )
 
     scored.sort(key=lambda x: x["match_score"], reverse=True)
-    return scored[:limit]
+    top = scored[:limit]
+
+    # Batch-fetch specs for all top results that have a ch_model
+    model_names = list({r["ch_model"] for r in top if r.get("ch_model")})
+    specs_map = {}  # {item_code: {spec: spec_value}}
+    if model_names:
+        all_specs = frappe.db.get_all(
+            "CH Model Spec Value",
+            filters={"parent": ["in", model_names]},
+            fields=["parent", "spec", "spec_value"],
+        )
+        # Build model→specs dict first, then map via item ch_model
+        model_specs = {}
+        for s in all_specs:
+            model_specs.setdefault(s.parent, {})[s.spec] = s.spec_value
+        for r in top:
+            if r.get("ch_model"):
+                r["specs"] = model_specs.get(r["ch_model"], {})
+            else:
+                r["specs"] = {}
+    else:
+        for r in top:
+            r["specs"] = {}
+
+    return top
 
 
 @frappe.whitelist()

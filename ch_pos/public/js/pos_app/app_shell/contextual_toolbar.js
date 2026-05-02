@@ -57,10 +57,14 @@ export class ContextualToolbar {
 			<div class="ch-pos-category-chips">
 				<button class="ch-pos-category-chip active" data-group="">${__("All")}</button>
 			</div>
+			<div class="ch-pos-brand-chips" style="display:none">
+				<button class="ch-pos-brand-chip active" data-brand="">${__("All Brands")}</button>
+			</div>
 		`);
 
 		this._bind_sell_events();
 		this._load_item_groups();
+		this._load_brands();
 	}
 
 	_bind_sell_events() {
@@ -157,6 +161,40 @@ export class ContextualToolbar {
 					);
 				});
 			},
+		});
+	}
+
+	_load_brands() {
+		frappe.call({
+			method: "frappe.client.get_list",
+			args: {
+				doctype: "Brand",
+				filters: {},
+				fields: ["name"],
+				order_by: "name asc",
+				limit_page_length: 0,
+			},
+			callback: (r) => {
+				const brands = r.message || [];
+				if (!brands.length) return;
+				const wrap = this.panel.find(".ch-pos-brand-chips");
+				brands.forEach((b) => {
+					wrap.append(
+						`<button class="ch-pos-brand-chip" data-brand="${frappe.utils.escape_html(b.name)}">${frappe.utils.escape_html(b.name)}</button>`
+					);
+				});
+				wrap.show();
+			},
+		});
+
+		// Brand chip click handler
+		this.panel.on("click", ".ch-pos-brand-chip", (e) => {
+			const brand = $(e.currentTarget).data("brand") || "";
+			this.panel.find(".ch-pos-brand-chip").removeClass("active");
+			$(e.currentTarget).addClass("active");
+			PosState.brand_filter = brand;
+			PosState.item_page = 0;
+			EventBus.emit("items:reload");
 		});
 	}
 

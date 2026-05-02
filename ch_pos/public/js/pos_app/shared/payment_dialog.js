@@ -1288,15 +1288,27 @@ PosState.coupon_code     = null;
 PosState.coupon_discount = 0;
 $msg.html(`<span style="color:var(--pos-success)">🎟️ ${__("Voucher")} — ₹${format_number(data.amount)} ${__("off")} (${__("Bal")}: ₹${format_number(data.balance)})</span>`).show();
 } else {
+// Compute actual rupee discount (percentage coupons need to be applied against cart total)
+let disc_amount = 0;
+let disc_label = "";
+if (data.is_percentage) {
+    const cart_subtotal = PosState.cart.reduce((s, c) => s + flt(c.qty) * flt(c.rate), 0);
+    disc_amount = Math.round(flt(data.amount) / 100 * cart_subtotal * 100) / 100;
+    if (data.max_discount > 0 && disc_amount > data.max_discount) disc_amount = data.max_discount;
+    disc_label = `${data.amount}% ${__("off")} = ₹${format_number(disc_amount)}`;
+} else {
+    disc_amount = flt(data.amount);
+    disc_label = `₹${format_number(disc_amount)} ${__("off")}`;
+}
 this._dlg_coupon_code     = code;
-this._dlg_coupon_discount = flt(data.amount);
+this._dlg_coupon_discount = disc_amount;
 this._dlg_voucher_code    = "";
 this._dlg_voucher_amount  = 0;
 PosState.coupon_code     = code;
-PosState.coupon_discount = this._dlg_coupon_discount;
+PosState.coupon_discount = disc_amount;
 PosState.voucher_code    = null;
 PosState.voucher_amount  = 0;
-$msg.html(`<span style="color:var(--pos-success)">🏷️ ${__("Coupon")} — ₹${format_number(data.amount)} ${__("off")}</span>`).show();
+$msg.html(`<span style="color:var(--pos-success)">🏷️ ${__("Coupon")} — ${disc_label}</span>`).show();
 }
 this._update_totals();
 }).catch(err => {

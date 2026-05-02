@@ -639,7 +639,12 @@ export class BuybackWorkspace {
 				<i class="fa fa-info-circle"></i>
 				${__("The manager will review and approve this order in Desk. Refresh to check status.")}
 			</div>
-			<div class="ch-bb-actions" style="margin-top:12px">
+			<div class="ch-bb-actions" style="margin-top:12px;flex-direction:column;gap:8px">
+				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-manager-approve"
+					data-order="${order_name}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
+					<i class="fa fa-check"></i> ${__("Approve (Manager In-Store)")}
+				</button>
 				<button class="btn btn-outline-secondary ch-bb-act ch-bb-refresh-stage"
 					style="width:100%;border-radius:var(--pos-radius,8px)">
 					<i class="fa fa-refresh"></i> ${__("Refresh Status")}
@@ -716,13 +721,13 @@ export class BuybackWorkspace {
 						: ""}
 				</div>
 				<div class="ch-bb-actions" style="margin-top:14px;flex-direction:column;gap:8px">
+					<button class="btn btn-success btn-lg ch-bb-act ch-bb-approve-instor"
+						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
+						<i class="fa fa-check-circle"></i> ${__("Customer Approved (In-Store)")}
+					</button>
 					<button class="btn btn-outline-primary ch-bb-act ch-bb-resend-link"
 						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:600">
 						<i class="fa fa-paper-plane"></i> ${__("Resend Link")}
-					</button>
-					<button class="btn btn-outline-secondary ch-bb-act ch-bb-approve-instor"
-						style="width:100%;border-radius:var(--pos-radius,8px)">
-						<i class="fa fa-pencil"></i> ${__("Approve In-Store Instead")}
 					</button>
 					<button class="btn btn-link ch-bb-act ch-bb-refresh-stage"
 						style="font-size:12px;margin-top:4px">
@@ -981,6 +986,24 @@ export class BuybackWorkspace {
 				btn.prop("disabled", false)
 					.html(`<i class="fa fa-check-circle"></i> ${__("Create Order & Send for Approval")}`);
 			});
+		});
+
+		// ── INSPECT: Manager Approve (in-store) ──────────
+		el.on("click.bbstage", ".ch-bb-manager-approve", (e) => {
+			const order_name = $(e.currentTarget).data("order");
+			if (!order_name) return;
+			frappe.confirm(
+				__("Confirm manager approval for order {0}?", [order_name]),
+				() => {
+					frappe.xcall("buyback.api.approve_order", {
+						order_name,
+						remarks: "Approved in-store via POS",
+					}).then(() => {
+						frappe.show_alert({ message: __("Order approved"), indicator: "green" });
+						this._reload();
+					});
+				}
+			);
 		});
 
 		// ── INSPECT: Refresh status ──────────────────────

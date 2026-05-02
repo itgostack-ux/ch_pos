@@ -1758,10 +1758,15 @@ def search_invoices_for_return(search_term, pos_profile=None) -> list:
 		limit_page_length=20,
 	)
 
+	from frappe.utils import date_diff
+	today = nowdate()
 	for inv in invoices:
 		inv["items_count"] = frappe.db.count(
 			"Sales Invoice Item", {"parent": inv["name"]}
 		)
+		days = cint(date_diff(today, str(inv["posting_date"])))
+		inv["days_since_purchase"] = days
+		inv["return_window_expired"] = days > 14
 
 	return invoices
 
@@ -3528,7 +3533,13 @@ def request_manager_approval(mobile_no, purpose, reference_doctype=None, referen
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Manager approval request audit failed")
-    # In production, send OTP via SMS here
+    # Send OTP via email (lookup email by mobile)
+    try:
+        from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
+        manager_email = _get_email_for_mobile(mobile_no)
+        send_otp_email(manager_email, otp, purpose, reference_name or "")
+    except Exception:
+        frappe.log_error(title="Manager OTP email delivery failed")
     return {"sent": True, "mobile": mobile_no[:3] + "****" + mobile_no[-3:], "otp_generated": bool(otp)}
 
 
@@ -4627,7 +4638,7 @@ def get_comparison_filters() -> dict:
 
 
 @frappe.whitelist()
-def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, pos_profile=None) -> list:
+def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, pos_profile=None, in_stock_only=None) -> list:
     """Return items matching filters with specs, prices, stock and active offers."""
     today = frappe.utils.today()
 
@@ -4660,10 +4671,19 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
                  or search_lower in (i.brand or "").lower()
                  or search_lower in (i.name or "").lower()]
 
-    # Get warehouse for stock check
+    # Get warehouse for stock check + nearby store warehouses
     warehouse = None
+    nearby_profiles = []  # [{name, warehouse}] for other stores in same company
     if pos_profile:
         warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
+        if warehouse:
+            company = frappe.db.get_value("Warehouse", warehouse, "company")
+            if company:
+                nearby_profiles = frappe.db.get_all(
+                    "POS Profile",
+                    filters={"disabled": 0, "warehouse": ["!=", warehouse], "company": company},
+                    fields=["name", "warehouse"],
+                )
 
     results = []
     for item in items:
@@ -4740,7 +4760,39 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
                 )
                 total_stock = sum(flt(s.actual_qty) for s in stock_data)
 
+            # Get stock at nearby stores (batch query)
+            nearby_stock = []
+            if nearby_profiles:
+                nearby_wh_names = [p.warehouse for p in nearby_profiles if p.warehouse]
+                if nearby_wh_names:
+                    nearby_bins = frappe.db.get_all(
+                        "Bin",
+                        filters={
+                            "item_code": ["in", variant_codes],
+                            "warehouse": ["in", nearby_wh_names],
+                            "actual_qty": [">", 0],
+                        },
+                        fields=["warehouse", "actual_qty"],
+                    )
+                    # Aggregate by warehouse
+                    wh_qty = {}
+                    for b in nearby_bins:
+                        wh_qty[b.warehouse] = wh_qty.get(b.warehouse, 0) + flt(b.actual_qty)
+                    # Build result with profile name
+                    wh_to_profile = {p.warehouse: p.name for p in nearby_profiles if p.warehouse}
+                    for wh, qty in wh_qty.items():
+                        if qty > 0:
+                            nearby_stock.append({
+                                "warehouse": wh,
+                                "pos_profile": wh_to_profile.get(wh, wh),
+                                "qty": qty,
+                            })
+
         # Get active offers for this item (by item_code, brand, item_group)
+        # Skip items with no stock when in_stock_only filter is set
+        if cint(in_stock_only) and total_stock <= 0:
+            continue
+
         offers = frappe.db.sql(
             """SELECT name, offer_name, offer_type, value_type, value,
                       bank_name, card_type, min_bill_amount, payment_mode
@@ -4783,6 +4835,7 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
             "max_price": max_price,
             "variant_count": variant_count,
             "stock": total_stock,
+            "nearby_stock": nearby_stock,
             "brand_offers": brand_offers,
             "bank_offers": bank_offers,
             "other_offers": other_offers,
@@ -6265,12 +6318,16 @@ def pos_send_customer_otp(order_name) -> dict:
 		reference_doctype="Buyback Order",
 		reference_name=order_name,
 	)
-	# Deliver OTP via WhatsApp (same path as Buyback Hub send_otp)
+	# Deliver OTP via WhatsApp + Email (same path as Buyback Hub send_otp)
 	try:
-		from buyback.buyback.whatsapp_notifications import send_otp_whatsapp
+		from buyback.buyback.whatsapp_notifications import send_otp_whatsapp, send_otp_email
 		send_otp_whatsapp(mobile_no, otp, order_name)
+		customer_email = ""
+		if doc.customer:
+			customer_email = frappe.db.get_value("Customer", doc.customer, "email_id") or ""
+		send_otp_email(customer_email, otp, "Buyback Customer Approval", order_name)
 	except Exception:
-		frappe.log_error(title="POS Buyback OTP WhatsApp delivery failed")
+		frappe.log_error(title="POS Buyback OTP delivery failed")
 	return {
 		"sent": True,
 		"masked_mobile": mobile_no[:2] + "****" + mobile_no[-2:],
