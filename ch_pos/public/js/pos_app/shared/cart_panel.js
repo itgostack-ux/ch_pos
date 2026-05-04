@@ -322,6 +322,7 @@ export class CartPanel {
 		let duplicate_check_timer = null;
 		let last_duplicate_phone_checked = "";
 		let whatsapp_manually_edited = false;
+		let syncing_whatsapp = false;
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
 		const input_value = (fieldname) =>
@@ -356,11 +357,14 @@ export class CartPanel {
 			if (!mobile) return;
 
 			if (!whatsapp_manually_edited || !whatsapp || whatsapp === last_auto_synced_mobile) {
+				syncing_whatsapp = true;
+				d.set_value("whatsapp_number", mobile);
 				d.fields_dict.whatsapp_number.$input.val(mobile);
 				d.doc.whatsapp_number = mobile;
 				last_auto_synced_mobile = mobile;
 				otp_verified_number = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+				setTimeout(() => { syncing_whatsapp = false; }, 0);
 			}
 
 			const mobile_digits = mobile.replace(/\D/g, "");
@@ -529,6 +533,7 @@ export class CartPanel {
 		});
 
 		d.fields_dict.whatsapp_number.$input.on("input", () => {
+			if (syncing_whatsapp) return;
 			d.doc.whatsapp_number = input_value("whatsapp_number");
 			whatsapp_manually_edited = d.doc.whatsapp_number !== last_auto_synced_mobile;
 			otp_verified_number = "";
@@ -545,6 +550,7 @@ export class CartPanel {
 			}).then((row) => {
 				if (!row) return;
 				if (row.state) {
+					d.set_value("state", row.state);
 					d.fields_dict.state.$input.val(row.state);
 					d.doc.state = row.state;
 				}
