@@ -3586,16 +3586,22 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
 
     mobile_no = validate_indian_phone(mobile_no)
-    purpose = (purpose or "POS Customer Verification").strip()
-    if not purpose:
-        purpose = "POS Customer Verification"
+    purpose = "POS Customer Verification"
 
-    otp_code = CHOTPLog.generate_otp(
-        mobile_no=mobile_no,
-        purpose=purpose,
-        reference_doctype="Customer",
-        reference_name="",
-    )
+    try:
+        otp_code = CHOTPLog.generate_otp(
+            mobile_no=mobile_no,
+            purpose=purpose,
+            reference_doctype="Customer",
+            reference_name="",
+        )
+    except Exception as e:
+        if "Purpose cannot be" in str(e):
+            frappe.throw(
+                _("OTP purpose setup is missing for POS customer verification. Please contact administrator."),
+                title=_("OTP Setup Error"),
+            )
+        raise
 
     sent_whatsapp = False
     sent_email = False
@@ -3641,7 +3647,7 @@ def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Veri
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
 
     mobile_no = validate_indian_phone(mobile_no)
-    purpose = (purpose or "POS Customer Verification").strip() or "POS Customer Verification"
+    purpose = "POS Customer Verification"
 
     return CHOTPLog.verify_otp(
         mobile_no=mobile_no,
@@ -5866,6 +5872,90 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
     }
 
 
+def _phone_suffix_10(phone_no):
+    """Return normalized 10-digit Indian phone suffix, or empty string."""
+    phone_no = (phone_no or "").strip()
+    if not phone_no:
+        return ""
+
+    try:
+        normalized = validate_indian_phone(phone_no, "Phone Number")
+    except TypeError:
+        normalized = validate_indian_phone(phone_no)
+    except Exception:
+        normalized = phone_no
+
+    digits = "".join(ch for ch in str(normalized) if ch.isdigit())
+    if len(digits) < 10:
+        return ""
+    return digits[-10:]
+
+
+def _find_existing_customer_by_phone_suffix(phone_suffix):
+    """Find existing customer by mobile/alternate/whatsapp/contact phone."""
+    if not phone_suffix:
+        return None
+
+    like_value = f"%{phone_suffix}"
+    row = frappe.db.sql(
+        """
+        SELECT name, customer_name, mobile_no, ch_alternate_phone, ch_whatsapp_number
+        FROM `tabCustomer`
+        WHERE (mobile_no LIKE %(like)s
+            OR ch_alternate_phone LIKE %(like)s
+            OR ch_whatsapp_number LIKE %(like)s)
+          AND disabled = 0
+        ORDER BY modified DESC
+        LIMIT 1
+        """,
+        {"like": like_value},
+        as_dict=True,
+    )
+    if row:
+        return row[0]
+
+    row = frappe.db.sql(
+        """
+        SELECT c.name, c.customer_name, c.mobile_no, c.ch_alternate_phone, c.ch_whatsapp_number
+        FROM `tabContact Phone` cp
+        JOIN `tabDynamic Link` dl
+          ON dl.parent = cp.parent
+         AND dl.parenttype = 'Contact'
+         AND dl.link_doctype = 'Customer'
+        JOIN `tabCustomer` c
+          ON c.name = dl.link_name
+        WHERE cp.phone LIKE %(like)s
+          AND c.disabled = 0
+        ORDER BY cp.modified DESC
+        LIMIT 1
+        """,
+        {"like": like_value},
+        as_dict=True,
+    )
+    return row[0] if row else None
+
+
+@frappe.whitelist()
+def find_existing_customer_by_phone(phone_no):
+    """Check whether a customer already exists for the given phone number."""
+    suffix = _phone_suffix_10(phone_no)
+    if not suffix:
+        return {"exists": False}
+
+    hit = _find_existing_customer_by_phone_suffix(suffix)
+    if not hit:
+        return {"exists": False}
+
+    return {
+        "exists": True,
+        "customer": hit.get("name"),
+        "customer_name": hit.get("customer_name"),
+        "mobile_no": hit.get("mobile_no") or "",
+        "alternate_phone": hit.get("ch_alternate_phone") or "",
+        "whatsapp_number": hit.get("ch_whatsapp_number") or "",
+    }
+
+
 # ── Quick Customer Creation ──────────────────────────────────────
 @frappe.whitelist()
 def quick_create_customer(customer_name, mobile_no="", email_id="",
@@ -5878,6 +5968,34 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
                           shipping_state="", shipping_pincode="") -> dict:
     """Create a new Customer quickly from the POS interface."""
     frappe.has_permission("Customer", "create", throw=True)
+
+    mobile_suffix = _phone_suffix_10(mobile_no)
+    whatsapp_suffix = _phone_suffix_10(whatsapp_number)
+
+    if mobile_suffix:
+        hit = _find_existing_customer_by_phone_suffix(mobile_suffix)
+        if hit:
+            frappe.throw(
+                _("Customer already exists with mobile number {0}: <b>{1}</b> ({2}). Please select the existing customer.").format(
+                    mobile_no,
+                    hit.get("customer_name") or hit.get("name"),
+                    hit.get("name"),
+                ),
+                title=_("Duplicate Customer"),
+            )
+
+    if whatsapp_suffix and whatsapp_suffix != mobile_suffix:
+        hit = _find_existing_customer_by_phone_suffix(whatsapp_suffix)
+        if hit:
+            frappe.throw(
+                _("Customer already exists with WhatsApp number {0}: <b>{1}</b> ({2}). Please select the existing customer.").format(
+                    whatsapp_number,
+                    hit.get("customer_name") or hit.get("name"),
+                    hit.get("name"),
+                ),
+                title=_("Duplicate Customer"),
+            )
+
     cust = frappe.new_doc("Customer")
     cust.customer_name = customer_name
     cust.customer_group = customer_group or "Individual"

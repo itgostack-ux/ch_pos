@@ -318,9 +318,41 @@ export class CartPanel {
 
 	_show_new_customer_dialog() {
 		let otp_verified_number = "";
-		const otp_purpose = "POS Customer Verification";
+		let last_auto_synced_mobile = "";
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
+		const otp_error_message = (err, fallback) => {
+			const msg = (err && (err.message || err.exc || err._server_messages)) || "";
+			if (String(msg).includes("Purpose cannot be")) {
+				return __("OTP setup is not configured for POS customer verification. Please contact administrator.");
+			}
+			return (err && err.message) || fallback;
+		};
+
+		const check_existing_customer = (phone_no) => {
+			return frappe.xcall("ch_pos.api.pos_api.find_existing_customer_by_phone", { phone_no })
+				.then((res) => res || { exists: false })
+				.catch(() => ({ exists: false }));
+		};
+
+		const offer_use_existing_customer = (hit, phone_label) => {
+			if (!hit || !hit.exists || !hit.customer) return false;
+			frappe.confirm(
+				__("Customer already exists with {0}: {1} ({2}). Use existing customer?", [
+					phone_label,
+					hit.customer_name || hit.customer,
+					hit.customer,
+				]),
+				() => {
+					d.hide();
+					this.customer_field.set_value(hit.customer);
+					this._commit_customer(hit.customer);
+					frappe.show_alert({ message: __("Selected existing customer {0}", [hit.customer]), indicator: "green" });
+				},
+				() => {}
+			);
+			return true;
+		};
 
 		const d = new frappe.ui.Dialog({
 			title: __("New Customer"),
@@ -374,11 +406,25 @@ export class CartPanel {
 			],
 			size: "large",
 			primary_action_label: __("Create"),
-			primary_action: (values) => {
+			primary_action: async (values) => {
 				const phone = (values.mobile_no || "").trim();
 				if (phone && !assert_india_phone(d.fields_dict.mobile_no.$input[0], phone)) return;
 				const whatsapp = (values.whatsapp_number || "").trim();
 				if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+
+				const existing_by_mobile = phone ? await check_existing_customer(phone) : { exists: false };
+				if (offer_use_existing_customer(existing_by_mobile, __("Mobile Number"))) return;
+
+				const existing_by_whatsapp = await check_existing_customer(whatsapp);
+				if (
+					offer_use_existing_customer(
+						existing_by_whatsapp,
+						__("WhatsApp Number")
+					)
+				) {
+					return;
+				}
+
 				if (otp_verified_number !== whatsapp) {
 					frappe.show_alert({ message: __("Verify WhatsApp OTP before creating customer"), indicator: "red" });
 					return;
@@ -421,6 +467,20 @@ export class CartPanel {
 			}
 		});
 
+		d.fields_dict.mobile_no.$input.on("input", () => {
+			const mobile = (d.get_value("mobile_no") || "").trim();
+			const whatsapp = (d.get_value("whatsapp_number") || "").trim();
+			if (!mobile) return;
+
+			// Default behavior: sync mobile -> WhatsApp unless user manually changed WhatsApp.
+			if (!whatsapp || whatsapp === last_auto_synced_mobile) {
+				d.set_value("whatsapp_number", mobile);
+				last_auto_synced_mobile = mobile;
+				otp_verified_number = "";
+				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+			}
+		});
+
 		d.fields_dict.whatsapp_number.$input.on("input", () => {
 			otp_verified_number = "";
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
@@ -432,13 +492,12 @@ export class CartPanel {
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("Sending OTP..."), "#2563eb"));
 			frappe.xcall("ch_pos.api.pos_api.request_customer_whatsapp_otp", {
 				mobile_no: whatsapp,
-				purpose: otp_purpose,
 				customer_name: d.get_value("customer_name") || "Customer",
 			}).then(() => {
 				otp_verified_number = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP sent to WhatsApp"), "#15803d"));
 			}).catch((err) => {
-				d.fields_dict.otp_status.$wrapper.html(status_html(err.message || __("Failed to send OTP"), "#b91c1c"));
+				d.fields_dict.otp_status.$wrapper.html(status_html(otp_error_message(err, __("Failed to send OTP")), "#b91c1c"));
 			});
 		});
 
@@ -453,7 +512,6 @@ export class CartPanel {
 			frappe.xcall("ch_pos.api.pos_api.verify_customer_whatsapp_otp", {
 				mobile_no: whatsapp,
 				otp_code,
-				purpose: otp_purpose,
 			}).then((res) => {
 				if (res && res.valid) {
 					otp_verified_number = whatsapp;
@@ -465,7 +523,7 @@ export class CartPanel {
 				}
 			}).catch((err) => {
 				otp_verified_number = "";
-				d.fields_dict.otp_status.$wrapper.html(status_html(err.message || __("OTP verification failed"), "#b91c1c"));
+				d.fields_dict.otp_status.$wrapper.html(status_html(otp_error_message(err, __("OTP verification failed")), "#b91c1c"));
 			});
 		});
 	}
