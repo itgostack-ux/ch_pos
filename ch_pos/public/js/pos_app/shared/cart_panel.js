@@ -325,8 +325,16 @@ export class CartPanel {
 		let syncing_whatsapp = false;
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
-		const input_value = (fieldname) =>
-			((d.fields_dict[fieldname] && d.fields_dict[fieldname].$input && d.fields_dict[fieldname].$input.val()) || d.get_value(fieldname) || "").trim();
+		const input_value = (fieldname) => {
+			const f = d.fields_dict[fieldname];
+			let v = (f && f.$input && f.$input.val()) || "";
+			if (!v) {
+				const $i = d.$wrapper.find(`[data-fieldname="${fieldname}"] input`).first();
+				v = ($i.length ? $i.val() : "") || "";
+			}
+			if (!v) v = d.get_value(fieldname) || "";
+			return String(v).trim();
+		};
 		const validate_email_input = () => {
 			const email = input_value("email_id");
 			if (!email) return true;
@@ -358,13 +366,18 @@ export class CartPanel {
 
 			if (!whatsapp_manually_edited || !whatsapp || whatsapp === last_auto_synced_mobile) {
 				syncing_whatsapp = true;
-				d.set_value("whatsapp_number", mobile);
-				d.fields_dict.whatsapp_number.$input.val(mobile);
+				const $w_input = d.$wrapper.find('[data-fieldname="whatsapp_number"] input').first();
+				if ($w_input.length) {
+					$w_input.val(mobile);
+				}
+				if (d.fields_dict.whatsapp_number && d.fields_dict.whatsapp_number.set_value) {
+					d.fields_dict.whatsapp_number.set_value(mobile);
+				}
 				d.doc.whatsapp_number = mobile;
 				last_auto_synced_mobile = mobile;
 				otp_verified_number = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
-				setTimeout(() => { syncing_whatsapp = false; }, 0);
+				setTimeout(() => { syncing_whatsapp = false; }, 50);
 			}
 
 			const mobile_digits = mobile.replace(/\D/g, "");
@@ -465,9 +478,9 @@ export class CartPanel {
 					frappe.show_alert({ message: __("Mobile Number is mandatory"), indicator: "red" });
 					return;
 				}
-				if (!assert_india_phone(d.fields_dict.mobile_no.$input[0], phone)) return;
+				if (!assert_india_phone(input_el("mobile_no"), phone)) return;
 				const whatsapp = input_value("whatsapp_number");
-				if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+				if (!whatsapp || !assert_india_phone(input_el("whatsapp_number"), whatsapp)) return;
 				if (!validate_email_input()) return;
 				const email = input_value("email_id");
 
@@ -518,7 +531,6 @@ export class CartPanel {
 		});
 		d.show();
 		d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
-		setTimeout(sync_whatsapp_from_mobile, 0);
 
 		// Prevent Enter key from auto-submitting customer creation.
 		d.$wrapper.find("form").on("keydown", (e) => {
@@ -527,20 +539,25 @@ export class CartPanel {
 			}
 		});
 
-		d.fields_dict.mobile_no.$input.on("input change paste keyup blur", () => {
+		// Phone controls (mobile_no, whatsapp_number) use ControlPhone which has
+		// async make_input. Bind via delegation so handlers work even before $input exists.
+		const $body = d.$wrapper.find(".modal-body");
+
+		$body.on("input change paste keyup blur", '[data-fieldname="mobile_no"] input', () => {
 			whatsapp_manually_edited = false;
 			sync_whatsapp_from_mobile();
 		});
 
-		d.fields_dict.whatsapp_number.$input.on("input", () => {
+		$body.on("input", '[data-fieldname="whatsapp_number"] input', () => {
 			if (syncing_whatsapp) return;
-			d.doc.whatsapp_number = input_value("whatsapp_number");
-			whatsapp_manually_edited = d.doc.whatsapp_number !== last_auto_synced_mobile;
+			const val = input_value("whatsapp_number");
+			d.doc.whatsapp_number = val;
+			whatsapp_manually_edited = val !== last_auto_synced_mobile;
 			otp_verified_number = "";
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
 		});
 
-		d.fields_dict.city.$input.on("awesomplete-selectcomplete change blur", () => {
+		$body.on("awesomplete-selectcomplete change blur", '[data-fieldname="city"] input', () => {
 			const city = input_value("city");
 			if (!city) return;
 			frappe.xcall("frappe.client.get_value", {
@@ -548,16 +565,16 @@ export class CartPanel {
 				filters: { name: city },
 				fieldname: ["city_name", "state"],
 			}).then((row) => {
-				if (!row) return;
-				if (row.state) {
-					d.set_value("state", row.state);
+				if (!row || !row.state) return;
+				d.set_value("state", row.state);
+				if (d.fields_dict.state.$input) {
 					d.fields_dict.state.$input.val(row.state);
-					d.doc.state = row.state;
 				}
+				d.doc.state = row.state;
 			});
 		});
 
-		d.fields_dict.email_id.$input.on("change blur", validate_email_input);
+		$body.on("change blur", '[data-fieldname="email_id"] input', validate_email_input);
 
 		const send_otp_handler = async () => {
 			sync_whatsapp_from_mobile();
@@ -566,10 +583,10 @@ export class CartPanel {
 				frappe.show_alert({ message: __("Mobile Number is mandatory"), indicator: "red" });
 				return;
 			}
-			if (!assert_india_phone(d.fields_dict.mobile_no.$input[0], phone)) return;
+			if (!assert_india_phone(input_el("mobile_no"), phone)) return;
 
 			const whatsapp = input_value("whatsapp_number");
-			if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+			if (!whatsapp || !assert_india_phone(input_el("whatsapp_number"), whatsapp)) return;
 			if (!validate_email_input()) return;
 
 			const existing_by_mobile = await check_existing_customer(phone);
@@ -605,7 +622,7 @@ export class CartPanel {
 		const verify_otp_handler = () => {
 			const whatsapp = input_value("whatsapp_number");
 			const otp_code = input_value("otp_code");
-			if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+			if (!whatsapp || !assert_india_phone(input_el("whatsapp_number"), whatsapp)) return;
 			if (!otp_code) {
 				frappe.show_alert({ message: __("Enter OTP code"), indicator: "orange" });
 				return;
@@ -626,6 +643,13 @@ export class CartPanel {
 				otp_verified_number = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(otp_error_message(err, __("OTP verification failed")), "#b91c1c"));
 			});
+		};
+
+		const input_el = (fieldname) => {
+			const f = d.fields_dict[fieldname];
+			if (f && f.$input && f.$input[0]) return f.$input[0];
+			const $i = d.$wrapper.find(`[data-fieldname="${fieldname}"] input`).first();
+			return $i[0] || null;
 		};
 
 		d.get_field("send_otp").$wrapper.on("click", "button", send_otp_handler);
