@@ -59,7 +59,6 @@ export class ProductGrid {
 		});
 		this.panel.on("click", ".ch-pos-btn-clear-filters", () => {
 			PosState.search_term = "";
-			PosState.item_group_filter = "";
 			PosState.item_page = 0;
 			EventBus.emit("items:reload");
 			EventBus.emit("search:cleared");

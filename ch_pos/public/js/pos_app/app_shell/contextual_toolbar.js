@@ -54,17 +54,9 @@ export class ContextualToolbar {
 					</div>
 				</div>
 			</div>
-			<div class="ch-pos-category-chips">
-				<button class="ch-pos-category-chip active" data-group="">${__("All")}</button>
-			</div>
-			<div class="ch-pos-brand-chips" style="display:none">
-				<button class="ch-pos-brand-chip active" data-brand="">${__("All Brands")}</button>
-			</div>
 		`);
 
 		this._bind_sell_events();
-		this._load_item_groups();
-		this._load_brands();
 	}
 
 	_bind_sell_events() {
@@ -104,16 +96,6 @@ export class ContextualToolbar {
 		// Clear filters from empty-state button
 		EventBus.on("search:cleared", () => {
 			panel.find(".ch-pos-search").val("");
-			panel.find(".ch-pos-category-chip").removeClass("active").first().addClass("active");
-		});
-
-		// Category chip click
-		panel.on("click", ".ch-pos-category-chip", function () {
-			panel.find(".ch-pos-category-chip").removeClass("active");
-			$(this).addClass("active");
-			PosState.item_group_filter = $(this).data("group") || "";
-			PosState.item_page = 0;
-			EventBus.emit("items:reload");
 		});
 
 		// Stock toggle
@@ -140,61 +122,6 @@ export class ContextualToolbar {
 			$(this).addClass("btn-primary active").removeClass("btn-default");
 			panel.find(".ch-pos-view-card").addClass("btn-default").removeClass("btn-primary active");
 			EventBus.emit("items:rerender");
-		});
-	}
-
-	_load_item_groups() {
-		frappe.call({
-			method: "frappe.client.get_list",
-			args: {
-				doctype: "Item Group",
-				filters: { is_group: 0 },
-				fields: ["name"],
-				order_by: "name asc",
-				limit_page_length: 0,
-			},
-			callback: (r) => {
-				const chips = this.panel.find(".ch-pos-category-chips");
-				(r.message || []).forEach((g) => {
-					chips.append(
-						`<button class="ch-pos-category-chip" data-group="${frappe.utils.escape_html(g.name)}">${frappe.utils.escape_html(g.name)}</button>`
-					);
-				});
-			},
-		});
-	}
-
-	_load_brands() {
-		frappe.call({
-			method: "frappe.client.get_list",
-			args: {
-				doctype: "Brand",
-				filters: {},
-				fields: ["name"],
-				order_by: "name asc",
-				limit_page_length: 0,
-			},
-			callback: (r) => {
-				const brands = r.message || [];
-				if (!brands.length) return;
-				const wrap = this.panel.find(".ch-pos-brand-chips");
-				brands.forEach((b) => {
-					wrap.append(
-						`<button class="ch-pos-brand-chip" data-brand="${frappe.utils.escape_html(b.name)}">${frappe.utils.escape_html(b.name)}</button>`
-					);
-				});
-				wrap.show();
-			},
-		});
-
-		// Brand chip click handler
-		this.panel.on("click", ".ch-pos-brand-chip", (e) => {
-			const brand = $(e.currentTarget).data("brand") || "";
-			this.panel.find(".ch-pos-brand-chip").removeClass("active");
-			$(e.currentTarget).addClass("active");
-			PosState.brand_filter = brand;
-			PosState.item_page = 0;
-			EventBus.emit("items:reload");
 		});
 	}
 

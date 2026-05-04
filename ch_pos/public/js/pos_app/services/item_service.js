@@ -23,12 +23,6 @@ export class ItemService {
 	 */
 	load_items() {
 		const filters = {};
-		if (PosState.item_group_filter) {
-			filters.item_group = PosState.item_group_filter;
-		}
-		if (PosState.brand_filter) {
-			filters.brand = PosState.brand_filter;
-		}
 		if (PosState.in_stock_only) {
 			filters.in_stock_only = 1;
 		}
