@@ -4109,9 +4109,9 @@ body > .desk-alert-container {
 .ch-pay-credit-section {
   margin: 0 12px 8px;
   padding: 10px 12px;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
 }
 .ch-pay-credit-header {
   display: flex;
@@ -4119,7 +4119,7 @@ body > .desk-alert-container {
   gap: 6px;
   font-size: 12px;
   font-weight: 700;
-  color: #92400e;
+  color: #334155;
   margin-bottom: 8px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -4129,9 +4129,9 @@ body > .desk-alert-container {
   font-size: 11px;
   font-weight: 600;
   padding: 2px 8px;
-  border-radius: 10px;
-  background: #fef3c7;
-  color: #92400e;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #075985;
 }
 .ch-pay-credit-body {
   display: flex;
@@ -4148,14 +4148,15 @@ body > .desk-alert-container {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
-  color: #78350f;
+  color: #334155;
   padding: 3px 8px;
-  background: rgba(255,255,255,0.6);
+  background: #fff;
+  border: 1px solid #e2e8f0;
   border-radius: 6px;
 }
 .ch-pay-credit-bar-wrap {
   height: 5px;
-  background: #fef3c7;
+  background: #e2e8f0;
   border-radius: 3px;
   overflow: hidden;
 }
@@ -4163,6 +4164,53 @@ body > .desk-alert-container {
   height: 100%;
   border-radius: 3px;
   transition: width 0.5s ease;
+}
+.ch-pay-credit-policy-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 2px;
+}
+.ch-pay-credit-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.ch-pay-credit-control-block {
+  min-width: 0;
+}
+.ch-pay-credit-control-wide {
+  grid-column: 1 / -1;
+}
+.ch-pay-credit-control-block label {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.ch-pay-credit-control-block input,
+.ch-pay-credit-control-block .form-control,
+.ch-pay-credit-display-field {
+  width: 100%;
+  min-height: 30px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+.ch-pay-credit-display-field {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  color: #0f172a;
 }
 /* Essential row: terms pills + due date inline */
 .ch-pay-credit-essentials {
@@ -4189,9 +4237,9 @@ body > .desk-alert-container {
 }
 .ch-pay-credit-term-btn:hover { background: #f3f4f6; }
 .ch-pay-credit-term-btn.active {
-  background: #4f46e5;
+  background: #2563eb;
   color: #fff;
-  border-color: #4f46e5;
+  border-color: #2563eb;
 }
 .ch-pay-credit-due-row {
   display: flex;
@@ -4202,7 +4250,7 @@ body > .desk-alert-container {
 .ch-pay-credit-due-label {
   font-size: 11px;
   font-weight: 600;
-  color: #92400e;
+  color: #475569;
 }
 .ch-pay-credit-due-val {
   font-size: 12px;
@@ -4218,7 +4266,7 @@ body > .desk-alert-container {
 .ch-pay-credit-advanced summary {
   font-size: 11px;
   font-weight: 600;
-  color: #92400e;
+  color: #475569;
   cursor: pointer;
   list-style: none;
   display: flex;
@@ -4249,7 +4297,7 @@ body > .desk-alert-container {
 .ch-pay-credit-field-item label {
   font-size: 10px;
   font-weight: 600;
-  color: #92400e;
+  color: #475569;
 }
 .ch-pay-credit-field-item input,
 .ch-pay-credit-field-item .form-control {
@@ -4278,14 +4326,15 @@ body > .desk-alert-container {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: rgba(255,255,255,0.6);
+  background: #fff;
+  border: 1px solid #e2e8f0;
   padding: 4px 6px;
   border-radius: 6px;
 }
 .ch-pay-credit-history-item i { font-size: 14px; }
 .ch-pay-credit-history-label {
   font-size: 10px;
-  color: #92400e;
+  color: #64748b;
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }

@@ -52,6 +52,7 @@ export class PaymentDialog {
 		this._credit_partial_payment = 0;
 		this._credit_approved_by = "";
 		this._credit_approved = false;  // true when credit limit OK or manager approved
+		this._credit_info = null;
 
 		// Free Sale state
 		this._is_free_sale = false;
@@ -112,7 +113,10 @@ export class PaymentDialog {
 			this._credit_interest_rate = saved.credit_interest_rate || 0;
 			this._credit_grace_period = saved.credit_grace_period || 0;
 			this._credit_partial_payment = saved.credit_partial_payment || 0;
+			this._credit_reference = saved.credit_reference || "";
+			this._credit_notes = saved.credit_notes || "";
 			this._credit_approved_by = saved.credit_approved_by || "";
+			this._credit_approved = saved.credit_approved || false;
 			this._is_free_sale = saved.is_free_sale || false;
 			this._free_sale_reason = saved.free_sale_reason || "";
 			this._free_sale_approved_by = saved.free_sale_approved_by || "";
@@ -140,7 +144,11 @@ export class PaymentDialog {
 			this._credit_interest_rate = 0;
 			this._credit_grace_period = 0;
 			this._credit_partial_payment = 0;
+			this._credit_reference = "";
+			this._credit_notes = "";
 			this._credit_approved_by = "";
+			this._credit_approved = false;
+			this._credit_info = null;
 			this._is_free_sale = false;
 			this._free_sale_reason = "";
 			this._free_sale_approved_by = "";
@@ -231,6 +239,8 @@ export class PaymentDialog {
 			ov.find("#ch-pay-credit-interest").val(this._credit_interest_rate || 0);
 			ov.find("#ch-pay-credit-grace").val(this._credit_grace_period || 0);
 			ov.find("#ch-pay-credit-partial").val(this._credit_partial_payment || 0);
+			ov.find("#ch-pay-credit-ref").val(this._credit_reference || "");
+			ov.find("#ch-pay-credit-notes").val(this._credit_notes || "");
 			ov.find("#ch-pay-credit-approved-by").val(this._credit_approved_by || "");
 			// Highlight active term pill
 			if (this._credit_terms) {
@@ -306,46 +316,71 @@ export class PaymentDialog {
 		const credit_html = !is_walkin ? `
 			<div id="ch-pay-credit-section" class="ch-pay-credit-section" style="display:none">
 				<div class="ch-pay-credit-header">
-					<i class="fa fa-handshake-o"></i> ${__("Credit Sale")}
+					<i class="fa fa-line-chart"></i> ${__("CREDIT SALE — CREDIT CONTROL")}
 					<span id="ch-pay-credit-limit-badge" class="ch-pay-credit-limit-badge"></span>
 				</div>
 				<div class="ch-pay-credit-body">
-					<!-- Credit limit / outstanding info (loaded async, shown as compact badge row) -->
 					<div class="ch-pay-credit-info" id="ch-pay-credit-info"></div>
 					<div id="ch-pay-credit-history" class="ch-pay-credit-history" style="display:none"></div>
 
-					<!-- Essential row: Terms + Reference inline -->
-					<div class="ch-pay-credit-essentials">
-						<div class="ch-pay-credit-terms-pills" id="ch-pay-credit-terms-pills">
-							${["Net 15","Net 30","Net 45","Net 60"].map(t =>
-								`<button class="ch-pay-credit-term-btn" data-days="${t.split(' ')[1]}" data-term="${t}">${t}</button>`
-							).join("")}
-							<button class="ch-pay-credit-term-btn" data-days="custom" data-term="Custom">${__("Custom")}</button>
+					<div class="ch-pay-credit-control-grid">
+						<div class="ch-pay-credit-control-block ch-pay-credit-control-wide">
+							<label>${__("Payment Terms")} <span class="text-danger">*</span></label>
+							<div class="ch-pay-credit-terms-pills" id="ch-pay-credit-terms-pills">
+								${["Net 15","Net 30","Net 45","Net 60"].map(t =>
+									`<button class="ch-pay-credit-term-btn" data-days="${t.split(' ')[1]}" data-term="${t}">${t}</button>`
+								).join("")}
+								<button class="ch-pay-credit-term-btn" data-days="custom" data-term="Custom">${__("Custom")}</button>
+							</div>
 						</div>
-						<div class="ch-pay-credit-due-row">
-							<span class="ch-pay-credit-due-label">${__("Due")}</span>
-							<div id="ch-pay-credit-due-date" class="ch-pay-credit-due-val"></div>
+						<div class="ch-pay-credit-control-block">
+							<label>${__("Due Date")}</label>
+							<div id="ch-pay-credit-due-date" class="ch-pay-credit-readonly ch-pay-credit-display-field"></div>
+						</div>
+						<div class="ch-pay-credit-control-block">
+							<label>${__("Credit Days")}</label>
+							<input type="number" class="form-control form-control-sm" id="ch-pay-credit-days"
+								value="30" min="1" max="365" step="1">
+						</div>
+						<div class="ch-pay-credit-control-block">
+							<label>${__("Down Payment")}</label>
+							<div class="input-group input-group-sm">
+								<span class="input-group-addon">₹</span>
+								<input type="number" class="form-control" id="ch-pay-credit-partial"
+									value="0" min="0" step="1" placeholder="0">
+							</div>
+						</div>
+						<div class="ch-pay-credit-control-block">
+							<label>${__("Credit Exposure")}</label>
+							<div id="ch-pay-credit-exposure" class="ch-pay-credit-readonly ch-pay-credit-display-field">₹0</div>
+						</div>
+						<div class="ch-pay-credit-control-block">
+							<label>${__("Customer PO / Ref")}</label>
+							<input type="text" class="form-control form-control-sm" id="ch-pay-credit-ref"
+								placeholder="${__("PO / approval ref")}">
+						</div>
+						<div class="ch-pay-credit-control-block">
+							<label>${__("Reminder Date")}</label>
+							<div id="ch-pay-credit-reminder" class="ch-pay-credit-readonly ch-pay-credit-display-field"></div>
+						</div>
+						<div class="ch-pay-credit-control-block ch-pay-credit-control-wide">
+							<label>${__("Internal Notes")}</label>
+							<input type="text" class="form-control form-control-sm" id="ch-pay-credit-notes"
+								placeholder="${__("Collection note / exception reason")}">
+						</div>
+						<div class="ch-pay-credit-control-block ch-pay-credit-control-wide">
+							<label>${__("Approval Status")}</label>
+							<input type="text" class="form-control form-control-sm ch-pay-credit-readonly"
+								id="ch-pay-credit-approved-by" readonly
+								placeholder="${__("Auto-approved within credit policy")}">
 						</div>
 					</div>
 
 					<!-- Advanced fields (collapsible) -->
 					<details class="ch-pay-credit-advanced" id="ch-pay-credit-advanced">
-						<summary>${__("More options")}</summary>
+						<summary>${__("Finance Charges")}</summary>
 						<div class="ch-pay-credit-fields">
 							<div class="ch-pay-credit-grid">
-								<div class="ch-pay-credit-field-item">
-									<label>${__("Credit Days")}</label>
-									<input type="number" class="form-control form-control-sm" id="ch-pay-credit-days"
-										value="30" min="1" max="365" step="1">
-								</div>
-								<div class="ch-pay-credit-field-item">
-									<label>${__("Down Payment")}</label>
-									<div class="input-group input-group-sm">
-										<span class="input-group-addon">₹</span>
-										<input type="number" class="form-control" id="ch-pay-credit-partial"
-											value="0" min="0" step="1" placeholder="0">
-									</div>
-								</div>
 								<div class="ch-pay-credit-field-item">
 									<label>${__("Interest % p.a.")}</label>
 									<div class="input-group input-group-sm">
@@ -358,26 +393,6 @@ export class PaymentDialog {
 									<label>${__("Grace Period (days)")}</label>
 									<input type="number" class="form-control form-control-sm" id="ch-pay-credit-grace"
 										value="0" min="0" max="30" step="1">
-								</div>
-								<div class="ch-pay-credit-field-item">
-									<label>${__("Ref / PO No")}</label>
-									<input type="text" class="form-control form-control-sm" id="ch-pay-credit-ref"
-										placeholder="${__("PO-2026-001")}">
-								</div>
-								<div class="ch-pay-credit-field-item">
-									<label>${__("Reminder Date")}</label>
-									<div id="ch-pay-credit-reminder" class="form-control form-control-sm ch-pay-credit-readonly"></div>
-								</div>
-								<div class="ch-pay-credit-field-item ch-pay-credit-field-full">
-									<label>${__("Notes")}</label>
-									<input type="text" class="form-control form-control-sm" id="ch-pay-credit-notes"
-										placeholder="${__("e.g. Payment by NEFT on or before due date")}">
-								</div>
-								<div class="ch-pay-credit-field-item ch-pay-credit-field-full">
-									<label>${__("Approved By")}</label>
-									<input type="text" class="form-control form-control-sm ch-pay-credit-readonly"
-										id="ch-pay-credit-approved-by" readonly
-										placeholder="${__("Auto-filled on manager override")}">
 								</div>
 							</div>
 						</div>
@@ -845,7 +860,10 @@ placeholder="${__("Enter code...")}">
 				this._credit_terms = "Net 30";
 				this._credit_days = 30;
 				ov.find("#ch-pay-credit-days").val(30);
+				ov.find(".ch-pay-credit-term-btn").removeClass("active");
 				ov.find(".ch-pay-credit-term-btn[data-term='Net 30']").addClass("active");
+				this._seed_credit_down_payment();
+				this._render_payments();
 				this._load_credit_info();
 				this._update_credit_due_date();
 			}
@@ -905,7 +923,11 @@ placeholder="${__("Enter code...")}">
 			this._credit_grace_period = parseInt($(e.currentTarget).val()) || 0;
 		});
 		ov.on("input", "#ch-pay-credit-partial", e => {
-			this._credit_partial_payment = parseFloat($(e.currentTarget).val()) || 0;
+			const grand = this._calc_grand_total();
+			this._credit_partial_payment = Math.min(parseFloat($(e.currentTarget).val()) || 0, grand);
+			$(e.currentTarget).val(this._credit_partial_payment || "");
+			this._set_cash_amount(this._credit_partial_payment);
+			this._render_credit_info(this._credit_info);
 			this._update_totals();
 		});
 		ov.on("input", "#ch-pay-credit-ref", e => {
@@ -1460,6 +1482,30 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		});
 	}
 
+	_seed_credit_down_payment() {
+		const grand = this._calc_grand_total();
+		const tendered = this._payments.reduce((sum, payment) => sum + flt(payment.amount), 0);
+		const looks_like_default_full_payment = this._payments.length === 1 && Math.abs(tendered - grand) <= 0.005;
+
+		if (!this._payments.length) {
+			this._payments = [{ mode: "Cash", amount: 0, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
+			return;
+		}
+
+		if (looks_like_default_full_payment && !this._credit_partial_payment) {
+			this._payments[0].amount = 0;
+		}
+	}
+
+	_calc_credit_exposure() {
+		if (this._is_free_sale) return 0;
+		const grand = this._calc_grand_total();
+		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
+		const advance = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
+		const paid = this._payments.reduce((sum, payment) => sum + flt(payment.amount), 0);
+		return Math.max(0, grand - loyalty - advance - paid);
+	}
+
 	// ───────────────────────────────────── Discount Reasons ──
 
 	_load_disc_reasons() {
@@ -1989,6 +2035,10 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const has_cash = this._payments.some(p => this._mop_type(p.mode) === "cash");
 		if (has_cash && !this._is_free_sale) this._render_quick_cash();
 
+		if (this._is_credit_sale) {
+			this._render_credit_info(this._credit_info);
+		}
+
 		// Lock commercial controls once a gateway payment has been initiated
 		const gateway_active = this._payments.some(p => p.gateway_initiated);
 		const $commercials = this._overlay.find("#ch-pay-commercials");
@@ -2126,7 +2176,10 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			credit_interest_rate: this._credit_interest_rate,
 			credit_grace_period: this._credit_grace_period,
 			credit_partial_payment: this._credit_partial_payment,
+			credit_reference: this._credit_reference,
+			credit_notes: this._credit_notes,
 			credit_approved_by: this._credit_approved_by,
+			credit_approved: this._credit_approved,
 			is_free_sale: this._is_free_sale,
 			free_sale_reason: this._free_sale_reason,
 			free_sale_approved_by: this._free_sale_approved_by,
@@ -2226,7 +2279,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		// Credit Sale validations
 		if (this._is_credit_sale) {
-			if (!this._credit_approved) {
+			const credit_exposure = this._calc_credit_exposure();
+			if (credit_exposure > 0.005 && !this._credit_approved) {
 				frappe.show_alert({ message: __("Manager approval required — credit limit exceeded or overdue invoices"), indicator: "orange" });
 				this._submitting = false;
 				return;
@@ -2588,107 +2642,137 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			customer: PosState.customer,
 			company: PosState.company,
 		}).then(info => {
-			if (!this._overlay) return;
-			const $info = this._overlay.find("#ch-pay-credit-info");
-			const $history = this._overlay.find("#ch-pay-credit-history");
-			const $approval = this._overlay.find("#ch-pay-credit-approval");
-			if (!info) {
-				$info.html(`<div class="text-muted">${__("No credit limit configured for this customer")}</div>`);
-				$history.hide();
-				$approval.hide();
-				return;
-			}
-			const limit = flt(info.credit_limit);
-			const outstanding = flt(info.outstanding);
-			const available = Math.max(0, limit - outstanding);
-			const cart_total = this._calc_grand_total();
-			const over_limit = cart_total > available;
-			const overdue_count = cint(info.overdue_count || 0);
-			const avg_days = cint(info.avg_payment_days || 0);
-			const last_payment = info.last_payment_date || "—";
+			this._credit_info = info || null;
+			this._render_credit_info(this._credit_info);
+		}).catch(e => { console.error("Credit info load failed:", e); });
+	}
 
-			// Credit info summary with utilization bar
-			const utilization_pct = limit > 0 ? Math.min(100, Math.round((outstanding / limit) * 100)) : 0;
-			const bar_color = utilization_pct > 80 ? "#dc2626" : utilization_pct > 50 ? "#f59e0b" : "#16a34a";
+	_render_credit_info(info) {
+		if (!this._overlay || !this._is_credit_sale) return;
+		const $info = this._overlay.find("#ch-pay-credit-info");
+		const $history = this._overlay.find("#ch-pay-credit-history");
+		const $approval = this._overlay.find("#ch-pay-credit-approval");
+		const $badge = this._overlay.find("#ch-pay-credit-limit-badge");
+		const exposure = this._calc_credit_exposure();
+		this._overlay.find("#ch-pay-credit-exposure").text(`₹${format_number(exposure)}`);
 
+		if (!info) {
+			$badge.text(__("Limit Missing"));
 			$info.html(`
 				<div class="ch-pay-credit-stat-grid">
-					<div class="ch-pay-credit-stat">
-						<span>${__("Credit Limit")}</span>
-						<b>₹${format_number(limit)}</b>
-					</div>
-					<div class="ch-pay-credit-stat">
-						<span>${__("Outstanding")}</span>
-						<b style="color:#dc2626">₹${format_number(outstanding)}</b>
-					</div>
-					<div class="ch-pay-credit-stat">
-						<span>${__("Available")}</span>
-						<b style="color:${over_limit ? "#dc2626" : "#16a34a"}">₹${format_number(available)}</b>
-					</div>
-					<div class="ch-pay-credit-stat">
-						<span>${__("This Sale")}</span>
-						<b>₹${format_number(cart_total)}</b>
-					</div>
-				</div>
-				<div class="ch-pay-credit-bar-wrap">
-					<div class="ch-pay-credit-bar" style="width:${utilization_pct}%;background:${bar_color}"></div>
-				</div>
-				<div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-top:2px">
-					<span>${__("Utilization")}: ${utilization_pct}%</span>
-					<span>${over_limit ? `<span style="color:#dc2626;font-weight:600"><i class="fa fa-exclamation-triangle"></i> ${__("Over Limit by")} ₹${format_number(cart_total - available)}</span>` : `<span style="color:#16a34a">${__("Within Limit")}</span>`}</span>
+					<div class="ch-pay-credit-stat"><span>${__("Credit Limit")}</span><b>—</b></div>
+					<div class="ch-pay-credit-stat"><span>${__("Outstanding")}</span><b>—</b></div>
+					<div class="ch-pay-credit-stat"><span>${__("Available")}</span><b>₹0</b></div>
+					<div class="ch-pay-credit-stat"><span>${__("Credit Exposure")}</span><b>₹${format_number(exposure)}</b></div>
 				</div>
 			`);
-
-			// Payment history
-			$history.show().html(`
-				<div class="ch-pay-credit-history-grid">
-					<div class="ch-pay-credit-history-item">
-						<i class="fa fa-clock-o" style="color:${overdue_count > 0 ? "#dc2626" : "#16a34a"}"></i>
-						<div>
-							<div class="ch-pay-credit-history-label">${__("Overdue Invoices")}</div>
-							<div class="ch-pay-credit-history-val" style="color:${overdue_count > 0 ? "#dc2626" : "#1a1a2e"}">${overdue_count}</div>
-						</div>
-					</div>
-					<div class="ch-pay-credit-history-item">
-						<i class="fa fa-calendar-check-o" style="color:#6366f1"></i>
-						<div>
-							<div class="ch-pay-credit-history-label">${__("Avg. Payment Days")}</div>
-							<div class="ch-pay-credit-history-val">${avg_days || "—"}</div>
-						</div>
-					</div>
-					<div class="ch-pay-credit-history-item">
-						<i class="fa fa-calendar" style="color:#0ea5e9"></i>
-						<div>
-							<div class="ch-pay-credit-history-label">${__("Last Payment")}</div>
-							<div class="ch-pay-credit-history-val">${last_payment}</div>
-						</div>
-					</div>
-				</div>
-			`);
-
-			// Over-limit approval requirement
-			this._credit_approved = !over_limit && overdue_count === 0;
-			if (over_limit || overdue_count > 0) {
-				const reasons = [];
-				if (over_limit) reasons.push(__("exceeds available credit by ₹{0}", [format_number(cart_total - available)]));
-				if (overdue_count > 0) reasons.push(__("{0} overdue invoice(s)", [overdue_count]));
-				$approval.show().html(`
-					<div class="ch-pay-credit-approval-warn">
-						<i class="fa fa-exclamation-triangle"></i>
-						<span>${__("Manager approval required")}: ${reasons.join(", ")}</span>
-					</div>
-					<button class="btn btn-sm btn-warning" id="ch-pay-credit-override-btn" style="margin-top:6px">
-						<i class="fa fa-unlock"></i> ${__("Request Manager Override")}
-					</button>
-					<div id="ch-pay-credit-override-status" style="margin-top:6px"></div>
-				`);
-				this._overlay.find("#ch-pay-credit-override-btn").on("click", () => {
-					this._request_credit_override(cart_total, available, overdue_count);
-				});
+			$history.hide();
+			this._credit_approved = exposure <= 0.005 || !!this._credit_approved_by;
+			if (exposure > 0.005 && !this._credit_approved_by) {
+				this._overlay.find("#ch-pay-credit-approved-by").val("");
+				this._render_credit_override($approval, [__("credit limit not configured")], exposure, 0, 0);
 			} else {
 				$approval.hide();
 			}
-		}).catch(e => { console.error("Credit info load failed:", e); });
+			return;
+		}
+
+		const limit = flt(info.credit_limit);
+		const outstanding = flt(info.outstanding);
+		const available = Math.max(0, limit - outstanding);
+		const over_limit = exposure > available;
+		const overdue_count = cint(info.overdue_count || 0);
+		const avg_days = cint(info.avg_payment_days || 0);
+		const last_payment = info.last_payment_date || "—";
+		const projected = outstanding + exposure;
+		const utilization_pct = limit > 0 ? Math.min(100, Math.round((projected / limit) * 100)) : 0;
+		const bar_color = utilization_pct > 80 ? "#dc2626" : utilization_pct > 50 ? "#f59e0b" : "#16a34a";
+
+		$badge.text(over_limit || overdue_count > 0 ? __("Approval Required") : __("Within Policy"));
+		$info.html(`
+			<div class="ch-pay-credit-stat-grid">
+				<div class="ch-pay-credit-stat">
+					<span>${__("Credit Limit")}</span>
+					<b>₹${format_number(limit)}</b>
+				</div>
+				<div class="ch-pay-credit-stat">
+					<span>${__("Outstanding")}</span>
+					<b style="color:#dc2626">₹${format_number(outstanding)}</b>
+				</div>
+				<div class="ch-pay-credit-stat">
+					<span>${__("Available")}</span>
+					<b style="color:${over_limit ? "#dc2626" : "#16a34a"}">₹${format_number(available)}</b>
+				</div>
+				<div class="ch-pay-credit-stat">
+					<span>${__("Credit Exposure")}</span>
+					<b>₹${format_number(exposure)}</b>
+				</div>
+			</div>
+			<div class="ch-pay-credit-bar-wrap">
+				<div class="ch-pay-credit-bar" style="width:${utilization_pct}%;background:${bar_color}"></div>
+			</div>
+			<div class="ch-pay-credit-policy-row">
+				<span>${__("Projected Utilization")}: ${utilization_pct}%</span>
+				<span>${over_limit ? `<span style="color:#dc2626;font-weight:600"><i class="fa fa-exclamation-triangle"></i> ${__("Over Limit by")} ₹${format_number(exposure - available)}</span>` : `<span style="color:#16a34a">${__("Within Limit")}</span>`}</span>
+			</div>
+		`);
+
+		$history.show().html(`
+			<div class="ch-pay-credit-history-grid">
+				<div class="ch-pay-credit-history-item">
+					<i class="fa fa-clock-o" style="color:${overdue_count > 0 ? "#dc2626" : "#16a34a"}"></i>
+					<div>
+						<div class="ch-pay-credit-history-label">${__("Overdue Invoices")}</div>
+						<div class="ch-pay-credit-history-val" style="color:${overdue_count > 0 ? "#dc2626" : "#1a1a2e"}">${overdue_count}</div>
+					</div>
+				</div>
+				<div class="ch-pay-credit-history-item">
+					<i class="fa fa-calendar-check-o" style="color:#6366f1"></i>
+					<div>
+						<div class="ch-pay-credit-history-label">${__("Avg. Payment Days")}</div>
+						<div class="ch-pay-credit-history-val">${avg_days || "—"}</div>
+					</div>
+				</div>
+				<div class="ch-pay-credit-history-item">
+					<i class="fa fa-calendar" style="color:#0ea5e9"></i>
+					<div>
+						<div class="ch-pay-credit-history-label">${__("Last Payment")}</div>
+						<div class="ch-pay-credit-history-val">${last_payment}</div>
+					</div>
+				</div>
+			</div>
+		`);
+
+		this._credit_approved = exposure <= 0.005 || (!over_limit && overdue_count === 0) || !!this._credit_approved_by;
+		if (this._credit_approved && !this._credit_approved_by) {
+			this._overlay.find("#ch-pay-credit-approved-by").val(__("Auto-approved within credit policy"));
+		}
+
+		if ((over_limit || overdue_count > 0) && !this._credit_approved_by && exposure > 0.005) {
+			this._overlay.find("#ch-pay-credit-approved-by").val("");
+			const reasons = [];
+			if (over_limit) reasons.push(__("exceeds available credit by ₹{0}", [format_number(exposure - available)]));
+			if (overdue_count > 0) reasons.push(__("{0} overdue invoice(s)", [overdue_count]));
+			this._render_credit_override($approval, reasons, exposure, available, overdue_count);
+		} else {
+			$approval.hide();
+		}
+	}
+
+	_render_credit_override($approval, reasons, exposure, available, overdue_count) {
+		$approval.show().html(`
+			<div class="ch-pay-credit-approval-warn">
+				<i class="fa fa-exclamation-triangle"></i>
+				<span>${__("Manager approval required")}: ${reasons.join(", ")}</span>
+			</div>
+			<button class="btn btn-sm btn-warning" id="ch-pay-credit-override-btn" style="margin-top:6px">
+				<i class="fa fa-unlock"></i> ${__("Request Manager Override")}
+			</button>
+			<div id="ch-pay-credit-override-status" style="margin-top:6px"></div>
+		`);
+		this._overlay.find("#ch-pay-credit-override-btn").on("click", () => {
+			this._request_credit_override(exposure, available, overdue_count);
+		});
 	}
 
 	_update_credit_due_date() {
