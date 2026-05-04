@@ -196,6 +196,15 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
         {
+            "fieldname": "custom_coupon_discount_amount",
+            "fieldtype": "Currency",
+            "label": "Coupon Discount Amount",
+            "insert_after": "custom_coupon_code",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_coupon_code",
+            "module": "POS Core",
+        },
+        {
             "fieldname": "custom_client_request_id",
             "fieldtype": "Data",
             "label": "Client Request ID",

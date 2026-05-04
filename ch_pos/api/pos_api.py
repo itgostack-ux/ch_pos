@@ -281,6 +281,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        payments=None,
                        exchange_assessment=None, additional_discount_percentage=0,
                        additional_discount_amount=0, coupon_code=None,
+                       coupon_discount_amount=0,
                        voucher_code=None, voucher_amount=0,
                        redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
                        bank_offer_discount=0, bank_offer_name=None,
@@ -686,11 +687,17 @@ def create_pos_invoice(pos_profile, customer, items,
         # and payment validation (paid_amount >= grand_total) passes.
         inv.discount_amount = flt(inv.discount_amount or 0) + exchange_credit
 
+    manual_discount_amount = flt(additional_discount_amount)
+    coupon_discount_amount = flt(coupon_discount_amount)
+    if coupon_code and not coupon_discount_amount and manual_discount_amount > 0 and flt(additional_discount_percentage) <= 0 and not discount_reason:
+        coupon_discount_amount = manual_discount_amount
+        manual_discount_amount = 0
+
     # Additional discount
     if flt(additional_discount_percentage) > 0:
         inv.additional_discount_percentage = flt(additional_discount_percentage)
-    elif flt(additional_discount_amount) > 0:
-        inv.discount_amount = flt(additional_discount_amount)
+    elif manual_discount_amount > 0:
+        inv.discount_amount = flt(inv.discount_amount or 0) + manual_discount_amount
 
     # Discount reason — validate against CH Discount Reason master
     if discount_reason:
@@ -721,7 +728,7 @@ def create_pos_invoice(pos_profile, customer, items,
                 )
 
         inv.custom_discount_reason = discount_reason
-    elif (flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0) and not coupon_code:
+    elif flt(additional_discount_percentage) > 0 or manual_discount_amount > 0:
         frappe.throw(frappe._("A discount reason is required when applying a discount"))
 
     # Coupon code — accept code string (e.g. TESTCOUPON10) or doc name
@@ -732,6 +739,10 @@ def create_pos_invoice(pos_profile, customer, items,
         if not doc_name:
             frappe.throw(frappe._("Coupon code '{0}' not found").format(coupon_code))
         inv.custom_coupon_code = doc_name  # Sales Invoice in ERPNext 15 has no coupon_code field
+        if coupon_discount_amount > 0:
+            inv.discount_amount = flt(inv.discount_amount or 0) + coupon_discount_amount
+            if inv.meta.has_field("custom_coupon_discount_amount"):
+                inv.custom_coupon_discount_amount = coupon_discount_amount
 
     # Voucher — add voucher amount to the discount
     voucher_redeemed = 0
