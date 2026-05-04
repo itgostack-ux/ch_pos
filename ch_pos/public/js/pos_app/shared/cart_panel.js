@@ -319,8 +319,22 @@ export class CartPanel {
 	_show_new_customer_dialog() {
 		let otp_verified_number = "";
 		let last_auto_synced_mobile = "";
+		let duplicate_check_timer = null;
+		let last_duplicate_phone_checked = "";
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
+		const input_value = (fieldname) =>
+			((d.fields_dict[fieldname] && d.fields_dict[fieldname].$input && d.fields_dict[fieldname].$input.val()) || "").trim();
+		const validate_email_input = () => {
+			const email = input_value("email_id");
+			if (!email) return true;
+			const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+			if (!valid) {
+				frappe.show_alert({ message: __("Enter a valid Email address"), indicator: "red" });
+				d.fields_dict.email_id.$input.focus();
+			}
+			return valid;
+		};
 		const otp_error_message = (err, fallback) => {
 			const msg = (err && (err.message || err.exc || err._server_messages)) || "";
 			if (String(msg).includes("Purpose cannot be")) {
@@ -333,6 +347,34 @@ export class CartPanel {
 			return frappe.xcall("ch_pos.api.pos_api.find_existing_customer_by_phone", { phone_no })
 				.then((res) => res || { exists: false })
 				.catch(() => ({ exists: false }));
+		};
+		const sync_whatsapp_from_mobile = () => {
+			const mobile = input_value("mobile_no");
+			const whatsapp = input_value("whatsapp_number");
+			d.doc.mobile_no = mobile;
+			if (!mobile) return;
+
+			if (!whatsapp || whatsapp === last_auto_synced_mobile) {
+				d.fields_dict.whatsapp_number.$input.val(mobile);
+				d.doc.whatsapp_number = mobile;
+				last_auto_synced_mobile = mobile;
+				otp_verified_number = "";
+				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+			}
+
+			const mobile_digits = mobile.replace(/\D/g, "");
+			if (mobile_digits.length < 10) return;
+			const mobile_suffix = mobile_digits.slice(-10);
+			clearTimeout(duplicate_check_timer);
+			duplicate_check_timer = setTimeout(async () => {
+				if (last_duplicate_phone_checked === mobile_suffix) return;
+				const hit = await check_existing_customer(mobile);
+				if (hit && hit.exists) {
+					last_duplicate_phone_checked = mobile_suffix;
+					d.fields_dict.otp_status.$wrapper.html(status_html(__("Customer already exists for this mobile number"), "#b91c1c"));
+					offer_use_existing_customer(hit, __("Mobile Number"));
+				}
+			}, 350);
 		};
 
 		const offer_use_existing_customer = (hit, phone_label) => {
@@ -359,7 +401,7 @@ export class CartPanel {
 			fields: [
 				// ── Basic Info ──
 				{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"), reqd: 1 },
-				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), options: "Phone" },
+				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), options: "Phone", reqd: 1 },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "email_id", fieldtype: "Data", label: __("Email"), options: "Email" },
 				{ fieldname: "customer_group", fieldtype: "Link", label: __("Customer Group"),
@@ -407,10 +449,17 @@ export class CartPanel {
 			size: "large",
 			primary_action_label: __("Create"),
 			primary_action: async (values) => {
-				const phone = (values.mobile_no || "").trim();
-				if (phone && !assert_india_phone(d.fields_dict.mobile_no.$input[0], phone)) return;
-				const whatsapp = (values.whatsapp_number || "").trim();
+				const customer_name = input_value("customer_name");
+				const phone = input_value("mobile_no");
+				if (!phone) {
+					frappe.show_alert({ message: __("Mobile Number is mandatory"), indicator: "red" });
+					return;
+				}
+				if (!assert_india_phone(d.fields_dict.mobile_no.$input[0], phone)) return;
+				const whatsapp = input_value("whatsapp_number");
 				if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+				if (!validate_email_input()) return;
+				const email = input_value("email_id");
 
 				const existing_by_mobile = phone ? await check_existing_customer(phone) : { exists: false };
 				if (offer_use_existing_customer(existing_by_mobile, __("Mobile Number"))) return;
@@ -430,13 +479,13 @@ export class CartPanel {
 					return;
 				}
 				frappe.xcall("ch_pos.api.pos_api.quick_create_customer", {
-					customer_name: values.customer_name,
-					mobile_no: values.mobile_no || "",
-					email_id: values.email_id || "",
+					customer_name,
+					mobile_no: phone,
+					email_id: email,
 					customer_group: values.customer_group || "Individual",
 					company: PosState.company,
 					alternate_phone: values.alternate_phone || "",
-					whatsapp_number: values.whatsapp_number || "",
+					whatsapp_number: whatsapp,
 					address_line1: values.address_line1 || "",
 					address_line2: values.address_line2 || "",
 					city: values.city || "",
@@ -467,32 +516,42 @@ export class CartPanel {
 			}
 		});
 
-		d.fields_dict.mobile_no.$input.on("input", () => {
-			const mobile = (d.get_value("mobile_no") || "").trim();
-			const whatsapp = (d.get_value("whatsapp_number") || "").trim();
-			if (!mobile) return;
-
-			// Default behavior: sync mobile -> WhatsApp unless user manually changed WhatsApp.
-			if (!whatsapp || whatsapp === last_auto_synced_mobile) {
-				d.set_value("whatsapp_number", mobile);
-				last_auto_synced_mobile = mobile;
-				otp_verified_number = "";
-				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
-			}
-		});
+		d.fields_dict.mobile_no.$input.on("input change paste keyup", sync_whatsapp_from_mobile);
 
 		d.fields_dict.whatsapp_number.$input.on("input", () => {
+			d.doc.whatsapp_number = input_value("whatsapp_number");
 			otp_verified_number = "";
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
 		});
 
-		d.get_field("send_otp").$input.on("click", () => {
-			const whatsapp = (d.get_value("whatsapp_number") || "").trim();
+		d.fields_dict.email_id.$input.on("change blur", validate_email_input);
+
+		d.get_field("send_otp").$input.on("click", async () => {
+			sync_whatsapp_from_mobile();
+			const phone = input_value("mobile_no");
+			if (!phone) {
+				frappe.show_alert({ message: __("Mobile Number is mandatory"), indicator: "red" });
+				return;
+			}
+			if (!assert_india_phone(d.fields_dict.mobile_no.$input[0], phone)) return;
+
+			const whatsapp = input_value("whatsapp_number");
 			if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+			if (!validate_email_input()) return;
+
+			const existing_by_mobile = await check_existing_customer(phone);
+			if (offer_use_existing_customer(existing_by_mobile, __("Mobile Number"))) return;
+
+			if (whatsapp !== phone) {
+				const existing_by_whatsapp = await check_existing_customer(whatsapp);
+				if (offer_use_existing_customer(existing_by_whatsapp, __("WhatsApp Number"))) return;
+			}
+
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("Sending OTP..."), "#2563eb"));
 			frappe.xcall("ch_pos.api.pos_api.request_customer_whatsapp_otp", {
 				mobile_no: whatsapp,
-				customer_name: d.get_value("customer_name") || "Customer",
+				customer_name: input_value("customer_name") || "Customer",
+				email_id: input_value("email_id"),
 			}).then(() => {
 				otp_verified_number = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP sent to WhatsApp"), "#15803d"));
@@ -502,8 +561,8 @@ export class CartPanel {
 		});
 
 		d.get_field("verify_otp").$input.on("click", () => {
-			const whatsapp = (d.get_value("whatsapp_number") || "").trim();
-			const otp_code = (d.get_value("otp_code") || "").trim();
+			const whatsapp = input_value("whatsapp_number");
+			const otp_code = input_value("otp_code");
 			if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
 			if (!otp_code) {
 				frappe.show_alert({ message: __("Enter OTP code"), indicator: "orange" });

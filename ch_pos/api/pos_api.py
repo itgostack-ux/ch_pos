@@ -2,7 +2,7 @@ import datetime
 
 import frappe
 from frappe import _
-from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime
+from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime, validate_email_address
 try:
 	from buyback.utils import validate_indian_phone
 except ImportError:
@@ -3581,11 +3581,14 @@ def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None
 
 
 @frappe.whitelist()
-def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification", customer_name="Customer") -> dict:
+def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification", customer_name="Customer", email_id=None) -> dict:
     """Generate and send OTP for customer WhatsApp verification before quick create."""
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
 
     mobile_no = validate_indian_phone(mobile_no)
+    to_email = (email_id or "").strip()
+    if to_email:
+        to_email = validate_email_address(to_email, throw=True)
     purpose = "POS Customer Verification"
 
     try:
@@ -3625,7 +3628,8 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
 
     try:
         from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
-        to_email = _get_email_for_mobile(mobile_no)
+        if not to_email:
+            to_email = _get_email_for_mobile(mobile_no)
         if to_email:
             send_otp_email(to_email, otp_code, purpose, "")
             sent_email = True
@@ -5969,8 +5973,16 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
     """Create a new Customer quickly from the POS interface."""
     frappe.has_permission("Customer", "create", throw=True)
 
+    if not (mobile_no or "").strip():
+        frappe.throw(_("Mobile Number is mandatory"), title=_("Missing Mobile Number"))
+    if not (state or "").strip():
+        frappe.throw(_("State is mandatory"), title=_("Missing State"))
+
     mobile_suffix = _phone_suffix_10(mobile_no)
     whatsapp_suffix = _phone_suffix_10(whatsapp_number)
+    email_id = (email_id or "").strip()
+    if email_id:
+        email_id = validate_email_address(email_id, throw=True)
 
     if mobile_suffix:
         hit = _find_existing_customer_by_phone_suffix(mobile_suffix)
@@ -6007,7 +6019,7 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
     if mobile_no:
         cust.mobile_no = mobile_no.strip()
     if email_id:
-        cust.email_id = email_id.strip()
+        cust.email_id = email_id
     if alternate_phone:
         cust.ch_alternate_phone = alternate_phone.strip()
     if whatsapp_number:
