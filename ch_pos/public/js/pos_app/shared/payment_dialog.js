@@ -675,7 +675,13 @@ placeholder="${__("Enter code...")}">
 		if (coupon > 0)      rows += `<div class="ch-pay-total-row ch-pay-deduct"><span>🏷️ ${__("Coupon")} (${frappe.utils.escape_html(PosState.coupon_code || "")})</span><span>-₹${format_number(coupon)}</span></div>`;
 		if (voucher > 0)     rows += `<div class="ch-pay-total-row ch-pay-deduct"><span>🎟️ ${__("Voucher")}</span><span>-₹${format_number(voucher)}</span></div>`;
 		if (exchange > 0)    rows += `<div class="ch-pay-total-row ch-pay-deduct" style="color:var(--pos-success,#16a34a)"><span><i class="fa fa-exchange"></i> ${__("Exchange Credit")}</span><span>-₹${format_number(exchange)}</span></div>`;
+		if (PosState.exchange_assessment && exchange > 0) {
+			rows += `<div class="ch-pay-total-row"><span>${__("Buyback Request")}</span><span>${frappe.utils.escape_html(PosState.exchange_assessment)}</span></div>`;
+		}
 		if (pe_cr > 0)       rows += `<div class="ch-pay-total-row ch-pay-deduct" style="color:var(--pos-success,#16a34a)"><span><i class="fa fa-retweet"></i> ${__("Swap Credit")}</span><span>-₹${format_number(pe_cr)}</span></div>`;
+		if (PosState.product_exchange_invoice && pe_cr > 0) {
+			rows += `<div class="ch-pay-total-row"><span>${__("Return Request")}</span><span>${frappe.utils.escape_html(PosState.product_exchange_invoice)}</span></div>`;
+		}
 		if (offer_d > 0)     rows += `<div class="ch-pay-total-row ch-pay-deduct"><span>🏦 ${__("Bank Offer")}</span><span>-₹${format_number(offer_d)}</span></div>`;
 		// Loyalty redemption shown as a deduction (market standard: negative line in red)
 		const loyalty_redeemed = this._redeem_loyalty ? Math.min(this._loyalty_amount || 0, grand) : 0;
@@ -777,6 +783,14 @@ placeholder="${__("Enter code...")}">
 			this._payments[parseInt($(e.currentTarget).data("idx"))].card_reference = $(e.currentTarget).val().trim();
 			this._update_totals();
 		});
+		// Bank transfer partner + reference
+		ov.on("input", ".ch-pay-row-bank-partner", e => {
+			this._payments[parseInt($(e.currentTarget).data("idx"))].bank_partner = $(e.currentTarget).val().trim();
+		});
+		ov.on("input", ".ch-pay-row-bank-ref", e => {
+			this._payments[parseInt($(e.currentTarget).data("idx"))].bank_reference = $(e.currentTarget).val().trim();
+			this._update_totals();
+		});
 		// Card last 4
 		ov.on("input", ".ch-pay-row-card4", e => {
 			this._payments[parseInt($(e.currentTarget).data("idx"))].card_last_four = $(e.currentTarget).val().trim();
@@ -838,6 +852,14 @@ placeholder="${__("Enter code...")}">
 			if (this._is_finance_sale_type(PosState.sale_type)) {
 				this._sync_finance_payments();
 				this._render_payments();
+			}
+			if (this._is_replacement_sale_type(PosState.sale_type)) {
+				if (!PosState.product_exchange_invoice || !(PosState.return_items || []).length) {
+					frappe.show_alert({
+						message: __("For Replacement Sale, select original invoice and return items from Returns workspace first"),
+						indicator: "orange",
+					});
+				}
 			}
 			this._update_totals();
 		});
@@ -1649,11 +1671,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// while in Free Sale mode, then re-opened with a normal sale type).
 		const cur = this._sale_types.find(t => t.sale_type_name === PosState.sale_type);
 		if (cur) {
-			const should_free   = !cur.requires_payment;
 			// FS (Finance Sale) is NOT a credit sale
 			const should_credit = !!(cur.triggers_credit_sale ||
 				["CS"].includes((cur.code || "").toUpperCase())) &&
 				!this._is_finance_sale_type(PosState.sale_type);
+			// Credit sale types have requires_payment=false — exclude them from free sale detection
+			const should_free   = !cur.requires_payment && !should_credit;
 			if (should_free !== this._is_free_sale) {
 				this._overlay.find("#ch-pay-free-chk").prop("checked", should_free).trigger("change");
 			}
@@ -1668,6 +1691,14 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (!st) return false;
 		const code = (st.code || "").toUpperCase();
 		return code === "FS" || type_name.toLowerCase().includes("finance") || type_name.toLowerCase().includes("emi");
+	}
+
+	_is_replacement_sale_type(type_name) {
+		const st = this._sale_types.find(t => t.sale_type_name === type_name);
+		if (!st) return false;
+		const code = (st.code || "").toUpperCase();
+		const nm = (type_name || "").toLowerCase();
+		return code === "RS" || nm.includes("replacement") || nm.includes("swap");
 	}
 
 	_update_sale_sub_type(type_name) {
@@ -1771,6 +1802,16 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 								placeholder="${__("Card RRN")}" value="${frappe.utils.escape_html(p.card_reference || "")}">
 							<input type="text" class="form-control form-control-sm ch-pay-row-card4" data-idx="${idx}"
 								placeholder="${__("Last 4 digits")}" maxlength="4" value="${frappe.utils.escape_html(p.card_last_four || "")}">
+						</div>
+					</div>`;
+			} else if (type === "bank") {
+				ref_html = `
+					<div class="ch-pay-bank-refs mt-1">
+						<div class="ch-pay-gateway-grid ch-pay-gateway-grid-two">
+							<input type="text" class="form-control form-control-sm ch-pay-row-bank-partner" data-idx="${idx}"
+								placeholder="${__("Bank / Partner")}" value="${frappe.utils.escape_html(p.bank_partner || "")}">
+							<input type="text" class="form-control form-control-sm ch-pay-row-bank-ref" data-idx="${idx}"
+								placeholder="${__("Bank UTR / Ref No")}" value="${frappe.utils.escape_html(p.bank_reference || "")}">
 						</div>
 					</div>`;
 			} else if (type === "finance") {
@@ -2033,6 +2074,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 					.toggleClass("ch-pay-ref-valid", valid);
 				if (!valid) all_valid = false;
 			}
+			if (type === "bank" && has_amount) {
+				const valid = !!(p.bank_reference || "").trim();
+				this._overlay?.find(`.ch-pay-row-bank-ref[data-idx="${i}"]`)
+					.toggleClass("ch-pay-ref-invalid", !valid)
+					.toggleClass("ch-pay-ref-valid", valid);
+				if (!valid) all_valid = false;
+			}
 			if (type === "finance" && has_amount) {
 				const prov_valid = !!(p.finance_provider || "").trim();
 				const tenure_valid = !!(p.finance_tenure);
@@ -2056,6 +2104,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const lc = (mop_name || "").toLowerCase();
 		if (lc.includes("upi") || lc.includes("gpay") || lc.includes("phonepe") || lc.includes("paytm")) return "upi";
 		if (lc.includes("card") || lc.includes("debit") || lc.includes("edc")) return "card";
+		if (lc.includes("bank") || lc.includes("neft") || lc.includes("rtgs") || lc.includes("imps") || lc.includes("transfer")) return "bank";
 		if (lc.includes("finance") || lc.includes("emi") || lc.includes("bajaj") || lc.includes("hdfc") || lc.includes("tvs")) return "finance";
 		if (lc.includes("cash")) return "cash";
 		return "other";
@@ -2150,6 +2199,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 					this._submitting = false;
 					return;
 				}
+				if (type === "bank" && flt(p.amount) > 0 && !p.bank_reference) {
+					frappe.show_alert({ message: __("Enter Bank UTR/Reference for {0}", [p.mode]), indicator: "orange" });
+					this._submitting = false;
+					return;
+				}
 				if (type === "finance" && flt(p.amount) > 0) {
 					if (!p.finance_provider) {
 						frappe.show_alert({ message: __("Enter Finance Provider for {0}", [p.mode]), indicator: "orange" });
@@ -2225,6 +2279,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			upi_transaction_id:   p.upi_transaction_id || "",
 			card_reference:       p.card_reference || "",
 			card_last_four:       p.card_last_four || "",
+			bank_partner:         p.bank_partner || "",
+			bank_reference:       p.bank_reference || "",
 			finance_provider:     p.finance_provider || "",
 			finance_tenure:       p.finance_tenure || "",
 			finance_approval_id:  p.finance_approval_id || "",
@@ -2312,7 +2368,43 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			});
 		};
 
-		if (PosState.product_exchange_invoice && (PosState.return_items || []).length) {
+		const is_replacement_sale = this._is_replacement_sale_type(PosState.sale_type || "");
+		if (is_replacement_sale) {
+			const original_invoice = PosState.product_exchange_invoice || PosState.sale_reference;
+			const return_items = PosState.return_items || [];
+			if (!original_invoice || !return_items.length) {
+				this._on_error(__("Replacement Sale needs original invoice and return request. Use Returns workspace first."));
+				return;
+			}
+			frappe.call({
+				method: "ch_pos.api.pos_api.process_return_with_replacement",
+				args: {
+					original_invoice,
+					return_items,
+					replacement_payload: invoice_data,
+					settlement_payments: payments,
+					sales_executive: PosState.sales_executive || null,
+				},
+				callback: (r) => {
+					const res = r.message || {};
+					if (res.replacement_invoice) {
+						frappe.show_alert({ message: __("Replacement billed: {0}", [res.replacement_invoice]), indicator: "green" });
+						this._show_success({ name: res.replacement_invoice });
+					} else {
+						this._on_error(__("Replacement billing failed"));
+					}
+				},
+				error: (xhr) => {
+					const resp = xhr && xhr.responseJSON;
+					const server_msg = resp && (resp.message || resp.exc_type);
+					const msg = server_msg
+						? frappe.utils.strip_html(server_msg)
+						: __("Replacement billing failed");
+					frappe.msgprint({ title: __("Replacement Failed"), indicator: "red", message: msg });
+					this._on_error(msg);
+				},
+			});
+		} else if (PosState.product_exchange_invoice && (PosState.return_items || []).length) {
 			frappe.call({
 				method: "ch_pos.api.pos_api.create_pos_return",
 				args: {

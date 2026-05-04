@@ -29,6 +29,9 @@ def get_columns():
         {"label": _("Tax Scheme"), "fieldname": "tax_scheme", "fieldtype": "Data", "width": 100},
         {"label": _("Gross Amount"), "fieldname": "gross_amount", "fieldtype": "Currency", "width": 120},
         {"label": _("Discount"), "fieldname": "discount_amount", "fieldtype": "Currency", "width": 100},
+        {"label": _("Discount Reason"), "fieldname": "discount_reason", "fieldtype": "Data", "width": 160},
+        {"label": _("Coupon Code"), "fieldname": "coupon_code", "fieldtype": "Data", "width": 130},
+        {"label": _("Voucher Amount"), "fieldname": "voucher_amount", "fieldtype": "Currency", "width": 120},
         {"label": _("Taxable Value"), "fieldname": "taxable_value", "fieldtype": "Currency", "width": 120},
         {"label": _("Exempted Value"), "fieldname": "exempted_value", "fieldtype": "Currency", "width": 120},
         {"label": _("GST Amount"), "fieldname": "gst_amount", "fieldtype": "Currency", "width": 110},
@@ -41,6 +44,14 @@ def get_columns():
 def get_data(filters):
     conditions = _build_conditions(filters)
 
+    has_coupon = frappe.db.has_column("Sales Invoice", "custom_coupon_code")
+    has_voucher = frappe.db.has_column("Sales Invoice", "custom_voucher_amount")
+    has_discount_reason = frappe.db.has_column("Sales Invoice", "custom_discount_reason")
+
+    coupon_select = "pi.custom_coupon_code" if has_coupon else "''"
+    voucher_select = "pi.custom_voucher_amount" if has_voucher else "0"
+    discount_reason_select = "pi.custom_discount_reason" if has_discount_reason else "''"
+
     invoices = frappe.db.sql("""
         SELECT
             pi.name,
@@ -50,6 +61,9 @@ def get_data(filters):
             pi.company,
             pi.grand_total,
             pi.discount_amount,
+            {discount_reason_select} AS discount_reason,
+            {coupon_select} AS coupon_code,
+            {voucher_select} AS voucher_amount,
             pi.net_total,
             pi.total_taxes_and_charges,
             pi.custom_is_margin_scheme,
@@ -66,7 +80,12 @@ def get_data(filters):
           {conditions}
         GROUP BY pi.name
         ORDER BY pi.posting_date DESC, pi.name DESC
-    """.format(conditions=conditions), filters, as_dict=True)  # noqa: UP032
+    """.format(
+        conditions=conditions,
+        discount_reason_select=discount_reason_select,
+        coupon_select=coupon_select,
+        voucher_select=voucher_select,
+    ), filters, as_dict=True)  # noqa: UP032
 
     data = []
     for inv in invoices:
@@ -89,6 +108,9 @@ def get_data(filters):
             "tax_scheme": tax_scheme,
             "gross_amount": flt(inv.grand_total),
             "discount_amount": flt(inv.discount_amount),
+            "discount_reason": inv.discount_reason or "",
+            "coupon_code": inv.coupon_code or "",
+            "voucher_amount": flt(inv.voucher_amount),
             "taxable_value": taxable_value,
             "exempted_value": exempted_value,
             "gst_amount": gst_amount,

@@ -58,20 +58,8 @@ export class CartPanel {
 
 			<!-- B. Quick Retail Actions -->
 			<div class="ch-pos-quick-actions">
-				<button class="btn btn-outline-primary ch-pos-btn-exchange">
-					<i class="fa fa-exchange"></i> ${__("Exchange")}
-				</button>
-				<button class="btn btn-outline-info ch-pos-btn-vas">
-					<i class="fa fa-shield"></i> ${__("VAS")}
-				</button>
-				<button class="btn btn-outline-secondary ch-pos-btn-product-exchange">
-					<i class="fa fa-retweet"></i> ${__("Swap")}
-				</button>
 				<button class="btn btn-outline-warning ch-pos-btn-exception">
 					<i class="fa fa-exclamation-triangle"></i> ${__("Exception")}
-				</button>
-				<button class="btn btn-outline-dark ch-pos-btn-warranty-claim">
-					<i class="fa fa-wrench"></i> ${__("Warranty")}
 				</button>
 				<div class="ch-pos-exchange-banner" style="display:none"></div>
 				<div class="ch-pos-product-exchange-banner" style="display:none"></div>
@@ -329,6 +317,11 @@ export class CartPanel {
 	}
 
 	_show_new_customer_dialog() {
+		let otp_verified_number = "";
+		const otp_purpose = "POS Customer Verification";
+		const status_html = (message, color = "#6b7280") =>
+			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
+
 		const d = new frappe.ui.Dialog({
 			title: __("New Customer"),
 			fields: [
@@ -344,7 +337,14 @@ export class CartPanel {
 				{ fieldtype: "Section Break", label: __("Additional Contact") },
 				{ fieldname: "alternate_phone", fieldtype: "Data", label: __("Alternate Number"), options: "Phone" },
 				{ fieldtype: "Column Break" },
-				{ fieldname: "whatsapp_number", fieldtype: "Data", label: __("WhatsApp Number"), options: "Phone" },
+				{ fieldname: "whatsapp_number", fieldtype: "Data", label: __("WhatsApp Number"), options: "Phone", reqd: 1 },
+
+				{ fieldtype: "Section Break", label: __("WhatsApp Verification") },
+				{ fieldname: "otp_code", fieldtype: "Data", label: __("OTP Code") },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "send_otp", fieldtype: "Button", label: __("Send OTP") },
+				{ fieldname: "verify_otp", fieldtype: "Button", label: __("Verify OTP") },
+				{ fieldname: "otp_status", fieldtype: "HTML", options: "" },
 
 				// ── Address ──
 				{ fieldtype: "Section Break", label: __("Address") },
@@ -352,7 +352,7 @@ export class CartPanel {
 				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "city", fieldtype: "Data", label: __("City") },
-				{ fieldname: "state", fieldtype: "Data", label: __("State") },
+				{ fieldname: "state", fieldtype: "Data", label: __("State"), reqd: 1 },
 				{ fieldtype: "Section Break" },
 				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode") },
 				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality") },
@@ -377,6 +377,12 @@ export class CartPanel {
 			primary_action: (values) => {
 				const phone = (values.mobile_no || "").trim();
 				if (phone && !assert_india_phone(d.fields_dict.mobile_no.$input[0], phone)) return;
+				const whatsapp = (values.whatsapp_number || "").trim();
+				if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+				if (otp_verified_number !== whatsapp) {
+					frappe.show_alert({ message: __("Verify WhatsApp OTP before creating customer"), indicator: "red" });
+					return;
+				}
 				frappe.xcall("ch_pos.api.pos_api.quick_create_customer", {
 					customer_name: values.customer_name,
 					mobile_no: values.mobile_no || "",
@@ -406,6 +412,62 @@ export class CartPanel {
 			},
 		});
 		d.show();
+		d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+
+		// Prevent Enter key from auto-submitting customer creation.
+		d.$wrapper.find("form").on("keydown", (e) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+			}
+		});
+
+		d.fields_dict.whatsapp_number.$input.on("input", () => {
+			otp_verified_number = "";
+			d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+		});
+
+		d.get_field("send_otp").$input.on("click", () => {
+			const whatsapp = (d.get_value("whatsapp_number") || "").trim();
+			if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+			d.fields_dict.otp_status.$wrapper.html(status_html(__("Sending OTP..."), "#2563eb"));
+			frappe.xcall("ch_pos.api.pos_api.request_customer_whatsapp_otp", {
+				mobile_no: whatsapp,
+				purpose: otp_purpose,
+				customer_name: d.get_value("customer_name") || "Customer",
+			}).then(() => {
+				otp_verified_number = "";
+				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP sent to WhatsApp"), "#15803d"));
+			}).catch((err) => {
+				d.fields_dict.otp_status.$wrapper.html(status_html(err.message || __("Failed to send OTP"), "#b91c1c"));
+			});
+		});
+
+		d.get_field("verify_otp").$input.on("click", () => {
+			const whatsapp = (d.get_value("whatsapp_number") || "").trim();
+			const otp_code = (d.get_value("otp_code") || "").trim();
+			if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
+			if (!otp_code) {
+				frappe.show_alert({ message: __("Enter OTP code"), indicator: "orange" });
+				return;
+			}
+			frappe.xcall("ch_pos.api.pos_api.verify_customer_whatsapp_otp", {
+				mobile_no: whatsapp,
+				otp_code,
+				purpose: otp_purpose,
+			}).then((res) => {
+				if (res && res.valid) {
+					otp_verified_number = whatsapp;
+					d.fields_dict.otp_status.$wrapper.html(status_html(__("WhatsApp verified"), "#15803d"));
+					frappe.show_alert({ message: __("WhatsApp verified"), indicator: "green" });
+				} else {
+					otp_verified_number = "";
+					d.fields_dict.otp_status.$wrapper.html(status_html((res && res.message) || __("Invalid OTP"), "#b91c1c"));
+				}
+			}).catch((err) => {
+				otp_verified_number = "";
+				d.fields_dict.otp_status.$wrapper.html(status_html(err.message || __("OTP verification failed"), "#b91c1c"));
+			});
+		});
 	}
 
 	bind() {
@@ -464,11 +526,7 @@ export class CartPanel {
 		this._refresh_held_count(w);
 
 		// Quick actions
-		w.on("click", ".ch-pos-btn-exchange", () => EventBus.emit("exchange:open"));
-		w.on("click", ".ch-pos-btn-vas", () => EventBus.emit("vas:open"));
-		w.on("click", ".ch-pos-btn-product-exchange", () => EventBus.emit("product_exchange:open"));
 		w.on("click", ".ch-pos-btn-exception", () => this._show_exception_dialog());
-		w.on("click", ".ch-pos-btn-warranty-claim", () => this._show_warranty_claim_dialog());
 
 		// Cart line qty / remove
 		w.on("click", ".ch-pos-qty-plus", function () {

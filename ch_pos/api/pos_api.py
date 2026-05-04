@@ -520,6 +520,11 @@ def create_pos_invoice(pos_profile, customer, items,
                 row["custom_card_reference"] = p["card_reference"]
             if p.get("card_last_four"):
                 row["custom_card_last_four"] = p["card_last_four"]
+            # Bank transfer metadata reuse existing POS payment fields so no schema migration is needed.
+            if p.get("bank_partner") and not p.get("gateway_provider"):
+                row["custom_gateway_provider"] = p["bank_partner"]
+            if p.get("bank_reference") and not p.get("card_reference"):
+                row["custom_card_reference"] = p["bank_reference"]
             # Finance/EMI fields on down-payment rows
             if p.get("finance_provider"):
                 row["custom_finance_provider"] = p["finance_provider"]
@@ -716,7 +721,7 @@ def create_pos_invoice(pos_profile, customer, items,
                 )
 
         inv.custom_discount_reason = discount_reason
-    elif flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
+    elif (flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0) and not coupon_code:
         frappe.throw(frappe._("A discount reason is required when applying a discount"))
 
     # Coupon code — accept code string (e.g. TESTCOUPON10) or doc name
@@ -3573,6 +3578,78 @@ def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Manager approval verification audit failed")
     return result
+
+
+@frappe.whitelist()
+def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification", customer_name="Customer") -> dict:
+    """Generate and send OTP for customer WhatsApp verification before quick create."""
+    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+
+    mobile_no = validate_indian_phone(mobile_no)
+    purpose = (purpose or "POS Customer Verification").strip()
+    if not purpose:
+        purpose = "POS Customer Verification"
+
+    otp_code = CHOTPLog.generate_otp(
+        mobile_no=mobile_no,
+        purpose=purpose,
+        reference_doctype="Customer",
+        reference_name="",
+    )
+
+    sent_whatsapp = False
+    sent_email = False
+    try:
+        wa_settings = frappe.get_cached_doc("CH WhatsApp Settings")
+        if wa_settings and cint(wa_settings.enabled):
+            from ch_item_master.ch_core.whatsapp import send_template_message
+            template_name = wa_settings.get("general_otp") or "ch_otp_verification"
+            send_template_message(
+                phone=mobile_no,
+                template_name=template_name,
+                body_values={"1": otp_code},
+                customer_name=(customer_name or "Customer")[:140],
+                ref_doctype="Customer",
+                ref_name="",
+                enqueue=False,
+            )
+            sent_whatsapp = True
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Customer WhatsApp OTP delivery failed")
+
+    try:
+        from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
+        to_email = _get_email_for_mobile(mobile_no)
+        if to_email:
+            send_otp_email(to_email, otp_code, purpose, "")
+            sent_email = True
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Customer OTP email delivery failed")
+
+    return {
+        "sent": True,
+        "mobile": mobile_no[:3] + "****" + mobile_no[-3:],
+        "otp_generated": bool(otp_code),
+        "sent_whatsapp": sent_whatsapp,
+        "sent_email": sent_email,
+    }
+
+
+@frappe.whitelist()
+def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Verification") -> dict:
+    """Verify customer OTP used during POS quick customer creation."""
+    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+
+    mobile_no = validate_indian_phone(mobile_no)
+    purpose = (purpose or "POS Customer Verification").strip() or "POS Customer Verification"
+
+    return CHOTPLog.verify_otp(
+        mobile_no=mobile_no,
+        purpose=purpose,
+        otp_code=str(otp_code or "").strip(),
+        reference_doctype="Customer",
+        reference_name="",
+    )
 
 
 @frappe.whitelist()
@@ -6639,7 +6716,11 @@ def pos_create_inspection(assessment_name) -> dict:
 			ba.submit()
 			frappe.db.commit()
 		from buyback.api import create_inspection_from_assessment
-		result = create_inspection_from_assessment(assessment_name)
+		# Pick a default checklist template (first active one) so the form opens pre-filled
+		default_template = frappe.db.get_value(
+			"Buyback Checklist Template", {"disabled": 0}, "name", order_by="creation asc"
+		)
+		result = create_inspection_from_assessment(assessment_name, checklist_template=default_template)
 		ins = frappe.get_doc("Buyback Inspection", result["name"])
 
 	# Also get grade options for the inline form selector
@@ -6812,83 +6893,115 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 # ═══════════════════════════════════════════════════════════════════════════
 
 @frappe.whitelist()
-def get_todays_invoices(pos_profile, date=None, phone=None) -> list:
-	"""Return POS invoices for a profile filtered by date or customer phone.
+def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None) -> list:
+    """Return POS invoices for a profile filtered by date, phone, or invoice number.
 
-	Used by the Reprint dialog in the POS frontend. Company isolation is enforced
-	via the POS Profile's company so the same customer's invoices in another
-	company (e.g. GoFix vs GoGizmo) are never exposed to this profile.
-	"""
-	from frappe.utils import getdate
+    Used by the Reprint dialog in the POS frontend. Company isolation is enforced
+    via the POS Profile's company so the same customer's invoices in another
+    company (e.g. GoFix vs GoGizmo) are never exposed to this profile.
+    """
+    from frappe.utils import getdate
 
-	if not pos_profile:
-		frappe.throw(frappe._("POS Profile is required."))
+    if not pos_profile:
+        frappe.throw(frappe._("POS Profile is required."))
 
-	company = frappe.db.get_value("POS Profile", pos_profile, "company")
-	if not company:
-		frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
+    company = frappe.db.get_value("POS Profile", pos_profile, "company")
+    if not company:
+        frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
 
-	if phone:
-		# Search by customer phone number — find matching customers first
-		phone_clean = phone.strip()
-		customers = frappe.get_all(
-			"Customer",
-			filters={"mobile_no": ["like", f"%{phone_clean}"]},
-			pluck="name",
-			limit=50,
-		)
-		if not customers:
-			return []
+    if invoice_no:
+        invoice_no = (invoice_no or "").strip()
+        rows = frappe.db.sql("""
+            SELECT
+                pi.name,
+                pi.customer,
+                pi.customer_name,
+                pi.grand_total,
+                pi.posting_date,
+                pi.posting_time,
+                pi.is_return,
+                pi.status,
+                pi.custom_ch_sale_type,
+                GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
+                GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+            FROM `tabSales Invoice` pi
+            LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
+            JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
+            WHERE pi.pos_profile = %s
+              AND pi.company = %s
+              AND pi.name LIKE %s
+              AND pi.docstatus = 1
+            GROUP BY pi.name
+            ORDER BY pi.posting_date DESC, pi.posting_time DESC
+            LIMIT 50
+        """, (pos_profile, company, f"%{invoice_no}%"), as_dict=True)
+        return rows
 
-		cust_placeholders = ", ".join(["%s"] * len(customers))
-		rows = frappe.db.sql("""
-			SELECT
-				pi.name,
-				pi.customer,
-				pi.grand_total,
-				pi.posting_date,
-				pi.posting_time,
-				pi.is_return,
-				pi.status,
-				pi.custom_gofix_service_request,
-				GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
-			FROM `tabSales Invoice` pi
-			JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
-			WHERE pi.pos_profile = %s
-			  AND pi.company = %s
-			  AND pi.customer IN ({cust_placeholders})
-			  AND pi.docstatus = 1
-			GROUP BY pi.name
-			ORDER BY pi.posting_date DESC, pi.posting_time DESC
-			LIMIT 50
-		""".format(cust_placeholders=cust_placeholders), [pos_profile, company] + customers, as_dict=True)  # noqa: UP032
-		return rows
+    if phone:
+        phone_clean = phone.strip()
+        customers = frappe.get_all(
+            "Customer",
+            filters={"mobile_no": ["like", f"%{phone_clean}"]},
+            pluck="name",
+            limit=50,
+        )
+        if not customers:
+            return []
 
-	# Default: search by date
-	filter_date = getdate(date) if date else getdate(nowdate())
+        cust_placeholders = ", ".join(["%s"] * len(customers))
+        rows = frappe.db.sql("""
+            SELECT
+                pi.name,
+                pi.customer,
+                pi.customer_name,
+                pi.grand_total,
+                pi.posting_date,
+                pi.posting_time,
+                pi.is_return,
+                pi.status,
+                pi.custom_ch_sale_type,
+                GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
+                GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+            FROM `tabSales Invoice` pi
+            LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
+            JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
+            WHERE pi.pos_profile = %s
+              AND pi.company = %s
+              AND pi.customer IN ({cust_placeholders})
+              AND pi.docstatus = 1
+            GROUP BY pi.name
+            ORDER BY pi.posting_date DESC, pi.posting_time DESC
+            LIMIT 50
+        """.format(cust_placeholders=cust_placeholders), [pos_profile, company] + customers, as_dict=True)  # noqa: UP032
+        return rows
 
-	rows = frappe.db.sql("""
-		SELECT
-			pi.name,
-			pi.customer,
-			pi.grand_total,
-			pi.posting_date,
-			pi.posting_time,
-			pi.is_return,
-			pi.status,
-			pi.custom_gofix_service_request,
-			GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
-		FROM `tabSales Invoice` pi
-		JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
-		WHERE pi.pos_profile = %s
-		  AND pi.company = %s
-		  AND pi.posting_date = %s
-		  AND pi.docstatus = 1
-		GROUP BY pi.name
-		ORDER BY pi.posting_time DESC
-	""", (pos_profile, company, filter_date), as_dict=True)
+    filter_date = getdate(date) if date else getdate(nowdate())
 
-	return rows
+    rows = frappe.db.sql("""
+        SELECT
+            pi.name,
+            pi.customer,
+            pi.customer_name,
+            pi.grand_total,
+            pi.posting_date,
+            pi.posting_time,
+            pi.is_return,
+            pi.status,
+            pi.custom_ch_sale_type,
+            GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
+            GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+        FROM `tabSales Invoice` pi
+        LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
+        JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
+        WHERE pi.pos_profile = %s
+          AND pi.company = %s
+          AND pi.posting_date = %s
+          AND pi.docstatus = 1
+        GROUP BY pi.name
+        ORDER BY pi.posting_time DESC
+    """, (pos_profile, company, filter_date), as_dict=True)
+
+    return rows
 
 
 # ═══════════════════════════════════════════════════════════════════════════

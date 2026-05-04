@@ -212,27 +212,10 @@ export class CartService {
 					this._add_new_cart_item(item_data, serial_no);
 					frappe.show_alert({ message: __("{0} added with IMEI {1}", [item_data.item_name, serial_no]), indicator: "green" });
 				} else if (res.fifo_violation) {
-					// Shouldn't happen for the oldest serial, but handle gracefully
-					frappe.confirm(
-						`<div style="line-height:1.7">
-							<b style="color:#e67e22">&#9888; Older stock exists</b><br>
-							<b>${frappe.utils.escape_html(res.oldest_serial)}</b>
-							(received ${frappe.utils.escape_html(res.oldest_date || "")})
-							should be sold first.<br><br>
-							You selected <b>${frappe.utils.escape_html(serial_no)}</b>
-							(received ${frappe.utils.escape_html(res.selected_date || "")}).<br><br>
-							Do you still want to bill <b>${frappe.utils.escape_html(serial_no)}</b>?
-							This exception will be recorded.
-						</div>`,
-						() => {
-							frappe.call({
-								method: "ch_pos.api.pos_api.log_fifo_override",
-								args: { serial_no, item_code: item_data.item_code, warehouse: PosState.warehouse, oldest_serial: res.oldest_serial, oldest_date: res.oldest_date, pos_profile: PosState.pos_profile },
-							});
-							this._add_new_cart_item(item_data, serial_no);
-							frappe.show_alert({ message: __("{0} added (FIFO override recorded)", [serial_no]), indicator: "orange" });
-						}
-					);
+					frappe.show_alert({
+						message: __("FIFO restricted. Sell oldest serial first: {0}", [res.oldest_serial || "-"]),
+						indicator: "red",
+					});
 				} else {
 					frappe.show_alert({ message: res.reason || __("Invalid serial number"), indicator: "red" });
 				}
@@ -487,47 +470,11 @@ export class CartService {
 								indicator: "green",
 							});
 						} else if (res.fifo_violation) {
-							// Soft FIFO warning — ask for confirmation before proceeding
 							dlg.enable_primary_action();
-							frappe.confirm(
-								`<div style="line-height:1.7">
-									<b style="color:#e67e22">⚠ Older stock exists</b><br>
-									<b>${frappe.utils.escape_html(res.oldest_serial)}</b>
-									(received ${frappe.utils.escape_html(res.oldest_date || "")})
-									should be sold first.<br><br>
-									You selected <b>${frappe.utils.escape_html(final_serial)}</b>
-									(received ${frappe.utils.escape_html(res.selected_date || "")}).<br><br>
-									Do you still want to bill <b>${frappe.utils.escape_html(final_serial)}</b>?
-									This exception will be recorded.
-								</div>`,
-								() => {
-									// User confirmed override — log exception then add to cart
-									frappe.call({
-										method: "ch_pos.api.pos_api.log_fifo_override",
-										args: {
-											serial_no: final_serial,
-											item_code: item_data.item_code,
-											warehouse: PosState.warehouse,
-											oldest_serial: res.oldest_serial,
-											oldest_date: res.oldest_date,
-											pos_profile: PosState.pos_profile,
-										},
-									});
-									dlg.hide();
-									this._add_new_cart_item(item_data, final_serial);
-									frappe.show_alert({
-										message: __("{0} added (FIFO override recorded)", [final_serial]),
-										indicator: "orange",
-									});
-								},
-								() => {
-									// User cancelled — re-enable so they can pick the older serial
-									frappe.show_alert({
-										message: __("Please select {0} to follow FIFO", [res.oldest_serial]),
-										indicator: "blue",
-									});
-								}
-							);
+							frappe.show_alert({
+								message: __("FIFO restricted. Please select oldest serial: {0}", [res.oldest_serial || "-"]),
+								indicator: "red",
+							});
 						} else {
 							dlg.enable_primary_action();
 							frappe.show_alert({
@@ -1483,26 +1430,33 @@ export class CartService {
 		// Use input date; default today
 		const today = frappe.datetime.get_today();
 
-		const build_invoice_list = (date, phone, container) => {
+		const build_invoice_list = (date, phone, invoice_no, container) => {
 			container.html(`<div class="text-center text-muted" style="padding:20px">
 				<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}
 			</div>`);
 			const args = { pos_profile: PosState.pos_profile };
-			if (phone) args.phone = phone;
+			if (invoice_no) args.invoice_no = invoice_no;
+			else if (phone) args.phone = phone;
 			else args.date = date;
 			frappe.xcall("ch_pos.api.pos_api.get_todays_invoices", args).then((invoices) => {
 				if (!invoices || !invoices.length) {
-					const msg = phone ? __("No invoices found for this phone number") : __("No invoices for this date");
+					const msg = invoice_no
+						? __("No invoices found for this invoice number")
+						: (phone ? __("No invoices found for this phone number") : __("No invoices for this date"));
 					container.html(`<div class="text-center text-muted" style="padding:20px">${msg}</div>`);
 					return;
 				}
 				const rows = invoices.map(inv => {
 					const is_ret = inv.is_return ? `<span class="badge badge-warning">${__("Return")}</span>` : "";
 					const sign = inv.is_return ? "-" : "";
+					const sale_type = frappe.utils.escape_html(inv.custom_ch_sale_type || "");
+					const mop = frappe.utils.escape_html(inv.mode_of_payment || "");
+					const customer = frappe.utils.escape_html(inv.customer_name || inv.customer || "");
 					return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
 						<div style="flex:1">
 							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${is_ret}</div>
-							<div class="text-muted" style="font-size:12px">${frappe.utils.escape_html(inv.customer || "")} · ${sign}₹${format_number(flt(inv.grand_total))} · ${phone ? frappe.utils.escape_html(inv.posting_date || "") + " " : ""}${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
+							<div class="text-muted" style="font-size:12px">${customer} · ${sign}₹${format_number(flt(inv.grand_total))} · ${phone || invoice_no ? frappe.utils.escape_html(inv.posting_date || "") + " " : ""}${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
+							<div class="text-muted" style="font-size:11px">${__("Sale Type")}: ${sale_type || "-"} · ${__("MOP")}: ${mop || "-"}</div>
 							${inv.items_summary ? `<div class="text-muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">${frappe.utils.escape_html(inv.items_summary)}</div>` : ""}
 						</div>
 						<button class="btn btn-xs btn-default ch-reprint-btn" data-name="${frappe.utils.escape_html(inv.name)}">
@@ -1523,7 +1477,7 @@ export class CartService {
 					fieldname: "search_by",
 					fieldtype: "Select",
 					label: __("Search By"),
-					options: "Date\nPhone Number",
+					options: "Date\nPhone Number\nInvoice Number",
 					default: "Date",
 				},
 				{
@@ -1541,6 +1495,13 @@ export class CartService {
 					description: __("Enter phone number to find invoices"),
 				},
 				{
+					fieldname: "invoice_no",
+					fieldtype: "Data",
+					label: __("Invoice Number"),
+					depends_on: "eval:doc.search_by==='Invoice Number'",
+					description: __("Enter full or partial invoice number"),
+				},
+				{
 					fieldname: "invoices_html",
 					fieldtype: "HTML",
 					options: `<div class="ch-reprint-container"></div>`,
@@ -1553,12 +1514,12 @@ export class CartService {
 
 		// Initial load
 		const container = dlg.$wrapper.find(".ch-reprint-container");
-		build_invoice_list(today, null, container);
+		build_invoice_list(today, null, null, container);
 
 		// Reload when date changes
 		dlg.fields_dict.date.$input.on("change", () => {
 			const d = dlg.get_value("date");
-			if (d) build_invoice_list(d, null, container);
+			if (d) build_invoice_list(d, null, null, container);
 		});
 
 		// Search when phone is entered (on Enter key or blur)
@@ -1567,12 +1528,25 @@ export class CartService {
 			if (e.key === "Enter") {
 				e.preventDefault();
 				const p = dlg.get_value("phone");
-				if (p && p.length >= 4) build_invoice_list(null, p, container);
+				if (p && p.length >= 4) build_invoice_list(null, p, null, container);
 			}
 		});
 		phone_input.on("blur", () => {
 			const p = dlg.get_value("phone");
-			if (p && p.length >= 4) build_invoice_list(null, p, container);
+			if (p && p.length >= 4) build_invoice_list(null, p, null, container);
+		});
+
+		const invoice_input = dlg.fields_dict.invoice_no.$input;
+		invoice_input.on("keydown", (e) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				const inv = (dlg.get_value("invoice_no") || "").trim();
+				if (inv) build_invoice_list(null, null, inv, container);
+			}
+		});
+		invoice_input.on("blur", () => {
+			const inv = (dlg.get_value("invoice_no") || "").trim();
+			if (inv) build_invoice_list(null, null, inv, container);
 		});
 
 		// Clear results when switching search mode
@@ -1580,7 +1554,9 @@ export class CartService {
 			const mode = dlg.get_value("search_by");
 			if (mode === "Date") {
 				const d = dlg.get_value("date");
-				if (d) build_invoice_list(d, null, container);
+				if (d) build_invoice_list(d, null, null, container);
+			} else if (mode === "Invoice Number") {
+				container.html(`<div class="text-center text-muted" style="padding:20px">${__("Enter invoice number and press Enter")}</div>`);
 			} else {
 				container.html(`<div class="text-center text-muted" style="padding:20px">${__("Enter a phone number and press Enter")}</div>`);
 			}
