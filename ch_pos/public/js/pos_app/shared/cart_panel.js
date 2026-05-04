@@ -419,7 +419,7 @@ export class CartPanel {
 			fields: [
 				// ── Basic Info ──
 				{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"), reqd: 1 },
-				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), options: "Phone", reqd: 1 },
+				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), reqd: 1 },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "email_id", fieldtype: "Data", label: __("Email"), options: "Email" },
 				{ fieldname: "customer_group", fieldtype: "Link", label: __("Customer Group"),
@@ -427,9 +427,9 @@ export class CartPanel {
 
 				// ── Additional Contact ──
 				{ fieldtype: "Section Break", label: __("Additional Contact") },
-				{ fieldname: "alternate_phone", fieldtype: "Data", label: __("Alternate Number"), options: "Phone" },
+				{ fieldname: "alternate_phone", fieldtype: "Data", label: __("Alternate Number") },
 				{ fieldtype: "Column Break" },
-				{ fieldname: "whatsapp_number", fieldtype: "Data", label: __("WhatsApp Number"), options: "Phone", reqd: 1 },
+				{ fieldname: "whatsapp_number", fieldtype: "Data", label: __("WhatsApp Number"), reqd: 1 },
 
 				{ fieldtype: "Section Break", label: __("WhatsApp Verification") },
 				{ fieldname: "otp_code", fieldtype: "Data", label: __("OTP Code") },
@@ -531,6 +531,13 @@ export class CartPanel {
 		});
 		d.show();
 		d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+
+		// Make the dialog body scrollable so long forms (with shipping section) are reachable.
+		d.$wrapper.find(".modal-dialog").css({ "max-width": "900px" });
+		d.$wrapper.find(".modal-body").css({
+			"max-height": "calc(100vh - 180px)",
+			"overflow-y": "auto",
+		});
 
 		// Prevent Enter key from auto-submitting customer creation.
 		d.$wrapper.find("form").on("keydown", (e) => {
