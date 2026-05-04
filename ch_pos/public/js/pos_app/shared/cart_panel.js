@@ -321,10 +321,11 @@ export class CartPanel {
 		let last_auto_synced_mobile = "";
 		let duplicate_check_timer = null;
 		let last_duplicate_phone_checked = "";
+		let whatsapp_manually_edited = false;
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
 		const input_value = (fieldname) =>
-			((d.fields_dict[fieldname] && d.fields_dict[fieldname].$input && d.fields_dict[fieldname].$input.val()) || "").trim();
+			((d.fields_dict[fieldname] && d.fields_dict[fieldname].$input && d.fields_dict[fieldname].$input.val()) || d.get_value(fieldname) || "").trim();
 		const validate_email_input = () => {
 			const email = input_value("email_id");
 			if (!email) return true;
@@ -354,7 +355,7 @@ export class CartPanel {
 			d.doc.mobile_no = mobile;
 			if (!mobile) return;
 
-			if (!whatsapp || whatsapp === last_auto_synced_mobile) {
+			if (!whatsapp_manually_edited || !whatsapp || whatsapp === last_auto_synced_mobile) {
 				d.fields_dict.whatsapp_number.$input.val(mobile);
 				d.doc.whatsapp_number = mobile;
 				last_auto_synced_mobile = mobile;
@@ -425,7 +426,12 @@ export class CartPanel {
 				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1") },
 				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2") },
 				{ fieldtype: "Column Break" },
-				{ fieldname: "city", fieldtype: "Data", label: __("City") },
+				{ fieldname: "city", fieldtype: "Link", options: "CH City", label: __("City"),
+				  get_query: () => {
+					const filters = { disabled: 0 };
+					if (PosState.company) filters.company = PosState.company;
+					return { filters };
+				  } },
 				{ fieldname: "state", fieldtype: "Data", label: __("State"), reqd: 1 },
 				{ fieldtype: "Section Break" },
 				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode") },
@@ -508,6 +514,7 @@ export class CartPanel {
 		});
 		d.show();
 		d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+		setTimeout(sync_whatsapp_from_mobile, 0);
 
 		// Prevent Enter key from auto-submitting customer creation.
 		d.$wrapper.find("form").on("keydown", (e) => {
@@ -516,17 +523,37 @@ export class CartPanel {
 			}
 		});
 
-		d.fields_dict.mobile_no.$input.on("input change paste keyup", sync_whatsapp_from_mobile);
+		d.fields_dict.mobile_no.$input.on("input change paste keyup blur", () => {
+			whatsapp_manually_edited = false;
+			sync_whatsapp_from_mobile();
+		});
 
 		d.fields_dict.whatsapp_number.$input.on("input", () => {
 			d.doc.whatsapp_number = input_value("whatsapp_number");
+			whatsapp_manually_edited = d.doc.whatsapp_number !== last_auto_synced_mobile;
 			otp_verified_number = "";
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
 		});
 
+		d.fields_dict.city.$input.on("awesomplete-selectcomplete change blur", () => {
+			const city = input_value("city");
+			if (!city) return;
+			frappe.xcall("frappe.client.get_value", {
+				doctype: "CH City",
+				filters: { name: city },
+				fieldname: ["city_name", "state"],
+			}).then((row) => {
+				if (!row) return;
+				if (row.state) {
+					d.fields_dict.state.$input.val(row.state);
+					d.doc.state = row.state;
+				}
+			});
+		});
+
 		d.fields_dict.email_id.$input.on("change blur", validate_email_input);
 
-		d.get_field("send_otp").$input.on("click", async () => {
+		const send_otp_handler = async () => {
 			sync_whatsapp_from_mobile();
 			const phone = input_value("mobile_no");
 			if (!phone) {
@@ -548,19 +575,28 @@ export class CartPanel {
 			}
 
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("Sending OTP..."), "#2563eb"));
+			frappe.dom.freeze(__("Sending OTP..."));
 			frappe.xcall("ch_pos.api.pos_api.request_customer_whatsapp_otp", {
 				mobile_no: whatsapp,
 				customer_name: input_value("customer_name") || "Customer",
 				email_id: input_value("email_id"),
-			}).then(() => {
+			}).then((res) => {
 				otp_verified_number = "";
-				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP sent to WhatsApp"), "#15803d"));
+				const channels = [];
+				if (res && res.sent_whatsapp) channels.push(__("WhatsApp"));
+				if (res && res.sent_email) channels.push(__("Email"));
+				const channel_text = channels.length ? channels.join(" + ") : __("OTP log");
+				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP generated via {0}", [channel_text]), "#15803d"));
+				frappe.show_alert({ message: __("OTP generated via {0}", [channel_text]), indicator: "green" });
 			}).catch((err) => {
 				d.fields_dict.otp_status.$wrapper.html(status_html(otp_error_message(err, __("Failed to send OTP")), "#b91c1c"));
+				frappe.show_alert({ message: otp_error_message(err, __("Failed to send OTP")), indicator: "red" });
+			}).finally(() => {
+				frappe.dom.unfreeze();
 			});
-		});
+		};
 
-		d.get_field("verify_otp").$input.on("click", () => {
+		const verify_otp_handler = () => {
 			const whatsapp = input_value("whatsapp_number");
 			const otp_code = input_value("otp_code");
 			if (!whatsapp || !assert_india_phone(d.fields_dict.whatsapp_number.$input[0], whatsapp)) return;
@@ -584,7 +620,10 @@ export class CartPanel {
 				otp_verified_number = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(otp_error_message(err, __("OTP verification failed")), "#b91c1c"));
 			});
-		});
+		};
+
+		d.get_field("send_otp").$wrapper.on("click", "button", send_otp_handler);
+		d.get_field("verify_otp").$wrapper.on("click", "button", verify_otp_handler);
 	}
 
 	bind() {

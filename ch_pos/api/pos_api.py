@@ -3647,6 +3647,12 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Customer OTP email delivery failed")
 
+    if not sent_whatsapp and not sent_email:
+        frappe.throw(
+            _("OTP was generated, but no delivery channel is enabled. Enable WhatsApp OTP or provide a valid customer email."),
+            title=_("OTP Delivery Not Configured"),
+        )
+
     return {
         "sent": True,
         "mobile": mobile_no[:3] + "****" + mobile_no[-3:],
@@ -3671,6 +3677,26 @@ def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Veri
         reference_doctype="Customer",
         reference_name="",
     )
+
+
+def _resolve_pos_city_state(city, state):
+    city = (city or "").strip()
+    state = (state or "").strip()
+    if not city or not frappe.db.exists("DocType", "CH City"):
+        return city, state
+
+    city_row = frappe.db.get_value("CH City", city, ["city_name", "state"], as_dict=True)
+    if not city_row:
+        city_row = frappe.db.get_value(
+            "CH City",
+            {"city_name": city, "disabled": 0},
+            ["city_name", "state"],
+            as_dict=True,
+        )
+    if city_row:
+        city = city_row.city_name or city
+        state = state or city_row.state or ""
+    return city, state
 
 
 @frappe.whitelist()
@@ -5988,6 +6014,8 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         frappe.throw(_("Mobile Number is mandatory"), title=_("Missing Mobile Number"))
     if not (state or "").strip():
         frappe.throw(_("State is mandatory"), title=_("Missing State"))
+
+    city, state = _resolve_pos_city_state(city, state)
 
     mobile_suffix = _phone_suffix_10(mobile_no)
     whatsapp_suffix = _phone_suffix_10(whatsapp_number)
