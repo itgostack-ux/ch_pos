@@ -3188,8 +3188,12 @@ body > .modal-backdrop {
 body > .modal {
   z-index: 9996 !important;
 }
-body > .desk-alert-container {
+body > .desk-alert-container,
+#alert-container {
   z-index: 100000 !important;
+}
+#alert-container .desk-alert {
+  z-index: 100001 !important;
 }
 
 /* ── Modal screen container ───────────────────────────────────────────── */
