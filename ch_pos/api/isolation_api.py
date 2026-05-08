@@ -367,6 +367,200 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
 
 
 @frappe.whitelist()
+def reopen_settlement(session_name, manager_pin) -> dict:
+    """
+    Cancel a wrong settlement and reopen the session for re-settlement.
+
+    Market standard: Settlement Correction flow (Retail Pro / GoFrugal pattern).
+
+    Use when:
+      - Settlement was submitted with wrong actual_closing_cash
+      - close_session has NOT yet been called  (session status = "Pending Close")
+
+    Flow after this API:
+      1. Call create_settlement() with the correct cash amount
+      2. Call close_session() as normal
+
+    For sessions that are already "Closed", use correct_closed_settlement() instead.
+    """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+
+    session = frappe.get_doc("CH POS Session", session_name)
+
+    # Manager PIN gate (same permission used for closing approval)
+    from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
+    pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_closing")
+    if not pin_result.get("valid"):
+        frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+    manager_user = pin_result["user"]
+
+    if session.status != "Pending Close":
+        frappe.throw(
+            _("Session {0} is in '{1}' status. "
+              "Only 'Pending Close' sessions can be reopened for re-settlement. "
+              "For a Closed session use the Correct Closed Settlement action.").format(
+                session_name, session.status
+            ),
+            title=_("Settlement Correction"),
+        )
+
+    # Find the submitted settlement to cancel
+    settlement_name = frappe.db.get_value(
+        "CH POS Settlement",
+        {"session": session_name, "docstatus": 1},
+        "name",
+    )
+    if not settlement_name:
+        frappe.throw(_("No submitted settlement found for session {0}.").format(session_name))
+
+    # Cancel the settlement (validate() is NOT called during cancel, so the
+    # "Session already closed" guard does not fire here)
+    settlement = frappe.get_doc("CH POS Settlement", settlement_name)
+    settlement.flags.ignore_permissions = True
+    settlement.cancel()
+
+    # Reset session back to Open so create_settlement + close_session can run again.
+    # db_set bypasses the state-machine validator (which lives in validate()).
+    session.db_set("status", "Open", update_modified=True)
+
+    try:
+        from ch_pos.audit import log_business_event
+        log_business_event(
+            event_type="Other",
+            ref_doctype="CH POS Session",
+            ref_name=session_name,
+            before="Pending Close — Settlement: {}".format(settlement_name),
+            after="Open (reopened for re-settlement)",
+            remarks="Settlement {} cancelled by {}. Session reopened to allow correction.".format(
+                settlement_name, manager_user
+            ),
+        )
+    except Exception:
+        pass
+
+    return {
+        "session_name": session_name,
+        "session_status": "Open",
+        "cancelled_settlement": settlement_name,
+        "reopened_by": manager_user,
+        "message": _(
+            "Settlement {0} cancelled. Session is now Open — please submit a new "
+            "settlement with the correct cash count and then close the session."
+        ).format(settlement_name),
+    }
+
+
+@frappe.whitelist()
+def correct_closed_settlement(session_name, correct_closing_cash,
+                               correction_reason, manager_pin) -> dict:
+    """
+    Post-close cash correction for a session that is already "Closed".
+
+    Market standard: SAP Cash Desk Correction / Oracle Tender Over-Short pattern.
+
+    Does NOT reopen the session or affect GL entries (invoices are authoritative).
+    Updates actual_closing_cash + variance on the settlement and session records
+    in-place so the NEXT session's expected_float carries the right opening balance.
+
+    Use when:
+      - close_session was already called with wrong closing cash
+      - Session status = "Closed" (terminal)
+
+    For sessions still in "Pending Close", use reopen_settlement() instead.
+    """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    correct_closing_cash = flt(correct_closing_cash)
+
+    if not correction_reason or not correction_reason.strip():
+        frappe.throw(_("Correction reason is mandatory."), title=_("Settlement Correction"))
+
+    session = frappe.get_doc("CH POS Session", session_name)
+
+    # Manager PIN gate
+    from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
+    pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_closing")
+    if not pin_result.get("valid"):
+        frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+    manager_user = pin_result["user"]
+
+    if session.status != "Closed":
+        frappe.throw(
+            _("Session {0} is not Closed (status: {1}). "
+              "For Pending Close sessions, use Reopen Settlement instead.").format(
+                session_name, session.status
+            ),
+            title=_("Settlement Correction"),
+        )
+
+    # Get the submitted settlement
+    settlement_name = frappe.db.get_value(
+        "CH POS Settlement",
+        {"session": session_name, "docstatus": 1},
+        "name",
+    )
+    if not settlement_name:
+        frappe.throw(_("No submitted settlement found for session {0}.").format(session_name))
+
+    old_cash = flt(frappe.db.get_value("CH POS Settlement", settlement_name, "actual_closing_cash"))
+    expected = flt(frappe.db.get_value("CH POS Settlement", settlement_name, "expected_closing_cash"))
+    old_variance = old_cash - expected
+    new_variance = correct_closing_cash - expected
+    ts = now_datetime()
+
+    # All target fields have allow_on_submit=1 on the Settlement doctype,
+    # so frappe.db.set_value works without cancelling the document.
+    frappe.db.set_value("CH POS Settlement", settlement_name, {
+        "actual_closing_cash": correct_closing_cash,
+        "variance_amount": new_variance,
+        "variance_reason": correction_reason.strip(),
+        "corrected_by": manager_user,
+        "correction_time": ts,
+        "correction_notes": (
+            "Post-close correction: ₹{old} → ₹{new}. "
+            "Original variance ₹{ov}, corrected variance ₹{nv}. "
+            "Reason: {reason}"
+        ).format(
+            old=old_cash, new=correct_closing_cash,
+            ov=old_variance, nv=new_variance,
+            reason=correction_reason.strip(),
+        ),
+    }, update_modified=True)
+
+    # Mirror onto the session so the next session's expected_float is correct
+    frappe.db.set_value("CH POS Session", session_name, {
+        "closing_cash_actual": correct_closing_cash,
+        "cash_variance": new_variance,
+        "variance_reason": correction_reason.strip(),
+    }, update_modified=True)
+
+    try:
+        from ch_pos.audit import log_business_event
+        log_business_event(
+            event_type="Other",
+            ref_doctype="CH POS Settlement",
+            ref_name=settlement_name,
+            before="actual_closing_cash: {}, variance: {}".format(old_cash, old_variance),
+            after="actual_closing_cash: {}, variance: {}".format(correct_closing_cash, new_variance),
+            remarks="Post-close correction by {}. Reason: {}".format(manager_user, correction_reason),
+        )
+    except Exception:
+        pass
+
+    return {
+        "settlement_name": settlement_name,
+        "old_closing_cash": old_cash,
+        "new_closing_cash": correct_closing_cash,
+        "old_variance": old_variance,
+        "new_variance": new_variance,
+        "corrected_by": manager_user,
+        "message": _(
+            "Settlement corrected. Closing cash updated from ₹{0} to ₹{1}. "
+            "New variance: ₹{2}."
+        ).format(old_cash, correct_closing_cash, new_variance),
+    }
+
+
+@frappe.whitelist()
 def create_cash_movement(session_name, movement_type, amount, reason,
                          manager_pin=None, remarks=None) -> dict:
     """Create a CH Cash Drop (cash movement) during an active session."""
