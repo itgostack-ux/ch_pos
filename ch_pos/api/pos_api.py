@@ -4418,9 +4418,11 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     se.to_warehouse = to_warehouse
 
     for item in items:
+        qty = flt(item.get("qty", 1))
         se.append("items", {
             "item_code": item.get("item_code"),
-            "qty": flt(item.get("qty", 1)),
+            "qty": qty,
+            "custom_quantity": qty,
             "uom": item.get("uom", "Nos"),
             "s_warehouse": from_warehouse,
             "t_warehouse": to_warehouse,
