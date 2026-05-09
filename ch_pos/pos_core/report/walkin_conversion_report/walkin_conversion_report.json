@@ -3,8 +3,16 @@
  "creation": "2026-03-28 00:00:00.000000",
  "disabled": 0,
  "doctype": "Report",
+ "filters": [
+  {"fieldname": "from_date", "fieldtype": "Date",   "label": "From Date", "reqd": 1},
+  {"fieldname": "to_date",   "fieldtype": "Date",   "label": "To Date",   "reqd": 1},
+  {"fieldname": "company",   "fieldtype": "Link",   "label": "Company",   "options": "Company",       "reqd": 0},
+  {"fieldname": "zone",      "fieldtype": "Link",   "label": "Zone",      "options": "CH Store Zone", "reqd": 0},
+  {"fieldname": "city",      "fieldtype": "Link",   "label": "City",      "options": "CH City",       "reqd": 0},
+  {"fieldname": "pos_profile","fieldtype": "Link",  "label": "Store / POS Profile", "options": "POS Profile", "reqd": 0}
+ ],
  "is_standard": "Yes",
- "modified": "2026-03-28 00:00:00.000000",
+ "modified": "2026-05-09 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "Walkin Conversion Report",
@@ -15,6 +23,7 @@
  "roles": [
   {"role": "System Manager"},
   {"role": "Accounts Manager"},
-  {"role": "Sales Manager"}
+  {"role": "Sales Manager"},
+  {"role": "Store Manager"}
  ]
 }
