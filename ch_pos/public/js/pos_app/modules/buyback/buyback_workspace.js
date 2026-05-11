@@ -1199,7 +1199,7 @@ export class BuybackWorkspace {
 		function _step_kyc() {
 			return `<div class="ch-wz-card">
 				<div class="ch-wz-row">
-					${_input("kyc_id_type", __("ID Type"), "select", { reqd: true, options: ["", "Aadhaar", "PAN", "Passport", "Driving Licence", "Voter ID"] })}
+					${_input("kyc_id_type", __("ID Type"), "select", { reqd: true, options: ["", "Aadhar Card", "PAN Card", "Passport", "Driving License", "Voter ID"] })}
 					${_input("kyc_id_number", __("ID Number"), "text", { reqd: true })}
 				</div>
 				<div class="ch-wz-row ch-wz-row-3" style="margin-top:16px">
@@ -1518,7 +1518,7 @@ export class BuybackWorkspace {
 
 				{ fieldtype: "Section Break", label: __("KYC Details") },
 				{ fieldname: "kyc_id_type", fieldtype: "Select", label: __("ID Type"),
-					options: "\nAadhaar\nPAN\nPassport\nDriving Licence\nVoter ID" },
+					options: "\nAadhar Card\nPAN Card\nPassport\nDriving License\nVoter ID" },
 				{ fieldname: "kyc_id_number", fieldtype: "Data", label: __("ID Number") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "kyc_name", fieldtype: "Data", label: __("Name on ID") },

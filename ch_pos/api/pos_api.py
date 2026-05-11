@@ -6592,74 +6592,141 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
                                  upi_id=None, bank_account_holder=None,
                                  bank_account_number=None, bank_ifsc=None,
                                  bank_name=None) -> dict:
-	"""Record customer approval of the final buyback price.
+    """Record customer approval of the final buyback price.
 
-	method: "In-Store Signature" | "OTP" | "Token Link"
-	If method == "OTP", otp_code is verified first.
-	kyc_id_type / kyc_id_number: optional KYC data saved on the order.
-	"""
-	doc = frappe.get_doc("Buyback Order", order_name)
-	doc.check_permission("write")
+    method: "In-Store Signature" | "OTP" | "Token Link"
+    If method == "OTP", otp_code is verified first.
+    kyc_id_type / kyc_id_number: optional KYC data saved on the order.
+    """
+    doc = frappe.get_doc("Buyback Order", order_name)
+    doc.check_permission("write")
 
-	if method == "OTP":
-		if not otp_code:
-			frappe.throw(frappe._("OTP code is required for OTP verification."))
-		from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
-		result = CHOTPLog.verify_otp(
-			mobile_no=doc.mobile_no,
-			purpose="Buyback Customer Approval",
-			otp_code=str(otp_code),
-			reference_doctype="Buyback Order",
-			reference_name=order_name,
-		)
-		if not result.get("valid"):
-			frappe.throw(frappe._(result.get("message", "OTP verification failed.")))
-		doc.otp_verified = 1
+    def _normalize_kyc_type(id_type):
+        raw = (id_type or "").strip()
+        if not raw:
+            return ""
+        alias = {
+            "aadhaar": "Aadhar Card",
+            "aadhar": "Aadhar Card",
+            "aadhaar card": "Aadhar Card",
+            "aadhar card": "Aadhar Card",
+            "pan": "PAN Card",
+            "pan card": "PAN Card",
+            "driving licence": "Driving License",
+            "driving license": "Driving License",
+            "voter id": "Voter ID",
+            "passport": "Passport",
+        }
+        normalized = alias.get(raw.casefold(), raw)
+        allowed = {"Aadhar Card", "PAN Card", "Driving License", "Voter ID", "Passport"}
+        if normalized not in allowed:
+            frappe.throw(
+                frappe._("Invalid ID Proof Type. Allowed values: Aadhar Card, PAN Card, Driving License, Voter ID, Passport")
+            )
+        return normalized
 
-	# Save KYC data if provided
-	if kyc_id_type:
-		doc.customer_id_type = kyc_id_type
-	if kyc_id_number:
-		doc.customer_id_number = kyc_id_number
-	if customer_id_front:
-		doc.customer_id_front = customer_id_front
-	if customer_id_back:
-		doc.customer_id_back = customer_id_back
-	if customer_photo:
-		doc.customer_photo = customer_photo
+    is_submitted = cint(doc.docstatus) == 1
+    update_after_submit = {}
 
-	# Save settlement & payout details
-	if settlement_type:
-		doc.settlement_type = settlement_type
-	if payout_mode:
-		doc.customer_payout_mode = payout_mode
-	if upi_id:
-		doc.customer_upi_id = upi_id
-	if bank_account_holder:
-		doc.customer_bank_account_holder = bank_account_holder
-	if bank_account_number:
-		doc.customer_bank_account_number = bank_account_number
-	if bank_ifsc:
-		doc.customer_bank_ifsc = bank_ifsc
-	if bank_name:
-		doc.customer_bank_name = bank_name
-	if payout_mode:
-		doc.customer_payout_updated_at = frappe.utils.now_datetime()
-		doc.customer_payout_updated_by = frappe.session.user
+    if method == "OTP":
+        if not otp_code:
+            frappe.throw(frappe._("OTP code is required for OTP verification."))
+        result = doc.verify_otp(str(otp_code))
+        if not result.get("valid"):
+            frappe.throw(frappe._(result.get("message", "OTP verification failed.")))
 
-	if kyc_id_type and kyc_id_number:
-		doc.kyc_verified = 1
-		doc.kyc_verified_by = frappe.session.user
-		doc.kyc_verified_at = frappe.utils.now_datetime()
+    if kyc_id_type:
+        kyc_id_type = _normalize_kyc_type(kyc_id_type)
+        if is_submitted:
+            update_after_submit["customer_id_type"] = kyc_id_type
+        else:
+            doc.customer_id_type = kyc_id_type
+    if kyc_id_number:
+        if is_submitted:
+            update_after_submit["customer_id_number"] = kyc_id_number
+        else:
+            doc.customer_id_number = kyc_id_number
+    if customer_id_front:
+        if is_submitted:
+            update_after_submit["customer_id_front"] = customer_id_front
+        else:
+            doc.customer_id_front = customer_id_front
+    if customer_id_back:
+        if is_submitted:
+            update_after_submit["customer_id_back"] = customer_id_back
+        else:
+            doc.customer_id_back = customer_id_back
+    if customer_photo:
+        if is_submitted:
+            update_after_submit["customer_photo"] = customer_photo
+        else:
+            doc.customer_photo = customer_photo
 
-	doc.flags.ignore_permissions = True
-	doc.customer_approve(method=method)
+    if settlement_type:
+        if is_submitted:
+            update_after_submit["settlement_type"] = settlement_type
+        else:
+            doc.settlement_type = settlement_type
+    if payout_mode:
+        if is_submitted:
+            update_after_submit["customer_payout_mode"] = payout_mode
+        else:
+            doc.customer_payout_mode = payout_mode
+    if upi_id:
+        if is_submitted:
+            update_after_submit["customer_upi_id"] = upi_id
+        else:
+            doc.customer_upi_id = upi_id
+    if bank_account_holder:
+        if is_submitted:
+            update_after_submit["customer_bank_account_holder"] = bank_account_holder
+        else:
+            doc.customer_bank_account_holder = bank_account_holder
+    if bank_account_number:
+        if is_submitted:
+            update_after_submit["customer_bank_account_number"] = bank_account_number
+        else:
+            doc.customer_bank_account_number = bank_account_number
+    if bank_ifsc:
+        if is_submitted:
+            update_after_submit["customer_bank_ifsc"] = bank_ifsc
+        else:
+            doc.customer_bank_ifsc = bank_ifsc
+    if bank_name:
+        if is_submitted:
+            update_after_submit["customer_bank_name"] = bank_name
+        else:
+            doc.customer_bank_name = bank_name
+    if payout_mode:
+        if is_submitted:
+            update_after_submit["customer_payout_updated_at"] = frappe.utils.now_datetime()
+            update_after_submit["customer_payout_updated_by"] = frappe.session.user
+        else:
+            doc.customer_payout_updated_at = frappe.utils.now_datetime()
+            doc.customer_payout_updated_by = frappe.session.user
 
-	return {
-		"order_name": doc.name,
-		"status": doc.status,
-		"customer_approved": 1,
-	}
+    if kyc_id_type and kyc_id_number:
+        if is_submitted:
+            update_after_submit["kyc_verified"] = 1
+            update_after_submit["kyc_verified_by"] = frappe.session.user
+            update_after_submit["kyc_verified_at"] = frappe.utils.now_datetime()
+        else:
+            doc.kyc_verified = 1
+            doc.kyc_verified_by = frappe.session.user
+            doc.kyc_verified_at = frappe.utils.now_datetime()
+
+    if is_submitted and update_after_submit:
+        doc.db_set(update_after_submit, update_modified=True)
+        doc.reload()
+
+    doc.flags.ignore_permissions = True
+    doc.customer_approve(method=method)
+
+    return {
+        "order_name": doc.name,
+        "status": doc.status,
+        "customer_approved": 1,
+    }
 
 
 @frappe.whitelist()
