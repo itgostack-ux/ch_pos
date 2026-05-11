@@ -213,13 +213,32 @@ export class PaymentDialog {
 	}
 
 	/** Re-render the Add Payment buttons from PosState.payment_modes.
-	 *  Called after mount so the live (already-loaded) modes are always reflected. */
+	 *  Called after mount so the live (already-loaded) modes are always reflected.
+	 *  When offline, only Cash is allowed — UPI/Card/Finance require bank connectivity. */
 	_render_mop_buttons() {
 		if (!this._overlay) return;
 		const container = this._overlay.find(".ch-pay-mop-btns");
 		if (!container.length) return;
-		const modes = PosState.payment_modes || [];
-		if (!modes.length) return;   // no change — template value stays
+		let modes = PosState.payment_modes || [];
+		if (!modes.length) return;
+
+		const offline = !navigator.onLine;
+		if (offline) {
+			modes = modes.filter((p) => (p.mode_of_payment || "").toLowerCase().includes("cash"));
+			// Show offline payment notice
+			const notice_id = "ch-pay-offline-notice";
+			if (!this._overlay.find(`#${notice_id}`).length) {
+				container.before(
+					`<div id="${notice_id}" class="ch-pay-offline-notice">
+						<i class="fa fa-wifi-slash"></i>
+						${__("Offline — only Cash payments accepted. Other modes will sync when connection restores.")}
+					</div>`
+				);
+			}
+		} else {
+			this._overlay.find("#ch-pay-offline-notice").remove();
+		}
+
 		container.html(modes.map(p => `
 			<button class="ch-pay-mop-btn" data-mop="${frappe.utils.escape_html(p.mode_of_payment)}">
 				${_mop_icon(p.mode_of_payment)}

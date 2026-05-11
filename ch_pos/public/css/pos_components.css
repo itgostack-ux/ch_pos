@@ -5539,3 +5539,23 @@ body > .desk-alert-container,
 .ch-attach-name { font-size: 13px; font-weight: 500; flex: 1; }
 .ch-attach-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .ch-attach-actions .btn { min-width: 50px; }
+
+/* ── Offline Payment Notice ───────────────────────────── */
+.ch-pay-offline-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #92400e;
+  font-weight: 500;
+}
+.ch-pay-offline-notice .fa {
+  color: #f59e0b;
+  font-size: 15px;
+  flex-shrink: 0;
+}

@@ -412,6 +412,16 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
         {
+            "fieldname": "ch_offline_client_id",
+            "fieldtype": "Data",
+            "label": "Offline Client ID",
+            "insert_after": "custom_warranty_claim",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
+            "module": "POS Core",
+        },
+        {
             "fieldname": "custom_buyback_order",
             "fieldtype": "Link",
             "label": "Buyback Order",
