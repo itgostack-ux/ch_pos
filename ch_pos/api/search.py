@@ -407,42 +407,62 @@ def _get_nearby_warehouses(pos_profile):
 
 @frappe.whitelist()
 def get_nearby_stock(item_code, pos_profile) -> dict:
-    """Full nearby-store stock check for a single item (for item detail popup)."""
+    """Full nearby-store stock check for a single item (for item detail popup).
+
+    Returns Sellable-bin qty only — damaged/reserved/transfer stock excluded.
+    """
     stores = _get_nearby_warehouses(pos_profile)
     result = []
     for s in stores:
-        qty = flt(frappe.db.get_value(
-            "Bin", {"item_code": item_code, "warehouse": s.warehouse}, "actual_qty"
-        ))
+        # Count Active serials in Sellable bin (no bin record = Sellable default)
+        qty = frappe.db.sql("""
+            SELECT COUNT(sn.name)
+            FROM `tabSerial No` sn
+            LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
+            WHERE sn.item_code = %(item_code)s
+              AND sn.warehouse = %(warehouse)s
+              AND sn.status = 'Active'
+              AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
+        """, {"item_code": item_code, "warehouse": s.warehouse})[0][0] or 0
+
         result.append({
             "store_name": s.store_name,
             "store_code": s.store_code,
             "city": s.city,
             "pincode": s.pincode,
-            "qty": qty,
+            "qty": flt(qty),
         })
     return result
 
 
 @frappe.whitelist()
 def get_available_serials(item_code, warehouse) -> dict:
-    """Return list of available serial numbers for an item in a warehouse, FIFO ordered."""
+    """Return list of available serial numbers for an item in a warehouse, FIFO ordered.
+
+    Only serials in the Sellable bin are returned — items in Damaged, Disposed,
+    Reserved, or Transfer bins are excluded from POS availability.
+    (Serial with no CH Stock Bin record defaults to Sellable.)
+    """
     # Primary: use SNBB inward dates for true FIFO order
+    # Bin filter: exclude serials where bin_type != Sellable
     rows = frappe.db.sql("""
         SELECT
             sn.name AS serial_no,
             sn.warranty_expiry_date,
-            MIN(DATE(sbb.posting_datetime)) AS inward_date
+            MIN(DATE(sbb.posting_datetime)) AS inward_date,
+            COALESCE(sb.bin_type, 'Sellable') AS bin_type
         FROM `tabSerial No` sn
         LEFT JOIN `tabSerial and Batch Entry` sbe ON sbe.serial_no = sn.name
         LEFT JOIN `tabSerial and Batch Bundle` sbb
             ON sbe.parent = sbb.name
             AND sbb.type_of_transaction = 'Inward'
             AND sbb.docstatus = 1
+        LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
         WHERE sn.item_code = %(item_code)s
           AND sn.warehouse = %(warehouse)s
           AND sn.status = 'Active'
-        GROUP BY sn.name, sn.warranty_expiry_date
+          AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
+        GROUP BY sn.name, sn.warranty_expiry_date, sb.bin_type
         ORDER BY inward_date ASC, sn.name ASC
     """, {"item_code": item_code, "warehouse": warehouse}, as_dict=True)
 
