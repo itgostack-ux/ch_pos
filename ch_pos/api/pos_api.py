@@ -2055,11 +2055,40 @@ def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
 
 
 @frappe.whitelist()
-def create_pos_return(original_invoice, return_items, sales_executive=None) -> dict:
-    """Create a Sales Invoice return (credit note) for specific items."""
+def create_pos_return(original_invoice, return_items, sales_executive=None,
+                      return_reason=None, return_remarks=None,
+                      manager_pin=None) -> dict:
+    """Create a Sales Invoice return (credit note) for specific items.
+
+    Market-standard maker-checker (SAP credit memo / Oracle Returns Mgmt):
+
+    * `return_reason` + `return_remarks` are MANDATORY for audit (every return
+      must justify itself, similar to RGA reason codes in Oracle Order Mgmt).
+    * Returns above the per-profile auto-approve limit, OR returns containing
+      serialized devices, OR returns where the original invoice is older than
+      the configured policy window are routed to "Pending Approval" instead of
+      being submitted directly.
+    * A POS Manager (role) can either submit the return directly (auto-approve)
+      or supply a `manager_pin` to override the threshold for an in-person
+      checker workflow (matches Walmart/Best Buy POS pattern).
+    """
     frappe.has_permission("Sales Invoice", "create", throw=True)
     if isinstance(return_items, str):
         return_items = frappe.parse_json(return_items)
+
+    # ── Mandatory remarks/reason (SAP "Reason for Rejection" parity) ───
+    return_reason = (return_reason or "").strip()
+    return_remarks = (return_remarks or "").strip()
+    if not return_remarks:
+        frappe.throw(
+            frappe._("Return remarks are mandatory. Please describe why this return is being processed."),
+            title=frappe._("Remarks Required"),
+        )
+    if len(return_remarks) < 10:
+        frappe.throw(
+            frappe._("Return remarks must be at least 10 characters (audit requirement)."),
+            title=frappe._("Remarks Too Short"),
+        )
 
     orig = frappe.get_doc("Sales Invoice", original_invoice)
     if orig.docstatus != 1 or orig.is_return:
@@ -2190,10 +2219,59 @@ def create_pos_return(original_invoice, return_items, sales_executive=None) -> d
     ret.flags.ignore_permissions = True
     # Insert first with default Draft workflow state so _doc_before_save is
     # populated before we transition to Approved (matches create_pos_invoice
-    # pattern at line ~846). POS exception: returns bypass Maker-Checker.
+    # pattern at line ~846).
     ret.insert(ignore_permissions=True)
+
+    # ── Persist the captured reason/remarks for audit ────────────────
+    update_kwargs = {}
+    if return_reason and frappe.get_meta("Sales Invoice").has_field("custom_return_reason"):
+        update_kwargs["custom_return_reason"] = return_reason
+    if frappe.get_meta("Sales Invoice").has_field("custom_return_remarks"):
+        update_kwargs["custom_return_remarks"] = return_remarks
+    # Always echo into the standard remarks field so it is visible on the
+    # printed credit note even when the custom field is not yet installed.
+    existing_remarks = (ret.get("remarks") or "").strip()
+    composed_remarks = f"[Return] {return_reason or 'Reason not set'}: {return_remarks}"
+    if existing_remarks:
+        composed_remarks = f"{existing_remarks}\n{composed_remarks}"
+    update_kwargs["remarks"] = composed_remarks
+    if update_kwargs:
+        for k, v in update_kwargs.items():
+            ret.set(k, v)
+        ret.save(ignore_permissions=True)
+
+    # ── Maker-Checker gate (SAP credit memo release strategy) ─────────
+    requires_approval, reasons = _return_requires_approval(orig, ret, return_items, manager_pin)
+    user_roles = set(frappe.get_roles(frappe.session.user))
+    is_manager = bool({"POS Manager", "Accounts Manager", "System Manager"} & user_roles)
+    pin_ok = bool(manager_pin) and _verify_manager_pin(manager_pin, ret.company)
+
+    if requires_approval and not (is_manager or pin_ok):
+        ret.workflow_state = "Pending Approval"
+        ret.custom_si_approval_state = "Pending Approval"
+        ret.save(ignore_permissions=True)
+        frappe.db.commit()
+        return {
+            "name": ret.name,
+            "status": "Pending Approval",
+            "requires_approval": True,
+            "approval_reasons": reasons,
+            "grand_total": ret.grand_total,
+            "customer": ret.customer,
+            "customer_name": ret.customer_name,
+            "message": frappe._("Return saved as draft pending manager approval ({0}).").format(", ".join(reasons)),
+        }
+
     ret.workflow_state = "Approved"
     ret.custom_si_approval_state = "Approved"
+    if is_manager or pin_ok:
+        ret.add_comment(
+            "Info",
+            text=frappe._("Return auto-approved by {0}{1}").format(
+                frappe.session.user,
+                " (manager PIN)" if pin_ok and not is_manager else "",
+            ),
+        )
     try:
         ret.submit()
     except Exception:
@@ -2261,6 +2339,144 @@ def create_pos_return(original_invoice, return_items, sales_executive=None) -> d
         "auto_included_vas_rows": _auto_added_plans,
         "cancelled_sold_plans": cancelled_plans,
     }
+
+
+# ── Return Approval Workflow (SAP Credit Memo Release Strategy parity) ──
+def _return_requires_approval(orig_invoice, ret_doc, return_items, manager_pin=None):
+    """Decide whether a return needs manager approval before submission.
+
+    Triggers (any of):
+      * Refund value exceeds POS Profile auto_approve limit (default ₹5,000).
+      * Return contains a serialised device (high-value risk per Best Buy POS).
+      * Original invoice older than POS Profile return_window_days
+        (default 30 days — matches Apple/Amazon return policy windows).
+      * Return % > 50% of original invoice value (partial-return abuse guard).
+    """
+    reasons = []
+    refund_value = abs(flt(ret_doc.grand_total or 0))
+    auto_limit = flt(
+        frappe.db.get_value("POS Profile", orig_invoice.pos_profile, "custom_return_auto_approve_limit")
+        or 0
+    ) or 5000.0
+    return_window = cint(
+        frappe.db.get_value("POS Profile", orig_invoice.pos_profile, "custom_return_window_days")
+        or 0
+    ) or 30
+
+    if refund_value > auto_limit:
+        reasons.append(f"Refund value ₹{refund_value:,.2f} exceeds auto-approve limit ₹{auto_limit:,.2f}")
+
+    has_serial = any((ri.get("serial_no") or "").strip() for ri in (return_items or []))
+    if has_serial:
+        reasons.append("Serialised device return (manager review required)")
+
+    try:
+        invoice_age_days = (getdate(nowdate()) - getdate(orig_invoice.posting_date)).days
+        if invoice_age_days > return_window:
+            reasons.append(f"Original invoice is {invoice_age_days} days old (policy window: {return_window} days)")
+    except Exception:
+        pass
+
+    orig_total = abs(flt(orig_invoice.grand_total or 0))
+    if orig_total and (refund_value / orig_total) > 0.5:
+        reasons.append(f"Return is {refund_value/orig_total*100:.0f}% of original invoice (>50%)")
+
+    return (bool(reasons), reasons)
+
+
+def _verify_manager_pin(manager_pin, company=None):
+    """Lightweight PIN check used for return-override.
+
+    Looks up CH POS Manager PIN; returns True on a clean match. Reuses the
+    same store as `approve_credit_override` for consistency.
+    """
+    if not manager_pin:
+        return False
+    if not frappe.db.exists("DocType", "CH POS Manager PIN"):
+        return False
+    rows = frappe.get_all(
+        "CH POS Manager PIN",
+        filters={"pin": manager_pin, "disabled": 0},
+        fields=["user"],
+        limit=1,
+    )
+    return bool(rows)
+
+
+@frappe.whitelist()
+def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) -> dict:
+    """Manager-checker approval that submits a Pending Approval return invoice.
+
+    Mirrors SAP VA02 release strategy: a separate user (the checker) reviews
+    the credit memo, supplies a justification, and releases it for posting.
+    """
+    frappe.has_permission("Sales Invoice", "submit", throw=True)
+
+    doc = frappe.get_doc("Sales Invoice", return_invoice)
+    if doc.docstatus != 0:
+        frappe.throw(frappe._("Return {0} is not in Draft state (current docstatus: {1})").format(
+            return_invoice, doc.docstatus))
+    if not doc.is_return:
+        frappe.throw(frappe._("{0} is not a return invoice").format(return_invoice))
+
+    user_roles = set(frappe.get_roles(frappe.session.user))
+    is_manager = bool({"POS Manager", "Accounts Manager", "System Manager"} & user_roles)
+    pin_ok = bool(manager_pin) and _verify_manager_pin(manager_pin, doc.company)
+
+    if not (is_manager or pin_ok):
+        frappe.throw(
+            frappe._("Only a POS Manager can approve return {0}. Provide a valid manager PIN to override.").format(return_invoice),
+            frappe.PermissionError,
+        )
+
+    approval_remarks = (approval_remarks or "").strip()
+    if not approval_remarks:
+        frappe.throw(frappe._("Approval remarks are mandatory (audit requirement)"))
+
+    doc.workflow_state = "Approved"
+    doc.custom_si_approval_state = "Approved"
+    doc.add_comment(
+        "Workflow",
+        text=frappe._("Return approved by {0}{1}: {2}").format(
+            frappe.session.user,
+            " (manager PIN)" if pin_ok and not is_manager else "",
+            approval_remarks,
+        ),
+    )
+    doc.flags.ignore_permissions = True
+    doc.save()
+    doc.submit()
+    frappe.db.commit()
+
+    return {
+        "name": doc.name,
+        "status": "Approved",
+        "grand_total": doc.grand_total,
+        "customer": doc.customer,
+        "customer_name": doc.customer_name,
+    }
+
+
+@frappe.whitelist()
+def get_pending_return_approvals(pos_profile=None, limit=20) -> list:
+    """List Sales Invoice returns waiting on manager approval (for the dashboard)."""
+    filters = {
+        "docstatus": 0,
+        "is_return": 1,
+        "workflow_state": "Pending Approval",
+    }
+    if pos_profile:
+        filters["pos_profile"] = pos_profile
+    return frappe.get_all(
+        "Sales Invoice",
+        filters=filters,
+        fields=[
+            "name", "customer", "customer_name", "grand_total", "posting_date",
+            "remarks", "owner", "creation", "return_against",
+        ],
+        order_by="creation desc",
+        limit=limit,
+    )
 
 
 @frappe.whitelist()
@@ -3683,6 +3899,14 @@ def _resolve_pos_city_state(city, state):
     city = (city or "").strip()
     state = (state or "").strip()
     if not city or not frappe.db.exists("DocType", "CH City"):
+        # Even without a city we still want to canonicalise + ensure the
+        # CH State master row exists when a state was supplied.
+        if state and frappe.db.exists("DocType", "CH State"):
+            try:
+                from ch_item_master.ch_core.doctype.ch_state.ch_state import ensure_state
+                state = ensure_state(state) or state
+            except Exception:
+                pass
         return city, state
 
     city_row = frappe.db.get_value("CH City", city, ["city_name", "state"], as_dict=True)
@@ -3696,6 +3920,16 @@ def _resolve_pos_city_state(city, state):
     if city_row:
         city = city_row.city_name or city
         state = state or city_row.state or ""
+
+    # Canonicalise state via CH State master so customer.state always points
+    # at a valid Link target (Oracle TCA / Dynamics 365 reference-data pattern).
+    if state and frappe.db.exists("DocType", "CH State"):
+        try:
+            from ch_item_master.ch_core.doctype.ch_state.ch_state import ensure_state
+            state = ensure_state(state) or state
+        except Exception:
+            pass
+
     return city, state
 
 

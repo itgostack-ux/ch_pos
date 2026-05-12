@@ -217,6 +217,41 @@ export class ReturnsWorkspace {
 					});
 				});
 
+				// ── Mandatory Reason + Remarks (SAP credit-memo parity) ───
+				if (action === "return") {
+					fields.push({ fieldtype: "Section Break", label: __("Return Justification") });
+					fields.push({
+						fieldname: "return_reason",
+						fieldtype: "Select",
+						label: __("Return Reason"),
+						reqd: 1,
+						options: [
+							"",
+							"Defective / DOA",
+							"Wrong Item Delivered",
+							"Customer Changed Mind",
+							"Damaged in Transit",
+							"Pricing Error",
+							"Duplicate Purchase",
+							"Other",
+						].join("\n"),
+					});
+					fields.push({ fieldtype: "Column Break" });
+					fields.push({
+						fieldname: "manager_pin",
+						fieldtype: "Password",
+						label: __("Manager PIN (override threshold)"),
+						description: __("Optional — enter to auto-approve over-limit returns"),
+					});
+					fields.push({
+						fieldname: "return_remarks",
+						fieldtype: "Small Text",
+						label: __("Remarks"),
+						reqd: 1,
+						description: __("Mandatory — describe the customer's reason in detail (min 10 chars)"),
+					});
+				}
+
 				const dlg = new frappe.ui.Dialog({
 					title: action === "return"
 						? __("Return Items — {0}", [invoice_name])
@@ -228,6 +263,25 @@ export class ReturnsWorkspace {
 						const return_items = [];
 						let total_credit = 0;
 						let serial_mismatch = false;
+
+						// Validate mandatory remarks/reason for refund returns
+						// (exchange path goes through cart payment which already
+						// captures justification on the new invoice).
+						if (action === "return") {
+							const reason = (values.return_reason || "").trim();
+							const remarks = (values.return_remarks || "").trim();
+							if (!reason) {
+								frappe.show_alert({ message: __("Select a return reason"), indicator: "red" });
+								return;
+							}
+							if (remarks.length < 10) {
+								frappe.show_alert({
+									message: __("Remarks are required (min 10 characters)"),
+									indicator: "red",
+								});
+								return;
+							}
+						}
 
 						items.forEach((item, i) => {
 							const qty = Math.min(
@@ -293,7 +347,11 @@ export class ReturnsWorkspace {
 								}
 								dlg.hide();
 								if (action === "return") {
-									this._process_return(invoice_name, return_items, total_credit);
+									this._process_return(invoice_name, return_items, total_credit, {
+										return_reason: values.return_reason,
+										return_remarks: values.return_remarks,
+										manager_pin: values.manager_pin,
+									});
 								} else {
 									this._process_product_exchange(invoice_name, return_items, total_credit);
 								}
@@ -306,7 +364,11 @@ export class ReturnsWorkspace {
 						dlg.hide();
 
 						if (action === "return") {
-							this._process_return(invoice_name, return_items, total_credit);
+							this._process_return(invoice_name, return_items, total_credit, {
+								return_reason: values.return_reason,
+								return_remarks: values.return_remarks,
+								manager_pin: values.manager_pin,
+							});
 						} else {
 							this._process_product_exchange(invoice_name, return_items, total_credit);
 						}
@@ -340,28 +402,57 @@ export class ReturnsWorkspace {
 		});
 	}
 
-	_process_return(invoice_name, return_items, total_credit) {
+	_process_return(invoice_name, return_items, total_credit, justification = {}) {
 		frappe.call({
 			method: "ch_pos.api.pos_api.create_pos_return",
-			args: { original_invoice: invoice_name, return_items: return_items },
+			args: {
+				original_invoice: invoice_name,
+				return_items: return_items,
+				return_reason: justification.return_reason || "",
+				return_remarks: justification.return_remarks || "",
+				manager_pin: justification.manager_pin || "",
+			},
 			freeze: true,
 			freeze_message: __("Processing Return..."),
 			callback: (r) => {
-				if (r.message) {
-					const cn = r.message;
+				if (!r.message) return;
+				const cn = r.message;
+
+				// Pending Approval branch — return is in Draft awaiting manager
+				if (cn.requires_approval || cn.status === "Pending Approval") {
+					const reasons_html = (cn.approval_reasons || []).map(
+						(x) => `<li>${frappe.utils.escape_html(x)}</li>`
+					).join("");
 					frappe.msgprint({
-						title: __("Return Processed"),
-						indicator: "green",
+						title: __("Manager Approval Required"),
+						indicator: "orange",
 						message: `
-							<div style="text-align:center;padding:16px;">
-								<i class="fa fa-check-circle text-success" style="font-size:48px;"></i>
-								<h4 style="margin:16px 0 8px;">${__("Credit Note Created")}</h4>
-								<p><b>${cn.name}</b></p>
-								<p>${__("Refund Amount")}: <b class="text-success">₹${format_number(Math.abs(cn.grand_total))}</b></p>
-								<p class="text-muted">${__("Customer")}: ${frappe.utils.escape_html(cn.customer_name || cn.customer)}</p>
+							<div style="padding:8px">
+								<i class="fa fa-clock-o text-warning" style="font-size:36px"></i>
+								<h5 style="margin:12px 0 6px">${__("Return Saved as Draft")}</h5>
+								<p><b>${frappe.utils.escape_html(cn.name)}</b></p>
+								<p>${__("Refund Amount")}: <b>₹${format_number(Math.abs(cn.grand_total))}</b></p>
+								<p class="text-muted">${__("This return needs manager approval before posting:")}</p>
+								<ul style="text-align:left">${reasons_html}</ul>
+								<p class="text-muted small">${__("Ask a manager to approve from Pending Returns, or re-submit with their PIN.")}</p>
 							</div>`,
 					});
+					return;
 				}
+
+				// Auto-approved & submitted branch
+				frappe.msgprint({
+					title: __("Return Processed"),
+					indicator: "green",
+					message: `
+						<div style="text-align:center;padding:16px;">
+							<i class="fa fa-check-circle text-success" style="font-size:48px;"></i>
+							<h4 style="margin:16px 0 8px;">${__("Credit Note Created")}</h4>
+							<p><b>${cn.name}</b></p>
+							<p>${__("Refund Amount")}: <b class="text-success">₹${format_number(Math.abs(cn.grand_total))}</b></p>
+							<p class="text-muted">${__("Customer")}: ${frappe.utils.escape_html(cn.customer_name || cn.customer)}</p>
+						</div>`,
+				});
 			},
 		});
 	}

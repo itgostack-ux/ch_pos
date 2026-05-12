@@ -100,6 +100,13 @@ export class ProductGrid {
 						</button>
 					</div>
 				</div>`);
+
+			// SAP/Oracle pattern — when search returns nothing, check if the
+			// term matches an existing item that's just hidden by readiness gates
+			// (PLM not Approved, lifecycle not Active, missing Item Default).
+			// Surface a one-line toast with the actual blocker so users don't
+			// guess why their newly-created item is invisible.
+			this._probe_missing_item_readiness(PosState.search_term);
 			return;
 		}
 
@@ -414,6 +421,50 @@ export class ProductGrid {
 					fields: [{ fieldtype: "HTML", options: body }],
 					size: "small",
 				}).show();
+			},
+		});
+	}
+
+	// SAP "material status" / Oracle "item lifecycle" pattern: when a search
+	// returns nothing, ask the server whether the term resolves to a real
+	// Item that's hidden by readiness gates. If yes, surface the first blocker
+	// so users understand why their newly-created item is invisible instead
+	// of silently retrying.
+	_probe_missing_item_readiness(term) {
+		if (!term || String(term).trim().length < 3) return;
+		// Throttle — don't fire on every keystroke
+		const now = Date.now();
+		if (this._last_readiness_probe && (now - this._last_readiness_probe) < 1500) return;
+		this._last_readiness_probe = now;
+
+		frappe.call({
+			method: "ch_item_master.ch_item_master.readiness.get_readiness_for_missing_item",
+			args: {
+				query_term: String(term).trim(),
+				company: PosState.active_company || PosState.company || "",
+			},
+			callback: (r) => {
+				const data = r && r.message;
+				if (!data || data.is_sellable) return;
+				const blockers = (data.checks || []).filter((c) => !c.passed && c.severity === "blocker");
+				if (!blockers.length) return;
+				const first = blockers[0];
+				const more = blockers.length > 1 ? __(" (+{0} more)", [blockers.length - 1]) : "";
+				frappe.show_alert({
+					message: __("Item {0} exists but is hidden: {1}{2}",
+						[data.item_code, first.label, more]),
+					indicator: "orange",
+				}, 8);
+				// Optional drill-down chip
+				const grid = this.panel.find(".ch-pos-empty-state .ch-pos-empty-actions");
+				if (grid.length && !grid.find(".ch-pos-btn-open-readiness").length) {
+					grid.append(`<button class="btn btn-sm btn-warning ch-pos-btn-open-readiness">
+						<i class="fa fa-info-circle"></i> ${__("Open {0} ({1} issue(s))", [data.item_code, blockers.length])}
+					</button>`);
+					grid.find(".ch-pos-btn-open-readiness").on("click", () => {
+						frappe.set_route("Form", "Item", data.item_code);
+					});
+				}
 			},
 		});
 	}

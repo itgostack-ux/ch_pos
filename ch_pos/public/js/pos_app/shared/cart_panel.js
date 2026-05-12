@@ -509,7 +509,8 @@ export class CartPanel {
 					if (PosState.company) filters.company = PosState.company;
 					return { filters };
 				  } },
-				{ fieldname: "state", fieldtype: "Data", label: __("State"), reqd: 1 },
+				{ fieldname: "state", fieldtype: "Link", options: "CH State", label: __("State"), reqd: 1,
+				  get_query: () => ({ filters: { disabled: 0 } }) },
 				{ fieldtype: "Section Break" },
 				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode") },
 				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality") },
@@ -524,8 +525,8 @@ export class CartPanel {
 				{ fieldname: "shipping_city", fieldtype: "Data", label: __("Shipping City"),
 				  depends_on: "eval:!doc.same_as_billing" },
 				{ fieldtype: "Column Break" },
-				{ fieldname: "shipping_state", fieldtype: "Data", label: __("Shipping State"),
-				  depends_on: "eval:!doc.same_as_billing" },
+				{ fieldname: "shipping_state", fieldtype: "Link", options: "CH State", label: __("Shipping State"),
+				  depends_on: "eval:!doc.same_as_billing", get_query: () => ({ filters: { disabled: 0 } }) },
 				{ fieldname: "shipping_pincode", fieldtype: "Data", label: __("Shipping Pincode"),
 				  depends_on: "eval:!doc.same_as_billing" },
 			],
@@ -653,11 +654,20 @@ export class CartPanel {
 				fieldname: ["city_name", "state"],
 			}).then((row) => {
 				if (!row || !row.state) return;
-				d.set_value("state", row.state);
-				if (d.fields_dict.state.$input) {
-					d.fields_dict.state.$input.val(row.state);
-				}
-				(d.doc || (d.doc = {})).state = row.state;
+				// State field is now Link to CH State — ensure the master row exists
+				// so the link control accepts the value (idempotent server call).
+				frappe.xcall("ch_item_master.ch_item_master.ch_core.doctype.ch_state.ch_state.ensure_state", {
+					state_name: row.state,
+				}).then((state_name) => {
+					const value = state_name || row.state;
+					d.set_value("state", value);
+					if (d.fields_dict.state.$input) {
+						d.fields_dict.state.$input.val(value);
+					}
+					(d.doc || (d.doc = {})).state = value;
+				}).catch(() => {
+					d.set_value("state", row.state);
+				});
 			});
 		});
 
@@ -992,6 +1002,10 @@ export class CartPanel {
 			this._update_exception_banner();
 			this._update_warranty_claim_banner();
 		});
+		// Exception applied from Exceptions workspace → refresh banner immediately
+		// once cart is mounted (handles the "Apply & Bill" flow).
+		EventBus.on("exception:applied", () => this._update_exception_banner());
+		EventBus.on("mode:switch", () => this._update_exception_banner());
 
 		EventBus.on("customer:set", (cust) => {
 			if (cust) {

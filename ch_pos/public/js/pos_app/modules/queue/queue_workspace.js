@@ -3,7 +3,7 @@
  *
  * Company-aware token queue panel:
  * - GoFix (service): "GoFix Request" conversion (existing flow)
- * - GoGizmo (retail): "Start Billing" + "Drop" actions
+ * - GoGizmo (retail): "Start Billing" + "Withdraw" actions
  *
  * Shows Waiting / Engaged / In-Progress tokens for the current store.
  * Auto-refreshes every 30 seconds while the queue tab is active.
@@ -16,13 +16,17 @@ function _is_service() {
 	return c.includes("gofix") || c.includes("service");
 }
 
-const DROP_REASONS = [
+// Withdrawal reason taxonomy — aligned with Salesforce/Dynamics 365 lost-opportunity
+// reason codes so funnel analytics can be reported consistently.
+const WITHDRAW_REASONS = [
 	"Price Too High",
 	"Item Not Available",
 	"Just Browsing",
 	"Found Elsewhere",
 	"Will Come Back Later",
 	"Long Wait Time",
+	"Stock Not Available",
+	"Customer Decision Pending",
 	"Other",
 ];
 
@@ -229,7 +233,7 @@ export class QueueWorkspace {
 				</button>
 				<button class="btn btn-sm btn-default ch-queue-drop-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
-					${__("Drop")}
+					${__("Withdraw")}
 				</button>`;
 		}
 
@@ -323,11 +327,14 @@ export class QueueWorkspace {
 		return Promise.resolve(PosState.default_customer || null);
 	}
 
-	// ── Retail: Drop Token ──────────────────────────────────────
+	// ── Retail: Withdraw Token ──────────────────────────────────
+	// Internally still posts status="Dropped" for backward compatibility with
+	// existing reports, but the UX uses "Withdraw"/"Withdrawn" terminology that
+	// matches Salesforce, Dynamics 365 and Oracle Service Cloud conventions.
 
 	_showDropDialog(token) {
 		const d = new frappe.ui.Dialog({
-			title: `${__("Drop Token")} — ${token.token_display || token.name}`,
+			title: `${__("Withdraw Token")} — ${token.token_display || token.name}`,
 			fields: [
 				{
 					label: __("Customer"),
@@ -337,27 +344,33 @@ export class QueueWorkspace {
 					read_only: 1,
 				},
 				{
-					label: __("Reject CX Reason"),
+					label: __("Withdrawal Reason"),
 					fieldtype: "Select",
 					fieldname: "drop_reason",
-					options: DROP_REASONS.join("\n"),
+					options: WITHDRAW_REASONS.join("\n"),
 					reqd: 1,
+					description: __("Required for funnel analytics — pick the closest match"),
 				},
 				{
-					label: __("Reject CX Detail"),
+					label: __("Sub-Reason / Detail"),
 					fieldtype: "Data",
 					fieldname: "drop_sub_reason",
 					depends_on: "drop_reason",
 				},
 				{
-					label: __("Reject Remarks"),
+					label: __("Remarks"),
 					fieldtype: "Small Text",
 					fieldname: "drop_remarks",
-					placeholder: __("Capture why customer did not convert"),
+					reqd: 1,
+					placeholder: __("Capture why the customer did not convert (mandatory for audit)"),
 				},
 			],
-			primary_action_label: `<i class="fa fa-times-circle"></i> ${__("Drop Token")}`,
+			primary_action_label: `<i class="fa fa-times-circle"></i> ${__("Withdraw Token")}`,
 			primary_action: (values) => {
+				if (!String(values.drop_remarks || "").trim()) {
+					frappe.show_alert({ message: __("Remarks are required"), indicator: "red" });
+					return;
+				}
 				d.disable_primary_action();
 				frappe.xcall("ch_pos.api.token_api.drop_token", {
 					token_name: token.name,
@@ -367,7 +380,7 @@ export class QueueWorkspace {
 				}).then(() => {
 					d.hide();
 					frappe.show_alert({
-						message: __("Token {0} dropped — {1}", [
+						message: __("Token {0} withdrawn — {1}", [
 							token.token_display || token.name,
 							values.drop_reason,
 						]),
@@ -377,7 +390,7 @@ export class QueueWorkspace {
 				}).catch((err) => {
 					d.enable_primary_action();
 					frappe.show_alert({
-						message: err.message || __("Failed to drop token"),
+						message: err.message || __("Failed to withdraw token"),
 						indicator: "red",
 					});
 				});

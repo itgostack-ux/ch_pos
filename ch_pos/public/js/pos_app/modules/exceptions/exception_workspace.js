@@ -115,6 +115,16 @@ export class ExceptionWorkspace {
 			if (name) frappe.set_route("Form", "CH Exception Request", name);
 		});
 
+		// Apply Approved exception to current cart and switch to Sell mode
+		// (Oracle Retail / SAP CAR pattern: surface the override directly in the
+		// transaction context so the cashier doesn't re-navigate back to billing).
+		panel.on("click", ".ch-exc-apply-bill", (e) => {
+			e.stopPropagation();
+			const name = $(e.currentTarget).data("name");
+			if (!name) return;
+			this._apply_and_bill(name);
+		});
+
 		// Item link control
 		this._item_control = frappe.ui.form.make_control({
 			df: { fieldtype: "Link", options: "Item", fieldname: "exc_item", placeholder: __("Select Item"),
@@ -279,7 +289,7 @@ export class ExceptionWorkspace {
 					<td><span class="badge badge-${status_cls}">${frappe.utils.escape_html(r.status || "")}</span></td>
 					<td>${r.raised_at ? frappe.datetime.prettyDate(r.raised_at) : "—"}</td>
 					<td>
-						${r.status === "Approved" ? `<button class="btn btn-xs btn-success ch-exc-view" data-name="${frappe.utils.escape_html(r.name)}" title="${__("View")}"><i class="fa fa-check"></i></button>` : ""}
+						${this._is_appliable(r) ? `<button class="btn btn-xs btn-success ch-exc-apply-bill" data-name="${frappe.utils.escape_html(r.name)}" title="${__("Apply this exception to the current cart and switch to Billing")}"><i class="fa fa-shopping-cart"></i> ${__("Apply & Bill")}</button>` : ""}
 					</td>
 				</tr>`;
 			});
@@ -295,3 +305,39 @@ export class ExceptionWorkspace {
 function format_currency(val) {
 	return frappe.format(val, { fieldtype: "Currency" });
 }
+
+// Exposed as instance method via prototype assignment so it can use PosState/EventBus.
+ExceptionWorkspace.prototype._is_appliable = function (r) {
+	// Only fully-approved, not-yet-consumed exceptions can be applied to a cart.
+	const status = (r && r.status) || "";
+	if (status !== "Approved" && status !== "Auto-Approved") return false;
+	if (r.pos_invoice) return false; // already consumed
+	return true;
+};
+
+ExceptionWorkspace.prototype._apply_and_bill = function (exception_name) {
+	// Server-side validity check first (matches cart_panel.js behaviour).
+	frappe.xcall(
+		"ch_item_master.ch_item_master.exception_api.check_exception_valid",
+		{ exception_name },
+	).then((r) => {
+		if (!r || !r.valid) {
+			frappe.msgprint(__("Exception {0} is no longer valid (status: {1}). It may have expired or already been used.",
+				[exception_name, r?.status || "Unknown"]));
+			return;
+		}
+		// 1. Stash exception on POS state — payment_dialog.js forwards it to backend.
+		PosState.exception_request = exception_name;
+		// 2. Switch to sell mode so the cashier lands directly on the cart with the
+		//    exception banner already visible (cart_panel.js handles the banner render).
+		PosState.active_mode = "sell";
+		EventBus.emit("mode:set", "sell");
+		EventBus.emit("mode:switch", "sell");
+		// 3. Tell cart_panel to refresh its banner once it mounts.
+		EventBus.emit("exception:applied", { name: exception_name });
+		frappe.show_alert({
+			message: __("Exception {0} applied — billing mode active", [exception_name]),
+			indicator: "green",
+		});
+	});
+};

@@ -504,15 +504,22 @@ def cancel_token(token_name: str) -> dict:
 
 @frappe.whitelist()
 def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = "", drop_remarks: str = "") -> dict:
-    """Mark a token as Dropped (customer left / no-show) with mandatory reason capture."""
+    """Withdraw a token (customer left / no-show) with mandatory reason + remarks capture.
+
+    Status remains "Dropped" in the database for backward compatibility with reports;
+    the UI surfaces the action as "Withdraw" / "Withdrawn" (Salesforce/Dynamics 365
+    nomenclature for lost-opportunity tracking).
+    """
     user_roles = frappe.get_roles()
     if "POS User" not in user_roles and "POS Manager" not in user_roles:
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted", "Dropped"):
-        frappe.throw(_("Cannot drop a {0} token").format(doc.status), title=_("API Error"))
+        frappe.throw(_("Cannot withdraw a {0} token").format(doc.status), title=_("API Error"))
     if not drop_reason:
-        frappe.throw(_("Drop reason is mandatory when marking a token as Dropped"), title=_("API Error"))
+        frappe.throw(_("Withdrawal reason is mandatory"), title=_("API Error"))
+    if not (drop_remarks or "").strip():
+        frappe.throw(_("Remarks are mandatory when withdrawing a token (audit requirement)"), title=_("API Error"))
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "status": "Dropped",
         "drop_reason": drop_reason,

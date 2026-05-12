@@ -77,11 +77,31 @@ export class ClaimsWorkspace {
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
 						<span><i class="fa fa-list"></i> ${__("Recent Claims")}</span>
-						<button class="btn btn-xs btn-default ch-claim-refresh" style="border-radius:var(--pos-radius-sm)">
+						<div style="display:flex;align-items:center;gap:6px">
+							<div class="ch-claim-filter-chips" style="display:flex;gap:4px">
+								<button class="btn btn-xs btn-default ch-claim-filter active" data-filter="all" style="border-radius:var(--pos-radius-sm)">${__("All")}</button>
+								<button class="btn btn-xs btn-default ch-claim-filter" data-filter="manufacturer" style="border-radius:var(--pos-radius-sm)">${__("Manufacturer")}</button>
+								<button class="btn btn-xs btn-default ch-claim-filter" data-filter="vas" style="border-radius:var(--pos-radius-sm)">${__("VAS / Extended")}</button>
+							</div>
+							<button class="btn btn-xs btn-default ch-claim-refresh" style="border-radius:var(--pos-radius-sm)">
+								<i class="fa fa-refresh"></i>
+							</button>
+						</div>
+					</div>
+					<div class="section-body ch-claim-pipeline">
+						<div class="text-muted text-center" style="padding:16px">${__("Loading...")}</div>
+					</div>
+				</div>
+
+				<!-- VAS Activity (sold plans + redemptions) -->
+				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
+					<div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
+						<span><i class="fa fa-shield"></i> ${__("VAS Plans Activity")}</span>
+						<button class="btn btn-xs btn-default ch-vas-refresh" style="border-radius:var(--pos-radius-sm)">
 							<i class="fa fa-refresh"></i>
 						</button>
 					</div>
-					<div class="section-body ch-claim-pipeline">
+					<div class="section-body ch-vas-activity">
 						<div class="text-muted text-center" style="padding:16px">${__("Loading...")}</div>
 					</div>
 				</div>
@@ -90,6 +110,7 @@ export class ClaimsWorkspace {
 
 		this._bind(panel);
 		this._load_claims_pipeline(panel);
+		this._load_vas_activity(panel);
 		this._start_auto_refresh(panel);
 	}
 
@@ -111,6 +132,18 @@ export class ClaimsWorkspace {
 		});
 
 		panel.on("click", ".ch-claim-refresh", () => this._load_claims_pipeline(panel));
+
+		// Filter chips for the claims pipeline (All / Manufacturer / VAS)
+		panel.on("click", ".ch-claim-filter", (e) => {
+			const $btn = $(e.currentTarget);
+			panel.find(".ch-claim-filter").removeClass("active btn-primary").addClass("btn-default");
+			$btn.removeClass("btn-default").addClass("active btn-primary");
+			this._claim_filter = $btn.data("filter") || "all";
+			this._load_claims_pipeline(panel);
+		});
+
+		// VAS activity refresh
+		panel.on("click", ".ch-vas-refresh", () => this._load_vas_activity(panel));
 
 		// Raise claim for a device
 		panel.on("click", ".ch-dev-raise-claim", (e) => {
@@ -1417,13 +1450,23 @@ export class ClaimsWorkspace {
 		const pipe = panel.find(".ch-claim-pipeline");
 		pipe.html(`<div class="text-muted text-center" style="padding:12px"><i class="fa fa-spinner fa-spin"></i></div>`);
 
+		const filters = {
+			docstatus: ["!=", 2],
+			claim_status: ["not in", ["Closed", "Cancelled"]],
+			company: PosState.active_company || PosState.company || "",
+		};
+		// Filter chip — VAS family vs manufacturer-only
+		const f = this._claim_filter || "all";
+		const VAS_TYPES = ["Extended Warranty", "Value Added Service", "Protection Plan", "Post-Repair Warranty"];
+		if (f === "vas") {
+			filters.coverage_type = ["in", VAS_TYPES];
+		} else if (f === "manufacturer") {
+			filters.coverage_type = "Manufacturer Warranty";
+		}
+
 		frappe.xcall("frappe.client.get_list", {
 			doctype: "CH Warranty Claim",
-			filters: {
-				docstatus: ["!=", 2],
-				claim_status: ["not in", ["Closed", "Cancelled"]],
-				company: PosState.active_company || PosState.company || "",
-			},
+			filters: filters,
 			fields: ["name", "claim_date", "claim_status", "serial_no", "customer_name",
 				"customer", "item_name", "coverage_type"],
 			order_by: "modified desc",
@@ -1455,11 +1498,91 @@ export class ClaimsWorkspace {
 		});
 	}
 
+	// ── VAS Plans Activity ──────────────────────────────────────────
+	// Surfaces sold VAS plans + claim utilisation + voucher redemptions so
+	// users see VAS-specific lifecycle data, not just purchase records.
+
+	_load_vas_activity(panel) {
+		const box = panel.find(".ch-vas-activity");
+		box.html(`<div class="text-muted text-center" style="padding:12px"><i class="fa fa-spinner fa-spin"></i></div>`);
+
+		frappe.xcall("ch_item_master.ch_item_master.warranty_api.get_vas_claims_dashboard", {
+			company: PosState.active_company || PosState.company || "",
+			limit: 15,
+		}).then((data) => {
+			const summary = (data && data.summary) || {};
+			const plans = (data && data.sold_plans) || [];
+			const claims = (data && data.recent_claims) || [];
+			const vouchers = (data && data.voucher_redemptions) || [];
+
+			if (!plans.length && !claims.length && !vouchers.length) {
+				box.html(`<div class="text-muted text-center" style="padding:16px">${__("No VAS activity in scope")}</div>`);
+				return;
+			}
+
+			const summary_html = `
+				<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;font-size:11px">
+					<span class="badge badge-info">${__("Active")}: ${summary.active_plans || 0}/${summary.total_plans || 0}</span>
+					<span class="badge badge-warning">${__("Open Claims")}: ${summary.open_claims || 0}</span>
+					<span class="badge badge-secondary">${__("Recent Claims")}: ${summary.total_claims || 0}</span>
+				</div>`;
+
+			const plans_html = plans.length ? `
+				<div style="font-weight:600;font-size:11px;color:#6b7280;margin:6px 0 4px">${__("Sold Plans")}</div>
+				<div style="max-height:220px;overflow:auto">
+					${plans.map(p => {
+						const status_cls = ((p.status || "").toLowerCase().includes("active")) ? "success"
+							: ((p.status || "").toLowerCase().includes("expired")) ? "secondary"
+							: ((p.status || "").toLowerCase().includes("exhausted")) ? "danger" : "default";
+						return `
+						<div class="ch-vas-plan-row" data-name="${frappe.utils.escape_html(p.name)}"
+							style="display:flex;align-items:center;gap:6px;padding:6px;font-size:12px;
+							border-bottom:1px solid #f3f4f6;cursor:pointer">
+							<span class="badge badge-${status_cls}" style="min-width:60px;text-align:center">${frappe.utils.escape_html(p.status || "—")}</span>
+							<span style="flex:1">
+								<b>${frappe.utils.escape_html(p.plan_title || p.warranty_plan || "")}</b>
+								<span class="text-muted"> · ${frappe.utils.escape_html(p.customer_name || p.customer || "")}</span>
+								${p.serial_no ? `<span class="text-muted"> · IMEI ${frappe.utils.escape_html(p.serial_no)}</span>` : ""}
+							</span>
+							<span style="font-size:11px;color:#6b7280">
+								${__("Claims")}: <b>${p.claim_count || 0}</b>${p.open_claims ? ` (${p.open_claims} open)` : ""}
+							</span>
+							<span style="font-size:11px;color:#9ca3af">${p.end_date || ""}</span>
+						</div>`;
+					}).join("")}
+				</div>` : "";
+
+			const vouchers_html = vouchers.length ? `
+				<div style="font-weight:600;font-size:11px;color:#6b7280;margin:10px 0 4px">${__("Voucher Redemptions")}</div>
+				<div style="max-height:140px;overflow:auto">
+					${vouchers.map(v => `
+						<div style="display:flex;gap:6px;padding:4px 6px;font-size:11px;border-bottom:1px solid #f3f4f6">
+							<span style="min-width:70px">${frappe.utils.escape_html(v.posting_date || "")}</span>
+							<span style="flex:1">${frappe.utils.escape_html(v.transaction_type || "")} — ${frappe.utils.escape_html(v.customer_name || v.customer || "")}</span>
+							<span class="text-muted">${v.amount ? "₹" + format_number(v.amount) : ""}</span>
+						</div>
+					`).join("")}
+				</div>` : "";
+
+			box.html(summary_html + plans_html + vouchers_html);
+
+			box.find(".ch-vas-plan-row").on("click", function () {
+				const name = $(this).data("name");
+				if (name) frappe.set_route("Form", "CH Sold Plan", name);
+			});
+		}).catch(() => {
+			box.html(`<div class="text-muted text-center" style="padding:12px">${__("Error loading VAS activity")}</div>`);
+		});
+	}
+
 	// ── Auto-refresh ────────────────────────────────────────────────
 
 	_start_auto_refresh(panel) {
 		this._stop_auto_refresh();
-		this._refresh_timer = setInterval(() => this._load_claims_pipeline(panel), 30000);
+		this._refresh_timer = setInterval(() => {
+			this._load_claims_pipeline(panel);
+			this._load_vas_activity(panel);
+		}, 30000);
 	}
 
 	_stop_auto_refresh() {
