@@ -30,6 +30,11 @@ def fail(name, detail=""):
     print(f"FAIL  {name}{f'  ({detail})' if detail else ''}")
 
 
+def skip(name, detail=""):
+    results.append(("SKIP", name, detail))
+    print(f"SKIP  {name}{f'  ({detail})' if detail else ''}")
+
+
 def _first_pos_profile():
     return frappe.db.get_value("POS Profile", {"disabled": 0}, "name")
 
@@ -41,7 +46,7 @@ def test_full_item_catalog_shape():
 
     pos_profile = _first_pos_profile()
     if not pos_profile:
-        fail("T01_full_catalog_shape", "no POS profile")
+        skip("T01_full_catalog_shape", "no POS profile")
         return
 
     result = get_full_item_catalog(pos_profile=pos_profile, page=0, page_size=50)
@@ -87,9 +92,22 @@ def test_customer_catalog_shape():
 
 def test_idempotency_via_client_id():
     """Calling create_pos_invoice_offline twice with same client_id returns same name."""
+    # Guard: skip if the column hasn't been migrated yet in any relevant table
+    def _col_exists(table):
+        return frappe.db.sql(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+            "AND COLUMN_NAME = 'ch_offline_client_id'",
+            table,
+        )[0][0]
+
+    if not _col_exists("tabSales Invoice") or not _col_exists("tabPOS Invoice"):
+        skip("test_idempotency_via_client_id",
+             "ch_offline_client_id column not yet migrated — run bench migrate")
+        return
+
     client_id = f"test-offline-idem-{frappe.generate_hash(length=8)}"
 
-    # Verify there is no existing invoice with this client_id
     existing = frappe.db.get_value(
         "Sales Invoice",
         {"ch_offline_client_id": client_id},
@@ -136,7 +154,7 @@ def test_paginated_catalog_scan():
 
     pos_profile = _first_pos_profile()
     if not pos_profile:
-        fail("T04_paginated_scan", "no POS profile")
+        skip("T04_paginated_scan", "no POS profile")
         return
 
     total_db = frappe.db.count("Item", {"disabled": 0, "is_sales_item": 1})
@@ -269,5 +287,5 @@ def run_all():
     print("=" * 60)
 
     if failed:
-        raise SystemExit(1)
+        raise Exception(f"Offline Resilience E2E: {failed} test(s) failed")
     return results

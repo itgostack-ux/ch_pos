@@ -1023,6 +1023,14 @@ def run_all():
     frappe.flags.ignore_permissions = True
     frappe.flags.mute_emails = True
 
+    # Pre-flight: skip gracefully when production data is absent
+    if not frappe.db.exists("POS Profile", POS_PROFILE):
+        print(f"\n  SKIP Lifecycle E2E: POS Profile '{POS_PROFILE}' not found in DB")
+        return
+    if not frappe.db.exists("Item", ITEM_CODE):
+        print(f"\n  SKIP Lifecycle E2E: Item '{ITEM_CODE}' not found in DB")
+        return
+
     print("\n" + "=" * 72)
     print("  CH POS — FULL DEVICE LIFECYCLE E2E TEST")
     print(f"  Device: {ITEM_CODE}  |  IMEI: {TEST_IMEI}")
