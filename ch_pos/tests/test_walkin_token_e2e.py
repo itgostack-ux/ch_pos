@@ -528,3 +528,5 @@ def _run_scenarios_for_ctx(ctx):
         except Exception as e:
             fail(f"{name} [{ctx['company']}]", str(e))
             traceback.print_exc()
+
+run_all = test_all

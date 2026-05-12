@@ -8,7 +8,7 @@
  "doctype": "Workspace",
  "for_user": "",
  "hide_custom": 0,
- "icon": "retail",
+ "icon": "selling",
  "idx": 0,
  "is_hidden": 0,
  "label": "POS",
@@ -600,5 +600,6 @@
   }
  ],
  "title": "POS",
- "type": "Workspace"
+ "type": "Workspace",
+ "indicator_color": "blue"
 }

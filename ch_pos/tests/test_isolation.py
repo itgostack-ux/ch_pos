@@ -657,3 +657,5 @@ def test_all():
     print("-" * 70 + "\n")
 
     return results
+
+run_all = test_all

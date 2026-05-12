@@ -969,3 +969,5 @@ if __name__ == "__main__":
     frappe.connect(site="erpnext.local")
     frappe.set_user("Administrator")
     test_all()
+
+run_all = test_all

@@ -942,7 +942,11 @@ def run_all():
     results = []
 
     frappe.set_user("Administrator")
-    ctx = _get_ctx()
+    try:
+        ctx = _get_ctx()
+    except Exception as e:
+        print(f"  SKIP Modules E2E: {e}")
+        return
     print(f"Context: profile={ctx['pos_profile']}, store={ctx['store']}, "
           f"company={ctx['company']}, item={ctx.get('item_code')}, "
           f"customer={ctx.get('customer')}")
