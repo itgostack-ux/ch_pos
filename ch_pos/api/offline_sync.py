@@ -96,7 +96,7 @@ def get_full_item_catalog(pos_profile, company=None, page=0, page_size=200):
             i.stock_uom,
             i.has_serial_no,
             i.has_variants,
-            i.thumbnail,
+            i.image AS thumbnail,
             IFNULL(b.actual_qty, 0) AS actual_qty,
             ip.price_list_rate        AS standard_rate
         FROM `tabItem` i

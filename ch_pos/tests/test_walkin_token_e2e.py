@@ -384,10 +384,10 @@ def _create_test_pos_invoice(ctx, token_name=None):
             "name",
         )
 
-    # Debit-to account for this company
+    # Debit-to account for this company (must be Asset root type — Debtors)
     debit_account = frappe.db.get_value(
         "Account",
-        {"company": company, "account_type": "Receivable", "is_group": 0},
+        {"company": company, "account_type": "Receivable", "root_type": "Asset", "is_group": 0},
         "name",
     )
 

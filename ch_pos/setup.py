@@ -21,6 +21,24 @@ CUSTOM_FIELDS = {
             "insert_after": "custom_pos_mode",
             "module": "POS Core",
         },
+        {
+            "fieldname": "custom_return_auto_approve_limit",
+            "fieldtype": "Currency",
+            "label": "Return Auto-Approve Limit",
+            "insert_after": "custom_store",
+            "description": "Max refund value (₹) auto-approved without manager. Default: ₹5,000.",
+            "default": "5000",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_return_window_days",
+            "fieldtype": "Int",
+            "label": "Return Window (Days)",
+            "insert_after": "custom_return_auto_approve_limit",
+            "description": "Days after sale within which returns are allowed. Default: 30.",
+            "default": "30",
+            "module": "POS Core",
+        },
     ],
     "Sales Invoice": [
         {
@@ -626,6 +644,19 @@ CUSTOM_FIELDS = {
             "fieldtype": "Data",
             "label": "Gateway Status",
             "insert_after": "custom_gateway_order_id",
+            "module": "POS Core",
+        },
+    ],
+    # POS Invoice — offline deduplication key (mirrors Sales Invoice field)
+    "POS Invoice": [
+        {
+            "fieldname": "ch_offline_client_id",
+            "fieldtype": "Data",
+            "label": "Offline Client ID",
+            "insert_after": "pos_profile",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
             "module": "POS Core",
         },
     ],
