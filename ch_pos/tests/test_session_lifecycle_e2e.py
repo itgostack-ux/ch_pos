@@ -490,8 +490,15 @@ def test_09_close_session():
         frappe.set_user("Administrator")
         from ch_pos.api.session_api import open_session, close_session
 
-        # Disable settlement requirement for this test
-        from ch_pos.api.session_api import _is_settlement_required
+        # Temporarily disable settlement requirement for this test
+        _orig_settlement = frappe.db.get_single_value(
+            "CH POS Control Settings", "require_settlement_before_session_close"
+        )
+        frappe.db.set_single_value(
+            "CH POS Control Settings", "require_settlement_before_session_close", 0
+        )
+        frappe.db.commit()
+
         # Open session
         open_result = open_session(
             pos_profile=ctx["pos_profile"],
@@ -506,6 +513,13 @@ def test_09_close_session():
             closing_cash=5000,
             manager_pin="1234",
         )
+
+        # Restore settlement setting
+        frappe.db.set_single_value(
+            "CH POS Control Settings", "require_settlement_before_session_close",
+            _orig_settlement or 0
+        )
+        frappe.db.commit()
 
         assert close_result.get("status") == "Closed", f"Expected Closed, got {close_result.get('status')}"
         assert flt(close_result.get("cash_variance")) == 0, f"Variance should be 0"
@@ -591,6 +605,15 @@ def test_11_complete_lifecycle():
         from ch_pos.api.session_api import open_session, close_session, get_session_status
         from ch_pos.api.isolation_api import get_pos_context_for_store
 
+        # Temporarily disable settlement requirement
+        _orig_settlement = frappe.db.get_single_value(
+            "CH POS Control Settings", "require_settlement_before_session_close"
+        )
+        frappe.db.set_single_value(
+            "CH POS Control Settings", "require_settlement_before_session_close", 0
+        )
+        frappe.db.commit()
+
         # 1. Verify store is ready
         store_ctx = get_pos_context_for_store(ctx["store"])
         assert store_ctx.get("day_closed") == False, f"Store should not be day_closed before opening"
@@ -619,6 +642,14 @@ def test_11_complete_lifecycle():
             closing_cash=10000,
             manager_pin="1234",
         )
+
+        # Restore settlement setting
+        frappe.db.set_single_value(
+            "CH POS Control Settings", "require_settlement_before_session_close",
+            _orig_settlement or 0
+        )
+        frappe.db.commit()
+
         assert close_result["status"] == "Closed"
         session_name = None  # Closed
 
@@ -773,11 +804,30 @@ def test_all():
     print("CH POS — Session Lifecycle E2E Tests")
     print("=" * 70 + "\n")
 
-    # One-time setup: ensure PIN exists
+    # One-time setup: ensure PIN and POS Executive exist
     frappe.set_user("Administrator")
     ctx = _get_test_context()
+    _test_exec_name = None
     if ctx:
         _ensure_manager_pin(ctx["store"])
+        # Create a POS Executive for Administrator if not present (test-only, cleaned up after)
+        if not frappe.db.exists("POS Executive", {
+            "user": "Administrator",
+            "company": ctx["company"],
+            "store": ctx["store"],
+            "is_active": 1,
+        }):
+            _exec = frappe.get_doc({
+                "doctype": "POS Executive",
+                "executive_name": "Test Administrator",
+                "user": "Administrator",
+                "company": ctx["company"],
+                "store": ctx["store"],
+                "role": "Manager",
+                "is_active": 1,
+            })
+            _exec.insert(ignore_permissions=True)
+            _test_exec_name = _exec.name
     frappe.db.commit()
 
     tests = [
@@ -808,6 +858,14 @@ def test_all():
         except Exception:
             frappe.db.rollback()
 
+    # Cleanup test-only POS Executive
+    if _test_exec_name:
+        try:
+            frappe.delete_doc("POS Executive", _test_exec_name, ignore_permissions=True, force=True)
+            frappe.db.commit()
+        except Exception:
+            pass
+
     # Summary
     total = len(results)
     passed = sum(1 for r in results if r["status"] == "PASS")
@@ -823,6 +881,8 @@ def test_all():
                 print(f"  ❌ {r['scenario']}: {r['detail']}")
     print("=" * 70)
 
+    if failed:
+        raise Exception(f"Session Lifecycle E2E: {failed} test(s) failed")
     return results
 
 run_all = test_all

@@ -603,6 +603,59 @@ def _cleanup(ctx):
         print(f"  ℹ️  Restored {len(ctx['closed_blocking_sessions'])} blocking session(s) to Open")
 
 
+_bootstrap_exec_record = None
+
+
+def _bootstrap_exec_for_context():
+    """Create a temporary POS Executive for Administrator so _get_test_context() can find a valid store."""
+    global _bootstrap_exec_record
+    # Find a valid profile + store pair first
+    profiles = frappe.get_all(
+        "POS Profile", filters={"disabled": 0},
+        fields=["name", "company", "warehouse"], order_by="name",
+    )
+    all_stores = frappe.get_all("CH Store", fields=["name", "company"])
+    company_stores = {}
+    for s in all_stores:
+        company_stores.setdefault(s.company, []).append(s.name)
+
+    for pp in profiles:
+        stores = company_stores.get(pp.company, [])
+        if not stores:
+            continue
+        store = stores[0]
+        # Only create if one doesn't already exist
+        if not frappe.db.exists("POS Executive", {
+            "user": "Administrator", "company": pp.company,
+            "store": store, "is_active": 1,
+        }):
+            rec = frappe.get_doc({
+                "doctype": "POS Executive",
+                "executive_name": "Test Bootstrap Admin",
+                "user": "Administrator",
+                "company": pp.company,
+                "store": store,
+                "role": "Manager",
+                "is_active": 1,
+            })
+            rec.insert(ignore_permissions=True)
+            frappe.db.commit()
+            _bootstrap_exec_record = rec.name
+        return
+
+
+def _cleanup_bootstrap_exec():
+    """Remove the temporary POS Executive created by _bootstrap_exec_for_context."""
+    global _bootstrap_exec_record
+    if _bootstrap_exec_record:
+        try:
+            frappe.delete_doc("POS Executive", _bootstrap_exec_record, ignore_permissions=True, force=True)
+            frappe.db.commit()
+        except Exception:
+            pass
+        _bootstrap_exec_record = None
+
+
 def test_all():
     """Run all isolation tests."""
     global results
@@ -615,6 +668,10 @@ def test_all():
     print("\n" + "=" * 70)
     print("  CH POS — Strict Isolation & Session Governance Tests")
     print("=" * 70 + "\n")
+
+    # Pre-create a POS Executive for Administrator if none exists, so _get_test_context works
+    _test_exec_name = None
+    _bootstrap_exec_for_context()
 
     ctx = _get_test_context()
     if not ctx:
@@ -647,6 +704,9 @@ def test_all():
 
     # Cleanup
     _cleanup(ctx)
+
+    # Remove the temporary POS Executive we created for bootstrap (if any)
+    _cleanup_bootstrap_exec()
 
     # Summary
     print("\n" + "-" * 70)

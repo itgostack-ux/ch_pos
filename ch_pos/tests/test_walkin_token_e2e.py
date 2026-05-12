@@ -384,12 +384,9 @@ def _create_test_pos_invoice(ctx, token_name=None):
             "name",
         )
 
-    # Debit-to account for this company (must be Asset root type — Debtors)
-    debit_account = frappe.db.get_value(
-        "Account",
-        {"company": company, "account_type": "Receivable", "root_type": "Asset", "is_group": 0},
-        "name",
-    )
+    # Debit-to account for this company — use company default to avoid picking
+    # secondary receivable accounts (EMI, Intercompany, etc.)
+    debit_account = frappe.db.get_value("Company", company, "default_receivable_account")
 
     doc_dict = {
         "doctype": "Sales Invoice",
