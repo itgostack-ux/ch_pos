@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_import": 1,
  "allow_rename": 0,
  "autoname": "format:AUDIT-{YYYY}-{#####}",
  "creation": "2026-03-13 00:00:00.000000",
