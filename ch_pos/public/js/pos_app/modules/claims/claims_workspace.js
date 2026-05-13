@@ -1150,6 +1150,12 @@ export class ClaimsWorkspace {
 				<div><span class="text-muted">${__("Customer")}:</span> <b>₹${format_number(claim.customer_share || 0)}</b></div>
 				<div><span class="text-muted">${__("Fee")}:</span> <b>₹${format_number(claim.processing_fee_amount || 0)}</b></div>
 			</div>
+			${claim.claim_status === "Additional Approval Pending" && Number(claim.additional_cost_customer || 0) > 0 ? `
+			<div style="margin-top:6px;padding:6px 8px;background:#fef3c7;border:1px dashed #f59e0b;border-radius:4px;font-size:11px">
+				<b>${__("Pending Customer Approval")}:</b>
+				${claim.additional_issue_description ? `<span>${frappe.utils.escape_html(claim.additional_issue_description)} — </span>` : ""}
+				<b>+₹${format_number(claim.additional_cost_customer)}</b> ${__("to customer share")}
+			</div>` : ""}
 			${logistics_detail}
 			${actions.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${actions.join("")}</div>` : ""}
 		</div>`;
@@ -1409,7 +1415,7 @@ export class ClaimsWorkspace {
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
 			], (v) => {
 				frappe.xcall("ch_item_master.ch_item_master.warranty_api.resolve_additional_approval_claim", {
-					claim_name, decision: "Approved", remarks: v.remarks,
+					claim_name, decision: "Customer Approved", remarks: v.remarks,
 				}).then(() => refresh("Customer approved additional cost"));
 			}, __("Customer Approved Additional Cost"), __("Confirm"));
 			return;
@@ -1421,7 +1427,7 @@ export class ClaimsWorkspace {
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
 			], (v) => {
 				frappe.xcall("ch_item_master.ch_item_master.warranty_api.resolve_additional_approval_claim", {
-					claim_name, decision: "Rejected", remarks: v.remarks,
+					claim_name, decision: "Customer Rejected", remarks: v.remarks,
 				}).then(() => refresh("Customer rejected additional cost"));
 			}, __("Customer Rejected Additional Cost"), __("Confirm"));
 			return;
