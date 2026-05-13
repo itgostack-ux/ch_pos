@@ -242,12 +242,12 @@
 				{ fieldname: "whatsapp_number", fieldtype: "Data", label: __("WhatsApp Number"), reqd: 1 },
 
 				{ fieldtype: "Section Break", label: __("WhatsApp Verification") },
-				{ fieldname: "otp_code", fieldtype: "Data", label: __("OTP Code") },
+				{ fieldname: "otp_code", fieldtype: "Data", label: __("OTP Code"),
+				  description: __("Enter the 6-digit code received on WhatsApp / Email. Verified automatically.") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "otp_actions", fieldtype: "HTML", options: `
 					<div class="ch-customer-otp-actions" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding-top:2px">
 						<button type="button" class="btn btn-default btn-xs ch-send-customer-otp">${__("Send OTP")}</button>
-						<button type="button" class="btn btn-default btn-xs ch-verify-customer-otp">${__("Verify OTP")}</button>
 					</div>` },
 				{ fieldname: "otp_status", fieldtype: "HTML", options: "" },
 
@@ -553,19 +553,23 @@
 			button.onpointerdown = run;
 		};
 
-		const bind_verify_otp_button = () => {
-			const button = d.$wrapper.find(".ch-verify-customer-otp").get(0);
-			if (!button || button._ch_verify_otp_bound) return;
-			button._ch_verify_otp_bound = true;
-			const run = (event) => {
-				event?.preventDefault?.();
-				event?.stopImmediatePropagation?.();
+		// Auto-verify OTP when the user finishes typing a 6-digit code (Razorpay /
+		// Stripe Checkout pattern). Removes the need for an explicit Verify button.
+		const bind_otp_auto_verify = () => {
+			const el = d.$wrapper.find('[data-fieldname="otp_code"] input').get(0);
+			if (!el || el._ch_otp_auto_bound) return;
+			el._ch_otp_auto_bound = true;
+			let last_attempted = "";
+			const maybe_verify = () => {
+				const code = (el.value || "").replace(/\D/g, "").trim();
+				if (code.length !== 6 || code === last_attempted) return;
+				const whatsapp = input_value("whatsapp_number");
+				if (!whatsapp || otp_verified_number === whatsapp) return;
+				last_attempted = code;
 				verify_otp_handler();
-				return false;
 			};
-			button.onclick = run;
-			button.onmousedown = run;
-			button.onpointerdown = run;
+			el.addEventListener("input", maybe_verify);
+			el.addEventListener("change", maybe_verify);
 		};
 
 		const bind_native_inputs = () => {
@@ -594,10 +598,10 @@
 		setTimeout(bind_native_inputs, 50);
 		d.$wrapper.one("shown.bs.modal", bind_native_inputs);
 		setTimeout(bind_send_otp_button, 50);
-		setTimeout(bind_verify_otp_button, 50);
+		setTimeout(bind_otp_auto_verify, 50);
 		d.$wrapper.one("shown.bs.modal", () => {
 			bind_send_otp_button();
-			bind_verify_otp_button();
+			bind_otp_auto_verify();
 		});
 
 		// Autofill watch
