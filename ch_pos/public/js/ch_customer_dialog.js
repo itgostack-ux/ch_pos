@@ -304,9 +304,36 @@
 				const existing_by_whatsapp = await check_existing_customer(whatsapp);
 				if (offer_use_existing_customer(existing_by_whatsapp)) return;
 
+				// UX fix: if user typed an OTP but never clicked "Verify OTP" explicitly,
+				// auto-verify on Create instead of forcing an extra click. Mirrors the
+				// inline OTP verification pattern used by Razorpay / Shopify checkout.
 				if (otp_verified_number !== whatsapp) {
-					frappe.show_alert({ message: __("Verify WhatsApp OTP before creating customer"), indicator: "red" });
-					return;
+					const otp_code = input_value("otp_code");
+					if (otp_code) {
+						try {
+							const res = await frappe.xcall("ch_pos.api.pos_api.verify_customer_whatsapp_otp", {
+								mobile_no: whatsapp,
+								otp_code,
+							});
+							if (res && res.valid) {
+								otp_verified_number = whatsapp;
+								d.fields_dict.otp_status.$wrapper.html(status_html(__("WhatsApp verified"), "#15803d"));
+							} else {
+								const msg = (res && res.message) || __("Invalid OTP");
+								d.fields_dict.otp_status.$wrapper.html(status_html(msg, "#b91c1c"));
+								frappe.show_alert({ message: msg, indicator: "red" });
+								return;
+							}
+						} catch (err) {
+							const msg = otp_error_message(err, __("OTP verification failed"));
+							d.fields_dict.otp_status.$wrapper.html(status_html(msg, "#b91c1c"));
+							frappe.show_alert({ message: msg, indicator: "red" });
+							return;
+						}
+					} else {
+						frappe.show_alert({ message: __("Send & verify WhatsApp OTP before creating customer"), indicator: "red" });
+						return;
+					}
 				}
 				frappe.xcall("ch_pos.api.pos_api.quick_create_customer", {
 					customer_name,
