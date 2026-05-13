@@ -2,7 +2,10 @@ import frappe
 from frappe.utils import flt, cint
 
 
-DISCOVERY_QUESTIONS = [
+# Universal questions shown for every category. Anything category-specific
+# (Capacity, Material, Use Case, Storage, Colour, ...) MUST come from the
+# Sub Category's Specifications table so the form always matches the product.
+UNIVERSAL_QUESTIONS = [
     {
         "question": "What is your budget range?",
         "type": "range",
@@ -10,33 +13,41 @@ DISCOVERY_QUESTIONS = [
         "options": {"min": 0, "max": 200000, "step": 1000},
     },
     {
-        "question": "What will you primarily use this for?",
-        "type": "multi",
-        "key": "usage",
-        "options": ["Gaming", "Photography", "Business", "Social Media", "Basic Use"],
-    },
-    {
         "question": "Do you have a brand preference?",
         "type": "choice",
         "key": "brand",
-        "options": [],  # filled dynamically
-    },
-    {
-        "question": "Condition preference?",
-        "type": "choice",
-        "key": "condition",
-        "options": ["New", "Refurbished", "Any"],
+        "options": [],  # filled dynamically from items in this sub-category
     },
 ]
 
 
-@frappe.whitelist()
-def get_guided_questions(sub_category) -> dict:
-    """Return guided selling questions for a sub-category."""
-    questions = list(DISCOVERY_QUESTIONS)
+# Sub Category Spec.spec_type → question type for the guided form.
+_SPEC_TYPE_TO_QUESTION_TYPE = {
+    "Variant": "choice",
+    "Property": "choice",
+}
 
-    # Fill brand options from items in this sub-category's item group
+
+@frappe.whitelist()
+def get_guided_questions(sub_category) -> list:
+    """Return guided selling questions for a sub-category.
+
+    Always:
+      • Budget (universal)
+      • Brand (auto-populated from items in this sub-category)
+      • Condition (only when refurbished/exchange items exist)
+    Plus a question per Sub Category specification, sourced from real
+    `CH Model Spec Value` data so options never include junk like
+    "Photography" for bags.
+    """
+    if not sub_category:
+        return []
+
+    questions = [dict(q) for q in UNIVERSAL_QUESTIONS]
+
     item_group = frappe.db.get_value("CH Sub Category", sub_category, "item_group")
+
+    # ── Brand options from items in this group ───────────────────────────
     if item_group:
         brands = frappe.db.get_all(
             "Item",
@@ -45,24 +56,55 @@ def get_guided_questions(sub_category) -> dict:
             distinct=True,
             pluck="brand",
         )
+        brand_opts = sorted({b for b in brands if b})
         for q in questions:
             if q["key"] == "brand":
-                q["options"] = sorted(set(b for b in brands if b))
+                q["options"] = brand_opts
                 break
+        # Drop the brand question entirely if no brands exist for this group
+        if not brand_opts:
+            questions = [q for q in questions if q["key"] != "brand"]
 
-    # Add spec-based questions from CH Sub Category specifications
+    # ── Condition (only if the catalogue actually has refurbished stock) ─
+    if item_group and _has_refurbished_items(item_group):
+        questions.append({
+            "question": "Condition preference?",
+            "type": "choice",
+            "key": "condition",
+            "options": ["New", "Refurbished", "Any"],
+        })
+
+    # ── Spec-driven category-specific questions ──────────────────────────
     sub_cat_doc = frappe.get_cached_doc("CH Sub Category", sub_category)
     for spec in sub_cat_doc.specifications or []:
-        questions.append(
-            {
-                "question": f"Preferred {spec.spec}?",
-                "type": "choice",
-                "key": f"spec_{spec.spec}",
-                "options": _get_spec_options(sub_category, spec.spec),
-            }
-        )
+        spec_name = spec.spec
+        if not spec_name:
+            continue
+        options = _get_spec_options(sub_category, spec_name)
+        if not options:
+            # Skip specs that have no real values — a question with no
+            # answers is just noise.
+            continue
+        questions.append({
+            "question": f"Preferred {spec_name}?",
+            "type": _SPEC_TYPE_TO_QUESTION_TYPE.get(spec.spec_type, "choice"),
+            "key": f"spec_{spec_name}",
+            "options": options,
+            "spec_name": spec_name,
+        })
 
     return questions
+
+
+def _has_refurbished_items(item_group):
+    """True when at least one non-disabled item in the group is refurbished."""
+    if not frappe.db.has_column("Item", "ch_item_condition"):
+        return False
+    return bool(frappe.db.exists("Item", {
+        "item_group": item_group,
+        "disabled": 0,
+        "ch_item_condition": ("in", ["Refurbished", "Used", "Pre-Owned"]),
+    }))
 
 
 def _get_spec_options(sub_category, spec_name):
@@ -71,7 +113,7 @@ def _get_spec_options(sub_category, spec_name):
         """SELECT DISTINCT sv.spec_value
            FROM `tabCH Model Spec Value` sv
            JOIN `tabCH Model` m ON m.name = sv.parent
-           WHERE m.sub_category = %s AND sv.spec = %s
+           WHERE m.sub_category = %s AND sv.spec = %s AND IFNULL(sv.spec_value, '') != ''
            ORDER BY sv.spec_value""",
         (sub_category, spec_name),
         pluck="spec_value",
@@ -115,9 +157,23 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
         uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms}
 
     prefs = {r.get("key"): r.get("answer") for r in responses}
+
+    # Pre-fetch specs for every model in scope so we can score against
+    # category-specific spec_* preferences (Capacity, Material, Colour, ...).
+    all_model_names = list({item.ch_model for item in items if item.ch_model})
+    model_specs = {}
+    if all_model_names:
+        for s in frappe.db.get_all(
+            "CH Model Spec Value",
+            filters={"parent": ["in", all_model_names]},
+            fields=["parent", "spec", "spec_value"],
+        ):
+            model_specs.setdefault(s.parent, {})[s.spec] = s.spec_value
+
     scored = []
     for item in items:
-        score = _score_item(item, prefs)
+        item_specs = model_specs.get(item.ch_model, {}) if item.ch_model else {}
+        score = _score_item(item, prefs, item_specs)
         if score > 0:
             # get selling price
             price = flt(
@@ -140,34 +196,13 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
                     "stock_uom": item.stock_uom or "Nos",
                     "must_be_whole_number": cint(uom_map.get(item.stock_uom, 0)),
                     "match_score": round(score, 1),
-                    "reason": _build_reason(item, prefs),
+                    "reason": _build_reason(item, prefs, item_specs),
+                    "specs": item_specs,
                 }
             )
 
     scored.sort(key=lambda x: x["match_score"], reverse=True)
     top = scored[:limit]
-
-    # Batch-fetch specs for all top results that have a ch_model
-    model_names = list({r["ch_model"] for r in top if r.get("ch_model")})
-    specs_map = {}  # {item_code: {spec: spec_value}}
-    if model_names:
-        all_specs = frappe.db.get_all(
-            "CH Model Spec Value",
-            filters={"parent": ["in", model_names]},
-            fields=["parent", "spec", "spec_value"],
-        )
-        # Build model→specs dict first, then map via item ch_model
-        model_specs = {}
-        for s in all_specs:
-            model_specs.setdefault(s.parent, {})[s.spec] = s.spec_value
-        for r in top:
-            if r.get("ch_model"):
-                r["specs"] = model_specs.get(r["ch_model"], {})
-            else:
-                r["specs"] = {}
-    else:
-        for r in top:
-            r["specs"] = {}
 
     return top
 
@@ -260,9 +295,14 @@ def save_guided_session(
     }
 
 
-def _score_item(item, prefs):
-    """Score an item (0-100) based on customer preferences."""
+def _score_item(item, prefs, item_specs=None):
+    """Score an item (0-100) based on customer preferences.
+
+    item_specs: optional dict {spec_name: spec_value} for the item's model,
+    used to score category-specific spec_* preferences.
+    """
     score = 50  # base score
+    item_specs = item_specs or {}
 
     # Brand match
     if prefs.get("brand") and prefs["brand"] != "Any":
@@ -290,13 +330,41 @@ def _score_item(item, prefs):
             else:
                 score -= 20
 
+    # Spec preference match — category-driven, e.g. Capacity, Material, Colour
+    for key, answer in prefs.items():
+        if not key.startswith("spec_") or not answer or answer == "Any":
+            continue
+        spec_name = key[len("spec_"):]
+        actual = item_specs.get(spec_name)
+        if actual is None:
+            continue
+        # Multi-select answers come as comma-separated string from the form
+        wanted = [a.strip() for a in str(answer).split(",") if a.strip()]
+        if not wanted:
+            continue
+        if str(actual) in wanted:
+            score += 12
+        else:
+            score -= 6
+
     return max(0, min(100, score))
 
 
-def _build_reason(item, prefs):
+def _build_reason(item, prefs, item_specs=None):
     parts = []
+    item_specs = item_specs or {}
     if prefs.get("brand") and item.brand == prefs.get("brand"):
         parts.append(f"Matches preferred brand ({item.brand})")
     if prefs.get("budget"):
         parts.append("Within budget range")
+    for key, answer in prefs.items():
+        if not key.startswith("spec_") or not answer or answer == "Any":
+            continue
+        spec_name = key[len("spec_"):]
+        actual = item_specs.get(spec_name)
+        if actual is None:
+            continue
+        wanted = [a.strip() for a in str(answer).split(",") if a.strip()]
+        if str(actual) in wanted:
+            parts.append(f"{spec_name}: {actual}")
     return "; ".join(parts) if parts else "Good match for your requirements"
