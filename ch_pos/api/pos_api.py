@@ -6818,6 +6818,32 @@ def pos_send_customer_otp(order_name) -> dict:
 
 
 @frappe.whitelist()
+def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
+	"""Verify OTP entered by cashier on behalf of customer.
+
+	Called from the POS "Awaiting OTP" stage when cashier types the OTP
+	the customer received on their mobile.
+	"""
+	doc = frappe.get_doc("Buyback Order", order_name)
+	result = doc.verify_otp(otp_code=otp_code)
+	if not result.get("valid"):
+		frappe.throw(result.get("message") or frappe._("Invalid or expired OTP."))
+	return {"verified": True}
+
+
+@frappe.whitelist()
+def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
+	"""Skip OTP for in-store customer approval.
+
+	Thin wrapper so the POS can call the BBO method via xcall
+	(doctype method calls from POS require the standard frappe.call
+	pattern, but xcall to a whitelisted function is simpler from JS).
+	"""
+	doc = frappe.get_doc("Buyback Order", name)
+	return doc.bypass_otp_instore(remarks=remarks)
+
+
+@frappe.whitelist()
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
                                  kyc_id_type=None, kyc_id_number=None,
                                  customer_id_front=None, customer_id_back=None,

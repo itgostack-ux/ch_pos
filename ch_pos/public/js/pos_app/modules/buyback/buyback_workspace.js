@@ -28,8 +28,8 @@ function _determine_stage(data) {
 	if (data.order) {
 		const s = data.order.status || "";
 		if (["Paid", "Closed"].includes(s)) return STAGE.DONE;
-		if (["Customer Approved", "Ready to Pay"].includes(s)) return STAGE.SETTLE;
-		if (["Approved", "Awaiting Customer Approval", "Awaiting OTP", "OTP Verified"].includes(s)) return STAGE.APPROVE;
+		if (["Customer Approved", "Ready to Pay", "OTP Verified"].includes(s)) return STAGE.SETTLE;
+		if (["Approved", "Awaiting Customer Approval", "Awaiting OTP"].includes(s)) return STAGE.APPROVE;
 		if (["Draft", "Awaiting Approval"].includes(s)) return STAGE.INSPECT;
 	}
 	// Assessment-based: inspection completed but no order yet → show approve/create order
@@ -694,6 +694,53 @@ export class BuybackWorkspace {
 		const is_waiting = order_status === "Awaiting Customer Approval";
 		const approval_url = order ? (order.approval_url || "") : "";
 
+		// ── "Awaiting OTP": OTP already sent, customer needs to enter it ────────
+		if (order_status === "Awaiting OTP") {
+			return `
+				<div class="ch-bb-valuation-banner" style="background:#fef3c7;border-color:#f59e0b">
+					<div class="ch-bb-val-label" style="color:#92400e">
+						<i class="fa fa-mobile"></i> ${__("OTP Sent — Awaiting Verification")}
+					</div>
+					<div class="ch-bb-val-amount" style="color:#92400e">₹${format_number(price)}</div>
+					<div class="ch-bb-val-sub" style="color:#92400e">
+						${mobile ? __("OTP sent to {0}", [masked]) : __("No mobile number on record")}
+					</div>
+				</div>
+				<div class="ch-bb-info-note" style="margin-top:12px;background:#fef9c3;border-color:#facc15;color:#713f12">
+					<i class="fa fa-info-circle"></i>
+					${__("Ask the customer for the OTP they received. Enter it below to verify, or use In-Store Approve if customer is physically present.")}
+				</div>
+				<div style="margin:14px 0;display:flex;gap:8px;align-items:flex-end">
+					<div style="flex:1">
+						<label class="ch-bb-field-label" style="font-size:12px;font-weight:600;display:block;margin-bottom:6px">
+							${__("Customer OTP")}
+						</label>
+						<input type="text" class="form-control ch-bb-otp-input"
+							maxlength="8" placeholder="e.g. 123456"
+							style="font-size:22px;font-weight:700;letter-spacing:4px;text-align:center;border-radius:var(--pos-radius,8px);padding:10px">
+					</div>
+					<button class="btn btn-success btn-lg ch-bb-act ch-bb-verify-otp-direct"
+						data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
+						style="border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px;padding:0 20px;white-space:nowrap">
+						<i class="fa fa-check-circle"></i> ${__("Verify OTP")}
+					</button>
+				</div>
+				<div class="ch-bb-actions" style="margin-top:6px;flex-direction:column;gap:8px">
+					${mobile ? `
+					<button class="btn btn-outline-primary ch-bb-act ch-bb-resend-otp-direct"
+						data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
+						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:600">
+						<i class="fa fa-paper-plane"></i> ${__("Resend OTP to")} ${masked}
+					</button>` : ""}
+					<button class="btn btn-outline-secondary ch-bb-act ch-bb-bypass-otp"
+						data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
+						style="width:100%;border-radius:var(--pos-radius,8px)">
+						<i class="fa fa-pencil"></i> ${__("Approve In-Store (Skip OTP)")}
+					</button>
+				</div>`;
+		}
+		// ────────────────────────────────────────────────────────────────────────
+
 		const price_banner = `
 			<div class="ch-bb-valuation-banner"
 				style="background:var(--pos-success-light,#d1fae5);border-color:var(--pos-success,#10b981)">
@@ -1037,6 +1084,75 @@ export class BuybackWorkspace {
 				return;
 			}
 			this._show_instore_approval_dialog(data);
+		});
+
+		// ── APPROVE (Awaiting OTP): Verify OTP directly ───────────
+		el.on("click.bbstage", ".ch-bb-verify-otp-direct", (e) => {
+			const otp_code = el.find(".ch-bb-otp-input").val().trim();
+			if (!otp_code || otp_code.length < 4) {
+				frappe.show_alert({ message: __("Enter a valid OTP"), indicator: "orange" });
+				return;
+			}
+			const btn = $(e.currentTarget);
+			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i>`);
+			frappe.xcall("ch_pos.api.pos_api.pos_verify_otp_direct", {
+				order_name: data.order.name,
+				otp_code,
+			}).then(() => {
+				frappe.show_alert({ message: __("OTP Verified!"), indicator: "green" });
+				this._reload();
+			}).catch((e) => {
+				btn.prop("disabled", false)
+					.html(`<i class="fa fa-check-circle"></i> ${__("Verify OTP")}`);
+				frappe.show_alert({ message: e.message || __("Invalid OTP"), indicator: "red" });
+			});
+		});
+
+		// ── APPROVE (Awaiting OTP): Resend OTP ───────────────────
+		el.on("click.bbstage", ".ch-bb-resend-otp-direct", (e) => {
+			const btn = $(e.currentTarget);
+			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Sending...")}`);
+			frappe.xcall("ch_pos.api.pos_api.pos_send_customer_otp", {
+				order_name: data.order.name,
+			}).then((res) => {
+				frappe.show_alert({
+					message: __("OTP resent to {0}", [res.masked_mobile || data.mobile_no]),
+					indicator: "green",
+				});
+				btn.prop("disabled", true)
+					.html(`<i class="fa fa-check"></i> ${__("OTP Resent")}`);
+			}).catch((e) => {
+				btn.prop("disabled", false)
+					.html(`<i class="fa fa-paper-plane"></i> ${__("Resend OTP")}`);
+				frappe.show_alert({ message: e.message || __("Failed to resend OTP"), indicator: "red" });
+			});
+		});
+
+		// ── APPROVE (Awaiting OTP): Bypass OTP In-Store ──────────
+		el.on("click.bbstage", ".ch-bb-bypass-otp", (e) => {
+			const order_name = data.order && data.order.name;
+			if (!order_name) return;
+			frappe.prompt([{
+				label: __("Remarks"),
+				fieldname: "remarks",
+				fieldtype: "Small Text",
+				description: __("Reason for bypassing OTP — will be logged for audit"),
+			}], (values) => {
+				frappe.confirm(
+					__("Confirm: customer is physically present and has approved in-store. OTP will be bypassed and this action will be logged."),
+					() => {
+						frappe.xcall("ch_pos.api.pos_api.bypass_otp_instore", {
+							name: order_name,
+							remarks: values.remarks || null,
+						}).then(() => {
+							frappe.show_alert({ message: __("In-store approval recorded — OTP bypassed"), indicator: "green" });
+							this._reload();
+						}).catch((e) => {
+							frappe.show_alert({ message: e.message || __("Failed"), indicator: "red" });
+						});
+					}
+				);
+			}, __("In-Store Approval"), __("Confirm Bypass"));
 		});
 
 		// ── SETTLE: Cashback ────────────────────────────
