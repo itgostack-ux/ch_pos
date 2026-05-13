@@ -239,35 +239,16 @@ export class RepairWorkspace {
 
 		// ── New Customer quick-create ──
 		panel.on("click", ".ch-rep-new-customer", () => {
-			const d = new frappe.ui.Dialog({
-				title: __("New Customer"),
-				fields: [
-					{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"), reqd: 1 },
-					{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), reqd: 1 },
-					{ fieldtype: "Column Break" },
-					{ fieldname: "email_id", fieldtype: "Data", label: __("Email"), options: "Email" },
-					{ fieldname: "customer_group", fieldtype: "Link", label: __("Customer Group"), options: "Customer Group", default: "Individual" },
-				],
-				primary_action_label: __("Create"),
-				primary_action: (values) => {
-					frappe.xcall("frappe.client.insert", {
-						doc: {
-							doctype: "Customer",
-							customer_name: values.customer_name,
-							customer_type: "Individual",
-							customer_group: values.customer_group || "Individual",
-							mobile_no: values.mobile_no,
-							email_id: values.email_id || undefined,
-						}
-					}).then((doc) => {
-						cust_field.set_value(doc.name);
-						panel.find(".ch-rep-phone").val(values.mobile_no);
-						frappe.show_alert({ message: __("Customer {0} created", [doc.customer_name]), indicator: "green" });
-						d.hide();
-					});
-				}
+			window.ch_open_new_customer_dialog({
+				company: PosState.company,
+				on_success: (name, mobile) => {
+					cust_field.set_value(name);
+					if (mobile) panel.find(".ch-rep-phone").val(mobile);
+				},
+				on_use_existing: (customer, cname) => {
+					cust_field.set_value(customer);
+				},
 			});
-			d.show();
 		});
 
 		panel.on("click", ".ch-rep-create", () => {

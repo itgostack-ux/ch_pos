@@ -46,6 +46,7 @@ doctype_js = {
 # App-level JS (extends POS UI)
 app_include_js = [
     "/assets/ch_pos/js/pos_extensions.js",
+    "/assets/ch_pos/js/ch_customer_dialog.js",
 ]
 
 # App-level CSS
