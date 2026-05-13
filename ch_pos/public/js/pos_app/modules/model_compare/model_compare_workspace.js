@@ -392,6 +392,7 @@ export class ModelCompareWorkspace {
 		// Collect all spec keys across selected items
 		const allSpecs = new Set();
 		const allFeatureGroups = new Map(); // group → Set of feature names
+		const variantAttrKeys = new Set();  // spec names already covered per-SKU
 		for (const item of items) {
 			Object.keys(item.specs || {}).forEach((k) => allSpecs.add(k));
 			for (const [group, features] of Object.entries(item.features || {})) {
@@ -400,7 +401,15 @@ export class ModelCompareWorkspace {
 					allFeatureGroups.get(group).add(f.feature);
 				}
 			}
+			for (const v of item.variants || []) {
+				Object.keys(v.attributes || {}).forEach((k) => variantAttrKeys.add(k));
+			}
 		}
+		// Specs already shown in the Variants section (Storage, Colour, RAM ...)
+		// would just be a confusing duplicate at the model level (one of many
+		// values picked arbitrarily). Hide them here — the Variants ladder
+		// is the source of truth for variant-driven specs.
+		for (const k of variantAttrKeys) allSpecs.delete(k);
 
 		const colWidth = Math.floor(100 / items.length);
 
