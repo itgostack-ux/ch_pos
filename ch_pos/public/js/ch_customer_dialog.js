@@ -590,4 +590,58 @@
 			$(document).off("click.ch_customer_dialog_otp mousedown.ch_customer_dialog_otp pointerdown.ch_customer_dialog_otp");
 		});
 	};
+
+	// ── Global override: any "+" button on a Customer Link field, any form ──
+	// Wait until frappe.ui.form is ready, then patch make_quick_entry.
+	function _install_customer_quick_entry_override() {
+		if (typeof frappe === "undefined" || !frappe.ui || !frappe.ui.form) {
+			return setTimeout(_install_customer_quick_entry_override, 200);
+		}
+		if (frappe.ui.form._ch_customer_qe_patched) return;
+		frappe.ui.form._ch_customer_qe_patched = true;
+
+		const _orig_make_quick_entry = frappe.ui.form.make_quick_entry;
+		frappe.ui.form.make_quick_entry = function (doctype, after_insert, init_callback, doc, force) {
+			if (doctype === "Customer") {
+				window.ch_open_new_customer_dialog({
+					on_success: (name) => {
+						if (typeof after_insert === "function") {
+							after_insert({ name: name, doctype: "Customer", customer_name: name });
+						}
+					},
+					on_use_existing: (customer) => {
+						if (typeof after_insert === "function") {
+							after_insert({ name: customer, doctype: "Customer", customer_name: customer });
+						}
+					},
+				});
+				return;
+			}
+			return _orig_make_quick_entry.apply(this, arguments);
+		};
+
+		// Also patch QuickEntryForm class if present (some Frappe paths instantiate directly)
+		if (frappe.ui.form.QuickEntryForm && frappe.ui.form.CustomerQuickEntryForm) {
+			const _orig_qef_show = frappe.ui.form.QuickEntryForm.prototype.show;
+			frappe.ui.form.QuickEntryForm.prototype.show = function () {
+				if (this.doctype === "Customer") {
+					window.ch_open_new_customer_dialog({
+						on_success: (name) => {
+							if (typeof this.after_insert === "function") {
+								this.after_insert({ name: name, doctype: "Customer", customer_name: name });
+							}
+						},
+						on_use_existing: (customer) => {
+							if (typeof this.after_insert === "function") {
+								this.after_insert({ name: customer, doctype: "Customer", customer_name: customer });
+							}
+						},
+					});
+					return;
+				}
+				return _orig_qef_show.apply(this, arguments);
+			};
+		}
+	}
+	_install_customer_quick_entry_override();
 })();
