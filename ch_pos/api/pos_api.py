@@ -7266,13 +7266,20 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
 	from frappe.utils import now_datetime
 	doc.settlement_type = "Buyback"
 
-	# Prevent duplicate payment row
+	# Avoid duplicate payments. The order may already have payment rows from
+	# another flow (customer-portal payout capture, manual entry, prior call
+	# of this same API on a doc that was reloaded). Add only the delta needed
+	# to reach final_price; if already fully paid, skip the append entirely.
+	final_price = flt(doc.final_price)
+	already_paid = sum(flt(p.amount) for p in (doc.payments or []))
+	remaining = flt(final_price - already_paid)
+
 	txn_ref = f"POS-Cashback-{doc.name}"
 	already_exists = any(p.transaction_reference == txn_ref for p in (doc.payments or []))
-	if not already_exists:
+	if not already_exists and remaining > 0.01:
 		doc.append("payments", {
 			"payment_method": payment_method,
-			"amount": flt(doc.final_price),
+			"amount": remaining,
 			"payment_date": now_datetime(),
 			"transaction_reference": txn_ref,
 		})
