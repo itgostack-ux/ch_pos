@@ -7206,7 +7206,16 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
 		}
 
 	if not doc.customer_approved:
-		frappe.throw(frappe._("Customer must approve the final price before cashback settlement."))
+		# OTP verification by the customer on their registered mobile is itself a
+		# valid form of approval. Treat OTP-verified orders as approved (and
+		# self-heal the flag for legacy rows where verify_otp didn't set it).
+		if getattr(doc, "otp_verified", 0):
+			from frappe.utils import now_datetime
+			doc.customer_approved = 1
+			if not doc.customer_approved_at:
+				doc.customer_approved_at = doc.otp_verified_at or now_datetime()
+		else:
+			frappe.throw(frappe._("Customer must approve the final price before cashback settlement."))
 
 	from frappe.utils import now_datetime
 	doc.settlement_type = "Buyback"
