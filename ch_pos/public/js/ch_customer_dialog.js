@@ -51,6 +51,7 @@
 		let $mobile_status_div = $();
 		let autofill_watch_timer = null;
 		let last_otp_trigger_at = 0;
+		let otp_request_in_flight = false;
 
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
@@ -389,6 +390,7 @@
 		$body.on("change blur", '[data-fieldname="email_id"] input', validate_email_input);
 
 		const send_otp_handler = async () => {
+			if (otp_request_in_flight) return;
 			const now = Date.now();
 			if (now - last_otp_trigger_at < 350) return;
 			last_otp_trigger_at = now;
@@ -418,6 +420,7 @@
 			if (!validate_email_input()) return;
 
 			const send_btn = d.$wrapper.find(".ch-send-customer-otp").get(0);
+			otp_request_in_flight = true;
 			if (send_btn) send_btn.disabled = true;
 			try {
 				const existing_by_mobile = await check_existing_customer(phone);
@@ -457,6 +460,7 @@
 				d.fields_dict.otp_status.$wrapper.html(status_html(message, "#b91c1c"));
 				dialog_alert(message, "red");
 			} finally {
+				otp_request_in_flight = false;
 				frappe.dom.unfreeze();
 				if (send_btn) send_btn.disabled = false;
 			}
