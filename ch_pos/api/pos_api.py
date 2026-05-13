@@ -3943,8 +3943,7 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
         if not to_email:
             to_email = _get_email_for_mobile(mobile_no)
         if to_email:
-            send_otp_email(to_email, otp_code, purpose, "")
-            sent_email = True
+            sent_email = send_otp_email(to_email, otp_code, purpose, "")
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Customer OTP email delivery failed")
 
