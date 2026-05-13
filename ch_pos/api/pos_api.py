@@ -6878,23 +6878,12 @@ def pos_send_customer_otp(order_name) -> dict:
 	if not mobile_no:
 		frappe.throw(frappe._("No mobile number on this Buyback Order."))
 
-	from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
-	otp = CHOTPLog.generate_otp(
-		mobile_no=mobile_no,
-		purpose="Buyback Customer Approval",
-		reference_doctype="Buyback Order",
-		reference_name=order_name,
-	)
-	# Deliver OTP via WhatsApp + Email (same path as Buyback Hub send_otp)
-	try:
-		from buyback.buyback.whatsapp_notifications import send_otp_whatsapp, send_otp_email
-		send_otp_whatsapp(mobile_no, otp, order_name)
-		customer_email = ""
-		if doc.customer:
-			customer_email = frappe.db.get_value("Customer", doc.customer, "email_id") or ""
-		send_otp_email(customer_email, otp, "Buyback Customer Approval", order_name)
-	except Exception:
-		frappe.log_error(title="POS Buyback OTP delivery failed")
+	# Delegate to BuybackOrder.send_otp() so the purpose, status transition, and
+	# delivery logic stay in one place. Using "Buyback Customer Approval" here
+	# previously caused a mismatch with BuybackOrder.verify_otp() which looks up
+	# purpose="Buyback Confirmation".
+	doc.flags.ignore_permissions = True
+	doc.send_otp()
 	return {
 		"sent": True,
 		"masked_mobile": mobile_no[:2] + "****" + mobile_no[-2:],
