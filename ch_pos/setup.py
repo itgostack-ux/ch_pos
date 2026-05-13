@@ -96,6 +96,16 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
         {
+            "fieldname": "custom_exchange_buyback_order",
+            "fieldtype": "Link",
+            "label": "Exchange Buyback Order",
+            "options": "Buyback Order",
+            "insert_after": "custom_exchange_amount",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_exchange_buyback_order",
+            "module": "POS Core",
+        },
+        {
             "fieldname": "custom_is_margin_scheme",
             "fieldtype": "Check",
             "label": "Has Margin Scheme Items",

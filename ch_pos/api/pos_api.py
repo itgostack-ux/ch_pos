@@ -11,6 +11,63 @@ except ImportError:
 		return phone
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
+# ── Buyback Exchange Credit helpers ─────────────────────────────────────────
+
+_EXCHANGE_MOP = "Buyback Exchange Credit"
+
+
+def _get_buyback_liability_account(company):
+    """Return the Buyback Liability GL account for this company.
+
+    Falls back gracefully: Buyback Settings → MOP account → None.
+    """
+    account = frappe.db.get_single_value("Buyback Settings", "buyback_expense_account")
+    if account:
+        return account
+    # Fallback: MOP account table
+    row = frappe.db.get_value(
+        "Mode of Payment Account",
+        {"parent": _EXCHANGE_MOP, "company": company},
+        "default_account",
+    )
+    return row or None
+
+
+def _ensure_buyback_exchange_mop(account, company):
+    """Create 'Buyback Exchange Credit' Mode of Payment if it doesn't exist.
+
+    Idempotent — safe to call on every exchange invoice. Uses a cached
+    flag so repeated calls in the same request skip the DB lookup.
+    """
+    _cache_key = f"buyback_exchange_mop_ok_{company}"
+    if frappe.cache().get_value(_cache_key):
+        return _EXCHANGE_MOP
+
+    if not frappe.db.exists("Mode of Payment", _EXCHANGE_MOP):
+        mop = frappe.new_doc("Mode of Payment")
+        mop.mode_of_payment = _EXCHANGE_MOP
+        mop.type = "General"
+        if account and company:
+            mop.append("accounts", {"company": company, "default_account": account})
+        mop.flags.ignore_permissions = True
+        mop.insert()
+        frappe.db.commit()
+    elif account and company:
+        # Ensure this company's account is configured
+        exists = frappe.db.exists(
+            "Mode of Payment Account",
+            {"parent": _EXCHANGE_MOP, "company": company},
+        )
+        if not exists:
+            mop = frappe.get_doc("Mode of Payment", _EXCHANGE_MOP)
+            mop.append("accounts", {"company": company, "default_account": account})
+            mop.flags.ignore_permissions = True
+            mop.save()
+            frappe.db.commit()
+
+    frappe.cache().set_value(_cache_key, True, expires_in_sec=3600)
+    return _EXCHANGE_MOP
+
 
 def _enforce_token_linkage(pos_profile, kiosk_token):
     """Block billing without a linked kiosk token when enforcement is enabled."""
@@ -279,7 +336,8 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
 def create_pos_invoice(pos_profile, customer, items,
                        mode_of_payment=None, amount_paid=0,
                        payments=None,
-                       exchange_assessment=None, additional_discount_percentage=0,
+                       exchange_assessment=None, buyback_order=None,
+                       additional_discount_percentage=0,
                        additional_discount_amount=0, coupon_code=None,
                        coupon_discount_amount=0,
                        voucher_code=None, voucher_amount=0,
@@ -647,19 +705,11 @@ def create_pos_invoice(pos_profile, customer, items,
         exchange_credit = flt(ba.revised_price) or flt(ba.quoted_price) or flt(ba.estimated_price)
         inv.custom_exchange_amount = exchange_credit
 
-        # ── MARKET-PARITY GUARD (Oracle Xstore / SAP Retail / MS D365 Commerce) ──
-        # When exchange/return credit exceeds the new purchase value, the system
-        # must NEVER silently drop the surplus -- the customer is owed money.
-        # Compute provisional grand_total (with items + taxes + other discounts
-        # already applied) and refuse to bill if the credit exceeds it.
-        # The cashier must either (a) add items to absorb the full credit, or
-        # (b) cancel exchange and use the Buyback -> Cashback flow to refund
-        # the surplus to the customer.
+        # ── MARKET-PARITY GUARD ──────────────────────────────────────────────
+        # Exchange credit must not exceed the new purchase value.
         try:
             inv.run_method("calculate_taxes_and_totals")
         except Exception:
-            # If calculation fails at this stage, fall through -- the regular
-            # save() below will surface the underlying error with full context.
             pass
         pre_exchange_total = flt(inv.rounded_total or inv.grand_total or 0)
         if exchange_credit - pre_exchange_total > 0.5:  # 50p tolerance for rounding
@@ -683,9 +733,26 @@ def create_pos_invoice(pos_profile, customer, items,
                 title=frappe._("Exchange Credit Surplus -- Cannot Bill"),
             )
 
-        # Apply exchange credit as a discount so ERPNext reduces grand_total
-        # and payment validation (paid_amount >= grand_total) passes.
-        inv.discount_amount = flt(inv.discount_amount or 0) + exchange_credit
+        # ── ACCOUNTING-CORRECT EXCHANGE CREDIT ──────────────────────────────
+        # Add exchange credit as a payment row (not a discount) so the GL debit
+        # hits the Device Buyback Liability account — clearing the liability
+        # created by the BBO Journal Entry when the old device was received.
+        #
+        # GL effect (₹10k device, ₹7k exchange, ₹3k cash):
+        #   Credit: Revenue          ₹10,000  (full selling price)
+        #   Debit:  Buyback Liability ₹7,000  (liability cleared)
+        #   Debit:  Cash              ₹3,000  (customer pays balance)
+        _exchange_account = _get_buyback_liability_account(inv.company)
+        _exchange_mop = _ensure_buyback_exchange_mop(_exchange_account, inv.company)
+        inv.append("payments", {
+            "mode_of_payment": _exchange_mop,
+            "account": _exchange_account,
+            "amount": exchange_credit,
+            "base_amount": exchange_credit,
+        })
+        # Store BBO link on invoice for traceability
+        if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
+            inv.custom_exchange_buyback_order = buyback_order
 
     manual_discount_amount = flt(additional_discount_amount)
     coupon_discount_amount = flt(coupon_discount_amount)
@@ -888,6 +955,24 @@ def create_pos_invoice(pos_profile, customer, items,
             {"linked_pos_invoice": inv.name, "exchange_amount": exchange_credit},
             update_modified=False,
         )
+
+    # Back-link Buyback Order → Sales Invoice (marks the exchange as consumed)
+    if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
+        try:
+            frappe.db.set_value(
+                "Buyback Order", buyback_order,
+                {
+                    "sales_invoice": inv.name,
+                    "status": "Closed",
+                },
+                update_modified=False,
+            )
+            from buyback.buyback.doctype.buyback_order.buyback_order import log_audit
+            log_audit("Exchange Invoiced", "Buyback Order", buyback_order,
+                      new_value={"sales_invoice": inv.name})
+        except Exception:
+            frappe.log_error(frappe.get_traceback(),
+                             f"BBO exchange link failed for {buyback_order}")
 
     # Back-link exception request to this invoice (marks it as consumed)
     if exception_request:

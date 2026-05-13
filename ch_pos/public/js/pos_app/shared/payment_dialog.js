@@ -2370,6 +2370,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			items,
 			payments,
 			exchange_assessment:            PosState.exchange_assessment || null,
+			buyback_order:                  PosState.exchange_order || null,
 			additional_discount_percentage: PosState.additional_discount_pct || 0,
 			additional_discount_amount:     PosState.additional_discount_amt || 0,
 			coupon_code:                    PosState.coupon_code || null,

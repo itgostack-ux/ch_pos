@@ -1179,7 +1179,8 @@ export class BuybackWorkspace {
 		// ── SETTLE: Exchange → go to Sell ───────────────
 		el.on("click.bbstage", ".ch-bb-exchange", (e) => {
 			const btn = $(e.currentTarget);
-			PosState.exchange_assessment = btn.data("name");
+			PosState.exchange_assessment = btn.data("name");      // BBA name
+			PosState.exchange_order     = btn.data("order-name"); // BBO name
 			PosState.exchange_amount = flt(btn.data("amount"));
 			EventBus.emit("exchange:applied", {
 				assessment: btn.data("name"),
