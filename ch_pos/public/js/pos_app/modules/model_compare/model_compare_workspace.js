@@ -445,6 +445,50 @@ export class ModelCompareWorkspace {
 			</span>`;
 		}), colWidth);
 
+		// ── Variants section: per-SKU price ladder + stock ──
+		const anyVariants = items.some((i) => (i.variants || []).length);
+		if (anyVariants) {
+			html += `<div class="ch-sbs-section-label">${__("Variants")} <span style="font-weight:400;color:#6b7280;font-size:11px">(${__("price · stock")})</span></div>`;
+			html += `<div class="ch-sbs-row">
+				<div class="ch-sbs-label">${__("Available SKUs")}</div>
+				<div class="ch-sbs-values">`;
+			for (const item of items) {
+				const variants = item.variants || [];
+				let cellHtml = "";
+				if (!variants.length) {
+					cellHtml = `<span class="ch-sbs-na">${__("No variants")}</span>`;
+				} else {
+					cellHtml = `<div class="ch-sbs-variants">`;
+					for (const v of variants) {
+						const attrs = Object.entries(v.attributes || {})
+							.map(([k, val]) => `${frappe.utils.escape_html(val)}`)
+							.join(" · ") || frappe.utils.escape_html(v.item_name || v.item_code);
+						const price = v.selling_price
+							? `<strong>₹${format_number(v.selling_price)}</strong>`
+							: `<span class="ch-sbs-na">${__("No price")}</span>`;
+						const stockCls = v.stock > 0 ? "in-stock" : "no-stock";
+						const stockLabel = v.stock > 0
+							? `${v.stock} ${__("in stock")}`
+							: __("Out of stock");
+						cellHtml += `
+							<div class="ch-sbs-variant-row">
+								<div class="ch-sbs-variant-attrs">${attrs}</div>
+								<div class="ch-sbs-variant-meta">
+									${price}
+									<span class="ch-compare-card-stock ${stockCls}" style="margin-left:8px;font-size:11px">
+										<i class="fa ${v.stock > 0 ? "fa-check-circle" : "fa-times-circle"}"></i>
+										${stockLabel}
+									</span>
+								</div>
+							</div>`;
+					}
+					cellHtml += `</div>`;
+				}
+				html += `<div class="ch-sbs-cell" style="width:${colWidth}%">${cellHtml}</div>`;
+			}
+			html += `</div></div>`;
+		}
+
 		// ── Spec rows ──
 		if (allSpecs.size) {
 			html += `<div class="ch-sbs-section-label">${__("Specifications")}</div>`;

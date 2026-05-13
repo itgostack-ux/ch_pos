@@ -5163,7 +5163,7 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
                     "value": mf.feature_value,
                 })
 
-        # Get variant prices (lowest) and stock
+        # Get variants of this template (each variant = one SKU on the model)
         variants = frappe.db.get_all(
             "Item",
             filters={"variant_of": item.name, "disabled": 0},
@@ -5174,25 +5174,42 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
         max_price = 0
         total_stock = 0
         variant_count = len(variants)
+        variant_rows = []  # per-variant breakdown for side-by-side comparison
 
         variant_codes = [v.name for v in variants] if variants else [item.name]
+        # Map variant_code → variant doc (for stitching prices/stock back)
+        variant_lookup = {v.name: v for v in variants} if variants else {item.name: item}
+
         if variant_codes:
-            # Get prices from Item Price (Selling)
+            # Get prices from CH Item Price (channel='POS') — the POS-aware
+            # price source. Vanilla `Item Price` is empty in this deployment
+            # so the previous query produced N/A for every model.
             prices = frappe.db.get_all(
-                "Item Price",
+                "CH Item Price",
                 filters={
                     "item_code": ["in", variant_codes],
-                    "selling": 1,
+                    "channel": "POS",
+                    "status": "Active",
                 },
-                fields=["price_list_rate"],
+                fields=["item_code", "selling_price", "mrp", "mop"],
             )
-            if prices:
-                price_vals = [flt(p.price_list_rate) for p in prices if flt(p.price_list_rate)]
-                if price_vals:
-                    min_price = min(price_vals)
-                    max_price = max(price_vals)
+            price_by_variant = {}
+            for p in prices:
+                # Keep the highest selling_price per variant if multiple active rows exist
+                existing = price_by_variant.get(p.item_code)
+                if not existing or flt(p.selling_price) > flt(existing.get("selling_price")):
+                    price_by_variant[p.item_code] = {
+                        "selling_price": flt(p.selling_price),
+                        "mrp": flt(p.mrp),
+                        "mop": flt(p.mop),
+                    }
+            price_vals = [v["selling_price"] for v in price_by_variant.values() if v["selling_price"]]
+            if price_vals:
+                min_price = min(price_vals)
+                max_price = max(price_vals)
 
-            # Get stock in store warehouse
+            # Get stock in store warehouse, per variant
+            stock_by_variant = {}
             if warehouse:
                 stock_data = frappe.db.get_all(
                     "Bin",
@@ -5200,9 +5217,37 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
                         "item_code": ["in", variant_codes],
                         "warehouse": warehouse,
                     },
-                    fields=["actual_qty"],
+                    fields=["item_code", "actual_qty"],
                 )
-                total_stock = sum(flt(s.actual_qty) for s in stock_data)
+                for s in stock_data:
+                    stock_by_variant[s.item_code] = stock_by_variant.get(s.item_code, 0) + flt(s.actual_qty)
+                total_stock = sum(stock_by_variant.values())
+
+            # Per-variant attribute values (e.g. Storage=64GB, Colour=Black)
+            variant_attrs = {}
+            if variants:
+                for av in frappe.db.get_all(
+                    "Item Variant Attribute",
+                    filters={"parent": ["in", variant_codes]},
+                    fields=["parent", "attribute", "attribute_value"],
+                ):
+                    variant_attrs.setdefault(av.parent, {})[av.attribute] = av.attribute_value
+
+            # Build per-variant rows for the comparison detail view
+            for vcode in variant_codes:
+                vdoc = variant_lookup.get(vcode)
+                pinfo = price_by_variant.get(vcode, {})
+                variant_rows.append({
+                    "item_code": vcode,
+                    "item_name": (vdoc.item_name if vdoc else vcode),
+                    "attributes": variant_attrs.get(vcode, {}),
+                    "selling_price": pinfo.get("selling_price", 0),
+                    "mrp": pinfo.get("mrp", 0),
+                    "mop": pinfo.get("mop", 0),
+                    "stock": stock_by_variant.get(vcode, 0),
+                })
+            # Sort variants by selling price ascending (cheapest first)
+            variant_rows.sort(key=lambda r: (r["selling_price"] or float("inf"), r["item_code"]))
 
             # Get stock at nearby stores (batch query)
             nearby_stock = []
@@ -5278,6 +5323,7 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
             "min_price": min_price,
             "max_price": max_price,
             "variant_count": variant_count,
+            "variants": variant_rows,
             "stock": total_stock,
             "nearby_stock": nearby_stock,
             "brand_offers": brand_offers,
