@@ -621,7 +621,7 @@
 		});
 
 		bind_send_otp_button();
-		bind_verify_otp_button();
+		bind_otp_auto_verify();
 
 		$(document)
 			.off("click.ch_customer_dialog_otp mousedown.ch_customer_dialog_otp pointerdown.ch_customer_dialog_otp")
@@ -631,13 +631,6 @@
 				event.stopImmediatePropagation();
 				d.fields_dict.otp_status.$wrapper.html(status_html(__("Checking customer..."), "#2563eb"));
 				send_otp_handler();
-				return false;
-			})
-			.on("pointerdown.ch_customer_dialog_otp mousedown.ch_customer_dialog_otp click.ch_customer_dialog_otp", ".ch-verify-customer-otp", (event) => {
-				if (!$.contains(d.$wrapper.get(0), event.currentTarget)) return;
-				event.preventDefault();
-				event.stopImmediatePropagation();
-				verify_otp_handler();
 				return false;
 			});
 		d.$wrapper.one("hidden.bs.modal", () => {
