@@ -45,28 +45,25 @@ def get_guided_questions(sub_category) -> list:
 
     questions = [dict(q) for q in UNIVERSAL_QUESTIONS]
 
-    item_group = frappe.db.get_value("CH Sub Category", sub_category, "item_group")
-
-    # ── Brand options from items in this group ───────────────────────────
-    if item_group:
-        brands = frappe.db.get_all(
-            "Item",
-            filters={"item_group": item_group, "disabled": 0},
-            fields=["brand"],
-            distinct=True,
-            pluck="brand",
-        )
-        brand_opts = sorted({b for b in brands if b})
-        for q in questions:
-            if q["key"] == "brand":
-                q["options"] = brand_opts
-                break
-        # Drop the brand question entirely if no brands exist for this group
-        if not brand_opts:
-            questions = [q for q in questions if q["key"] != "brand"]
+    # ── Brand options from items in this sub-category ────────────────────
+    brands = frappe.db.get_all(
+        "Item",
+        filters={"ch_sub_category": sub_category, "disabled": 0},
+        fields=["brand"],
+        distinct=True,
+        pluck="brand",
+    )
+    brand_opts = sorted({b for b in brands if b})
+    for q in questions:
+        if q["key"] == "brand":
+            q["options"] = brand_opts
+            break
+    # Drop the brand question entirely if no brands exist for this sub-category
+    if not brand_opts:
+        questions = [q for q in questions if q["key"] != "brand"]
 
     # ── Condition (only if the catalogue actually has refurbished stock) ─
-    if item_group and _has_refurbished_items(item_group):
+    if _has_refurbished_items(sub_category):
         questions.append({
             "question": "Condition preference?",
             "type": "choice",
@@ -96,12 +93,12 @@ def get_guided_questions(sub_category) -> list:
     return questions
 
 
-def _has_refurbished_items(item_group):
-    """True when at least one non-disabled item in the group is refurbished."""
+def _has_refurbished_items(sub_category):
+    """True when at least one non-disabled item in the sub-category is refurbished."""
     if not frappe.db.has_column("Item", "ch_item_condition"):
         return False
     return bool(frappe.db.exists("Item", {
-        "item_group": item_group,
+        "ch_sub_category": sub_category,
         "disabled": 0,
         "ch_item_condition": ("in", ["Refurbished", "Used", "Pre-Owned"]),
     }))
@@ -127,22 +124,19 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
         responses = frappe.parse_json(responses)
     limit = min(cint(limit) or 8, 20)
 
-    item_group = frappe.db.get_value("CH Sub Category", sub_category, "item_group")
-    if not item_group:
-        return []
-
-    # Base query — items in stock at this warehouse
+    # Base query — items in this specific sub-category (e.g. Backpacks only,
+    # not the entire Accessories item_group which includes earbuds, cables...)
     items = frappe.db.sql(
         """SELECT i.name as item_code, i.item_name, i.image, i.brand, i.item_group,
                   i.has_serial_no, i.stock_uom, i.ch_model,
                   b.actual_qty as stock_qty
            FROM `tabItem` i
            LEFT JOIN `tabBin` b ON b.item_code = i.name AND b.warehouse = %(wh)s
-           WHERE i.item_group = %(ig)s
+           WHERE i.ch_sub_category = %(sub_cat)s
              AND i.disabled = 0 AND i.is_sales_item = 1 AND i.has_variants = 0
              AND (b.actual_qty > 0 OR %(wh)s IS NULL)
            ORDER BY i.item_name""",
-        {"ig": item_group, "wh": warehouse},
+        {"sub_cat": sub_category, "wh": warehouse},
         as_dict=True,
     )
 
