@@ -154,7 +154,10 @@
 			(d.doc || (d.doc = {})).whatsapp_number = mobile;
 			last_auto_synced_mobile = mobile;
 			whatsapp_manually_edited = false;
-			otp_verified_number = "";
+			// Don't clear OTP verification if we're just re-syncing the same number that was verified
+			if (otp_verified_number !== mobile) {
+				otp_verified_number = "";
+			}
 			d.set_value("whatsapp_number", mobile)
 				.then(() => paint_whatsapp_input(mobile))
 				.catch(() => paint_whatsapp_input(mobile));
