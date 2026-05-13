@@ -701,8 +701,8 @@ def create_pos_invoice(pos_profile, customer, items,
                     exchange_assessment, ba.expires_on))
 
         inv.custom_exchange_assessment = exchange_assessment
-        # INT-4 fix: Use revised_price (post-inspection) if available, else quoted, else estimated
-        exchange_credit = flt(ba.revised_price) or flt(ba.quoted_price) or flt(ba.estimated_price)
+        # Use quoted_price (assessment value) or estimated_price as fallback
+        exchange_credit = flt(ba.quoted_price) or flt(ba.estimated_price)
         inv.custom_exchange_amount = exchange_credit
 
         # ── MARKET-PARITY GUARD ──────────────────────────────────────────────
