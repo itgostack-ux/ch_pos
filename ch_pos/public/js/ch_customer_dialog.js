@@ -92,11 +92,27 @@
 		};
 
 		const otp_error_message = (err, fallback) => {
-			const msg = (err && (err.message || err.exc || err._server_messages)) || "";
+			// Try to extract Frappe server-side message (from frappe.throw)
+			let msg = "";
+			try {
+				const sm = (err && err._server_messages)
+					|| (frappe.last_response && frappe.last_response._server_messages);
+				if (sm) {
+					const parsed = JSON.parse(sm);
+					if (parsed && parsed.length) {
+						const first = typeof parsed[0] === "string" ? JSON.parse(parsed[0]) : parsed[0];
+						msg = (first && (first.message || first)) || "";
+						// strip HTML tags
+						msg = String(msg).replace(/<[^>]+>/g, "").trim();
+					}
+				}
+			} catch (e) { /* ignore parse errors */ }
+
+			if (!msg) msg = (err && (err.message || err.exc)) || "";
 			if (String(msg).includes("Purpose cannot be")) {
 				return __("OTP setup is not configured for customer verification. Please contact administrator.");
 			}
-			return (err && err.message) || fallback;
+			return msg || fallback;
 		};
 
 		const check_existing_customer = (phone_no) => {
