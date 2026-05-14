@@ -6999,7 +6999,7 @@ def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
 	return doc.bypass_otp_instore(remarks=remarks)
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
                                  kyc_id_type=None, kyc_id_number=None,
                                  customer_id_front=None, customer_id_back=None,
@@ -7015,7 +7015,8 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
     kyc_id_type / kyc_id_number: optional KYC data saved on the order.
     """
     doc = frappe.get_doc("Buyback Order", order_name)
-    doc.check_permission("write")
+    # Guest-accessible (customer-facing step); OTP/method check below is the auth gate
+    doc.flags.ignore_permissions = True
 
     def _normalize_kyc_type(id_type):
         raw = (id_type or "").strip()
