@@ -19,9 +19,20 @@ _EXCHANGE_MOP = "Buyback Exchange Credit"
 def _get_buyback_liability_account(company):
     """Return the Buyback Liability GL account for this company.
 
-    Falls back gracefully: Buyback Settings → MOP account → None.
+    Falls back gracefully: Buyback Settings liability account → standard
+    Device Buyback Liability account → legacy MOP account → legacy expense
+    setting. The expense fallback keeps old installs working, but production
+    should configure a liability account so exchange credit clears the payable.
     """
-    account = frappe.db.get_single_value("Buyback Settings", "buyback_expense_account")
+    account = None
+    if frappe.get_meta("Buyback Settings").has_field("buyback_liability_account"):
+        account = frappe.db.get_single_value("Buyback Settings", "buyback_liability_account")
+    if not account and company:
+        account = frappe.db.get_value(
+            "Account",
+            {"company": company, "account_name": "Device Buyback Liability", "is_group": 0},
+            "name",
+        )
     if account:
         return account
     # Fallback: MOP account table
@@ -30,7 +41,9 @@ def _get_buyback_liability_account(company):
         {"parent": _EXCHANGE_MOP, "company": company},
         "default_account",
     )
-    return row or None
+    if row:
+        return row
+    return frappe.db.get_single_value("Buyback Settings", "buyback_expense_account")
 
 
 def _ensure_buyback_exchange_mop(account, company):

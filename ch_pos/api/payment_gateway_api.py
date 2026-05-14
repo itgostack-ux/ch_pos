@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import frappe
 import requests
 from frappe import _
+from frappe.rate_limiter import rate_limit
 from frappe.utils import cint, flt, get_url
 from frappe.utils.password import get_decrypted_password
 
@@ -291,13 +292,66 @@ def initiate_payment(machine_name, amount, payment_mode, customer=None, customer
 
 
 @frappe.whitelist(allow_guest=True)
+@rate_limit(limit=60, seconds=300, methods=["GET", "POST"], ip_based=True)
 def pine_labs_return(**kwargs):
+    """Pine Labs return callback — HMAC validation required (H17)."""
+    body = frappe.request.get_data(as_text=True) or "{}"
+    sig_header = frappe.get_request_header("X-PINELABS-SIGNATURE") or ""
+
+    # Validate HMAC signature (H17)
+    settings = frappe.get_cached_doc("CH Payment Machine", frappe.form_dict.get("machine", "")) \
+        if frappe.form_dict.get("machine") else None
+    if settings:
+        secret = _safe_get_password("CH Payment Machine", settings.name, "client_secret")
+        if secret:
+            import hmac
+            import hashlib
+            expected_sig = hmac.new(
+                secret.encode(), body.encode(), hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(expected_sig, sig_header):
+                frappe.log_error(
+                    title="Pine Labs Signature Mismatch",
+                    message=f"Signature validation failed on return callback. Expected: {expected_sig[:16]}..., got: {sig_header[:16]}...",
+                )
+                frappe.throw(
+                    _("Webhook signature validation failed"),
+                    frappe.AuthenticationError,
+                )
+
     frappe.logger("ch_pos_payment_gateway").info("Pine Labs return: %s", json.dumps(kwargs, default=str))
     return kwargs
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@rate_limit(limit=120, seconds=300, methods=["POST"], ip_based=True)
 def pine_labs_webhook():
+    """Pine Labs webhook callback — HMAC validation required (H17)."""
     body = frappe.request.get_data(as_text=True) or "{}"
+    sig_header = frappe.get_request_header("X-PINELABS-SIGNATURE") or ""
+
+    # Attempt to extract machine name from payload to get the right secret
+    payload = json.loads(body) if body else {}
+    machine_name = payload.get("machine") or frappe.form_dict.get("machine")
+
+    # Validate HMAC signature (H17)
+    if machine_name and frappe.db.exists("CH Payment Machine", machine_name):
+        secret = _safe_get_password("CH Payment Machine", machine_name, "client_secret")
+        if secret:
+            import hmac
+            import hashlib
+            expected_sig = hmac.new(
+                secret.encode(), body.encode(), hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(expected_sig, sig_header):
+                frappe.log_error(
+                    title="Pine Labs Signature Mismatch",
+                    message=f"Signature validation failed on webhook. Machine: {machine_name}",
+                )
+                frappe.throw(
+                    _("Webhook signature validation failed"),
+                    frappe.AuthenticationError,
+                )
+
     frappe.logger("ch_pos_payment_gateway").info("Pine Labs webhook: %s", body)
     return {"status": "ok"}

@@ -351,7 +351,7 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
         settlement.signoff_by_manager = manager_user
         settlement.manager_signoff_time = now_datetime()
 
-    settlement.insert(ignore_permissions=True)
+    settlement.insert()
     settlement.submit()
 
     # Move session to Pending Close
@@ -382,8 +382,17 @@ def reopen_settlement(session_name, manager_pin) -> dict:
       2. Call close_session() as normal
 
     For sessions that are already "Closed", use correct_closed_settlement() instead.
+
+    Security: Finance or Store Manager role required (C3).
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
+
+    roles = set(frappe.get_roles())
+    if not roles.intersection({"Finance Manager", "Store Manager", "System Manager", "Accounts Manager"}):
+        frappe.throw(
+            _("Settlement corrections require Finance or Store Manager role"),
+            title=_("Permission Denied"),
+        )
 
     session = frappe.get_doc("CH POS Session", session_name)
 
@@ -403,13 +412,6 @@ def reopen_settlement(session_name, manager_pin) -> dict:
             ),
             title=_("Settlement Correction"),
         )
-
-    # Find the submitted settlement to cancel
-    settlement_name = frappe.db.get_value(
-        "CH POS Settlement",
-        {"session": session_name, "docstatus": 1},
-        "name",
-    )
     if not settlement_name:
         frappe.throw(_("No submitted settlement found for session {0}.").format(session_name))
 
