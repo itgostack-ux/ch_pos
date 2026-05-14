@@ -673,9 +673,12 @@ def create_pos_invoice(pos_profile, customer, items,
     # Exchange assessment link + amount
     exchange_credit = 0
     if exchange_assessment:
+        # NOTE: Buyback Assessment has NO `revised_price` column — that field lives
+        # on Buyback Inspection. Including it here triggers a SQL `Unknown column`
+        # error and breaks Product Exchange billing. Fetch only existing columns.
         ba = frappe.db.get_value(
             "Buyback Assessment", exchange_assessment,
-            ["quoted_price", "estimated_price", "revised_price", "status", "expires_on",
+            ["quoted_price", "estimated_price", "status", "expires_on",
              "linked_pos_invoice", "inspection_status"],
             as_dict=True,
         )
@@ -5344,6 +5347,17 @@ def get_customer_pos_info(customer, company=None) -> dict:
 
     Used when a named customer is selected to auto-apply correct pricing.
     """
+    # Frappe's Awesomplete link picker injects a synthetic option whose value
+    # is the literal sentinel "create_new__link_option" — selecting it normally
+    # triggers the "+ Create a new Customer" dialog. POS code occasionally
+    # reads the field value before that action fires (e.g. a stale `change`
+    # handler), and we end up calling this API with that sentinel, which then
+    # blows up with "Customer create_new__link_option not found". Treat it as
+    # a no-op so the picker can recover gracefully and the user can complete
+    # the create-customer flow.
+    if customer in (None, "", "create_new__link_option", "__create_new__"):
+        return {}
+
     if not company:
         company = frappe.defaults.get_user_default("Company")
 

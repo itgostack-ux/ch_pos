@@ -109,7 +109,7 @@ def request_free_sale_approval(reason, customer, items, grand_total,
     if not managers:
         frappe.throw(_(
             "No category managers found for the items in this cart. "
-            "Please assign category managers in CH Category master."
+            "Please assign category managers in CH Category."
         ))
 
     # Generate a unique token for email approval links

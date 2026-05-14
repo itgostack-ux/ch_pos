@@ -413,6 +413,11 @@ export class SyncService {
 					args: {
 						original_invoice: item.data.product_exchange_invoice,
 						return_items:     item.data.return_items,
+						// See payment_dialog.js: Product Exchange flow does not collect a
+						// manual remark, so supply a deterministic default that satisfies
+						// the compliance check on create_pos_return.
+						return_reason:    item.data.return_reason  || "Product Exchange",
+						return_remarks:   item.data.return_remarks || "Product exchange — old device returned for credit applied to new purchase.",
 					},
 					callback: (r) => {
 						if (r.message) resolve();

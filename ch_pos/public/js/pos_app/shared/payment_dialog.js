@@ -2486,6 +2486,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 					original_invoice: PosState.product_exchange_invoice,
 					return_items:     PosState.return_items,
 					sales_executive:  PosState.sales_executive || null,
+					// Product-exchange flow: the customer is swapping a device for a new
+					// purchase, so the operator is not asked for a free-form remark.
+					// `create_pos_return` requires a non-empty justification (>=10 chars)
+					// to satisfy compliance rules — supply a deterministic default that
+					// records the business reason in the audit trail.
+					return_reason:    "Product Exchange",
+					return_remarks:   "Product exchange — old device returned for credit applied to new purchase.",
 				},
 				callback: r => {
 					if (r.message) {
@@ -2879,7 +2886,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		}).then(managers => {
 			this._required_managers = managers || [];
 			if (!managers || !managers.length) {
-				$mgr.html(`<div class="text-warning" style="padding:8px 0"><i class="fa fa-exclamation-triangle"></i> ${__("No category managers assigned. Please set Category Manager in CH Category master.")}</div>`);
+				$mgr.html(`<div class="text-warning" style="padding:8px 0"><i class="fa fa-exclamation-triangle"></i> ${__("No category managers assigned. Please set Category Manager in CH Category.")}</div>`);
 				return;
 			}
 			const rows = managers.map(m => `
