@@ -881,6 +881,7 @@ def sync_margin_receipt_format():
 
     replacements = {
         old_hsn_block: new_hsn_block,
+        '{% if _bank_acc %}\n          {% set _ba = frappe.get_doc("Bank Account", _bank_acc) %}': '{% if _bank_acc and frappe.db.exists("Bank Account", _bank_acc) %}\n          {% set _ba = frappe.get_doc("Bank Account", _bank_acc) %}',
         '{{ item.net_amount or ""}}': '{{ "%.2f"|format(line_taxable_map.get(item.name, 0)) }}',
         '{{ item.item_wise_tax_detail or ""}}': '{{ "%.2f"|format(line_gst_map.get(item.name, 0)) }}',
         '{% set total_tax = total_taxes_and_charges + row_tax %}': '{% set total_taxes_and_charges = total_taxes_and_charges + row_tax %}',

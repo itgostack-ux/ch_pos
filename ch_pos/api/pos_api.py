@@ -679,7 +679,7 @@ def create_pos_invoice(pos_profile, customer, items,
         ba = frappe.db.get_value(
             "Buyback Assessment", exchange_assessment,
             ["quoted_price", "estimated_price", "status", "expires_on",
-             "linked_pos_invoice", "inspection_status"],
+             "linked_pos_invoice"],
             as_dict=True,
         )
         if not ba:
