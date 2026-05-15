@@ -59,6 +59,10 @@ export class PaymentDialog {
 		this._free_sale_reason = "";
 		this._free_sale_approved_by = "";
 		this._free_sale_approved_at = null;
+		// Original Invoice link (Late Free Gift / VAS After Sale)
+		this._original_invoice = "";
+		this._original_invoice_reason = "";
+		this._original_invoice_field = null;
 
 		// Advance Adjustment
 		this._advance_amount = 0;
@@ -123,6 +127,8 @@ export class PaymentDialog {
 			this._free_sale_approved_at = saved.free_sale_approved_at || null;
 			this._free_sale_approval_name = saved.free_sale_approval_name || null;
 			this._required_managers = saved.required_managers || [];
+			this._original_invoice = saved.original_invoice || "";
+			this._original_invoice_reason = saved.original_invoice_reason || "";
 			this._advance_amount = saved.advance_amount || 0;
 			this._customer_advances = saved.customer_advances || [];
 			this._disc_pct    = saved.disc_pct    || 0;
@@ -155,6 +161,8 @@ export class PaymentDialog {
 			this._free_sale_approved_at = null;
 			this._free_sale_approval_name = null;
 			this._required_managers = [];
+			this._original_invoice = "";
+			this._original_invoice_reason = "";
 			this._advance_amount = 0;
 			this._customer_advances = [];
 			this._disc_pct    = 0;
@@ -275,6 +283,9 @@ export class PaymentDialog {
 			ov.find("#ch-pay-rows").hide();
 			ov.find("#ch-pay-quick-cash").hide();
 			ov.find("#ch-pay-free-reason").val(this._free_sale_reason);
+			// Restore Original Invoice fields
+			ov.find("#ch-pay-original-invoice-reason").val(this._original_invoice_reason || "");
+			this._mount_original_invoice_field();
 			// Restore approval status
 			if (this._free_sale_approval_name && this._required_managers.length) {
 				ov.find("#ch-pay-free-request-btn").hide();
@@ -431,6 +442,20 @@ export class PaymentDialog {
 						<label>${__("Reason")} <span class="text-danger">*</span></label>
 						<input type="text" class="form-control form-control-sm" id="ch-pay-free-reason"
 							placeholder="${__("e.g. Warranty replacement, Display damage compensation")}">
+					</div>
+					<!-- Original Invoice link (Late Free Gift / VAS After Sale) -->
+					<div class="ch-pay-free-field" style="margin-top:8px">
+						<label>${__("Original Invoice")} <span style="color:#9ca3af;font-weight:normal">(${__("link to prior device sale")})</span></label>
+						<div id="ch-pay-original-invoice-wrap"></div>
+					</div>
+					<div class="ch-pay-free-field" style="margin-top:8px">
+						<label>${__("Original Invoice Reason")}</label>
+						<select class="form-control form-control-sm" id="ch-pay-original-invoice-reason">
+							<option value="">${__("-- Select --")}</option>
+							<option value="Late Free Gift">${__("Late Free Gift")}</option>
+							<option value="VAS After Sale">${__("VAS After Sale")}</option>
+							<option value="Other">${__("Other")}</option>
+						</select>
 					</div>
 					<div id="ch-pay-free-managers" class="ch-pay-free-managers"></div>
 					<button class="btn btn-sm btn-primary ch-pay-free-request-btn" id="ch-pay-free-request-btn" style="margin-top:8px" disabled>
@@ -971,12 +996,20 @@ placeholder="${__("Enter code...")}">
 				ov.find("#ch-pay-quick-cash").hide();
 				// Load category managers for items in cart
 				this._load_category_managers();
+				// Mount Original Invoice picker (default reason = Late Free Gift)
+				if (!this._original_invoice_reason) {
+					this._original_invoice_reason = "Late Free Gift";
+				}
+				this._mount_original_invoice_field();
 			} else {
 				ov.find("#ch-pay-mop-section").show();
 				ov.find("#ch-pay-rows").show();
 				this._free_sale_approval_name = null;
 				this._free_sale_approved_by = "";
 				clearInterval(this._approval_poll);
+				this._original_invoice = "";
+				this._original_invoice_reason = "";
+				this._original_invoice_field = null;
 			}
 			this._update_totals();
 		});
@@ -984,6 +1017,9 @@ placeholder="${__("Enter code...")}">
 			this._free_sale_reason = $(e.currentTarget).val().trim();
 			ov.find("#ch-pay-free-request-btn").prop("disabled", !this._free_sale_reason);
 			this._update_totals();
+		});
+		ov.on("change", "#ch-pay-original-invoice-reason", e => {
+			this._original_invoice_reason = $(e.currentTarget).val();
 		});
 		ov.on("click", "#ch-pay-free-request-btn", () => {
 			this._request_free_sale_approval();
@@ -2205,6 +2241,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			free_sale_approved_at: this._free_sale_approved_at,
 			free_sale_approval_name: this._free_sale_approval_name,
 			required_managers: this._required_managers,
+			original_invoice: this._original_invoice,
+			original_invoice_reason: this._original_invoice_reason,
 			advance_amount: this._advance_amount,
 			customer_advances: this._customer_advances,
 			disc_pct:    this._disc_pct,
@@ -2404,6 +2442,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			free_sale_approved_by:          this._is_free_sale ? this._free_sale_approved_by : "",
 			free_sale_approved_at:          this._is_free_sale ? (this._free_sale_approved_at || null) : null,
 			free_sale_approval_name:        this._is_free_sale ? (this._free_sale_approval_name || "") : "",
+			original_invoice:               this._original_invoice || null,
+			original_invoice_reason:        this._original_invoice_reason || null,
 			advance_amount:                 advance > 0 ? advance : 0,
 			kiosk_token:                    PosState.kiosk_token || null,
 			guided_session:                 PosState.guided_session || null,
@@ -2868,6 +2908,39 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				status_el.html(`<div class="text-danger">${__("Failed to verify. Try again.")}</div>`);
 			});
 		}, __("Manager Credit Override"), __("Approve"));
+	}
+
+	// ── Original Invoice Picker (Late Free Gift / VAS After Sale) ──
+
+	_mount_original_invoice_field() {
+		if (!this._overlay) return;
+		const wrap = this._overlay.find("#ch-pay-original-invoice-wrap");
+		if (!wrap.length) return;
+		wrap.empty();
+		const customer = PosState.customer;
+		const company = PosState.active_company || PosState.company;
+		this._original_invoice_field = frappe.ui.form.make_control({
+			df: {
+				fieldname: "original_invoice",
+				fieldtype: "Link",
+				options: "Sales Invoice",
+				placeholder: __("Search prior Sales Invoice..."),
+				get_query: () => {
+					const filters = { docstatus: 1, is_return: 0 };
+					if (customer) filters.customer = customer;
+					if (company) filters.company = company;
+					return { filters };
+				},
+				change: () => {
+					this._original_invoice = this._original_invoice_field.get_value() || "";
+				},
+			},
+			parent: wrap,
+			render_input: true,
+		});
+		if (this._original_invoice) {
+			this._original_invoice_field.set_value(this._original_invoice);
+		}
 	}
 
 	// ── Category Manager Approval Flow ──────────────────────────

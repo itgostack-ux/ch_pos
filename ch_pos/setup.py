@@ -418,6 +418,29 @@ CUSTOM_FIELDS = {
             "depends_on": "eval:doc.custom_is_free_sale",
             "module": "POS Core",
         },
+        # Late free-gift / VAS-after-sale linkage to original device sale
+        {
+            "fieldname": "custom_original_invoice",
+            "fieldtype": "Link",
+            "label": "Original Sales Invoice",
+            "options": "Sales Invoice",
+            "insert_after": "custom_promo_write_off_je",
+            "read_only": 1,
+            "no_copy": 1,
+            "description": "Original device sale this invoice is linked to. Used for late free-gift issuance and VAS-after-sale plan binding.",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_original_invoice_reason",
+            "fieldtype": "Select",
+            "label": "Original Invoice Link Reason",
+            "options": "\nLate Free Gift\nVAS After Sale\nOther",
+            "insert_after": "custom_original_invoice",
+            "read_only": 1,
+            "no_copy": 1,
+            "depends_on": "eval:doc.custom_original_invoice",
+            "module": "POS Core",
+        },
         # Exception & Warranty links (applied during POS billing)
         {
             "fieldname": "custom_exception_request",

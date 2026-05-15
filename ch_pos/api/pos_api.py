@@ -369,7 +369,9 @@ def create_pos_invoice(pos_profile, customer, items,
                        advance_amount=0, kiosk_token=None,
                        guided_session=None,
                        exception_request=None, warranty_claim=None,
-                       customer_gstin=None) -> dict:
+                       customer_gstin=None,
+                       original_invoice=None,
+                       original_invoice_reason=None) -> dict:
     """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
@@ -697,16 +699,50 @@ def create_pos_invoice(pos_profile, customer, items,
         )
         if not ba:
             frappe.throw(frappe._("Buyback Assessment {0} not found").format(exchange_assessment))
-        # Only assessments where the customer has accepted a price quote are valid for exchange credit.
-        # Use a whitelist (not a blacklist) so new statuses don't accidentally pass through.
-        _VALID_EXCHANGE_STATUSES = frozenset({"Quoted", "Quote Accepted"})
+        # Whitelist of statuses where the customer has actively progressed the assessment.
+        # "Inspection Created" is the post-inspection state where the customer has chosen
+        # to use the device as exchange credit (we cross-check via customer_interested).
+        # Legacy "Quoted" / "Quote Accepted" remain accepted for forward-compat.
+        _VALID_EXCHANGE_STATUSES = frozenset({
+            "Quoted", "Quote Accepted",
+            "Submitted", "Inspection Created",
+        })
         if ba.status not in _VALID_EXCHANGE_STATUSES:
             frappe.throw(
                 frappe._("Buyback Assessment {0} cannot be used as exchange credit "
-                         "(current status: {1}; must be Quoted or Quote Accepted).").format(
+                         "(current status: {1}).").format(
                     frappe.bold(exchange_assessment), frappe.bold(ba.status)),
                 title=frappe._("Invalid Exchange Assessment"),
             )
+        # Post-inspection gate: when the assessment came from an inspection,
+        # require the linked Buyback Inspection to be Completed and the customer
+        # to have actively chosen to proceed (customer_interested = 1).
+        if ba.status == "Inspection Created":
+            insp_name = frappe.db.get_value(
+                "Buyback Inspection",
+                {"assessment": exchange_assessment},
+                "name",
+            )
+            if insp_name:
+                insp_status = frappe.db.get_value("Buyback Inspection", insp_name, "status")
+                if insp_status != "Completed":
+                    frappe.throw(
+                        frappe._("Buyback Inspection {0} is {1}; complete the inspection "
+                                 "before applying exchange credit.").format(
+                            frappe.bold(insp_name), frappe.bold(insp_status)),
+                        title=frappe._("Inspection Not Completed"),
+                    )
+            customer_interested = frappe.db.get_value(
+                "Buyback Assessment", exchange_assessment, "customer_interested"
+            )
+            if not customer_interested:
+                frappe.throw(
+                    frappe._("Customer has not confirmed exchange on Buyback Assessment {0}. "
+                             "Mark 'Customer Interested' (or have the customer accept the quote in the kiosk) "
+                             "before applying as exchange credit.").format(
+                        frappe.bold(exchange_assessment)),
+                    title=frappe._("Customer Confirmation Required"),
+                )
         if ba.linked_pos_invoice:
             frappe.throw(
                 frappe._("Buyback Assessment {0} was already used in invoice {1}").format(
@@ -892,6 +928,56 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.custom_ch_sale_sub_type = sale_sub_type
     if sale_reference:
         inv.custom_ch_sale_reference = sale_reference
+
+    # Original invoice linkage — for late free-gift or VAS-after-sale traceability.
+    # Strict validation: must be a submitted, non-return Sales Invoice for the
+    # same customer (or the same phone, if the current sale is to walk-in).
+    if original_invoice:
+        orig = frappe.db.get_value(
+            "Sales Invoice", original_invoice,
+            ["name", "customer", "docstatus", "is_return", "company"],
+            as_dict=True,
+        )
+        if not orig:
+            frappe.throw(
+                _("Original invoice {0} does not exist").format(original_invoice),
+                title=_("Invalid Original Invoice"),
+            )
+        if cint(orig.docstatus) != 1:
+            frappe.throw(
+                _("Original invoice {0} is not submitted (status {1})").format(
+                    original_invoice, orig.docstatus),
+                title=_("Invalid Original Invoice"),
+            )
+        if cint(orig.is_return):
+            frappe.throw(
+                _("Original invoice {0} is a return; cannot be linked").format(original_invoice),
+                title=_("Invalid Original Invoice"),
+            )
+        # Customer parity — block linking another customer's sale.
+        if orig.customer and customer and orig.customer != customer:
+            frappe.throw(
+                _("Original invoice {0} belongs to customer {1}, not {2}").format(
+                    original_invoice, orig.customer, customer),
+                title=_("Customer Mismatch"),
+            )
+        if orig.company and orig.company != profile.company:
+            frappe.throw(
+                _("Original invoice {0} is for company {1}, not {2}").format(
+                    original_invoice, orig.company, profile.company),
+                title=_("Company Mismatch"),
+            )
+        inv.custom_original_invoice = original_invoice
+        if original_invoice_reason:
+            allowed = {"Late Free Gift", "VAS After Sale", "Other"}
+            if original_invoice_reason not in allowed:
+                frappe.throw(
+                    _("Invalid original invoice reason: {0}").format(original_invoice_reason),
+                    title=_("Validation Error"),
+                )
+            inv.custom_original_invoice_reason = original_invoice_reason
+        elif cint(is_free_sale):
+            inv.custom_original_invoice_reason = "Late Free Gift"
 
     # For Finance Sale: stamp finance partner/tenure/loan-id on down-payment rows if not set
     # (The Finance row itself is excluded from inv.payments — it's tracked via outstanding_amount)
@@ -1377,6 +1463,113 @@ def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
         applicable.append(plan)
 
     return applicable
+
+
+@frappe.whitelist()
+def find_previous_device_invoice(phone, imei) -> dict:
+    """Strict resolver: find the prior submitted Sales Invoice that sold this
+    device (by IMEI/serial) to the customer matching the given phone number.
+
+    Used by:
+      - VAS-after-sale flow: bind the Sold Plan back to the original device
+        invoice instead of the current VAS invoice.
+      - Late free-gift flow: link a free-sale invoice to the device invoice
+        so accounts can audit why the gift was issued.
+
+    Args:
+        phone: Customer phone number (any format; last 10 digits matched).
+        imei: Device IMEI / serial number (exact or substring match against
+            ``Sales Invoice Item.serial_no``).
+
+    Returns:
+        dict with ``found`` (bool) and, when found:
+            customer, customer_name, customer_phone,
+            invoice, posting_date, item_code, item_name, serial_no, company.
+        When multiple invoices match, the most recent submitted, non-return
+        invoice is returned.
+    """
+    phone = (phone or "").strip()
+    imei = (imei or "").strip()
+    if not phone or not imei:
+        frappe.throw(_("Both phone and IMEI are required"), title=_("API Error"))
+
+    digits_only = "".join(c for c in phone if c.isdigit())
+    if len(digits_only) < 10:
+        frappe.throw(_("Phone must contain at least 10 digits"), title=_("API Error"))
+    phone_suffix = digits_only[-10:]
+
+    # 1. Resolve customer by phone (mobile_no, ch_alternate_phone, or contact)
+    customer = frappe.db.get_value(
+        "Customer", {"mobile_no": ["like", f"%{phone_suffix}"]}, "name"
+    )
+    if not customer:
+        customer = frappe.db.get_value(
+            "Customer", {"ch_alternate_phone": ["like", f"%{phone_suffix}"]}, "name"
+        )
+    if not customer:
+        contact_row = frappe.db.sql(
+            """SELECT dl.link_name
+                 FROM `tabDynamic Link` dl
+                 JOIN `tabContact` c ON c.name = dl.parent
+                WHERE dl.link_doctype = 'Customer'
+                  AND c.mobile_no LIKE %s
+                LIMIT 1""",
+            (f"%{phone_suffix}",),
+        )
+        if contact_row:
+            customer = contact_row[0][0]
+
+    if not customer:
+        return {
+            "found": False,
+            "reason": "no_customer",
+            "message": _("No customer found for phone {0}").format(phone),
+        }
+
+    # 2. Find the most recent submitted, non-return Sales Invoice for this
+    #    customer that sold this serial/IMEI.
+    rows = frappe.db.sql(
+        """SELECT si.name AS invoice,
+                  si.posting_date,
+                  si.company,
+                  si.customer,
+                  si.customer_name,
+                  sii.item_code,
+                  sii.item_name,
+                  sii.serial_no
+             FROM `tabSales Invoice Item` sii
+             JOIN `tabSales Invoice` si ON si.name = sii.parent
+            WHERE si.customer = %(customer)s
+              AND si.docstatus = 1
+              AND si.is_return = 0
+              AND sii.serial_no LIKE %(imei_pat)s
+            ORDER BY si.posting_date DESC, si.posting_time DESC
+            LIMIT 1""",
+        {"customer": customer, "imei_pat": f"%{imei}%"},
+        as_dict=True,
+    )
+    if not rows:
+        return {
+            "found": False,
+            "reason": "no_invoice",
+            "customer": customer,
+            "message": _("No prior sale of IMEI {0} to this customer").format(imei),
+        }
+
+    row = rows[0]
+    cust_phone = frappe.db.get_value("Customer", customer, "mobile_no") or ""
+    return {
+        "found": True,
+        "customer": row["customer"],
+        "customer_name": row["customer_name"],
+        "customer_phone": cust_phone,
+        "invoice": row["invoice"],
+        "posting_date": str(row["posting_date"]) if row["posting_date"] else None,
+        "company": row["company"],
+        "item_code": row["item_code"],
+        "item_name": row["item_name"],
+        "serial_no": (row["serial_no"] or "").strip(),
+    }
 
 
 @frappe.whitelist()
