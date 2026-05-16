@@ -5000,10 +5000,89 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
 
 
 @frappe.whitelist()
+def scan_for_stock_transfer(barcode, from_warehouse):
+    """Validate a scanned IMEI/Serial for an outgoing Stock Transfer.
+
+    Returns the item it belongs to and the warehouse it is currently in, so
+    the POS Stock Transfer screen can add the unit to the correct line and
+    block scans of serials that don't live at the source warehouse (SAP-style
+    bin enforcement).
+
+    Response shape:
+        {ok: True, serial_no, item_code, item_name, uom, warehouse}
+        {ok: False, code, message}
+    """
+    if not barcode:
+        return {"ok": False, "code": "empty", "message": _("Empty scan")}
+    if not from_warehouse:
+        return {"ok": False, "code": "no_source", "message": _("Select Source Warehouse first")}
+
+    barcode = (barcode or "").strip()
+    # Resolve serial — exact case first, then loose match (mirrors safe_get_serial).
+    sn_row = frappe.db.sql(
+        """SELECT name, item_code, warehouse, status
+             FROM `tabSerial No`
+            WHERE BINARY name = %s
+            LIMIT 1""",
+        (barcode,),
+        as_dict=True,
+    )
+    if not sn_row:
+        sn_row = frappe.db.sql(
+            """SELECT name, item_code, warehouse, status
+                 FROM `tabSerial No`
+                WHERE name = %s
+                LIMIT 1""",
+            (barcode,),
+            as_dict=True,
+        )
+    if not sn_row:
+        return {"ok": False, "code": "not_found", "message": _("Serial / IMEI {0} not found").format(barcode)}
+
+    sn = sn_row[0]
+    if (sn.warehouse or "") != from_warehouse:
+        return {
+            "ok": False,
+            "code": "wrong_warehouse",
+            "message": _("{0} is at {1}, not {2}").format(
+                sn.name, sn.warehouse or _("(no warehouse)"), from_warehouse
+            ),
+        }
+    if (sn.status or "").lower() not in ("", "active"):
+        return {
+            "ok": False,
+            "code": "bad_status",
+            "message": _("{0} status is {1}; cannot transfer").format(sn.name, sn.status),
+        }
+
+    item = frappe.db.get_value(
+        "Item", sn.item_code, ["item_name", "stock_uom"], as_dict=True
+    ) or {}
+    return {
+        "ok": True,
+        "serial_no": sn.name,
+        "item_code": sn.item_code,
+        "item_name": item.get("item_name") or sn.item_code,
+        "uom": item.get("stock_uom") or "Nos",
+        "warehouse": sn.warehouse,
+    }
+
+
+@frappe.whitelist()
 def create_stock_transfer(from_warehouse, to_warehouse, items,
                           courier_name=None, courier_tracking=None,
                           handover_notes=None, expected_delivery_date=None) -> dict:
-    """Create a Stock Entry (Material Transfer) from POS with courier hand-over."""
+    """Create a Stock Entry (Material Transfer) from POS with courier hand-over.
+
+    Each item in ``items`` may carry a ``serial_no`` field — a list of scanned
+    IMEIs or a newline-joined string. When supplied, ``qty`` is forced to the
+    serial count (SAP MIGO rule: scanned units == movement qty) and the
+    serials are written to Stock Entry Detail.serial_no so core ERPNext moves
+    each Serial No.warehouse on submit, which in turn fires our
+    ``Serial No.on_update`` hook and mirrors current_warehouse on the CH
+    Serial Lifecycle row — making the move visible in the IMEI Tracker with
+    zero extra writes.
+    """
     frappe.has_permission("Stock Entry", "create", throw=True)
     import json
     if isinstance(items, str):
@@ -5022,16 +5101,39 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     se.from_warehouse = from_warehouse
     se.to_warehouse = to_warehouse
 
+    # Cross-line dedupe: a serial can only ship once per transfer.
+    seen_serials = set()
     for item in items:
-        qty = flt(item.get("qty", 1))
-        se.append("items", {
+        raw_serials = item.get("serial_no") or item.get("serials") or ""
+        if isinstance(raw_serials, list):
+            serial_list = [s for s in (str(x).strip() for x in raw_serials) if s]
+        else:
+            serial_list = [s.strip() for s in str(raw_serials).splitlines() if s.strip()]
+
+        # Dedupe within the line, then across the document.
+        line_serials = []
+        for s in serial_list:
+            if s in seen_serials:
+                continue
+            seen_serials.add(s)
+            line_serials.append(s)
+
+        if line_serials:
+            qty = flt(len(line_serials))
+        else:
+            qty = flt(item.get("qty", 1))
+
+        row = {
             "item_code": item.get("item_code"),
             "qty": qty,
             "custom_quantity": qty,
             "uom": item.get("uom", "Nos"),
             "s_warehouse": from_warehouse,
             "t_warehouse": to_warehouse,
-        })
+        }
+        if line_serials:
+            row["serial_no"] = "\n".join(line_serials)
+        se.append("items", row)
 
     # Courier hand-over details in remarks
     remark_parts = []

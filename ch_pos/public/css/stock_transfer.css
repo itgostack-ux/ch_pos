@@ -1,0 +1,335 @@
+/* ──────────────────────────────────────────────────────────────────────────
+ * CH POS — Stock Transfer Workspace styling
+ * Aligns and modernises the "Create Stock Transfer" form, adds scanner-first
+ * UI patterns inspired by SAP MIGO (live counters, IMEI chips, locked qty
+ * when serials drive the line).
+ * Owned by ch_pos — do not edit upstream styles.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+.ch-st-card .section-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 700;
+	font-size: var(--pos-fs-md);
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--pos-border-light, #e5e7eb);
+}
+
+.ch-st-form { padding: 16px 18px 14px; }
+
+/* ── Two-column grid for warehouse pair ─────────────────────────────── */
+.ch-st-grid-2 {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 14px;
+	margin-bottom: 14px;
+}
+.ch-st-field { display: flex; flex-direction: column; gap: 6px; }
+.ch-st-label {
+	font-size: var(--pos-fs-xs);
+	font-weight: 700;
+	color: var(--pos-text-secondary, #4b5563);
+	letter-spacing: 0.02em;
+	margin: 0;
+}
+.ch-st-req { color: var(--pos-danger, #ef4444); margin-left: 2px; }
+
+/* Normalise Frappe Link controls inside this card */
+.ch-st-link .frappe-control { margin: 0 !important; }
+.ch-st-link .control-label { display: none !important; }
+.ch-st-link .form-control,
+.ch-st-form .form-control {
+	height: 38px;
+	font-size: var(--pos-fs-base, 13px);
+	border-radius: 8px;
+	border: 1px solid var(--pos-border, #e5e7eb);
+	padding: 0 12px;
+	background: #fff;
+	transition: border-color .15s ease, box-shadow .15s ease;
+}
+.ch-st-link .form-control:focus,
+.ch-st-form .form-control:focus {
+	border-color: var(--pos-primary, #4f6ef7);
+	box-shadow: 0 0 0 3px rgba(79, 110, 247, .12);
+	outline: 0;
+}
+.ch-st-link .link-btn { top: 7px; }
+
+/* ── Warehouse alert ────────────────────────────────────────────────── */
+.ch-st-wh-alert {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 12px;
+	margin: 0 0 14px;
+	font-size: var(--pos-fs-sm, 12px);
+	font-weight: 600;
+	color: #92400e;
+	background: #fffbeb;
+	border: 1px solid #fde68a;
+	border-radius: 8px;
+}
+.ch-st-wh-alert .fa { color: #d97706; }
+
+/* ── Mode toggle (Scan / Manual) ────────────────────────────────────── */
+.ch-st-mode-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px;
+	background: var(--pos-surface-sunken, #f3f4f6);
+	border-radius: 10px;
+	margin-bottom: 12px;
+	flex-wrap: wrap;
+}
+.ch-st-mode-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 14px;
+	font-size: var(--pos-fs-sm, 12px);
+	font-weight: 600;
+	color: var(--pos-text-secondary, #4b5563);
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 8px;
+	cursor: pointer;
+	transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.ch-st-mode-btn:hover { color: var(--pos-text-primary, #111827); }
+.ch-st-mode-btn.active {
+	background: #fff;
+	color: var(--pos-primary, #4f6ef7);
+	box-shadow: 0 1px 2px rgba(0, 0, 0, .06);
+	border-color: var(--pos-border, #e5e7eb);
+}
+.ch-st-mode-hint {
+	margin-left: auto;
+	font-size: var(--pos-fs-xs, 11px);
+	color: var(--pos-text-muted, #6b7280);
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* ── Scanner row ────────────────────────────────────────────────────── */
+.ch-st-scan-row {
+	position: relative;
+	margin-bottom: 12px;
+}
+.ch-st-scan-row .ch-st-scan-icon {
+	position: absolute;
+	left: 14px;
+	top: 50%;
+	transform: translateY(-50%);
+	color: var(--pos-primary, #4f6ef7);
+	font-size: 16px;
+	pointer-events: none;
+}
+.ch-st-scan-input {
+	height: 46px !important;
+	padding-left: 42px !important;
+	font-size: var(--pos-fs-md, 14px) !important;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	border-radius: 10px !important;
+	border: 2px solid var(--pos-primary, #4f6ef7) !important;
+	background: #f8fafc !important;
+}
+.ch-st-scan-input:focus {
+	background: #fff !important;
+	box-shadow: 0 0 0 4px rgba(79, 110, 247, .18) !important;
+}
+.ch-st-scan-input:disabled { opacity: .5; cursor: not-allowed; }
+
+.ch-st-scan-feedback {
+	display: none;
+	margin-top: 8px;
+	padding: 6px 10px;
+	border-radius: 6px;
+	font-size: var(--pos-fs-sm, 12px);
+	font-weight: 600;
+}
+.ch-st-scan-feedback .fa { margin-right: 4px; }
+.ch-st-fb-ok   { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.ch-st-fb-warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+.ch-st-fb-err  { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+
+/* ── Manual row ─────────────────────────────────────────────────────── */
+.ch-st-manual-row {
+	display: grid;
+	grid-template-columns: 1fr 90px auto;
+	gap: 10px;
+	margin-bottom: 12px;
+	align-items: stretch;
+}
+.ch-st-manual-row .ch-st-link,
+.ch-st-manual-row .form-control,
+.ch-st-manual-row .btn { height: 38px; }
+.ch-st-qty-input { text-align: center; font-weight: 600; }
+.ch-st-add-item-btn {
+	border-radius: 8px;
+	padding: 0 16px;
+	font-weight: 600;
+}
+
+/* ── Counter strip (SAP MIGO-style) ─────────────────────────────────── */
+.ch-st-counter-strip {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 10px;
+	margin-bottom: 12px;
+	padding: 10px 12px;
+	background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+	border: 1px solid var(--pos-border, #e5e7eb);
+	border-radius: 10px;
+}
+.ch-st-counter { text-align: center; }
+.ch-st-counter-label {
+	display: block;
+	font-size: var(--pos-fs-2xs, 10px);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pos-text-muted, #6b7280);
+	font-weight: 700;
+}
+.ch-st-counter-value {
+	display: block;
+	margin-top: 2px;
+	font-size: var(--pos-fs-xl, 18px);
+	font-weight: 700;
+	color: var(--pos-text-primary, #111827);
+	font-variant-numeric: tabular-nums;
+}
+
+/* ── Items table ────────────────────────────────────────────────────── */
+.ch-st-items-table { margin-top: 6px; }
+.ch-st-table {
+	width: 100%;
+	border-collapse: separate;
+	border-spacing: 0;
+	border: 1px solid var(--pos-border, #e5e7eb);
+	border-radius: 10px;
+	overflow: hidden;
+	font-size: var(--pos-fs-sm, 12px);
+}
+.ch-st-table thead th {
+	background: var(--pos-surface-sunken, #f3f4f6);
+	font-size: var(--pos-fs-2xs, 10px);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pos-text-secondary, #4b5563);
+	padding: 8px 12px;
+	font-weight: 700;
+	border-bottom: 1px solid var(--pos-border, #e5e7eb);
+}
+.ch-st-table tbody td {
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--pos-border-light, #f1f5f9);
+	vertical-align: middle;
+}
+.ch-st-table tbody tr:last-child td,
+.ch-st-table tbody tr.ch-st-chips-row:last-child + tr td { border-bottom: 0; }
+.ch-st-item-row--tracked td {
+	background: linear-gradient(180deg, #f5f7ff 0%, #fff 100%);
+}
+.ch-st-item-name { font-weight: 600; color: var(--pos-text-primary, #111827); }
+.ch-st-item-code {
+	margin-top: 2px;
+	font-size: var(--pos-fs-2xs, 10px);
+	color: var(--pos-text-muted, #6b7280);
+}
+.ch-st-track-tag {
+	display: inline-block;
+	padding: 1px 6px;
+	background: #eef2ff;
+	color: #4338ca;
+	border-radius: 4px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	font-size: 9px;
+}
+.ch-st-uom { color: var(--pos-text-muted, #6b7280); font-weight: 500; }
+.ch-st-qty-tracked {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 10px;
+	background: #eef2ff;
+	color: #4338ca;
+	border-radius: 999px;
+	font-weight: 700;
+	font-size: var(--pos-fs-sm, 12px);
+	font-variant-numeric: tabular-nums;
+}
+
+.ch-st-remove-row { padding: 4px 6px; line-height: 1; }
+
+/* ── Serial chips row ───────────────────────────────────────────────── */
+.ch-st-chips-row td { background: #fafbff; padding: 8px 12px 12px !important; }
+.ch-st-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ch-st-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 4px 4px 10px;
+	background: #fff;
+	border: 1px solid #c7d2fe;
+	border-radius: 999px;
+	font-size: var(--pos-fs-xs, 11px);
+	font-weight: 600;
+	color: #3730a3;
+	font-variant-numeric: tabular-nums;
+	max-width: 100%;
+}
+.ch-st-chip .fa-barcode { color: #6366f1; }
+.ch-st-chip .ch-st-chip-text {
+	max-width: 180px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.ch-st-chip .ch-st-remove-serial {
+	width: 20px;
+	height: 20px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	border: 0;
+	border-radius: 999px;
+	color: #6b7280;
+	cursor: pointer;
+}
+.ch-st-chip .ch-st-remove-serial:hover { background: #fee2e2; color: #b91c1c; }
+
+/* ── Empty state ────────────────────────────────────────────────────── */
+.ch-st-empty {
+	padding: 24px 16px;
+	text-align: center;
+	color: var(--pos-text-muted, #6b7280);
+	border: 1px dashed var(--pos-border, #e5e7eb);
+	border-radius: 10px;
+	background: #fafbfc;
+}
+.ch-st-empty .fa { font-size: 28px; opacity: .4; margin-bottom: 6px; }
+.ch-st-empty-title { font-weight: 700; font-size: var(--pos-fs-sm, 12px); color: var(--pos-text-secondary, #4b5563); }
+.ch-st-empty-hint { font-size: var(--pos-fs-2xs, 10px); margin-top: 2px; }
+
+/* ── New transfer action footer ─────────────────────────────────────── */
+.ch-st-new-actions .ch-st-submit-transfer {
+	border-radius: 10px;
+	padding: 8px 18px;
+	font-weight: 600;
+}
+
+/* ── Small-screen polish ────────────────────────────────────────────── */
+@media (max-width: 720px) {
+	.ch-st-grid-2 { grid-template-columns: 1fr; }
+	.ch-st-counter-strip { grid-template-columns: repeat(3, 1fr); padding: 8px; }
+	.ch-st-counter-value { font-size: var(--pos-fs-md, 14px); }
+	.ch-st-mode-hint { display: none; }
+	.ch-st-manual-row { grid-template-columns: 1fr 70px auto; }
+}

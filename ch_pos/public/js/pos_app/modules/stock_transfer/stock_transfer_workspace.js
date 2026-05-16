@@ -261,36 +261,82 @@ export class StockTransferWorkspace {
 		const body = panel.find(".ch-st-body");
 		const loading = panel.find(".ch-st-loading").hide();
 		this.transfer_items = [];
+		this.entry_mode = "scan"; // "scan" | "manual" — scanner-first by default
 
 		body.html(`
-			<div class="ch-pos-section-card">
+			<div class="ch-pos-section-card ch-st-card">
 				<div class="section-header"><i class="fa fa-plus-circle"></i> ${__("Create Stock Transfer")}</div>
-				<div class="section-body">
-					<!-- Mandatory warehouse selection -->
-					<div class="ch-st-wh-alert alert alert-warning" style="padding:8px 12px;font-size:12px;font-weight:600;margin-bottom:12px;border-radius:var(--pos-radius-sm)">
-						<i class="fa fa-exclamation-triangle"></i> ${__("Both source and destination warehouses are required")}
-					</div>
-					<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
-						<div>
-							<label style="font-size:var(--pos-fs-xs);font-weight:700;color:var(--pos-text-secondary);margin-bottom:4px;display:block">
-								${__("From Warehouse")} <span style="color:var(--pos-danger)">*</span>
+				<div class="section-body ch-st-form">
+					<!-- Warehouse pair: equal-height, aligned labels -->
+					<div class="ch-st-grid-2">
+						<div class="ch-st-field">
+							<label class="ch-st-label">
+								${__("From Warehouse")} <span class="ch-st-req">*</span>
 							</label>
-							<div class="ch-st-from-wh"></div>
+							<div class="ch-st-from-wh ch-st-link"></div>
 						</div>
-						<div>
-							<label style="font-size:var(--pos-fs-xs);font-weight:700;color:var(--pos-text-secondary);margin-bottom:4px;display:block">
-								${__("To Warehouse")} <span style="color:var(--pos-danger)">*</span>
+						<div class="ch-st-field">
+							<label class="ch-st-label">
+								${__("To Warehouse")} <span class="ch-st-req">*</span>
 							</label>
-							<div class="ch-st-to-wh"></div>
+							<div class="ch-st-to-wh ch-st-link"></div>
 						</div>
 					</div>
-					<div style="display:flex;gap:8px;margin-bottom:12px">
-						<div class="ch-st-item-field" style="flex:2"></div>
-						<input type="number" class="form-control ch-st-qty-input" placeholder="${__("Qty")}" min="1" value="1" style="flex:0 0 80px;border-radius:var(--pos-radius-sm);text-align:center">
-						<button class="btn btn-primary ch-st-add-item-btn" style="border-radius:var(--pos-radius-sm);white-space:nowrap">
+
+					<div class="ch-st-wh-alert" style="display:none">
+						<i class="fa fa-exclamation-triangle"></i>
+						<span class="ch-st-wh-alert-msg">${__("Pick source and destination warehouses to begin scanning")}</span>
+					</div>
+
+					<!-- Mode toggle: Scan (default, SAP-style) vs Manual -->
+					<div class="ch-st-mode-toggle" role="tablist">
+						<button type="button" class="ch-st-mode-btn active" data-mode="scan" role="tab">
+							<i class="fa fa-barcode"></i> ${__("Scan IMEI / Serial")}
+						</button>
+						<button type="button" class="ch-st-mode-btn" data-mode="manual" role="tab">
+							<i class="fa fa-keyboard-o"></i> ${__("Manual Item")}
+						</button>
+						<span class="ch-st-mode-hint">
+							<i class="fa fa-info-circle"></i>
+							${__("Scanned units are tracked end-to-end in IMEI Tracker")}
+						</span>
+					</div>
+
+					<!-- Scan input (default visible) -->
+					<div class="ch-st-scan-row" data-mode-panel="scan">
+						<i class="fa fa-barcode ch-st-scan-icon"></i>
+						<input type="text" class="form-control ch-st-scan-input"
+							placeholder="${__("Scan or type IMEI / Serial and press Enter")}"
+							autocomplete="off" inputmode="text">
+						<div class="ch-st-scan-feedback" aria-live="polite"></div>
+					</div>
+
+					<!-- Manual row (hidden by default) -->
+					<div class="ch-st-manual-row" data-mode-panel="manual" style="display:none">
+						<div class="ch-st-item-field ch-st-link"></div>
+						<input type="number" class="form-control ch-st-qty-input"
+							placeholder="${__("Qty")}" min="1" value="1">
+						<button class="btn btn-primary ch-st-add-item-btn">
 							<i class="fa fa-plus"></i> ${__("Add")}
 						</button>
 					</div>
+
+					<!-- Live counter strip (SAP MIGO-style) -->
+					<div class="ch-st-counter-strip">
+						<div class="ch-st-counter">
+							<span class="ch-st-counter-label">${__("Lines")}</span>
+							<span class="ch-st-counter-value ch-st-c-lines">0</span>
+						</div>
+						<div class="ch-st-counter">
+							<span class="ch-st-counter-label">${__("Total Qty")}</span>
+							<span class="ch-st-counter-value ch-st-c-qty">0</span>
+						</div>
+						<div class="ch-st-counter">
+							<span class="ch-st-counter-label">${__("Scanned Serials")}</span>
+							<span class="ch-st-counter-value ch-st-c-serials">0</span>
+						</div>
+					</div>
+
 					<div class="ch-st-items-table"></div>
 
 					<!-- Courier Hand-over Section -->
@@ -360,14 +406,98 @@ export class StockTransferWorkspace {
 			const f = this.from_wh_field.get_value();
 			const t = this.to_wh_field.get_value();
 			const alert_el = body.find(".ch-st-wh-alert");
+			const msg_el = body.find(".ch-st-wh-alert-msg");
 			if (f && t && f !== t) {
 				alert_el.hide();
+				body.find(".ch-st-scan-input").prop("disabled", false);
 			} else {
+				if (f && t && f === t) {
+					msg_el.text(__("Source and destination warehouse must be different"));
+				} else {
+					msg_el.text(__("Pick source and destination warehouses to begin scanning"));
+				}
 				alert_el.show();
+				body.find(".ch-st-scan-input").prop("disabled", true);
 			}
 		};
 		this.from_wh_field.$input.on("change", validate_wh);
 		this.to_wh_field.$input.on("change", validate_wh);
+		validate_wh();
+
+		// Mode toggle (Scan / Manual)
+		body.on("click", ".ch-st-mode-btn", (e) => {
+			const mode = $(e.currentTarget).data("mode");
+			this.entry_mode = mode;
+			body.find(".ch-st-mode-btn").removeClass("active");
+			$(e.currentTarget).addClass("active");
+			body.find("[data-mode-panel]").hide();
+			body.find(`[data-mode-panel="${mode}"]`).show();
+			if (mode === "scan") {
+				setTimeout(() => body.find(".ch-st-scan-input").trigger("focus"), 50);
+			}
+		});
+
+		// Scanner: Enter = consume scan
+		body.on("keydown", ".ch-st-scan-input", (e) => {
+			if (e.key !== "Enter") return;
+			e.preventDefault();
+			const $inp = $(e.currentTarget);
+			const barcode = ($inp.val() || "").trim();
+			if (!barcode) return;
+			const from_wh = this.from_wh_field.get_value();
+			const to_wh = this.to_wh_field.get_value();
+			if (!from_wh || !to_wh || from_wh === to_wh) {
+				this._scan_feedback(body, "error", __("Pick valid source and destination warehouses first"));
+				return;
+			}
+
+			// Local duplicate check before round-trip
+			const already = (this.transfer_items || []).some(r => (r.serial_nos || []).includes(barcode));
+			if (already) {
+				$inp.val("");
+				this._scan_feedback(body, "warn", __("{0} already scanned", [barcode]));
+				return;
+			}
+
+			$inp.prop("disabled", true);
+			frappe.call({
+				method: "ch_pos.api.pos_api.scan_for_stock_transfer",
+				args: { barcode, from_warehouse: from_wh },
+				callback: (r) => {
+					$inp.prop("disabled", false);
+					$inp.val("");
+					$inp.trigger("focus");
+					const res = r && r.message;
+					if (!res || !res.ok) {
+						const msg = (res && res.message) || __("Scan failed");
+						this._scan_feedback(body, "error", msg);
+						return;
+					}
+					// Append to line (group by item_code)
+					const line = this.transfer_items.find(x => x.item_code === res.item_code);
+					if (line) {
+						line.serial_nos = line.serial_nos || [];
+						line.serial_nos.push(res.serial_no);
+						line.qty = line.serial_nos.length;
+					} else {
+						this.transfer_items.push({
+							item_code: res.item_code,
+							item_name: res.item_name,
+							uom: res.uom || "Nos",
+							qty: 1,
+							serial_nos: [res.serial_no],
+						});
+					}
+					this._scan_feedback(body, "ok", __("{0} added", [res.serial_no]));
+					this._render_transfer_items(body);
+				},
+				error: () => {
+					$inp.prop("disabled", false);
+					$inp.trigger("focus");
+					this._scan_feedback(body, "error", __("Scan failed — try again"));
+				},
+			});
+		});
 
 		body.on("click", ".ch-st-add-item-btn", () => {
 			const item_code = this.st_item_field.get_value();
@@ -375,15 +505,21 @@ export class StockTransferWorkspace {
 			if (!item_code) { frappe.show_alert({ message: __("Select an item"), indicator: "orange" }); return; }
 
 			const existing = this.transfer_items.find(r => r.item_code === item_code);
-			if (existing) { existing.qty += qty; }
-			else {
+			if (existing) {
+				// If the existing line is serial-driven, refuse manual qty bump
+				if ((existing.serial_nos || []).length) {
+					frappe.show_alert({ message: __("This line is scanner-tracked — scan more serials instead"), indicator: "orange" });
+					return;
+				}
+				existing.qty += qty;
+			} else {
 				frappe.call({
 					method: "frappe.client.get_value",
 					args: { doctype: "Item", filters: { name: item_code }, fieldname: ["item_name", "stock_uom"] },
 					async: false,
 					callback: (r) => {
 						const d = r.message || {};
-						this.transfer_items.push({ item_code, item_name: d.item_name || item_code, uom: d.stock_uom || "Nos", qty });
+						this.transfer_items.push({ item_code, item_name: d.item_name || item_code, uom: d.stock_uom || "Nos", qty, serial_nos: [] });
 					},
 				});
 			}
@@ -401,46 +537,111 @@ export class StockTransferWorkspace {
 			this._render_transfer_items(body);
 		});
 
+		body.on("click", ".ch-st-remove-serial", (e) => {
+			const $btn = $(e.currentTarget);
+			const idx = parseInt($btn.data("idx"));
+			const serial = $btn.data("serial");
+			const line = this.transfer_items[idx];
+			if (!line) return;
+			line.serial_nos = (line.serial_nos || []).filter(s => s !== String(serial));
+			line.qty = line.serial_nos.length;
+			if (line.qty === 0) this.transfer_items.splice(idx, 1);
+			this._render_transfer_items(body);
+		});
+
 		body.on("click", ".ch-st-submit-transfer", () => this._submit_transfer(panel, body));
 		this._render_transfer_items(body);
+
+		// Initial focus on scanner
+		setTimeout(() => body.find(".ch-st-scan-input").trigger("focus"), 100);
+	}
+
+	_scan_feedback(container, kind, message) {
+		const cls = kind === "ok" ? "ch-st-fb-ok" : kind === "warn" ? "ch-st-fb-warn" : "ch-st-fb-err";
+		const icon = kind === "ok" ? "check-circle" : kind === "warn" ? "exclamation-circle" : "times-circle";
+		const el = container.find(".ch-st-scan-feedback");
+		el.removeClass("ch-st-fb-ok ch-st-fb-warn ch-st-fb-err")
+			.addClass(cls)
+			.html(`<i class="fa fa-${icon}"></i> ${frappe.utils.escape_html(message)}`)
+			.stop(true, true)
+			.fadeIn(80);
+		clearTimeout(this._fb_t);
+		this._fb_t = setTimeout(() => el.fadeOut(200), kind === "ok" ? 1200 : 2600);
 	}
 
 	_render_transfer_items(container) {
 		const table = container.find(".ch-st-items-table");
 		const actions = container.find(".ch-st-new-actions");
 		const courier_section = container.find(".ch-st-courier-section");
-		if (!this.transfer_items.length) {
-			table.html(`<div class="text-muted text-center" style="padding:16px">${__("No items added yet")}</div>`);
+
+		// Counter strip totals
+		const lines = (this.transfer_items || []).length;
+		const total_qty = (this.transfer_items || []).reduce((a, r) => a + (parseFloat(r.qty) || 0), 0);
+		const total_serials = (this.transfer_items || []).reduce((a, r) => a + ((r.serial_nos || []).length), 0);
+		container.find(".ch-st-c-lines").text(lines);
+		container.find(".ch-st-c-qty").text(total_qty);
+		container.find(".ch-st-c-serials").text(total_serials);
+
+		if (!lines) {
+			table.html(`
+				<div class="ch-st-empty">
+					<i class="fa fa-inbox"></i>
+					<div class="ch-st-empty-title">${__("No items added yet")}</div>
+					<div class="ch-st-empty-hint">${__("Scan an IMEI / Serial above, or switch to Manual mode")}</div>
+				</div>`);
 			actions.hide();
 			courier_section.hide();
 			return;
 		}
 		actions.show();
 		courier_section.show();
+
+		const row_html = (r, idx) => {
+			const has_serials = (r.serial_nos || []).length > 0;
+			const qty_cell = has_serials
+				? `<div class="ch-st-qty-tracked"><i class="fa fa-link"></i> ${r.qty}</div>`
+				: `<strong>${r.qty}</strong>`;
+			const chips = (r.serial_nos || []).map(sn => `
+				<span class="ch-st-chip" title="${frappe.utils.escape_html(sn)}">
+					<i class="fa fa-barcode"></i>
+					<span class="ch-st-chip-text">${frappe.utils.escape_html(sn)}</span>
+					<button class="ch-st-remove-serial" data-idx="${idx}" data-serial="${frappe.utils.escape_html(sn)}" title="${__("Remove this serial")}">
+						<i class="fa fa-times"></i>
+					</button>
+				</span>`).join("");
+			const chips_row = has_serials ? `
+				<tr class="ch-st-chips-row">
+					<td colspan="4">
+						<div class="ch-st-chips">${chips}</div>
+					</td>
+				</tr>` : "";
+			return `
+				<tr class="ch-st-item-row${has_serials ? " ch-st-item-row--tracked" : ""}">
+					<td>
+						<div class="ch-st-item-name">${frappe.utils.escape_html(r.item_name)}</div>
+						<div class="ch-st-item-code">${frappe.utils.escape_html(r.item_code)}${has_serials ? ` · <span class="ch-st-track-tag">${__("IMEI-tracked")}</span>` : ""}</div>
+					</td>
+					<td class="text-center">${qty_cell}</td>
+					<td class="text-center ch-st-uom">${frappe.utils.escape_html(r.uom)}</td>
+					<td class="text-center">
+						<button class="btn btn-link text-danger ch-st-remove-row" data-idx="${idx}" title="${__("Remove line")}">
+							<i class="fa fa-trash-o"></i>
+						</button>
+					</td>
+				</tr>
+				${chips_row}`;
+		};
+
 		table.html(`
-			<table class="ch-rpt-table" style="margin:0">
+			<table class="ch-st-table">
 				<thead><tr>
 					<th>${__("Item")}</th>
-					<th class="text-center" style="width:80px">${__("Qty")}</th>
+					<th class="text-center" style="width:90px">${__("Qty")}</th>
 					<th class="text-center" style="width:80px">${__("UOM")}</th>
-					<th style="width:40px"></th>
+					<th style="width:48px"></th>
 				</tr></thead>
 				<tbody>
-					${this.transfer_items.map((r, idx) => `
-						<tr>
-							<td>
-								<div style="font-weight:600;font-size:var(--pos-fs-sm)">${frappe.utils.escape_html(r.item_name)}</div>
-								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${frappe.utils.escape_html(r.item_code)}</div>
-							</td>
-							<td class="text-center"><strong>${r.qty}</strong></td>
-							<td class="text-center" style="color:var(--pos-text-muted)">${frappe.utils.escape_html(r.uom)}</td>
-							<td class="text-center">
-								<button class="btn btn-link text-danger ch-st-remove-row" data-idx="${idx}" style="padding:2px">
-									<i class="fa fa-trash-o"></i>
-								</button>
-							</td>
-						</tr>
-					`).join("")}
+					${this.transfer_items.map(row_html).join("")}
 				</tbody>
 			</table>
 		`);
@@ -469,7 +670,12 @@ export class StockTransferWorkspace {
 			args: {
 				from_warehouse: from_wh,
 				to_warehouse: to_wh,
-				items: this.transfer_items,
+				items: this.transfer_items.map(r => ({
+					item_code: r.item_code,
+					qty: r.qty,
+					uom: r.uom,
+					serial_no: (r.serial_nos || []).join("\n"),
+				})),
 				courier_name: courier_name || undefined,
 				courier_tracking: courier_tracking || undefined,
 				handover_notes: handover_notes || undefined,

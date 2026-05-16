@@ -55,6 +55,7 @@ app_include_css = [
     "/assets/ch_pos/css/pos_variables.css",
     "/assets/ch_pos/css/pos_layout.css",
     "/assets/ch_pos/css/pos_components.css",
+    "/assets/ch_pos/css/stock_transfer.css",
 ]
 
 # Doc events
