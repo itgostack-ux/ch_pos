@@ -708,9 +708,68 @@ CUSTOM_FIELDS = {
 }
 
 
+def _filter_ready_fields(fields_dict):
+    """Skip Link fields whose target DocType doesn't exist yet."""
+    ready = {}
+    for dt, field_list in fields_dict.items():
+        filtered = []
+        for f in field_list:
+            if f.get("fieldtype") == "Link" and f.get("options"):
+                if not frappe.db.exists("DocType", f["options"]):
+                    continue
+            filtered.append(f)
+        if filtered:
+            ready[dt] = filtered
+    return ready
+
+
+def _scrub_broken_link_custom_fields(target_doctypes):
+    """Remove Custom Field rows whose Link `options` are NULL or point to a
+    DocType that no longer exists.
+
+    Frappe re-validates every DocField on the parent DocType on each new
+    Custom Field insert (see ``check_link_table_options`` in
+    ``frappe/core/doctype/doctype/doctype.py``), so one stale row blocks
+    all subsequent inserts and raises ``WrongOptionsDoctypeLinkError``.
+
+    Idempotent. Safe to run before ``create_custom_fields()``.
+    """
+    if not frappe.db.table_exists("Custom Field"):
+        return
+    for dt in target_doctypes:
+        rows = frappe.get_all(
+            "Custom Field",
+            filters={"dt": dt, "fieldtype": "Link"},
+            fields=["name", "fieldname", "options"],
+        )
+        cleaned = False
+        for r in rows:
+            opts = (r.get("options") or "").strip()
+            if opts and frappe.db.exists("DocType", opts):
+                continue
+            try:
+                frappe.delete_doc(
+                    "Custom Field", r["name"],
+                    force=1, ignore_permissions=True, ignore_missing=True,
+                )
+                cleaned = True
+                frappe.logger().warning(
+                    f"[ch_pos] Scrubbed stale Custom Field {r['name']} "
+                    f"(options={opts!r} missing)"
+                )
+            except Exception:
+                frappe.log_error(
+                    title="Scrub stale Custom Field failed",
+                    message=frappe.get_traceback(),
+                )
+        if cleaned:
+            frappe.clear_cache(doctype=dt)
+
+
 def after_install():
     _ensure_module_defs()
-    create_custom_fields(CUSTOM_FIELDS, update=False)
+    _scrub_broken_link_custom_fields(CUSTOM_FIELDS.keys())
+    create_custom_fields(_filter_ready_fields(CUSTOM_FIELDS), update=False)
     sync_margin_receipt_format()
 
 
@@ -735,7 +794,8 @@ def before_migrate():
 
 
 def after_migrate():
-    create_custom_fields(CUSTOM_FIELDS, update=False)
+    _scrub_broken_link_custom_fields(CUSTOM_FIELDS.keys())
+    create_custom_fields(_filter_ready_fields(CUSTOM_FIELDS), update=False)
     sync_margin_receipt_format()
     _ensure_sale_types()
 
