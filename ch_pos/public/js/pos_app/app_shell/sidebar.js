@@ -35,6 +35,7 @@ const MODE_SECTIONS = [
 		modes: [
 			{ key: "material_request", icon: "fa-clipboard",    label: __("Request Stock") },
 			{ key: "stock_transfer",   icon: "fa-truck",        label: __("Transfers") },
+			{ key: "bin_manager",      icon: "fa-th-large",     label: __("Bin Manager") },
 		],
 	},
 	{
@@ -124,6 +125,9 @@ export class Sidebar {
 
 	_is_mode_allowed(modeKey) {
 		if (!this._allowed_modes) return true;
+		if (modeKey === "bin_manager" && this._allowed_modes.has("stock_transfer")) {
+			return true;
+		}
 		return this._allowed_modes.has(modeKey);
 	}
 
@@ -335,6 +339,6 @@ export class Sidebar {
 		return ["sell", "returns", "buyback", "repair"];
 	}
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "guided", "model_compare", "claims", "exceptions", "queue"];
+		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "bin_manager", "guided", "model_compare", "claims", "exceptions", "queue"];
 	}
 }

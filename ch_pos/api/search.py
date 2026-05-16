@@ -2,6 +2,50 @@ import frappe
 from frappe.utils import cint, flt
 
 
+def _resolve_sellable_warehouse(warehouse):
+    """Given any store-related warehouse, return its Sellable bin child.
+
+    Resolution order:
+      1. If `warehouse` already has ch_bin_type = 'Sellable' → return as-is.
+      2. If `warehouse` is the parent of a CH Store → return that store's Sellable child.
+      3. If `warehouse` is itself a child bin (Damaged/Reserved/etc.) → return the sibling Sellable bin under the same CH Store.
+      4. Otherwise → return None (caller falls back to the original warehouse).
+    """
+    if not warehouse:
+        return None
+    try:
+        wh = frappe.db.get_value(
+            "Warehouse", warehouse,
+            ["ch_bin_type", "ch_store"], as_dict=True
+        )
+    except Exception:
+        return None
+    if not wh:
+        return None
+    if (wh.get("ch_bin_type") or "") == "Sellable":
+        return warehouse
+    # Find sibling Sellable for the same store
+    if wh.get("ch_store"):
+        sellable = frappe.db.get_value(
+            "Warehouse",
+            {"ch_store": wh["ch_store"], "ch_bin_type": "Sellable", "disabled": 0},
+            "name",
+        )
+        if sellable:
+            return sellable
+    # Treat `warehouse` as a parent: find a CH Store whose warehouse == this one
+    store = frappe.db.get_value("CH Store", {"warehouse": warehouse}, "name")
+    if store:
+        sellable = frappe.db.get_value(
+            "Warehouse",
+            {"ch_store": store, "ch_bin_type": "Sellable", "disabled": 0},
+            "name",
+        )
+        if sellable:
+            return sellable
+    return None
+
+
 def _optional_item_select(fieldname, alias=None, fallback="''", cast="text"):
     """Build a safe SQL select expression for optional Item custom fields."""
     alias = alias or fieldname
@@ -44,7 +88,8 @@ def pos_item_search(
     page_size = min(cint(page_size) or 20, 100)
 
     profile_doc = frappe.get_cached_doc("POS Profile", pos_profile) if pos_profile else None
-    warehouse = profile_doc.warehouse if profile_doc else None
+    parent_warehouse = profile_doc.warehouse if profile_doc else None
+    warehouse = _resolve_sellable_warehouse(parent_warehouse) or parent_warehouse
     company = company or (profile_doc.company if profile_doc else None)
 
     if company and warehouse:
@@ -106,6 +151,12 @@ def pos_item_search(
     if filters.get("brand"):
         conditions.append(f"{brand_expr} = %(brand)s")
         values["brand"] = filters["brand"]
+
+    # Sell mode is restricted to items currently available in the store's Sellable bin.
+    # Server-enforced so a misconfigured frontend can't leak non-sellable items.
+    usage_lower = (usage_context or "sale").lower()
+    if usage_lower == "sale" and warehouse:
+        filters["in_stock_only"] = 1
 
     if filters.get("in_stock_only") and warehouse:
         # For serial-tracked items check Active serials; for others check Bin qty
