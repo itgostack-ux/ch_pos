@@ -14,6 +14,7 @@
 import { PosState, EventBus } from "../state.js";
 import { format_number } from "./helpers.js";
 import { pos_warning, pos_info } from "./toast.js";
+import { print_invoice_pdf } from "./print_helper.js";
 
 // ── MOP icon lookup ────────────────────────────────────────────────────────
 function _mop_icon(mop) {
@@ -2653,8 +2654,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				fieldname: "custom_gofix_service_request"
 			}).then(r => {
 				const fmt = r && r.custom_gofix_service_request ? "GoFix Service Invoice" : "Custom Sales Invoice";
-				const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=0&trigger_print=1`;
-				window.open(url, "_blank");
+				// Server-rendered PDF → header on every page (no browser print quirks)
+				print_invoice_pdf(name, fmt);
 			});
 		});
 	}

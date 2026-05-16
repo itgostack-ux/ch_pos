@@ -7,6 +7,7 @@
  */
 import { PosState, EventBus } from "../state.js";
 import { format_number } from "../shared/helpers.js";
+import { print_invoice_pdf } from "../shared/print_helper.js";
 
 export class CartService {
 	constructor() {
@@ -1848,13 +1849,12 @@ export class CartService {
 			}
 		});
 
-		// Print button
+		// Print button — server-rendered PDF (header on every page)
 		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
 			const name = $(e.currentTarget).data("name");
 			const is_gofix = $(e.currentTarget).data("gofix");
 			const fmt = is_gofix ? "GoFix Service Invoice" : "Custom Sales Invoice";
-			const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=0&trigger_print=1`;
-			window.open(url, "_blank");
+			print_invoice_pdf(name, fmt);
 		});
 	}
 
