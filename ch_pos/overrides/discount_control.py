@@ -36,11 +36,37 @@ def validate_pos_commercial_policy(doc, method=None):
 	policy = get_commercial_policy(company)
 	pos_channel = _resolve_pos_channel(doc)
 
+	# Pre-load the exception request (if any) so the item loop can skip
+	# MOP / discount-limit checks for items the manager already approved.
+	_exc_doc = None
+	_exc_name = doc.get("custom_exception_request")
+	if _exc_name:
+		try:
+			_exc = frappe.get_doc("CH Exception Request", _exc_name)
+			if _exc.status in ("Approved", "Auto-Approved") and _exc.docstatus == 1:
+				_exc_doc = _exc
+		except Exception:
+			pass
+
 	for item in doc.items:
 		rate = flt(item.rate)
 		item_code = item.item_code
 		if not item_code or rate <= 0:
 			continue
+
+		# ── Exception override ───────────────────────────────────────────
+		# If this item is covered by a pre-approved exception on the invoice,
+		# skip MOP floor and discount-limit enforcement entirely.
+		# The exception was already reviewed and approved by a manager.
+		_item_serial = (item.serial_no or "").strip().split("\n")[0]
+		_covered_by_exception = (
+			_exc_doc is not None
+			and _exc_doc.item_code == item_code
+			and (
+				not _exc_doc.serial_no
+				or _item_serial == (_exc_doc.serial_no or "").strip()
+			)
+		)
 
 		# ── A2: Offer Precedence Guard ────────────────────────────────
 		# If a CH Item Offer is active for this item, its synced ERPNext
@@ -50,7 +76,7 @@ def validate_pos_commercial_policy(doc, method=None):
 		# This check is informational — we add a note if both applied.
 
 		# ── A1: Discount validation ───────────────────────────────────
-		if pos_channel:
+		if pos_channel and not _covered_by_exception:
 			result = validate_pos_discount(
 				item_code=item_code,
 				channel=pos_channel,

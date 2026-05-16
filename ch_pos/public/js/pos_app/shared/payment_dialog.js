@@ -690,20 +690,29 @@ placeholder="${__("Enter code...")}">
 			<th>${__("Item")}</th><th class="text-center">${__("Qty")}</th><th class="text-right">${__("Amt")}</th>
 		</tr></thead><tbody>`;
 		PosState.cart.forEach(c => {
-			const amt = flt(c.qty) * flt(c.rate);
+			const base_rate = flt(c.price_list_rate || c.mrp || c.rate || 0);
+			const final_rate = flt(c.rate || 0);
+			const unit_disc = Math.max(flt(c.discount_amount || 0), Math.max(0, base_rate - final_rate));
+			const disc_amt = unit_disc * flt(c.qty);
+			const base_amt = flt(c.qty) * base_rate;
+			const final_amt = flt(c.qty) * final_rate;
+			const disc_pct = base_rate > 0 && unit_disc > 0 ? (unit_disc / base_rate) * 100 : 0;
 			const cls = c.is_warranty ? " ch-pay-row-warranty" : c.is_vas ? " ch-pay-row-vas" : "";
 			const serial_tag = c.serial_no
 				? `<div class="ch-pay-serial-tag"><i class="fa fa-barcode"></i> ${frappe.utils.escape_html(c.serial_no)}</div>`
 				: "";
+			const price_meta = unit_disc > 0
+				? `<div class="text-muted" style="font-size:11px">${__("Actual")}: ₹${format_number(base_rate)} • ${__("Discount")}: ${format_number(disc_pct)}% • ${__("Final")}: ₹${format_number(final_rate)}</div>`
+				: "";
 			html += `<tr class="ch-pay-item-row${cls}">
-				<td>${frappe.utils.escape_html(c.item_name)}${serial_tag}</td>
+				<td>${frappe.utils.escape_html(c.item_name)}${serial_tag}${price_meta}</td>
 				<td class="text-center">${c.qty}</td>
-				<td class="text-right">₹${format_number(amt)}</td>
+				<td class="text-right">${unit_disc > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);margin-right:4px">₹${format_number(base_amt)}</span>` : ""}₹${format_number(unit_disc > 0 ? final_amt : base_amt)}</td>
 			</tr>`;
-			if (flt(c.discount_amount) > 0) {
+			if (unit_disc > 0) {
 				html += `<tr class="ch-pay-offer-row">
 					<td colspan="2"><i class="fa fa-tag"></i> ${frappe.utils.escape_html(c.applied_offer ? (c.applied_offer.offer_name || __("Offer")) : __("Discount"))}</td>
-					<td class="text-right text-success">-₹${format_number(flt(c.discount_amount) * flt(c.qty))}</td>
+					<td class="text-right text-success">-₹${format_number(disc_amt)}</td>
 				</tr>`;
 			}
 		});
@@ -714,8 +723,13 @@ placeholder="${__("Enter code...")}">
 	_build_totals_html() {
 		let subtotal = 0, disc_total = 0;
 		PosState.cart.forEach(c => {
-			subtotal += flt(c.qty) * flt(c.rate);
-			disc_total += flt(c.discount_amount || 0) * flt(c.qty);
+			const base_rate = flt(c.price_list_rate || c.mrp || c.rate || 0);
+			const final_rate = flt(c.rate || 0);
+			const qty = flt(c.qty);
+			const explicit_disc = flt(c.discount_amount || 0);
+			const implicit_disc = Math.max(0, base_rate - final_rate);
+			subtotal += qty * base_rate;
+			disc_total += qty * Math.max(explicit_disc, implicit_disc);
 		});
 		const net = subtotal - disc_total;
 		let add_disc = 0;
@@ -2371,8 +2385,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			item_name:        c.item_name,
 			qty:              c.qty,
 			rate:             c.rate,
+			price_list_rate:  c.price_list_rate || c.mrp || c.rate,
 			uom:              c.uom,
+			discount_percentage: c.discount_percentage || 0,
 			discount_amount:  c.discount_amount || 0,
+			exception_request: c.exception_request || null,
+			exception_original_rate: c.exception_original_rate || null,
+			exception_final_rate: c.exception_final_rate || null,
 			warranty_plan:    c.warranty_plan || null,
 			for_item_code:    c.for_item_code || null,
 			for_serial_no:    c.for_serial_no || null,
@@ -2634,7 +2653,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				fieldname: "custom_gofix_service_request"
 			}).then(r => {
 				const fmt = r && r.custom_gofix_service_request ? "GoFix Service Invoice" : "Custom Sales Invoice";
-				const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=1`;
+				const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=0&trigger_print=1`;
 				window.open(url, "_blank");
 			});
 		});
@@ -2659,8 +2678,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	_calc_grand_total_before_offer() {
 		let subtotal = 0, disc_total = 0;
 		PosState.cart.forEach(c => {
-			subtotal   += flt(c.qty) * flt(c.rate);
-			disc_total += flt(c.discount_amount || 0) * flt(c.qty);
+			const base_rate = flt(c.price_list_rate || c.mrp || c.rate || 0);
+			const final_rate = flt(c.rate || 0);
+			const qty = flt(c.qty);
+			const explicit_disc = flt(c.discount_amount || 0);
+			const implicit_disc = Math.max(0, base_rate - final_rate);
+			subtotal += qty * base_rate;
+			disc_total += qty * Math.max(explicit_disc, implicit_disc);
 		});
 		let net = subtotal - disc_total;
 		if (PosState.additional_discount_pct) net -= net * PosState.additional_discount_pct / 100;

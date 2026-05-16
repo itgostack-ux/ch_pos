@@ -453,6 +453,7 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.custom_guided_session = guided_session
 
     # Exception request link — validate it's still valid before billing
+    exception_request_doc = None
     if exception_request:
         exc = frappe.get_doc("CH Exception Request", exception_request)
         if not exc.is_valid():
@@ -461,7 +462,34 @@ def create_pos_invoice(pos_profile, customer, items,
         if exc.pos_invoice:
             frappe.throw(frappe._("Exception Request {0} was already used in invoice {1}").format(
                 exception_request, exc.pos_invoice))
+        if exc.customer:
+            cust = frappe.db.get_value(
+                "Customer",
+                exc.customer,
+                ["mobile_no", "ch_alternate_phone"],
+                as_dict=True,
+            )
+            current_customer = frappe.db.get_value(
+                "Customer",
+                customer,
+                ["mobile_no", "ch_alternate_phone"],
+                as_dict=True,
+            ) if customer else None
+            def _phone_tail(phone_value):
+                return "".join(ch for ch in str(phone_value or "") if ch.isdigit())[-10:]
+            allowed_phone = _phone_tail(exc.customer_phone or (cust.mobile_no if cust else "") or (cust.ch_alternate_phone if cust else ""))
+            current_phone = _phone_tail((current_customer.mobile_no if current_customer else "") or (current_customer.ch_alternate_phone if current_customer else ""))
+            if exc.customer != customer or (allowed_phone and current_phone and allowed_phone != current_phone):
+                frappe.throw(frappe._("Exception Request {0} is tied to a different customer phone.").format(exception_request))
         inv.custom_exception_request = exception_request
+        exception_request_doc = exc
+        # Disable pricing rule engine for this invoice so ERPNext's
+        # set_missing_item_details / calculate_taxes_and_totals cannot
+        # override the exception-approved item rate with a standard
+        # Pricing Rule (e.g. PRLE-0002 at 10% discount).
+        inv.ignore_pricing_rule = 1
+        # IMPORTANT: Keep this flag set even if exception is linked later via workflow.
+        # This ensures pricing rules never override approved exception prices.
 
     # Warranty claim link — validate processing fee is pending
     if warranty_claim:
@@ -480,14 +508,52 @@ def create_pos_invoice(pos_profile, customer, items,
     warranty_items = []
 
     for item in items:
+        item_serial = (item.get("serial_no") or item.get("for_serial_no") or "").strip()
+        item_exception_original = flt(item.get("exception_original_rate") or item.get("price_list_rate") or item.get("mrp") or item.get("rate"))
+        item_exception_final = flt(item.get("exception_final_rate") or item.get("rate"))
+        if exception_request_doc and item.get("item_code") == exception_request_doc.item_code:
+            serial_match = not exception_request_doc.serial_no or item_serial == (exception_request_doc.serial_no or "").strip()
+            phone_match = True
+            if exception_request_doc.customer_phone or exception_request_doc.customer:
+                phone_match = exception_request_doc.customer == customer
+            if exception_request_doc.customer_phone:
+                cust = frappe.db.get_value(
+                    "Customer",
+                    customer,
+                    ["mobile_no", "ch_alternate_phone"],
+                    as_dict=True,
+                ) if customer else None
+                def _phone_tail(phone_value):
+                    return "".join(ch for ch in str(phone_value or "") if ch.isdigit())[-10:]
+                current_phone = _phone_tail((cust.mobile_no if cust else "") or (cust.ch_alternate_phone if cust else ""))
+                allowed_phone = _phone_tail(exception_request_doc.customer_phone)
+                phone_match = bool(allowed_phone and current_phone and allowed_phone == current_phone)
+            if not (serial_match and phone_match):
+                # Even if serial/phone match fails, still try to apply exception if item matches
+                # This handles cases where exception was approved but frontend didn't send exception_final_rate
+                if exception_request_doc.customer == customer or not exception_request_doc.customer:
+                    item_exception_original = flt(exception_request_doc.original_value or item_exception_original)
+                    item_exception_final = flt(exception_request_doc.resolution_value or exception_request_doc.requested_value or item_exception_final)
+                else:
+                    continue
+            else:
+                if not exception_request_doc.customer or exception_request_doc.customer == customer:
+                    item_exception_original = flt(exception_request_doc.original_value or item_exception_original)
+                    item_exception_final = flt(exception_request_doc.resolution_value or exception_request_doc.requested_value or item_exception_final)
+
         row = {
             "item_code": item.get("item_code"),
             "qty": flt(item.get("qty", 1)),
-            "rate": flt(item.get("rate")),
+            "rate": item_exception_final,
+            "price_list_rate": item_exception_original,
             "uom": item.get("uom", "Nos"),
             "warehouse": profile.warehouse,
+            "discount_percentage": flt(item.get("discount_percentage", 0)),
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
+        if item_exception_original > 0 and item_exception_final >= 0:
+            row["discount_amount"] = flt(max(0, item_exception_original - item_exception_final))
+            row["discount_percentage"] = flt(row["discount_amount"] / item_exception_original * 100) if item_exception_original > 0 else 0
         # Set warranty_plan on warranty/VAS invoice items only (not device items)
         if item.get("warranty_plan") and (item.get("is_warranty") or item.get("is_vas")):
             row["custom_warranty_plan"] = item.get("warranty_plan")
@@ -497,6 +563,12 @@ def create_pos_invoice(pos_profile, customer, items,
             row["custom_manager_approved"] = 1
             row["custom_manager_user"] = item.get("manager_user") or ""
             row["custom_override_reason"] = item.get("override_reason") or ""
+
+        # Store exception request details on item row for audit trail and pricing preservation
+        if exception_request_doc and item.get("item_code") == exception_request_doc.item_code:
+            row["custom_exception_request"] = exception_request
+            row["custom_exception_original_rate"] = item_exception_original
+            row["custom_exception_final_rate"] = item_exception_final
 
         # Pass serial_no so margin scheme can look up purchase cost
         if item.get("serial_no"):
@@ -508,6 +580,10 @@ def create_pos_invoice(pos_profile, customer, items,
             row["custom_is_margin_item"] = 1
 
         inv.append("items", row)
+
+        # Safety: If any item has exception pricing, ensure pricing rules are bypassed
+        if item_exception_original > 0 and item_exception_final != item_exception_original:
+            inv.ignore_pricing_rule = 1
 
         # Collect warranty/VAS info for post-submit processing
         if (item.get("is_warranty") or item.get("is_vas")) and item.get("warranty_plan"):
@@ -2091,6 +2167,7 @@ def get_invoice_items_for_return(invoice_name) -> dict:
     :func:`_get_linked_plans_for_invoice`.
     """
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+    inv.check_permission("read")  # SECURITY (H8): IDOR prevention
     if inv.docstatus != 1 or inv.is_return:
         frappe.throw(frappe._("Only submitted non-return invoices can be returned"))
 
@@ -2385,6 +2462,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
         )
 
     orig = frappe.get_doc("Sales Invoice", original_invoice)
+    orig.check_permission("read")  # SECURITY (H8): IDOR prevention
     if orig.docstatus != 1 or orig.is_return:
         frappe.throw(frappe._("Can only create returns for submitted non-return invoices"))
 

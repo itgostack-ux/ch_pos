@@ -98,6 +98,7 @@ export const PosState = {
 
 	// ── Exception & Warranty ───────────────────────────
 	exception_request: null,    // linked CH Exception Request name (approved, within validity)
+	exception_request_data: null, // cached approved exception details for line pricing
 	warranty_claim: null,       // linked CH Warranty Claim name (approved, processing fee billing)
 
 	// ── B2B/B2C ─────────────────────────────────────────
@@ -142,6 +143,7 @@ export const PosState = {
 		this.kiosk_token = null;
 		this.guided_session = null;
 		this.exception_request = null;
+		this.exception_request_data = null;
 		this.warranty_claim = null;
 		this.billing_gstin = "";
 		// POS-10 fix: Clear persisted cart on transaction reset

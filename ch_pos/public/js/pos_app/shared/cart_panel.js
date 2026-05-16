@@ -58,9 +58,6 @@ export class CartPanel {
 
 			<!-- B. Quick Retail Actions -->
 			<div class="ch-pos-quick-actions">
-				<button class="btn btn-outline-warning ch-pos-btn-exception">
-					<i class="fa fa-exclamation-triangle"></i> ${__("Exception")}
-				</button>
 				<div class="ch-pos-exchange-banner" style="display:none"></div>
 				<div class="ch-pos-product-exchange-banner" style="display:none"></div>
 				<div class="ch-pos-exception-banner" style="display:none"></div>
@@ -385,9 +382,6 @@ export class CartPanel {
 		// Initial badge count
 		this._refresh_held_count(w);
 
-		// Quick actions
-		w.on("click", ".ch-pos-btn-exception", () => this._show_exception_dialog());
-
 		// Cart line qty / remove
 		w.on("click", ".ch-pos-qty-plus", function () {
 			EventBus.emit("cart:qty_plus", $(this).data("idx"));
@@ -414,7 +408,53 @@ export class CartPanel {
 		w.on("click", ".ch-pos-line-vas", function () {
 			const idx = $(this).data("idx");
 			const item = PosState.cart[idx];
-			if (item) EventBus.emit("vas:open", { for_item: item });
+			if (item) {
+				PosState.last_vas_target = item;
+				EventBus.emit("vas:open", { for_item: item });
+			}
+		});
+
+		// Inline Exception button (line-level, serialized items)
+		w.on("click", ".ch-pos-line-exception", function () {
+			const idx = $(this).data("idx");
+			const item = PosState.cart[idx];
+			if (!item || !item.serial_no) return;
+			if (item.exception_request) {
+				frappe.show_alert({
+					message: __("Exception {0} already linked to this line. Remove it before creating a new one.", [item.exception_request]),
+					indicator: "orange",
+				});
+				return;
+			}
+			const existing = (PosState.cart || []).find((row) => !!row.exception_request);
+			if (existing) {
+				frappe.show_alert({
+					message: __("Only one active exception is allowed per cart. Remove existing exception first."),
+					indicator: "orange",
+				});
+				return;
+			}
+			const customer = PosState.customer || PosState.default_customer || "";
+			const item_code = item.item_code || item.item || item.code || item.name || "";
+
+			EventBus.emit("exception:open", {
+				source: "cart_line",
+				cart_idx: idx,
+				item_code,
+				item_name: item.item_name || "",
+				serial_no: item.serial_no || "",
+				customer,
+				lock_serial: true,
+				lock_customer: true,
+			});
+
+			PosState.active_mode = "exceptions";
+			EventBus.emit("mode:set", "exceptions");
+			EventBus.emit("mode:switch", "exceptions");
+		});
+		w.on("click", ".ch-pos-line-remove-exception", function () {
+			const idx = $(this).data("idx");
+			EventBus.emit("cart:exception_remove", idx);
 		});
 
 
@@ -433,8 +473,7 @@ export class CartPanel {
 
 		// Exception & Warranty banners
 		w.on("click", ".ch-pos-unlink-exception", () => {
-			PosState.exception_request = null;
-			this._update_exception_banner();
+			EventBus.emit("cart:exception_unlink_all");
 		});
 		w.on("click", ".ch-pos-unlink-warranty-claim", () => {
 			PosState.warranty_claim = null;
@@ -524,8 +563,15 @@ export class CartPanel {
 	}
 
 	_cart_line_html(item, idx) {
-		const amount = flt(item.qty) * flt(item.rate);
-		const discount_amt = flt(item.discount_amount || 0);
+		const price_list_rate = flt(item.price_list_rate || item.mrp || item.rate);
+		const final_unit_rate = flt(item.rate);
+		const discount_amt = Math.max(0, flt(item.discount_amount || 0));
+		const final_amount = flt(item.qty) * final_unit_rate;
+		const base_amount = flt(item.qty) * price_list_rate;
+		const computed_discount_amt = Math.max(discount_amt, Math.max(0, price_list_rate - final_unit_rate));
+		const discount_pct = price_list_rate > 0 && computed_discount_amt > 0
+			? (computed_discount_amt / price_list_rate) * 100
+			: 0;
 		const offer_tag = item.offer_applied
 			? `<span class="cart-offer-tag">${frappe.utils.escape_html(item.offer_applied)}</span>`
 			: "";
@@ -534,6 +580,18 @@ export class CartPanel {
 			: "";
 		const margin_tag = (item.ch_item_type === "Refurbished" || item.ch_item_type === "Pre-Owned")
 			? `<span class="cart-margin-tag">${frappe.utils.escape_html(item.ch_item_type)}</span>`
+			: "";
+		const exception_status = (item.exception_request_status || "").trim();
+		let exception_status_icon = "";
+		if (exception_status === "Pending") {
+			exception_status_icon = `<i class="fa fa-spinner fa-spin" style="margin-right:4px;color:#d97706"></i>`;
+		} else if (exception_status === "Approved" || exception_status === "Auto-Approved") {
+			exception_status_icon = `<i class="fa fa-check-circle" style="margin-right:4px;color:#16a34a"></i>`;
+		} else if (exception_status === "Rejected" || exception_status === "Expired") {
+			exception_status_icon = `<i class="fa fa-times-circle" style="margin-right:4px;color:#dc2626"></i>`;
+		}
+		const exception_tag = item.exception_request
+			? `<span class="cart-offer-tag" title="${__("Exception Request")}">${frappe.utils.escape_html(item.exception_request)}${exception_status ? ` • ${exception_status_icon}${frappe.utils.escape_html(exception_status)}` : ""}</span>`
 			: "";
 		const special = item.is_warranty ? " is-warranty-line" : item.is_vas ? " is-vas-line" : "";
 		const fixed_qty = cint(item.has_serial_no || item.is_warranty || item.is_vas);
@@ -561,16 +619,29 @@ export class CartPanel {
 
 		// Show auto-applied offer discount as read-only label
 		const disc_label = discount_amt > 0
-			? `<span class="cart-disc-label has-disc" title="${__("Offer discount")}">-₹${format_number(discount_amt)}</span>`
+			? `<span class="cart-disc-label has-disc" title="${__("Commercial discount")}">-${discount_pct ? format_number(discount_pct) + "% / " : ""}₹${format_number(computed_discount_amt)}</span>`
+			: "";
+		const price_breakdown = computed_discount_amt > 0
+			? `<div class="cart-item-rate" style="font-size:11px;color:var(--text-muted)">
+				${__("Actual")}: ₹${format_number(price_list_rate)} • ${__("Discount")}: ${format_number(discount_pct)}% • ${__("Final")}: ₹${format_number(final_unit_rate)}
+			</div>`
 			: "";
 
 		// Inline action buttons for serialized items
 		let inline_actions = "";
 		if (item.serial_no && !item.is_warranty && !item.is_vas) {
+			const exception_action = item.exception_request
+				? `<button class="btn btn-xs cart-line-action ch-pos-line-remove-exception" data-idx="${idx}" title="${__("Remove Exception")}">
+					<i class="fa fa-times-circle"></i>
+				</button>`
+				: `<button class="btn btn-xs cart-line-action ch-pos-line-exception" data-idx="${idx}" title="${__("Exception")}">
+					<i class="fa fa-exclamation-triangle"></i>
+				</button>`;
 			inline_actions = `
 				<button class="btn btn-xs cart-line-action ch-pos-line-vas" data-idx="${idx}" title="${__("Add VAS")}">
 					<i class="fa fa-shield"></i>
-				</button>`;
+				</button>
+				${exception_action}`;
 		}
 
 		return `
@@ -578,19 +649,23 @@ export class CartPanel {
 				<div class="cart-line-top">
 					<span class="cart-item-name">
 						${frappe.utils.escape_html(item.item_name)}
-						${offer_tag}${uom_tag}${serial_tag}${margin_tag}
+						${offer_tag}${uom_tag}${serial_tag}${margin_tag}${exception_tag}
 					</span>
-					<span class="cart-item-amount">₹${format_number(amount)}</span>
+					<span class="cart-item-amount">
+						${computed_discount_amt > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);margin-right:6px">₹${format_number(base_amount)}</span>` : ""}
+						₹${format_number(final_amount)}
+					</span>
 				</div>
 				<div class="cart-line-bottom">
 					${qty_controls}
-					<span class="cart-item-rate">@ ₹${format_number(item.rate)}</span>
+					<span class="cart-item-rate">@ ₹${format_number(price_list_rate)}</span>
 					${disc_label}
 					${inline_actions}
 					<button class="btn btn-link text-danger ch-pos-cart-remove" data-idx="${idx}">
 						<i class="fa fa-trash-o"></i>
 					</button>
 				</div>
+				${price_breakdown}
 			</div>`;
 	}
 
@@ -691,9 +766,17 @@ export class CartPanel {
 
 		let total_qty = 0, subtotal = 0, disc_total = 0;
 		cart.forEach((item) => {
-			total_qty  += flt(item.qty);
-			subtotal   += flt(item.qty) * flt(item.rate);
-			disc_total += flt(item.discount_amount || 0) * flt(item.qty);
+			const qty = flt(item.qty);
+			const base_rate = flt(item.price_list_rate || item.mrp || item.rate || 0);
+			const final_rate = flt(item.rate || 0);
+			const line_base = qty * base_rate;
+			const line_final = qty * final_rate;
+			const explicit_disc = flt(item.discount_amount || 0) * qty;
+			const implicit_disc = Math.max(0, line_base - line_final);
+
+			total_qty += qty;
+			subtotal += line_base;
+			disc_total += Math.max(explicit_disc, implicit_disc);
 		});
 
 		// Expose for payment dialog discount cap checks
@@ -726,49 +809,6 @@ export class CartPanel {
 		} else {
 			badge.hide();
 		}
-	}
-
-	// ── Exception Request ───────────────────────────────────────────────
-
-	_show_exception_dialog() {
-		const d = new frappe.ui.Dialog({
-			title: __("Apply Exception"),
-			fields: [
-				{
-					fieldname: "exception_request",
-					fieldtype: "Link",
-					options: "CH Exception Request",
-					label: __("Exception Request"),
-					reqd: 1,
-					get_query: () => ({
-						filters: {
-							status: "Approved",
-							docstatus: 1,
-							pos_invoice: ["in", ["", null]],
-							company: PosState.company || undefined,
-						},
-					}),
-				},
-			],
-			size: "small",
-			primary_action_label: __("Apply"),
-			primary_action: (values) => {
-				frappe.xcall(
-					"ch_item_master.ch_item_master.exception_api.check_exception_valid",
-					{ exception_name: values.exception_request },
-				).then((r) => {
-					if (!r || !r.valid) {
-						frappe.msgprint(__("Exception {0} is no longer valid (status: {1}). It may have expired.", [values.exception_request, r?.status || "Unknown"]));
-						return;
-					}
-					PosState.exception_request = values.exception_request;
-					d.hide();
-					frappe.show_alert({ message: __("Exception {0} applied", [values.exception_request]), indicator: "green" });
-					this._update_exception_banner();
-				});
-			},
-		});
-		d.show();
 	}
 
 	_update_exception_banner() {

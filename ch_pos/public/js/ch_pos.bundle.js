@@ -13,7 +13,7 @@
  */
 import { PosState, EventBus } from "./pos_app/state.js";
 import { LayoutManager } from "./pos_app/app_shell/layout_manager.js";
-import { CartPanel } from "./pos_app/shared/cart_panel.js";
+import { CartPanel } from "./pos_app/shared/cart_panel.js?v=20260515a";
 import { format_number } from "./pos_app/shared/helpers.js";
 
 // Session & Cash Control
@@ -22,7 +22,7 @@ import { SessionControls } from "./pos_app/app_shell/session_controls.js";
 
 // Services
 import { ItemService } from "./pos_app/services/item_service.js";
-import { CartService } from "./pos_app/services/cart_service.js";
+import { CartService } from "./pos_app/services/cart_service.js?v=20260515a";
 import { SyncService } from "./pos_app/services/sync_service.js";
 import { UpsellService } from "./pos_app/services/upsell_service.js";
 

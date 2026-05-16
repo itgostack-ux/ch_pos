@@ -10,9 +10,14 @@ import { format_number } from "../shared/helpers.js";
 
 export class CartService {
 	constructor() {
+		this._exception_status_inflight = new Set();
+		this._exception_status_seen = {};
+		this._exception_status_poll_ms = 8000;
+		this._exception_status_timer = null;
 		this._bind_events();
 		// POS-10 fix: Restore active cart from localStorage on page load
 		this._restore_active_cart();
+		this._start_exception_status_poll();
 	}
 
 	// POS-10 fix: Auto-persist active cart state to localStorage on every change
@@ -36,6 +41,8 @@ export class CartService {
 				sale_type: PosState.sale_type,
 				is_credit_sale: PosState.is_credit_sale || false,
 				is_free_sale: PosState.is_free_sale || false,
+				exception_request: PosState.exception_request,
+				exception_request_data: PosState.exception_request_data,
 				timestamp: frappe.datetime.now_datetime(),
 			};
 			localStorage.setItem("ch_pos_active_cart", JSON.stringify(data));
@@ -72,6 +79,11 @@ export class CartService {
 				if (data.sale_type) PosState.sale_type = data.sale_type;
 				PosState.is_credit_sale = data.is_credit_sale || false;
 				PosState.is_free_sale = data.is_free_sale || false;
+				PosState.exception_request = data.exception_request || null;
+				PosState.exception_request_data = data.exception_request_data || null;
+				if (PosState.exception_request_data) {
+					this._apply_exception_pricing_to_cart(PosState.exception_request_data);
+				}
 				EventBus.emit("cart:updated");
 				frappe.show_alert({ message: __("Previous cart restored"), indicator: "blue" });
 			}
@@ -129,6 +141,23 @@ export class CartService {
 			EventBus.emit("cart:updated");
 		});
 
+		EventBus.on("cart:exception_remove", (idx) => {
+			const item = PosState.cart[idx];
+			if (!item || !item.exception_request) return;
+			this._remove_exception_from_item(item);
+			EventBus.emit("cart:updated");
+		});
+
+		EventBus.on("cart:exception_unlink_all", () => {
+			let changed = false;
+			PosState.cart.forEach((item) => {
+				if (!item || !item.exception_request) return;
+				this._remove_exception_from_item(item);
+				changed = true;
+			});
+			if (changed) EventBus.emit("cart:updated");
+		});
+
 		EventBus.on("cart:cancel", () => {
 			if (!PosState.cart.length) return;
 			frappe.confirm(__("Clear all items from cart?"), () => {
@@ -148,9 +177,32 @@ export class CartService {
 
 		EventBus.on("coupon:apply", (code) => this._apply_coupon(code));
 		EventBus.on("discount:changed", () => EventBus.emit("cart:updated"));
+		EventBus.on("customer:changed", () => {
+			if (PosState.exception_request_data) {
+				this._apply_exception_pricing_to_cart(PosState.exception_request_data);
+				EventBus.emit("cart:updated");
+			}
+		});
+		EventBus.on("customer:info_loaded", () => {
+			if (PosState.exception_request_data) {
+				this._apply_exception_pricing_to_cart(PosState.exception_request_data);
+				EventBus.emit("cart:updated");
+			}
+		});
+		EventBus.on("exception:applied", (payload) => {
+			const data = payload && payload.data ? payload.data : PosState.exception_request_data;
+			if (!data) return;
+			this._apply_exception_pricing_to_cart(data);
+			EventBus.emit("cart:updated");
+		});
+
+		EventBus.on("state:transaction_reset", () => {
+			this._exception_status_seen = {};
+		});
 
 		// POS-10 fix: Auto-persist cart to localStorage on every update
 		EventBus.on("cart:updated", () => this._persist_active_cart());
+		EventBus.on("cart:updated", () => this._sync_pending_exception_statuses());
 
 		// H-11: Combo offer detection — runs after any item is added or qty changed
 		EventBus.on("cart:item_added", () => this._check_combo_offers());
@@ -158,12 +210,100 @@ export class CartService {
 		EventBus.on("cart:qty_plus", () => this._check_combo_offers());
 
 		EventBus.on("exchange:open", () => this._show_exchange_dialog());
-		EventBus.on("vas:open", () => this._show_vas_dialog());
+		EventBus.on("vas:open", (opts) => this._show_vas_dialog(opts));
 		EventBus.on("product_exchange:open", () => this._show_product_exchange_dialog());
 		EventBus.on("manager:request_approval", (opts) => this._show_manager_approval_dialog(opts));
 
 		// Direct serial add: scanned the FIFO-oldest (Sell First) serial from main screen.
 		EventBus.on("cart:scan_serial", (item_data) => this._add_to_cart_direct_serial(item_data));
+	}
+
+	_start_exception_status_poll() {
+		if (this._exception_status_timer) {
+			clearInterval(this._exception_status_timer);
+		}
+		this._exception_status_timer = setInterval(
+			() => this._sync_pending_exception_statuses(),
+			this._exception_status_poll_ms
+		);
+	}
+
+	_collect_pending_exception_requests() {
+		const names = new Set();
+		(PosState.cart || []).forEach((item) => {
+			const req = (item.exception_request || "").trim();
+			if (!req) return;
+			const status = ((item.exception_request_status || "") + "").trim();
+			if (status === "Approved" || status === "Auto-Approved" || status === "Rejected" || status === "Expired") return;
+			names.add(req);
+		});
+		return Array.from(names);
+	}
+
+	_sync_pending_exception_statuses() {
+		if (!PosState.cart || !PosState.cart.length) return;
+		const pending_names = this._collect_pending_exception_requests();
+		if (!pending_names.length) return;
+
+		pending_names.forEach((exception_name) => {
+			if (!exception_name || this._exception_status_inflight.has(exception_name)) return;
+			this._exception_status_inflight.add(exception_name);
+			frappe.xcall(
+				"ch_item_master.ch_item_master.exception_api.check_exception_valid",
+				{ exception_name }
+			).then((resp) => {
+				this._apply_exception_status_to_cart(exception_name, resp || null);
+			}).catch(() => {
+				// Ignore transient API/network errors; next poll will retry.
+			}).finally(() => {
+				this._exception_status_inflight.delete(exception_name);
+			});
+		});
+	}
+
+	_apply_exception_status_to_cart(exception_name, data) {
+		if (!exception_name || !data) return;
+		const status = (data.status || "Pending").trim();
+		let changed = false;
+		let just_approved = false;
+
+		PosState.cart.forEach((item) => {
+			if ((item.exception_request || "") !== exception_name) return;
+			const prev_status = ((item.exception_request_status || "") + "").trim() || "Pending";
+			if (prev_status !== status) {
+				item.exception_request_status = status;
+				changed = true;
+				if ((status === "Approved" || status === "Auto-Approved") && (prev_status !== "Approved" && prev_status !== "Auto-Approved")) {
+					just_approved = true;
+				}
+			}
+
+			if ((status === "Approved" || status === "Auto-Approved") && data.valid) {
+				item.exception_request_data = data;
+				this._apply_exception_pricing_to_item(item, data);
+				changed = true;
+			}
+		});
+
+		if (status === "Approved" || status === "Auto-Approved") {
+			PosState.exception_request = exception_name;
+			PosState.exception_request_data = data;
+		}
+
+		if (!changed) return;
+
+		EventBus.emit("cart:updated");
+		if ((status === "Approved" || status === "Auto-Approved") && data.valid) {
+			EventBus.emit("exception:applied", { name: exception_name, data });
+		}
+
+		if (just_approved && this._exception_status_seen[exception_name] !== status) {
+			this._exception_status_seen[exception_name] = status;
+			frappe.show_alert({
+				message: __("Exception {0} approved and applied to cart item", [exception_name]),
+				indicator: "green",
+			});
+		}
 	}
 
 	// ── Add to Cart ─────────────────────────────────────
@@ -316,15 +456,22 @@ export class CartService {
 	}
 
 	_add_new_cart_item(item_data, serial_no) {
+		const price_list_rate = flt(item_data.price_list_rate || item_data.mrp || item_data.selling_price || 0);
+		const selling_rate = flt(item_data.selling_price || price_list_rate || 0);
+		const commercial_discount_amount = Math.max(0, price_list_rate - selling_rate);
+		const commercial_discount_percentage = price_list_rate > 0 && commercial_discount_amount > 0
+			? flt(commercial_discount_amount / price_list_rate * 100)
+			: 0;
 		const cart_item = {
 			item_code: item_data.item_code,
 			item_name: item_data.item_name,
 			qty: 1,
-			rate: item_data.selling_price || item_data.mrp || 0,
+			rate: selling_rate,
+			price_list_rate,
 			mrp: item_data.mrp || 0,
 			uom: item_data.stock_uom || "Nos",
-			discount_percentage: 0,
-			discount_amount: 0,
+			discount_percentage: commercial_discount_percentage,
+			discount_amount: commercial_discount_amount,
 			offers: item_data.offers || [],
 			applied_offer: null,
 			warranty_plan: null,
@@ -337,7 +484,14 @@ export class CartService {
 			stock_qty: flt(item_data.stock_qty || 0),
 			must_be_whole_number: cint(item_data.must_be_whole_number),
 		};
+		if (!cart_item.discount_percentage && flt(item_data.discount_percentage) > 0) {
+			cart_item.discount_percentage = flt(item_data.discount_percentage);
+		}
+		if (!cart_item.discount_amount && flt(item_data.discount_amount) > 0) {
+			cart_item.discount_amount = flt(item_data.discount_amount);
+		}
 		this._apply_best_offer(cart_item);
+		this._apply_exception_pricing_to_item(cart_item, PosState.exception_request_data);
 		PosState.cart.push(cart_item);
 		EventBus.emit("cart:updated");
 		EventBus.emit("cart:item_added", { item_data, cart_item });
@@ -543,6 +697,10 @@ export class CartService {
 
 	// ── Offer Application ───────────────────────────────
 	_apply_best_offer(cart_item) {
+		if (cart_item.exception_request || cart_item.exception_request_data) {
+			this._apply_exception_pricing_to_item(cart_item, cart_item.exception_request_data || PosState.exception_request_data);
+			return;
+		}
 		const offers = cart_item.offers || [];
 		if (!offers.length) {
 			cart_item.applied_offer = null;
@@ -561,6 +719,95 @@ export class CartService {
 		} else if (best.value_type === "Price Override") {
 			cart_item.discount_amount = flt(cart_item.rate - best.value);
 			cart_item.discount_percentage = cart_item.rate ? flt(cart_item.discount_amount / cart_item.rate * 100) : 0;
+		}
+	}
+
+	_apply_exception_pricing_to_item(cart_item, exception_data) {
+		const data = exception_data || PosState.exception_request_data;
+		if (!cart_item || !data) return;
+		if (!data.item_code || cart_item.item_code !== data.item_code) return;
+		const customer_name_confirmed = data.customer && PosState.customer && data.customer === PosState.customer;
+		if (data.customer && PosState.customer && data.customer !== PosState.customer) return;
+		// Phone guard is a fallback identity check for when customer name is inconclusive
+		// (one side null/empty). Skip it when the customer name already confirmed a match
+		// to avoid a race condition where PosState.customer_info hasn't loaded yet.
+		if (data.customer_phone && !customer_name_confirmed) {
+			const current_phone = ((PosState.customer_info?.mobile_no || PosState.customer_info?.mobile || PosState.customer_info?.customer_phone || "") + "")
+				.replace(/\D/g, "")
+				.slice(-10);
+			const allowed_phone = ((data.customer_phone || "") + "").replace(/\D/g, "").slice(-10);
+			if (!current_phone || !allowed_phone || current_phone !== allowed_phone) return;
+		}
+		if (data.serial_no) {
+			const current_serial = (cart_item.serial_no || "").trim();
+			if (!current_serial || current_serial !== (data.serial_no || "").trim()) return;
+		}
+
+		const original_rate = flt(data.original_value || cart_item.price_list_rate || cart_item.mrp || cart_item.rate || 0);
+		const resolved_rate = flt(data.resolution_value || data.requested_value || cart_item.rate || 0);
+		if (original_rate <= 0 || resolved_rate < 0) return;
+		if (cart_item.pre_exception_rate == null) {
+			cart_item.pre_exception_rate = flt(cart_item.rate || 0);
+		}
+		if (cart_item.pre_exception_price_list_rate == null) {
+			cart_item.pre_exception_price_list_rate = flt(cart_item.price_list_rate || cart_item.mrp || cart_item.rate || 0);
+		}
+		if (cart_item.pre_exception_discount_amount == null) {
+			cart_item.pre_exception_discount_amount = flt(cart_item.discount_amount || 0);
+		}
+		if (cart_item.pre_exception_discount_percentage == null) {
+			cart_item.pre_exception_discount_percentage = flt(cart_item.discount_percentage || 0);
+		}
+
+		cart_item.exception_request = data.name || PosState.exception_request || null;
+		cart_item.exception_request_status = data.status || cart_item.exception_request_status || "Pending";
+		cart_item.exception_request_data = data;
+		cart_item.exception_original_rate = original_rate;
+		cart_item.exception_final_rate = resolved_rate;
+		cart_item.price_list_rate = original_rate;
+		cart_item.rate = resolved_rate;
+		cart_item.discount_amount = Math.max(0, original_rate - resolved_rate);
+		cart_item.discount_percentage = original_rate > 0 ? flt(cart_item.discount_amount / original_rate * 100) : 0;
+		cart_item.applied_offer = null;
+		cart_item.offers = [];
+	}
+
+	_apply_exception_pricing_to_cart(exception_data) {
+		const data = exception_data || PosState.exception_request_data;
+		if (!data) return;
+		PosState.exception_request_data = data;
+		PosState.cart.forEach((cart_item) => this._apply_exception_pricing_to_item(cart_item, data));
+	}
+
+	_remove_exception_from_item(cart_item) {
+		if (!cart_item) return;
+		if (cart_item.pre_exception_price_list_rate != null) {
+			cart_item.price_list_rate = flt(cart_item.pre_exception_price_list_rate);
+		}
+		if (cart_item.pre_exception_rate != null) {
+			cart_item.rate = flt(cart_item.pre_exception_rate);
+		}
+		if (cart_item.pre_exception_discount_amount != null) {
+			cart_item.discount_amount = flt(cart_item.pre_exception_discount_amount);
+		}
+		if (cart_item.pre_exception_discount_percentage != null) {
+			cart_item.discount_percentage = flt(cart_item.pre_exception_discount_percentage);
+		}
+
+		delete cart_item.exception_request;
+		delete cart_item.exception_request_status;
+		delete cart_item.exception_request_data;
+		delete cart_item.exception_original_rate;
+		delete cart_item.exception_final_rate;
+		delete cart_item.pre_exception_rate;
+		delete cart_item.pre_exception_price_list_rate;
+		delete cart_item.pre_exception_discount_amount;
+		delete cart_item.pre_exception_discount_percentage;
+
+		const remaining_exception = (PosState.cart || []).find((row) => !!row.exception_request);
+		if (!remaining_exception) {
+			PosState.exception_request = null;
+			PosState.exception_request_data = null;
 		}
 	}
 
@@ -967,13 +1214,15 @@ export class CartService {
 	}
 
 	// ── VAS Dialog ──────────────────────────────────────
-	_show_vas_dialog() {
+	_show_vas_dialog(opts = {}) {
 		// Pass current cart items for device-dependency enforcement
 		const cart_items = PosState.cart.map((c) => ({
 			item_code: c.item_code,
 			is_warranty: c.is_warranty,
 			is_vas: c.is_vas,
 		}));
+		const selected_device = [opts.for_item, PosState.last_vas_target]
+			.find((item) => item && !item.is_warranty && !item.is_vas) || null;
 		frappe.xcall("ch_pos.api.pos_api.get_vas_plans_with_rules", {
 			cart_items,
 		}).then((plans) => {
@@ -981,12 +1230,28 @@ export class CartService {
 				frappe.show_alert({ message: __("No VAS plans available"), indicator: "orange" });
 				return;
 			}
-			this._render_vas_selector(plans);
+			this._render_vas_selector(plans, selected_device);
+			PosState.last_vas_target = null;
 		});
 	}
 
-	_render_vas_selector(plans) {
+	_render_vas_selector(plans, selected_device = null) {
 		const device_items = PosState.cart.filter((c) => !c.is_warranty && !c.is_vas);
+		const selected_device_value = selected_device
+			? selected_device.item_code + (selected_device.serial_no ? ` (${selected_device.serial_no})` : "")
+			: "";
+		const default_manual_imei = selected_device && selected_device.serial_no
+			? selected_device.serial_no
+			: "";
+		const device_options = device_items
+			.map((c) => c.item_code + (c.serial_no ? ` (${c.serial_no})` : ""))
+			.filter((value, index, list) => value && list.indexOf(value) === index);
+		const prioritized_device_options = selected_device_value
+			? [selected_device_value, ...device_options.filter((value) => value !== selected_device_value)]
+			: device_options;
+		const for_item_options = prioritized_device_options.length
+			? [...prioritized_device_options, "── Enter IMEI manually ──"]
+			: ["", "── Enter IMEI manually ──"];
 
 		// Build plan cards HTML
 		const plan_cards = plans.map((p) => {
@@ -1035,17 +1300,15 @@ export class CartService {
 					fieldname: "for_item",
 					fieldtype: "Select",
 					label: __("Apply to Device"),
-					options: [
-						"",
-						...device_items.map((c) => c.item_code + (c.serial_no ? ` (${c.serial_no})` : "")),
-						"── Enter IMEI manually ──",
-					].join("\n"),
+					default: selected_device_value,
+					options: for_item_options.join("\n"),
 					description: __("Select a device from the cart, or enter IMEI for external / previously sold device"),
 				},
 				{
 					fieldname: "manual_imei",
 					fieldtype: "Data",
 					label: __("IMEI / Serial Number"),
+					default: default_manual_imei,
 					depends_on: "eval:doc.for_item === '── Enter IMEI manually ──' || (doc.for_item && !doc.for_item.includes('('))",
 					mandatory_depends_on: "eval:doc.for_item === '── Enter IMEI manually ──' || (doc.for_item && !doc.for_item.includes('('))",
 					description: __("Enter IMEI or serial number for the device"),
@@ -1119,6 +1382,28 @@ export class CartService {
 		});
 
 		dialog.show();
+		const applySelectedDevice = () => {
+			if (dialog.fields_dict.for_item) {
+				const select = dialog.fields_dict.for_item.$input && dialog.fields_dict.for_item.$input.get(0);
+				const fallback_value = select
+					? Array.from(select.options).map((option) => option.value).find((value) => value && value !== "── Enter IMEI manually ──")
+					: "";
+				const target_value = selected_device_value || fallback_value;
+				if (target_value) {
+					dialog.fields_dict.for_item.set_value(target_value);
+					if (select) {
+						select.value = target_value;
+						select.dispatchEvent(new Event("change", { bubbles: true }));
+					}
+					dialog.fields_dict.for_item.$input.trigger("change");
+				}
+			}
+			if (default_manual_imei && dialog.fields_dict.manual_imei) {
+				dialog.fields_dict.manual_imei.set_value(default_manual_imei);
+			}
+		};
+		applySelectedDevice();
+		setTimeout(applySelectedDevice, 100);
 	}
 
 	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no) {
@@ -1139,6 +1424,7 @@ export class CartService {
 			item_name: `✦ ${plan.plan_name}`,
 			qty: 1,
 			rate: flt(plan.price),
+			price_list_rate: flt(plan.price),
 			mrp: flt(plan.price),
 			uom: "Nos",
 			discount_percentage: 0,
@@ -1567,7 +1853,7 @@ export class CartService {
 			const name = $(e.currentTarget).data("name");
 			const is_gofix = $(e.currentTarget).data("gofix");
 			const fmt = is_gofix ? "GoFix Service Invoice" : "Custom Sales Invoice";
-			const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=1`;
+			const url = `/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(name)}&format=${encodeURIComponent(fmt)}&no_letterhead=0&trigger_print=1`;
 			window.open(url, "_blank");
 		});
 	}

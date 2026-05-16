@@ -11,9 +11,20 @@ import { PosState, EventBus } from "../../state.js";
 export class ExceptionWorkspace {
 	constructor() {
 		this._panel = null;
+		this._open_context = null;
+		this._locked_form_context = null;
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "exceptions") return;
 			this.render(ctx.panel);
+		});
+
+		EventBus.on("exception:open", (ctx) => {
+			this._open_context = ctx || null;
+			// Apply immediately only when Exceptions workspace is the active mode.
+			// Otherwise keep context and apply on next render to avoid losing prefill.
+			if (this._panel && PosState.active_mode === "exceptions") {
+				this._apply_open_context(this._panel);
+			}
 		});
 	}
 
@@ -57,6 +68,7 @@ export class ExceptionWorkspace {
 		`);
 
 		this._bind(panel);
+		this._apply_open_context(panel);
 		this._load_exception_types(panel);
 		this._load_my_requests(panel);
 	}
@@ -73,6 +85,7 @@ export class ExceptionWorkspace {
 				<div class="col-sm-6">
 					<label class="control-label">${__("Item")}</label>
 					<div class="ch-exc-item-link"></div>
+					<div class="small text-muted ch-exc-item-display" style="margin-top:4px;display:none"></div>
 				</div>
 				<div class="col-sm-6" style="margin-top:8px">
 					<label class="control-label">${__("Original Value")}</label>
@@ -160,6 +173,92 @@ export class ExceptionWorkspace {
 			render_input: true,
 		});
 		this._customer_control.$input.addClass("form-control");
+
+		// Default from in-progress POS transaction when not launched from a line action.
+		if (!this._open_context?.customer && PosState.customer) {
+			this._customer_control.set_value(PosState.customer);
+		}
+	}
+
+	_apply_open_context(panel) {
+		const ctx = this._open_context;
+		const serial_input = panel.find(".ch-exc-serial");
+		const item_display = panel.find(".ch-exc-item-display");
+
+		if (!ctx || ctx.source !== "cart_line") {
+			this._locked_form_context = null;
+			serial_input.val("").prop("readonly", false);
+			item_display.hide().text("");
+			if (this._customer_control?.$input) {
+				this._customer_control.$input.prop("disabled", false).prop("readonly", false);
+			}
+			return;
+		}
+
+		const initial_item_code = (ctx.item_code || "").trim();
+		if (initial_item_code) this._set_item_prefill(initial_item_code);
+		const customer_value = (ctx.customer || PosState.customer || PosState.default_customer || "").trim();
+		if (this._customer_control) this._customer_control.set_value(customer_value);
+		serial_input.val(ctx.serial_no || "");
+
+		const item_label = [ctx.item_name || "", ctx.item_code || ""].filter(Boolean).join(" (") + (ctx.item_name && ctx.item_code ? ")" : "");
+		if (item_label) item_display.text(item_label).show();
+
+		if (ctx.lock_serial) serial_input.prop("readonly", true);
+		if (ctx.lock_customer && this._customer_control?.$input) {
+			this._customer_control.$input.prop("disabled", true).prop("readonly", true);
+		}
+
+		this._locked_form_context = {
+			cart_idx: (ctx.cart_idx !== undefined && ctx.cart_idx !== null) ? parseInt(ctx.cart_idx, 10) : null,
+			item_code: initial_item_code,
+			serial_no: ctx.serial_no || "",
+			customer: customer_value,
+		};
+
+		if (!initial_item_code && ctx.serial_no) {
+			this._resolve_item_from_serial(ctx.serial_no).then((resolved) => {
+				if (!resolved?.item_code) return;
+				this._set_item_prefill(resolved.item_code);
+				if (this._locked_form_context) this._locked_form_context.item_code = resolved.item_code;
+				const label = [resolved.item_name || ctx.item_name || "", resolved.item_code]
+					.filter(Boolean)
+					.join(" (") + ((resolved.item_name || ctx.item_name) ? ")" : "");
+				if (label) item_display.text(label).show();
+			}).catch(() => {});
+		}
+
+		frappe.show_alert({
+			message: __("Exception form opened for IMEI {0}. IMEI and customer are locked.", [ctx.serial_no || ""]),
+			indicator: "blue",
+		});
+
+		// One-shot launch context.
+		this._open_context = null;
+	}
+
+	_set_item_prefill(item_code) {
+		if (!item_code || !this._item_control) return;
+		this._item_control.set_value(item_code);
+		if (!this._item_control.get_value() && this._item_control.$input) {
+			this._item_control.$input.val(item_code);
+		}
+	}
+
+	_resolve_item_from_serial(serial_no) {
+		return frappe.xcall("frappe.client.get_value", {
+			doctype: "Serial No",
+			filters: { name: serial_no },
+			fieldname: ["item_code", "item_name"],
+		}).then((sn) => {
+			if (!sn?.item_code) return null;
+			if (sn.item_name) return { item_code: sn.item_code, item_name: sn.item_name };
+			return frappe.xcall("frappe.client.get_value", {
+				doctype: "Item",
+				filters: { name: sn.item_code },
+				fieldname: ["item_name"],
+			}).then((it) => ({ item_code: sn.item_code, item_name: it?.item_name || "" }));
+		});
 	}
 
 	_load_exception_types(panel) {
@@ -185,9 +284,10 @@ export class ExceptionWorkspace {
 		const reason = panel.find(".ch-exc-reason").val().trim();
 		const requested_value = parseFloat(panel.find(".ch-exc-requested").val()) || 0;
 		const original_value = parseFloat(panel.find(".ch-exc-original").val()) || 0;
-		const serial_no = panel.find(".ch-exc-serial").val().trim();
-		const item_code = this._item_control ? this._item_control.get_value() : "";
-		const customer = this._customer_control ? this._customer_control.get_value() : "";
+		const locked_ctx = this._locked_form_context || null;
+		const serial_no = (locked_ctx?.serial_no || panel.find(".ch-exc-serial").val() || "").trim();
+		const item_code = (locked_ctx?.item_code || (this._item_control ? this._item_control.get_value() : "") || "").trim();
+		const customer = (locked_ctx?.customer || (this._customer_control ? this._customer_control.get_value() : "") || "").trim();
 
 		if (!exception_type) {
 			frappe.show_alert({ message: __("Select an exception type"), indicator: "orange" });
@@ -195,6 +295,10 @@ export class ExceptionWorkspace {
 		}
 		if (!reason) {
 			frappe.show_alert({ message: __("Please provide a reason"), indicator: "orange" });
+			return;
+		}
+		if (!customer) {
+			frappe.show_alert({ message: __("Select customer to raise exception"), indicator: "orange" });
 			return;
 		}
 
@@ -229,8 +333,30 @@ export class ExceptionWorkspace {
 		).then((res) => {
 			btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Submit Request")}`);
 
+			const submitted = {
+				name: res?.name || null,
+				status: res?.status || "Pending",
+				exception_type,
+				item_code: item_code || "",
+				serial_no: serial_no || "",
+				customer: customer || "",
+				requested_value,
+				original_value,
+			};
+			this._bind_request_to_cart_line(submitted, locked_ctx);
+
 			if (res.status === "Auto-Approved") {
 				frappe.show_alert({ message: __("Exception auto-approved! Ref: {0}", [res.name]), indicator: "green" });
+				frappe.xcall(
+					"ch_item_master.ch_item_master.exception_api.check_exception_valid",
+					{ exception_name: res.name }
+				).then((full) => {
+					if (full && full.valid) {
+						PosState.exception_request = res.name;
+						PosState.exception_request_data = full;
+						EventBus.emit("exception:applied", { name: res.name, data: full });
+					}
+				}).catch(() => {});
 			} else {
 				frappe.show_alert({ message: __("Request submitted: {0}. Status: {1}", [res.name, res.status]), indicator: "blue" });
 			}
@@ -239,13 +365,44 @@ export class ExceptionWorkspace {
 			panel.find(".ch-exc-type").val("");
 			panel.find(".ch-exc-reason").val("");
 			panel.find(".ch-exc-requested, .ch-exc-original, .ch-exc-serial").val("");
+			panel.find(".ch-exc-item-display").hide().text("");
 			if (this._item_control) this._item_control.set_value("");
 			if (this._customer_control) this._customer_control.set_value("");
+			this._locked_form_context = null;
+			panel.find(".ch-exc-serial").prop("readonly", false);
+			if (this._customer_control?.$input) {
+				this._customer_control.$input.prop("disabled", false).prop("readonly", false);
+			}
 
 			this._load_my_requests(panel);
 		}).catch(() => {
 			btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Submit Request")}`);
 		});
+	}
+
+	_bind_request_to_cart_line(submitted, locked_ctx) {
+		if (!submitted || !submitted.name) return;
+		const idx = locked_ctx && locked_ctx.cart_idx !== undefined && locked_ctx.cart_idx !== null
+			? parseInt(locked_ctx.cart_idx, 10)
+			: -1;
+
+		let target = null;
+		if (idx >= 0 && PosState.cart[idx]) {
+			target = PosState.cart[idx];
+		}
+
+		if (!target) {
+			target = PosState.cart.find((it) => {
+				if (submitted.serial_no && (it.serial_no || "").trim() === submitted.serial_no) return true;
+				return submitted.item_code && it.item_code === submitted.item_code;
+			}) || null;
+		}
+
+		if (!target) return;
+		target.exception_request = submitted.name;
+		target.exception_request_status = submitted.status || "Pending";
+		target.exception_request_data = submitted;
+		EventBus.emit("cart:updated");
 	}
 
 	// ── My Requests List ────────────────────────────────────────
@@ -328,13 +485,14 @@ ExceptionWorkspace.prototype._apply_and_bill = function (exception_name) {
 		}
 		// 1. Stash exception on POS state — payment_dialog.js forwards it to backend.
 		PosState.exception_request = exception_name;
+		PosState.exception_request_data = r;
 		// 2. Switch to sell mode so the cashier lands directly on the cart with the
 		//    exception banner already visible (cart_panel.js handles the banner render).
 		PosState.active_mode = "sell";
 		EventBus.emit("mode:set", "sell");
 		EventBus.emit("mode:switch", "sell");
 		// 3. Tell cart_panel to refresh its banner once it mounts.
-		EventBus.emit("exception:applied", { name: exception_name });
+		EventBus.emit("exception:applied", { name: exception_name, data: r });
 		frappe.show_alert({
 			message: __("Exception {0} applied — billing mode active", [exception_name]),
 			indicator: "green",

@@ -47,6 +47,7 @@ doctype_js = {
 app_include_js = [
     "/assets/ch_pos/js/pos_extensions.js",
     "/assets/ch_pos/js/ch_customer_dialog.js",
+    "/assets/ch_pos/js/bin_transfer_dialog.js",
 ]
 
 # App-level CSS

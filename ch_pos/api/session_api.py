@@ -278,6 +278,13 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
             "balance_details": balance_details,
         })
         opening_entry.insert(ignore_permissions=True)
+        # SECURITY (H9): Validate POS Manager role or approval before submitting
+        if not frappe.has_permission("POS Opening Entry", "submit", throw=False):
+            frappe.throw(
+                frappe._("You do not have permission to submit POS Opening Entries. "
+                         "Contact your Store Manager for approval."),
+                frappe.PermissionError,
+            )
         opening_entry.submit()
 
         # Update Business Date status to Open if not already
