@@ -272,11 +272,15 @@ export class BinManagerWorkspace {
 			method: "ch_item_master.ch_core.bin_transfer.get_pos_bin_summary",
 			args: { store: PosState.store },
 			callback: (r) => {
-				const data = (r.message && r.message.bins) || {};
+				const list = (r.message && r.message.bins) || [];
+				const data = {};
+				for (const row of list) {
+					data[row.bin_type] = row;
+				}
 				this._counts = data;
 				BIN_TYPES.forEach((bin) => {
 					const info = data[bin] || {};
-					const qty = info.total_qty != null ? info.total_qty : (info.serials || 0);
+					const qty = info.qty != null ? info.qty : (info.items || 0);
 					this.panel.find(`[data-bin-count="${bin}"]`).text(
 						qty ? __("{0} units", [qty]) : __("Empty")
 					);

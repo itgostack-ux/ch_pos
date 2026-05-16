@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """
-POS Closing Entry — end-of-day reconciliation for a POS terminal.
+CH POS Closing Entry — end-of-day reconciliation for a POS terminal.
 
 Lifecycle:  Draft → Submitted  (or Discrepancy if variance found)
 
@@ -17,7 +17,7 @@ from frappe.model.document import Document
 from frappe.utils import flt, cint, nowdate
 
 
-class POSClosingEntry(Document):
+class CHPOSClosingEntry(Document):
 	def validate(self):
 		self._set_closed_by()
 		self._fetch_invoice_summary()

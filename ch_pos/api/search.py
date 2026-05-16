@@ -3,12 +3,17 @@ from frappe.utils import cint, flt
 
 
 def _resolve_sellable_warehouse(warehouse):
-    """Given any store-related warehouse, return its Sellable bin child.
+    """Given any store-related warehouse, return the Sellable warehouse for that store.
+
+    Post-collapse architecture: the store's base warehouse IS the Sellable bin
+    (it carries ch_bin_type='Sellable' and is the warehouse on CH Store.warehouse).
+    The operational bins (Damaged / Reserved / In-Transit / Disposed / Buyback)
+    are siblings, linked back via the ``ch_store`` field.
 
     Resolution order:
-      1. If `warehouse` already has ch_bin_type = 'Sellable' → return as-is.
-      2. If `warehouse` is the parent of a CH Store → return that store's Sellable child.
-      3. If `warehouse` is itself a child bin (Damaged/Reserved/etc.) → return the sibling Sellable bin under the same CH Store.
+      1. If `warehouse` has ch_bin_type = 'Sellable' → return as-is.
+      2. If `warehouse` is the CH Store.warehouse for some store → return as-is.
+      3. If `warehouse` is a sibling bin (ch_store stamped) → return that store's base warehouse.
       4. Otherwise → return None (caller falls back to the original warehouse).
     """
     if not warehouse:
@@ -24,21 +29,19 @@ def _resolve_sellable_warehouse(warehouse):
         return None
     if (wh.get("ch_bin_type") or "") == "Sellable":
         return warehouse
-    # Find sibling Sellable for the same store
+    # If this warehouse is itself the base of a store, it's Sellable.
+    store_for_base = frappe.db.get_value("CH Store", {"warehouse": warehouse}, "name")
+    if store_for_base:
+        return warehouse
+    # If this is a sibling bin, jump to the store's base warehouse.
     if wh.get("ch_store"):
+        base = frappe.db.get_value("CH Store", wh["ch_store"], "warehouse")
+        if base:
+            return base
+        # Legacy fallback before migration.
         sellable = frappe.db.get_value(
             "Warehouse",
             {"ch_store": wh["ch_store"], "ch_bin_type": "Sellable", "disabled": 0},
-            "name",
-        )
-        if sellable:
-            return sellable
-    # Treat `warehouse` as a parent: find a CH Store whose warehouse == this one
-    store = frappe.db.get_value("CH Store", {"warehouse": warehouse}, "name")
-    if store:
-        sellable = frappe.db.get_value(
-            "Warehouse",
-            {"ch_store": store, "ch_bin_type": "Sellable", "disabled": 0},
             "name",
         )
         if sellable:
