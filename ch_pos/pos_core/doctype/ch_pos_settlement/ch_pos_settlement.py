@@ -116,6 +116,12 @@ class CHPOSSettlement(Document):
         self._validate_no_duplicate()
         self._validate_company_match()
         self._compute_denomination_total()
+        # Rebuild snapshot only when creating new or when the linked session changes.
+        # Skip on incidental field changes (status updates, sign-off, etc.) to avoid
+        # expensive re-fetching of invoice data on every save.
+        if self.is_new() or self.has_value_changed("session"):
+            if self.session:
+                self.calculate_from_transactions()
 
     def before_submit(self):
         self._validate_signoff()

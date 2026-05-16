@@ -24,7 +24,12 @@ VARIANCE_AUTO_ALLOW = 100  # ₹100 default threshold
 def _get_variance_threshold():
     """Get variance threshold from control settings, or default."""
     try:
-        return flt(frappe.db.get_single_value("CH POS Control Settings", "variance_approval_threshold")) or VARIANCE_AUTO_ALLOW
+        cached = frappe.cache().get_value("ch_pos_variance_threshold")
+        if cached is not None:
+            return flt(cached)
+        threshold = flt(frappe.db.get_single_value("CH POS Control Settings", "variance_approval_threshold")) or VARIANCE_AUTO_ALLOW
+        frappe.cache().set_value("ch_pos_variance_threshold", threshold, expires_in_sec=3600)
+        return threshold
     except Exception:
         return VARIANCE_AUTO_ALLOW
 
@@ -464,37 +469,46 @@ def auto_close_stale_sessions():
     Runs hourly. Sessions whose business_date < today and still Open
     are closed automatically with auto_closed=1.
     """
-    today = getdate(nowdate())
-    stale = frappe.get_all(
-        "CH POS Session",
-        filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", today)},
-        fields=["name", "pos_profile", "store", "business_date"],
-    )
-    for s in stale:
-        try:
-            doc = frappe.get_doc("CH POS Session", s.name)
-            doc.auto_closed = 1
-            doc.close_session(
-                closing_cash=0,
-                variance_reason="Auto-closed: session was open past business date",
-            )
-            frappe.logger("session").info(f"Auto-closed stale session {s.name} (biz date: {s.business_date})")
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), f"Auto-close failed for {s.name}")
-    if stale:
-        frappe.db.commit()
+    lock_key = "auto_close_stale_sessions_lock"
+    lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 5)", (lock_key,))[0][0]
+    if not lock_result:
+        return  # Another worker is already running this
+    try:
+        today = getdate(nowdate())
+        stale = frappe.get_all(
+            "CH POS Session",
+            filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", today)},
+            fields=["name", "pos_profile", "store", "business_date"],
+        )
+        for s in stale:
+            try:
+                doc = frappe.get_doc("CH POS Session", s.name)
+                doc.auto_closed = 1
+                doc.close_session(
+                    closing_cash=0,
+                    variance_reason="Auto-closed: session was open past business date",
+                )
+                frappe.logger("session").info(f"Auto-closed stale session {s.name} (biz date: {s.business_date})")
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), f"Auto-close failed for {s.name}")
+        if stale:
+            frappe.db.commit()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
 
 def auto_close_overnight_sessions():
     """Scheduler (cron 0 6 * * *): force-close ALL open sessions at 6 AM.
 
     Runs every day at 06:00 AM. Closes any session still in Open / Locked /
-    Suspended state regardless of business_date, so cashiers are forced to
+    Suspended state from yesterday or earlier, so cashiers are forced to
     open a fresh session when the store opens at 10:00 AM.
     """
+    from frappe.utils import add_days
+    yesterday = getdate(add_days(nowdate(), -1))
     open_sessions = frappe.get_all(
         "CH POS Session",
-        filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1},
+        filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", yesterday)},
         fields=["name", "pos_profile", "store", "business_date"],
     )
     for s in open_sessions:

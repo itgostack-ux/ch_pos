@@ -39,23 +39,26 @@ def _ensure_can_operate_token() -> None:
 
 _INDIAN_PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 
-# Simple in-memory rate limiter for guest endpoints
-_RATE_LIMIT_CACHE = {}  # key → list of timestamps
+# Rate limiter constants
 _RATE_LIMIT_MAX = 10  # max requests per window
 _RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
 
 
 def _check_rate_limit(key: str):
-    """Raise if rate limit exceeded for this key (IP/store combo)."""
+    """Raise if rate limit exceeded for this key (IP/store combo).
+
+    Uses frappe.cache() (Redis) so limits are enforced across all Gunicorn workers.
+    """
     import time
     now = time.time()
     window_start = now - _RATE_LIMIT_WINDOW
-    hits = _RATE_LIMIT_CACHE.get(key, [])
+    cache_key = f"ch_pos_rate_{key}"
+    hits = frappe.cache().get_value(cache_key) or []
     hits = [t for t in hits if t > window_start]
     if len(hits) >= _RATE_LIMIT_MAX:
         frappe.throw(_("Too many requests. Please try again later."), frappe.RateLimitExceededError, title=_("API Error"))
     hits.append(now)
-    _RATE_LIMIT_CACHE[key] = hits
+    frappe.cache().set_value(cache_key, hits, expires_in_sec=_RATE_LIMIT_WINDOW)
 
 def _normalize_phone(raw: str) -> str:
     """Alias for backward compatibility — delegates to shared utility."""
@@ -313,7 +316,7 @@ def create_token(
     # get unique sequential numbers for the day.
     today = frappe.utils.today()
     lock_key = f"pos_seq_{pos_profile}_{today}"
-    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key,))
     try:
         token_display = _generate_token_display(pos_profile, company_abbr)
         doc = frappe.get_doc(
@@ -579,7 +582,7 @@ def quick_walkin(
 
     today = frappe.utils.today()
     lock_key = f"pos_seq_{pos_profile}_{today}"
-    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key,))
     try:
         token_display = _generate_token_display(pos_profile, company_abbr)
         doc = frappe.get_doc({
@@ -871,7 +874,7 @@ def log_counter_walkin(
 
     today = frappe.utils.today()
     lock_key = f"pos_seq_{pos_profile}_{today}"
-    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key,))
     try:
         token_display = _generate_token_display(pos_profile, company_abbr)
         doc = frappe.get_doc({

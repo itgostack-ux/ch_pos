@@ -177,7 +177,9 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
 
     # Acquire advisory lock to prevent race condition on session creation
     lock_key = f"pos_session_{store}_{business_date}"
-    frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))
+    lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key,))[0][0]
+    if not lock_result:
+        frappe.throw(_("Store is busy processing another session request. Please try again in a moment."), title=_("Session Busy"))
     try:
         # Check for unclosed sessions (strict store-level single session)
         unclosed = frappe.db.get_value(
@@ -440,8 +442,15 @@ def switch_user(session_name, new_user, pwd=None) -> dict:
     except frappe.AuthenticationError:
         frappe.throw(_("Invalid password for {0}").format(new_user), title=_("API Error"))
 
-    old_user = session.user
-    session.db_set("user", new_user)
+    lock_key = f"session_switch_{session_name}"
+    lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 5)", (lock_key,))[0][0]
+    if not lock_result:
+        frappe.throw(_("Session is busy. Please try again."), title=_("Session Busy"))
+    try:
+        old_user = session.user
+        session.db_set("user", new_user)
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
     try:
         from ch_pos.audit import log_business_event
@@ -809,9 +818,21 @@ def _is_settlement_complete_for_store(store, business_date):
     - If card/bank receipts exist, POS EDC Settlement (Matched, submitted) must
       cover the card receipt total for that store/date.
     """
+    # Pre-fetch pos_profiles for this store/date to avoid nested subquery
+    profiles = frappe.get_all(
+        "CH POS Session",
+        filters={"store": store, "business_date": business_date, "docstatus": 1},
+        pluck="pos_profile",
+    )
+    if not profiles:
+        return True, _("Settlement complete (no sessions for the day).")
+
+    profiles = list(set(p for p in profiles if p))
+    if not profiles:
+        return True, _("Settlement complete (no sessions for the day).")
+
     card_total = flt(
-        frappe.db.sql(
-            """
+        frappe.db.sql("""
             SELECT COALESCE(SUM(sip.amount), 0)
             FROM `tabSales Invoice` pi
             JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
@@ -820,16 +841,8 @@ def _is_settlement_complete_for_store(store, business_date):
               AND pi.is_consolidated = 0
               AND pi.posting_date = %(bd)s
               AND mop.type = 'Bank'
-              AND pi.pos_profile IN (
-                  SELECT DISTINCT pos_profile
-                  FROM `tabCH POS Session`
-                  WHERE store = %(store)s
-                    AND business_date = %(bd)s
-                    AND docstatus = 1
-              )
-            """,
-            {"store": store, "bd": business_date},
-        )[0][0]
+              AND pi.pos_profile IN %(profiles)s
+        """, {"bd": business_date, "profiles": tuple(profiles)})[0][0]
     )
 
     if card_total <= 0:
@@ -840,17 +853,14 @@ def _is_settlement_complete_for_store(store, business_date):
         return False, _("Business date not advanced: card receipts exist but store warehouse mapping is missing for EDC settlement validation.")
 
     matched_settlement_total = flt(
-        frappe.db.sql(
-            """
+        frappe.db.sql("""
             SELECT COALESCE(SUM(matched_amount), 0)
             FROM `tabPOS EDC Settlement`
             WHERE docstatus = 1
               AND status = 'Matched'
               AND settlement_date = %(bd)s
               AND store = %(warehouse)s
-            """,
-            {"bd": business_date, "warehouse": store_warehouse},
-        )[0][0]
+        """, {"bd": business_date, "warehouse": store_warehouse})[0][0]
     )
 
     if matched_settlement_total + 0.01 < card_total:

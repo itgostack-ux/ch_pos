@@ -363,6 +363,11 @@
   }
  ],
  "index_web_pages_for_search": 1,
+ "indexes": [
+  {"fieldnames": "store,status,docstatus", "unique": 0},
+  {"fieldnames": "store,business_date,docstatus", "unique": 0},
+  {"fieldnames": "pos_profile,status,docstatus", "unique": 0}
+ ],
  "is_submittable": 1,
  "links": [],
  "modified": "2026-03-17 10:00:00.000000",
