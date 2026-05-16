@@ -261,7 +261,6 @@ export class StockTransferWorkspace {
 		const body = panel.find(".ch-st-body");
 		const loading = panel.find(".ch-st-loading").hide();
 		this.transfer_items = [];
-		this.entry_mode = "scan"; // "scan" | "manual" — scanner-first by default
 
 		body.html(`
 			<div class="ch-pos-section-card ch-st-card">
@@ -288,37 +287,17 @@ export class StockTransferWorkspace {
 						<span class="ch-st-wh-alert-msg">${__("Pick source and destination warehouses to begin scanning")}</span>
 					</div>
 
-					<!-- Mode toggle: Scan (default, SAP-style) vs Manual -->
-					<div class="ch-st-mode-toggle" role="tablist">
-						<button type="button" class="ch-st-mode-btn active" data-mode="scan" role="tab">
-							<i class="fa fa-barcode"></i> ${__("Scan IMEI / Serial")}
-						</button>
-						<button type="button" class="ch-st-mode-btn" data-mode="manual" role="tab">
-							<i class="fa fa-keyboard-o"></i> ${__("Manual Item")}
-						</button>
-						<span class="ch-st-mode-hint">
-							<i class="fa fa-info-circle"></i>
-							${__("Scanned units are tracked end-to-end in IMEI Tracker")}
-						</span>
-					</div>
-
-					<!-- Scan input (default visible) -->
-					<div class="ch-st-scan-row" data-mode-panel="scan">
+					<!-- Scanner-first capture: store staff can scan via wedge OR type IMEI + Enter -->
+					<div class="ch-st-scan-row">
 						<i class="fa fa-barcode ch-st-scan-icon"></i>
 						<input type="text" class="form-control ch-st-scan-input"
 							placeholder="${__("Scan or type IMEI / Serial and press Enter")}"
-							autocomplete="off" inputmode="text">
+							autocomplete="off" inputmode="text" spellcheck="false">
 						<div class="ch-st-scan-feedback" aria-live="polite"></div>
-					</div>
-
-					<!-- Manual row (hidden by default) -->
-					<div class="ch-st-manual-row" data-mode-panel="manual" style="display:none">
-						<div class="ch-st-item-field ch-st-link"></div>
-						<input type="number" class="form-control ch-st-qty-input"
-							placeholder="${__("Qty")}" min="1" value="1">
-						<button class="btn btn-primary ch-st-add-item-btn">
-							<i class="fa fa-plus"></i> ${__("Add")}
-						</button>
+						<div class="ch-st-scan-hint">
+							<i class="fa fa-info-circle"></i>
+							${__("Each scan is tracked end-to-end in IMEI Tracker")}
+						</div>
 					</div>
 
 					<!-- Live counter strip (SAP MIGO-style) -->
@@ -376,28 +355,38 @@ export class StockTransferWorkspace {
 		`);
 
 		// Init warehouse fields
+		// Show only real stores + main warehouses — hide sub-bins like Buyback /
+		// Damaged / Disposed / Reserved / Transit. For "To Warehouse" also exclude
+		// the currently selected From Warehouse so staff can't pick the same one.
+		const _wh_excluded_keywords = ["Buyback", "Damaged", "Disposed", "Reserved", "Transit"];
+		const _wh_query = (extra = {}) => () => {
+			const filters = [
+				["Warehouse", "disabled", "=", 0],
+				["Warehouse", "is_group", "=", 0],
+				..._wh_excluded_keywords.map(k => ["Warehouse", "name", "not like", `%-${k}%`]),
+			];
+			if (extra.exclude) filters.push(["Warehouse", "name", "!=", extra.exclude]);
+			return { filters, page_length: 50 };
+		};
+
 		this.from_wh_field = frappe.ui.form.make_control({
-			df: { fieldname: "from_wh", fieldtype: "Link", options: "Warehouse", placeholder: __("Source warehouse") },
+			df: {
+				fieldname: "from_wh", fieldtype: "Link", options: "Warehouse",
+				placeholder: __("Source warehouse"),
+				get_query: _wh_query(),
+			},
 			parent: body.find(".ch-st-from-wh"),
 			render_input: true,
 		});
 		this.from_wh_field.set_value(PosState.warehouse || "");
 
 		this.to_wh_field = frappe.ui.form.make_control({
-			df: { fieldname: "to_wh", fieldtype: "Link", options: "Warehouse", placeholder: __("Target warehouse") },
-			parent: body.find(".ch-st-to-wh"),
-			render_input: true,
-		});
-
-		this.st_item_field = frappe.ui.form.make_control({
 			df: {
-				fieldname: "item_code",
-				fieldtype: "Link",
-				options: "Item",
-				placeholder: __("Search item..."),
-				get_query: () => ({ filters: { disabled: 0, is_stock_item: 1, has_variants: 0 }, page_length: 99 }),
+				fieldname: "to_wh", fieldtype: "Link", options: "Warehouse",
+				placeholder: __("Target warehouse"),
+				get_query: () => _wh_query({ exclude: this.from_wh_field && this.from_wh_field.get_value() })(),
 			},
-			parent: body.find(".ch-st-item-field"),
+			parent: body.find(".ch-st-to-wh"),
 			render_input: true,
 		});
 
@@ -420,22 +409,15 @@ export class StockTransferWorkspace {
 				body.find(".ch-st-scan-input").prop("disabled", true);
 			}
 		};
-		this.from_wh_field.$input.on("change", validate_wh);
+		this.from_wh_field.$input.on("change", () => {
+			// Clear To if it now equals From
+			if (this.to_wh_field && this.to_wh_field.get_value() === this.from_wh_field.get_value()) {
+				this.to_wh_field.set_value("");
+			}
+			validate_wh();
+		});
 		this.to_wh_field.$input.on("change", validate_wh);
 		validate_wh();
-
-		// Mode toggle (Scan / Manual)
-		body.on("click", ".ch-st-mode-btn", (e) => {
-			const mode = $(e.currentTarget).data("mode");
-			this.entry_mode = mode;
-			body.find(".ch-st-mode-btn").removeClass("active");
-			$(e.currentTarget).addClass("active");
-			body.find("[data-mode-panel]").hide();
-			body.find(`[data-mode-panel="${mode}"]`).show();
-			if (mode === "scan") {
-				setTimeout(() => body.find(".ch-st-scan-input").trigger("focus"), 50);
-			}
-		});
 
 		// Scanner: Enter = consume scan
 		body.on("keydown", ".ch-st-scan-input", (e) => {
@@ -497,35 +479,6 @@ export class StockTransferWorkspace {
 					this._scan_feedback(body, "error", __("Scan failed — try again"));
 				},
 			});
-		});
-
-		body.on("click", ".ch-st-add-item-btn", () => {
-			const item_code = this.st_item_field.get_value();
-			const qty = parseInt(body.find(".ch-st-qty-input").val()) || 1;
-			if (!item_code) { frappe.show_alert({ message: __("Select an item"), indicator: "orange" }); return; }
-
-			const existing = this.transfer_items.find(r => r.item_code === item_code);
-			if (existing) {
-				// If the existing line is serial-driven, refuse manual qty bump
-				if ((existing.serial_nos || []).length) {
-					frappe.show_alert({ message: __("This line is scanner-tracked — scan more serials instead"), indicator: "orange" });
-					return;
-				}
-				existing.qty += qty;
-			} else {
-				frappe.call({
-					method: "frappe.client.get_value",
-					args: { doctype: "Item", filters: { name: item_code }, fieldname: ["item_name", "stock_uom"] },
-					async: false,
-					callback: (r) => {
-						const d = r.message || {};
-						this.transfer_items.push({ item_code, item_name: d.item_name || item_code, uom: d.stock_uom || "Nos", qty, serial_nos: [] });
-					},
-				});
-			}
-			this.st_item_field.set_value("");
-			body.find(".ch-st-qty-input").val(1);
-			this._render_transfer_items(body);
 		});
 
 		body.on("click", ".ch-st-remove-row", function () {
