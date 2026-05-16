@@ -12,6 +12,9 @@ def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=
     Purchase Receipt IMEI-tracking path and therefore never got a
     lifecycle document.  The row is created with status 'In Stock'
     so that the subsequent sale/return transition is valid.
+
+    Advisory-locked to prevent duplicate creation under concurrent POS
+    submissions for the same serial (e.g. family plan, dual-device sale).
     """
     if frappe.db.exists("CH Serial Lifecycle", serial_no):
         return
@@ -21,25 +24,42 @@ def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=
     if not item_code:
         return  # cannot create without item_code
 
-    from frappe.utils import now_datetime
-    lc = frappe.new_doc("CH Serial Lifecycle")
-    lc.serial_no = serial_no
-    lc.item_code = item_code
-    lc.lifecycle_status = "In Stock"
-    lc.current_company = company
-    lc.current_warehouse = warehouse
-    lc.append("lifecycle_log", {
-        "log_timestamp": now_datetime(),
-        "from_status": "",
-        "to_status": "In Stock",
-        "changed_by": frappe.session.user,
-        "company": company,
-        "warehouse": warehouse,
-        "remarks": f"Auto-created on sale — Serial No existed without lifecycle record",
-    })
-    lc.flags.ignore_permissions = True
-    lc.flags.ignore_validate = True
-    lc.insert()
+    lock_key = f"serial_create_{frappe.scrub(str(serial_no))}_lifecycle"
+    got_lock = frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))[0][0]
+    if not got_lock:
+        frappe.log_error(
+            f"Could not acquire lifecycle lock for {serial_no}",
+            "POS Invoice Serial Lifecycle Auto-Create",
+        )
+        return
+    try:
+        if frappe.db.exists("CH Serial Lifecycle", serial_no):
+            return  # raced with another worker — already created
+
+        store_name = (
+            frappe.db.get_value("CH Store", {"warehouse": warehouse}, "name") if warehouse else None
+        )
+        lc = frappe.new_doc("CH Serial Lifecycle")
+        lc.serial_no = serial_no
+        lc.item_code = item_code
+        lc.lifecycle_status = "In Stock"
+        lc.current_company = company
+        lc.current_warehouse = warehouse
+        lc.current_store = store_name or ""
+        lc.append("lifecycle_log", {
+            "log_timestamp": now_datetime(),
+            "from_status": "",
+            "to_status": "In Stock",
+            "changed_by": frappe.session.user,
+            "company": company,
+            "warehouse": warehouse,
+            "remarks": "Auto-created on sale — Serial No existed without lifecycle record",
+        })
+        lc.flags.ignore_permissions = True
+        lc.flags.ignore_validate = True
+        lc.insert()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
 
 def _update_serial_status(serial_no, new_status, company=None, warehouse=None, remarks=None, **kwargs):
