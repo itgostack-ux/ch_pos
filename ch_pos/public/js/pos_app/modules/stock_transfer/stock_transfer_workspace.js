@@ -390,7 +390,9 @@ export class StockTransferWorkspace {
 			render_input: true,
 		});
 
-		// Validate both warehouses selected before allowing add
+		// Validate both warehouses selected — show alert but keep scan input
+		// always editable so staff can pre-stage IMEIs while picking warehouses.
+		// The scanner Enter handler revalidates and shows an error if needed.
 		const validate_wh = () => {
 			const f = this.from_wh_field.get_value();
 			const t = this.to_wh_field.get_value();
@@ -398,7 +400,6 @@ export class StockTransferWorkspace {
 			const msg_el = body.find(".ch-st-wh-alert-msg");
 			if (f && t && f !== t) {
 				alert_el.hide();
-				body.find(".ch-st-scan-input").prop("disabled", false);
 			} else {
 				if (f && t && f === t) {
 					msg_el.text(__("Source and destination warehouse must be different"));
@@ -406,7 +407,6 @@ export class StockTransferWorkspace {
 					msg_el.text(__("Pick source and destination warehouses to begin scanning"));
 				}
 				alert_el.show();
-				body.find(".ch-st-scan-input").prop("disabled", true);
 			}
 		};
 		this.from_wh_field.$input.on("change", () => {
