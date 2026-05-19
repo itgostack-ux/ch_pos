@@ -503,6 +503,10 @@ def get_available_serials(item_code, warehouse) -> dict:
         SELECT
             sn.name AS serial_no,
             sn.warranty_expiry_date,
+            COALESCE(sn.ch_is_imei, 0) AS ch_is_imei,
+            COALESCE(NULLIF(sn.ch_serial_kind,''),
+                     CASE WHEN COALESCE(sn.ch_is_imei,0)=1 THEN 'IMEI' ELSE 'Barcode' END
+            ) AS ch_serial_kind,
             MIN(DATE(sbb.posting_datetime)) AS inward_date,
             COALESCE(sb.bin_type, 'Sellable') AS bin_type
         FROM `tabSerial No` sn
@@ -516,7 +520,7 @@ def get_available_serials(item_code, warehouse) -> dict:
           AND sn.warehouse = %(warehouse)s
           AND sn.status = 'Active'
           AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
-        GROUP BY sn.name, sn.warranty_expiry_date, sb.bin_type
+        GROUP BY sn.name, sn.warranty_expiry_date, sn.ch_is_imei, sn.ch_serial_kind, sb.bin_type
         ORDER BY inward_date ASC, sn.name ASC
     """, {"item_code": item_code, "warehouse": warehouse}, as_dict=True)
 

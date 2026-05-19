@@ -1186,7 +1186,9 @@ export class BuybackWorkspace {
 				assessment: btn.data("name"),
 				buyback_amount: flt(btn.data("amount")),
 				item_name: btn.data("item-name"),
-				imei_serial: btn.data("imei"),
+				// .attr() preserves the string form of all-digit IMEIs that
+				// .data() would otherwise coerce to Number.
+				imei_serial: btn.attr("data-imei") || "",
 				condition_grade: btn.data("grade"),
 			});
 			EventBus.emit("cart:updated");

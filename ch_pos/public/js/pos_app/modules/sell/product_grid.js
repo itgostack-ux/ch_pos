@@ -211,7 +211,7 @@ export class ProductGrid {
 
 		// IMEI/serial required badge
 		const serial_badge = item.has_serial_no
-			? `<span class="ch-pos-serial-badge">IMEI</span>`
+			? `<span class="ch-pos-serial-badge">Serial</span>`
 			: "";
 
 		// Item type badge (New / Refurbished / Display / Pre-Owned)
@@ -328,7 +328,7 @@ export class ProductGrid {
 		}
 		// Serial badge
 		if (item.has_serial_no) {
-			specs_html += `<span class="row-spec-pill row-serial-pill">IMEI</span>`;
+			specs_html += `<span class="row-spec-pill row-serial-pill">Serial</span>`;
 		}
 
 		// Condition: type + grade

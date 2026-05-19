@@ -315,7 +315,7 @@ export class CartService {
 	 * _prompt_serial_scan but skips the IMEI selection dialog.
 	 */
 	_add_to_cart_direct_serial(item_data) {
-		const serial_no = (item_data.serial_no || "").trim();
+		const serial_no = String(item_data.serial_no || "").trim();
 		if (!serial_no) {
 			EventBus.emit("cart:add_item", item_data);
 			return;
@@ -479,7 +479,9 @@ export class CartService {
 			is_warranty: false,
 			is_vas: false,
 			has_serial_no: cint(item_data.has_serial_no),
-			serial_no: serial_no || "",
+			// Always store as a string — IMEIs like 35600220100003 must never
+			// degrade to a JS Number (precision loss + backend .strip() crash).
+			serial_no: serial_no ? String(serial_no) : "",
 			ch_item_type: item_data.ch_item_type || "",
 			ch_allow_zero_rate: cint(item_data.ch_allow_zero_rate),
 			stock_qty: flt(item_data.stock_qty || 0),
@@ -568,7 +570,7 @@ export class CartService {
 	/** Prompt for IMEI/serial selection from available stock, with manual scan fallback */
 	_prompt_serial_scan(item_data) {
 		const dlg = new frappe.ui.Dialog({
-			title: __("Select IMEI — {0}", [item_data.item_name]),
+			title: __("Select IMEI / Serial — {0}", [item_data.item_name]),
 			fields: [
 				{
 					fieldtype: "HTML",
@@ -576,7 +578,7 @@ export class CartService {
 					options: `<div class="ch-imei-picker">
 						<div style="text-align:center;padding:16px 0;">
 							<i class="fa fa-spinner fa-spin" style="font-size:24px;opacity:0.4"></i>
-							<p class="text-muted" style="margin-top:8px">${__("Loading available IMEIs...")}</p>
+							<p class="text-muted" style="margin-top:8px">${__("Loading available serials...")}</p>
 						</div>
 					</div>`,
 				},
@@ -591,9 +593,11 @@ export class CartService {
 			size: "large",
 			primary_action_label: __("Add to Cart"),
 			primary_action: (values) => {
-				const serial = (values.serial_no || "").trim();
+				const serial = String(values.serial_no || "").trim();
 				// Check if one was selected from the picker
-				const selected = dlg.$wrapper.find(".ch-imei-row.selected").data("serial");
+				// jQuery .data() auto-converts all-digit strings to Numbers —
+				// use .attr() to keep IMEIs as strings.
+				const selected = dlg.$wrapper.find(".ch-imei-row.selected").attr("data-serial") || "";
 				const final_serial = selected || serial;
 				if (!final_serial) {
 					frappe.show_alert({ message: __("Select or scan an IMEI"), indicator: "orange" });
@@ -651,7 +655,7 @@ export class CartService {
 			const area = dlg.$wrapper.find(".ch-imei-picker");
 			if (!serials || !serials.length) {
 				area.html(`<div class="text-muted text-center" style="padding:12px">
-					${__("No IMEIs in stock at this warehouse. Use manual scan below.")}
+					${__("No serials in stock at this warehouse. Use manual scan below.")}
 				</div>`);
 				setTimeout(() => dlg.fields_dict.serial_no.$input.focus(), 100);
 				return;
@@ -669,12 +673,16 @@ export class CartService {
 				const fifo_badge = s.is_oldest
 					? `<span style="font-size:10px;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:4px;padding:1px 5px;margin-left:6px">${__("Sell First")}</span>`
 					: "";
+				// Kind chip: IMEI (real manufacturer ID) vs Barcode (system-generated)
+				const kind_chip = s.ch_is_imei
+					? `<span style="font-size:10px;background:#e0e7ff;color:#3730a3;border:1px solid #6366f1;border-radius:4px;padding:1px 5px;margin-left:6px">IMEI</span>`
+					: `<span style="font-size:10px;background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;border-radius:4px;padding:1px 5px;margin-left:6px">Barcode</span>`;
 				const inward_info = s.inward_date && idx > 0
 					? `<span class="text-muted" style="font-size:10px;margin-left:4px">In: ${frappe.datetime.str_to_user(s.inward_date)}</span>`
 					: "";
 				return `<div class="ch-imei-row" data-serial="${frappe.utils.escape_html(s.serial_no)}">
 					<span class="ch-imei-serial">${frappe.utils.escape_html(s.serial_no)}</span>
-					${fifo_badge}${inward_info}${warranty_info}
+					${kind_chip}${fifo_badge}${inward_info}${warranty_info}
 				</div>`;
 			}).join("");
 
@@ -691,7 +699,8 @@ export class CartService {
 			area.on("click", ".ch-imei-row", function () {
 				area.find(".ch-imei-row").removeClass("selected");
 				$(this).addClass("selected");
-				dlg.set_value("serial_no", $(this).data("serial"));
+				// .attr() preserves the string form of all-digit IMEIs.
+				dlg.set_value("serial_no", $(this).attr("data-serial") || "");
 			});
 		});
 	}

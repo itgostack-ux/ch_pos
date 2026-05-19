@@ -508,6 +508,13 @@ def create_pos_invoice(pos_profile, customer, items,
     warranty_items = []
 
     for item in items:
+        # IMEIs may arrive as JSON numbers (e.g. 35600220100003) — coerce to str
+        # in-place so every downstream consumer (.strip(), child-table assignment,
+        # warranty link, etc.) sees a string instead of an int.
+        for _sn_key in ("serial_no", "for_serial_no"):
+            _sn_val = item.get(_sn_key)
+            if _sn_val is not None and not isinstance(_sn_val, str):
+                item[_sn_key] = str(_sn_val)
         item_serial = (item.get("serial_no") or item.get("for_serial_no") or "").strip()
         item_exception_original = flt(item.get("exception_original_rate") or item.get("price_list_rate") or item.get("mrp") or item.get("rate"))
         item_exception_final = flt(item.get("exception_final_rate") or item.get("rate"))
@@ -2052,7 +2059,8 @@ def get_customer_advances(customer) -> list:
 def scan_barcode(barcode, pos_profile=None) -> dict:
     """Look up an item by exact barcode or serial number for POS scanner."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
-    barcode = (barcode or "").strip()
+    # Coerce — all-digit barcodes / IMEIs may arrive as JSON numbers.
+    barcode = str(barcode or "").strip()
     if not barcode:
         return None
 
@@ -3181,6 +3189,9 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
     When allow_fifo_override=1 the FIFO check is skipped (user has already
     confirmed the override in the UI); the exception is logged via log_fifo_override.
     """
+    # IMEIs / barcodes are stored as strings; coerce in case the client sent
+    # a JSON number for an all-digit IMEI (e.g. 35600220100003).
+    serial_no = str(serial_no or "").strip()
     if not frappe.db.exists("Serial No", serial_no):
         return {"valid": False, "reason": frappe._("Serial No {0} does not exist").format(serial_no)}
 
@@ -3249,6 +3260,8 @@ def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_dat
     Called from the JS confirm dialog when the user chooses to proceed despite
     the FIFO warning.  Logs to CH Business Audit Log and notifies RSM/ASM.
     """
+    serial_no = str(serial_no or "").strip()
+    oldest_serial = str(oldest_serial or "").strip()
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
     store = frappe.get_cached_value("POS Profile", pos_profile, "warehouse") if pos_profile else warehouse
@@ -3285,6 +3298,7 @@ def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_dat
 @frappe.whitelist()
 def check_serial_returnable(serial_no, original_invoice=None) -> dict:
     """Check if a serial number can be returned (not scrapped, transferred, or already returned)."""
+    serial_no = str(serial_no or "").strip()
     if not frappe.db.exists("Serial No", serial_no):
         return {"returnable": False, "reason": frappe._("Serial No {0} does not exist").format(serial_no)}
 
@@ -4334,7 +4348,8 @@ def get_customer_loyalty(customer, company=None) -> dict:
 @frappe.whitelist()
 def imei_history(serial_no) -> dict:
     """Full lifecycle of a serial number / IMEI: sales, returns, service, buyback."""
-    serial_no = serial_no.strip()
+    # Coerce — all-digit IMEIs can arrive as JSON numbers.
+    serial_no = str(serial_no or "").strip()
 
     # Try direct Serial No lookup
     if not frappe.db.exists("Serial No", serial_no):
