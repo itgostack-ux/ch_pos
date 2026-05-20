@@ -16,6 +16,7 @@
   "column_break_bdate",
   "enable_denomination_count",
   "lock_after_session_close",
+  "cash_variance_account",
   "isolation_section",
   "enforce_device_company_isolation",
   "enforce_user_company_isolation",
@@ -104,6 +105,13 @@
    "fieldtype": "Check",
    "label": "Lock After Session Close",
    "description": "Block all POS operations after session close until next day"
+  },
+  {
+   "fieldname": "cash_variance_account",
+   "fieldtype": "Link",
+   "options": "Account",
+   "label": "Cash Variance Account",
+   "description": "GL account for posting POS settlement cash shortage/surplus. Falls back to Company.write_off_account if blank."
   },
   {
    "fieldname": "isolation_section",

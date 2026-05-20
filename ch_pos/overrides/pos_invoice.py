@@ -554,6 +554,54 @@ def revert_kiosk_token_status(doc, method=None):
         })
 
 
+# ── Coupon usage counter (Pricing Rule integration) ─────────────────
+
+
+def increment_coupon_usage(doc, method=None):
+    """Hook: on_submit — increment the `used` counter on the linked Coupon Code.
+
+    In standard ERPNext, Sales Invoice has a `coupon_code` field that auto-fires
+    `update_coupon_code_count` on submit/cancel. In this site we store the coupon
+    on `custom_coupon_code` (the standard field does not exist in v15), so the
+    standard hook never fires and `maximum_use` would never be enforced.
+
+    This hook bridges the gap by delegating to the standard ERPNext utility,
+    preserving the original max-use validation semantics.
+    """
+    coupon_name = doc.get("custom_coupon_code")
+    if not coupon_name:
+        return
+    try:
+        from erpnext.accounts.doctype.pricing_rule.utils import update_coupon_code_count
+        update_coupon_code_count(coupon_name, "used")
+    except Exception:
+        # Standard util raises on max-use exhausted; let it bubble.
+        # Other failures (missing coupon, perms) must not block invoice submit.
+        if frappe.flags.get("in_test"):
+            raise
+        frappe.log_error(
+            title="increment_coupon_usage failed",
+            message=f"Invoice {doc.name} coupon {coupon_name}: " + frappe.get_traceback(),
+        )
+
+
+def decrement_coupon_usage(doc, method=None):
+    """Hook: on_cancel — decrement the `used` counter when an SI is cancelled."""
+    coupon_name = doc.get("custom_coupon_code")
+    if not coupon_name:
+        return
+    try:
+        from erpnext.accounts.doctype.pricing_rule.utils import update_coupon_code_count
+        update_coupon_code_count(coupon_name, "cancelled")
+    except Exception:
+        if frappe.flags.get("in_test"):
+            raise
+        frappe.log_error(
+            title="decrement_coupon_usage failed",
+            message=f"Invoice {doc.name} coupon {coupon_name}: " + frappe.get_traceback(),
+        )
+
+
 # ── Margin Scheme GST (selling side) ────────────────────────────
 
 

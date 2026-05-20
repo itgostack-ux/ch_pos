@@ -130,6 +130,117 @@ class CHPOSSettlement(Document):
 
     def on_submit(self):
         self.db_set("settlement_status", "Submitted")
+        self._post_variance_journal_entry()
+
+    def on_cancel(self):
+        self._cancel_variance_journal_entry()
+
+    def _post_variance_journal_entry(self):
+        """Post a Journal Entry for the cash shortage/surplus.
+
+        POS Invoices already book each tender to its account (per POS Profile)
+        and Cash Drops already JE cash movements to safe/bank/petty. The only
+        residual to post at day-close is the physical cash variance against the
+        expected closing cash.
+
+        Surplus (actual > expected) → Dr POS Cash, Cr Cash Variance (income)
+        Shortage (actual < expected) → Dr Cash Variance (expense), Cr POS Cash
+
+        Idempotent: skips if variance is zero or a JE is already linked.
+        """
+        if self.variance_journal_entry:
+            return
+        variance = flt(self.variance_amount)
+        if not variance:
+            return
+        if not self.company:
+            return
+
+        pos_cash_account = frappe.db.get_value("Company", self.company, "default_cash_account")
+        if not pos_cash_account:
+            frappe.log_error(
+                f"Settlement {self.name}: Company {self.company} has no default_cash_account; "
+                "variance JE skipped.",
+                "POS Settlement GL",
+            )
+            return
+
+        settings = frappe.get_cached_doc("CH POS Control Settings")
+        variance_account = settings.get("cash_variance_account") or frappe.db.get_value(
+            "Company", self.company, "write_off_account"
+        )
+        if not variance_account:
+            frappe.log_error(
+                f"Settlement {self.name}: no cash_variance_account in CH POS Control Settings "
+                f"and no write_off_account on Company {self.company}; variance JE skipped.",
+                "POS Settlement GL",
+            )
+            return
+
+        cost_center = frappe.db.get_value("Company", self.company, "cost_center")
+        amount = abs(variance)
+        is_surplus = variance > 0
+        remark = _("POS settlement {0} — {1} of {2}").format(
+            self.name,
+            _("cash surplus") if is_surplus else _("cash shortage"),
+            amount,
+        )
+
+        if is_surplus:
+            debit_account, credit_account = pos_cash_account, variance_account
+        else:
+            debit_account, credit_account = variance_account, pos_cash_account
+
+        try:
+            je = frappe.new_doc("Journal Entry")
+            je.update({
+                "voucher_type": "Journal Entry",
+                "company": self.company,
+                "posting_date": self.business_date or frappe.utils.today(),
+                "cheque_no": self.name,
+                "cheque_date": self.business_date or frappe.utils.today(),
+                "user_remark": remark,
+                "accounts": [
+                    {
+                        "account": debit_account,
+                        "debit_in_account_currency": amount,
+                        "cost_center": cost_center,
+                        "reference_type": "CH POS Settlement",
+                        "reference_name": self.name,
+                    },
+                    {
+                        "account": credit_account,
+                        "credit_in_account_currency": amount,
+                        "cost_center": cost_center,
+                        "reference_type": "CH POS Settlement",
+                        "reference_name": self.name,
+                    },
+                ],
+            })
+            je.flags.ignore_permissions = True
+            je.insert(ignore_permissions=True)
+            je.submit()
+            self.db_set("variance_journal_entry", je.name, update_modified=False)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"POS Settlement variance JE failed for {self.name}",
+            )
+
+    def _cancel_variance_journal_entry(self):
+        if not self.variance_journal_entry:
+            return
+        try:
+            je_status = frappe.db.get_value("Journal Entry", self.variance_journal_entry, "docstatus")
+            if je_status == 1:
+                je = frappe.get_doc("Journal Entry", self.variance_journal_entry)
+                je.flags.ignore_permissions = True
+                je.cancel()
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"POS Settlement variance JE cancel failed for {self.name}",
+            )
 
     def _validate_session(self):
         """Settlement must reference a valid session."""

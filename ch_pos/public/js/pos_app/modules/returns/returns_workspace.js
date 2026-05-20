@@ -250,6 +250,24 @@ export class ReturnsWorkspace {
 						reqd: 1,
 						description: __("Mandatory — describe the customer's reason in detail (min 10 chars)"),
 					});
+					// ── Phase D — Credit-only + Replacement linkback (manager-only) ──
+					fields.push({ fieldtype: "Section Break", label: __("Advanced (Manager Only)"), collapsible: 1, collapsible_depends_on: "eval:1" });
+					fields.push({
+						fieldname: "credit_only",
+						fieldtype: "Check",
+						label: __("Credit Only (No Stock Reversal)"),
+						default: 0,
+						description: __("Customer keeps the goods (damaged write-off / lost / fraud credit). Posts the Credit Note GL only — no Stock Ledger Entry. Requires POS/Accounts Manager role or a valid manager PIN."),
+					});
+					fields.push({ fieldtype: "Column Break" });
+					fields.push({
+						fieldname: "replacement_invoice",
+						fieldtype: "Link",
+						options: "Sales Invoice",
+						label: __("Replacement Sales Invoice"),
+						description: __("Optional — link the new sale that replaces this return so finance can net the credit."),
+						get_query: () => ({ filters: { is_return: 0, docstatus: 1 } }),
+					});
 				}
 
 				const dlg = new frappe.ui.Dialog({
@@ -351,6 +369,8 @@ export class ReturnsWorkspace {
 										return_reason: values.return_reason,
 										return_remarks: values.return_remarks,
 										manager_pin: values.manager_pin,
+										credit_only: values.credit_only ? 1 : 0,
+										replacement_invoice: values.replacement_invoice || "",
 									});
 								} else {
 									this._process_product_exchange(invoice_name, return_items, total_credit);
@@ -368,6 +388,8 @@ export class ReturnsWorkspace {
 								return_reason: values.return_reason,
 								return_remarks: values.return_remarks,
 								manager_pin: values.manager_pin,
+								credit_only: values.credit_only ? 1 : 0,
+								replacement_invoice: values.replacement_invoice || "",
 							});
 						} else {
 							this._process_product_exchange(invoice_name, return_items, total_credit);
@@ -411,6 +433,8 @@ export class ReturnsWorkspace {
 				return_reason: justification.return_reason || "",
 				return_remarks: justification.return_remarks || "",
 				manager_pin: justification.manager_pin || "",
+				credit_only: justification.credit_only ? 1 : 0,
+				replacement_invoice: justification.replacement_invoice || "",
 			},
 			freeze: true,
 			freeze_message: __("Processing Return..."),

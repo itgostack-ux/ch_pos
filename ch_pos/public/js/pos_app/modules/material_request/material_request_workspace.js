@@ -585,10 +585,15 @@ export class MaterialRequestWorkspace {
 					return;
 				}
 				list.html(requests.map(mr => {
-					const status_cls = ["Draft", "Pending"].includes(mr.status) ? "ch-pos-badge-warning"
-						: ["Ordered", "Partially Ordered", "Partially Received"].includes(mr.status) ? "ch-pos-badge-info"
-						: ["Received", "Transferred"].includes(mr.status) ? "ch-pos-badge-success"
-						: ["Stopped", "Cancelled"].includes(mr.status) ? "ch-pos-badge-muted"
+					// Prefer the server-computed display_status so terminal MR
+					// states (Stopped / Received / Transferred / Issued / short-
+					// closed) render as a single friendly "Completed" badge.
+					const shown_status = mr.display_status || mr.status;
+					const status_cls = shown_status === "Completed" ? "ch-pos-badge-success"
+						: ["Draft", "Pending"].includes(shown_status) ? "ch-pos-badge-warning"
+						: ["Ordered", "Partially Ordered", "Partially Received"].includes(shown_status) ? "ch-pos-badge-info"
+						: ["Received", "Transferred"].includes(shown_status) ? "ch-pos-badge-success"
+						: ["Stopped", "Cancelled"].includes(shown_status) ? "ch-pos-badge-muted"
 						: "ch-pos-badge-muted";
 					const sla_warn = mr.sla_breached
 						? ` <span style="color:#dc2626;font-size:10px"><i class="fa fa-exclamation-circle"></i> SLA</span>` : "";
@@ -610,7 +615,7 @@ export class MaterialRequestWorkspace {
 								${delayText ? `<div style="margin-top:4px">${delayText}</div>` : ""}
 							</div>
 							<div style="display:flex;gap:8px;align-items:center">
-								<span class="ch-pos-badge ${status_cls}">${frappe.utils.escape_html(mr.status)}</span>
+								<span class="ch-pos-badge ${status_cls}">${frappe.utils.escape_html(shown_status)}</span>
 								<button class="btn btn-xs btn-outline-secondary ch-mr-view-detail" data-name="${frappe.utils.escape_html(mr.name)}" style="border-radius:var(--pos-radius-sm)">
 									<i class="fa fa-external-link"></i>
 								</button>

@@ -346,6 +346,69 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
 
 
 @frappe.whitelist()
+def create_pos_quotation(pos_profile, customer, items, valid_till=None,
+                          notes=None, sales_executive=None) -> dict:
+    """Create a Quotation from the POS cart so the operator can issue a
+    Proforma Invoice (printed via the ch_erp15 "Proforma Invoice" format).
+
+    Reuse-first: this is a thin convenience over `frappe.new_doc("Quotation")`
+    so the POS can hand a draft quote to the customer without leaving the
+    cashier screen. The same Proforma print format used in Desk works here.
+    """
+    frappe.has_permission("Quotation", "create", throw=True)
+
+    if isinstance(items, str):
+        items = frappe.parse_json(items)
+    if not items:
+        frappe.throw(frappe._("At least one item is required for the proforma"))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    qtn = frappe.new_doc("Quotation")
+    qtn.quotation_to = "Customer"
+    qtn.party_name = customer or profile.customer
+    qtn.company = profile.company
+    qtn.transaction_date = nowdate()
+    qtn.valid_till = valid_till or str(datetime.date.today() + datetime.timedelta(days=15))
+    qtn.currency = profile.currency or frappe.get_cached_value("Company", profile.company, "default_currency")
+    qtn.selling_price_list = profile.selling_price_list
+    qtn.ignore_pricing_rule = 1
+    qtn.order_type = "Sales"
+    if notes and qtn.meta.has_field("terms"):
+        qtn.terms = notes
+
+    for item in items:
+        qtn.append("items", {
+            "item_code": item.get("item_code"),
+            "qty": flt(item.get("qty", 1)),
+            "rate": flt(item.get("rate", 0)),
+            "uom": item.get("uom") or "Nos",
+            "warehouse": item.get("warehouse") or profile.warehouse,
+        })
+
+    if sales_executive and qtn.meta.has_field("custom_sales_executive"):
+        qtn.custom_sales_executive = sales_executive
+
+    qtn.flags.ignore_permissions = True
+    qtn.insert(ignore_permissions=True)
+
+    try:
+        qtn.submit()
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Proforma quotation submit failed for {qtn.name}")
+        qtn.reload()
+
+    return {
+        "doctype": "Quotation",
+        "name": qtn.name,
+        "docstatus": qtn.docstatus,
+        "status": qtn.status,
+        "grand_total": flt(qtn.grand_total),
+        "valid_till": str(qtn.valid_till),
+        "print_format": "Proforma Invoice",
+    }
+
+
+@frappe.whitelist()
 def create_pos_invoice(pos_profile, customer, items,
                        mode_of_payment=None, amount_paid=0,
                        payments=None,
@@ -2436,7 +2499,8 @@ def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
 @frappe.whitelist()
 def create_pos_return(original_invoice, return_items, sales_executive=None,
                       return_reason=None, return_remarks=None,
-                      manager_pin=None) -> dict:
+                      manager_pin=None, credit_only=0,
+                      replacement_invoice=None) -> dict:
     """Create a Sales Invoice return (credit note) for specific items.
 
     Market-standard maker-checker (SAP credit memo / Oracle Returns Mgmt):
@@ -2450,6 +2514,11 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     * A POS Manager (role) can either submit the return directly (auto-approve)
       or supply a `manager_pin` to override the threshold for an in-person
       checker workflow (matches Walmart/Best Buy POS pattern).
+    * `credit_only=1` issues the credit note WITHOUT a Stock Ledger Entry
+      (no restock). Used when the customer keeps the physical goods
+      (damaged write-off, lost, fraud credit). Requires manager role or PIN.
+    * `replacement_invoice` captures the linkback to a replacement sale so
+      finance can net the credit against the new invoice.
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
     if isinstance(return_items, str):
@@ -2468,6 +2537,22 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
             frappe._("Return remarks must be at least 10 characters (audit requirement)."),
             title=frappe._("Remarks Too Short"),
         )
+
+    # Phase D — credit-only returns (no stock reversal) require manager auth
+    # because we are issuing a credit without physical goods coming back.
+    if cint(credit_only):
+        _user_roles = set(frappe.get_roles(frappe.session.user))
+        _is_mgr = bool({"POS Manager", "Accounts Manager", "System Manager"} & _user_roles)
+        _pin_ok = bool(manager_pin) and _verify_manager_pin(manager_pin)
+        if not (_is_mgr or _pin_ok):
+            frappe.throw(
+                frappe._(
+                    "Credit-only returns (no stock reversal) require a POS Manager / "
+                    "Accounts Manager role or a valid manager PIN. The customer keeps "
+                    "the goods; only the credit GL is posted."
+                ),
+                title=frappe._("Manager Authorization Required"),
+            )
 
     orig = frappe.get_doc("Sales Invoice", original_invoice)
     orig.check_permission("read")  # SECURITY (H8): IDOR prevention
@@ -2509,7 +2594,15 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     ret.is_pos = 1
     ret.is_return = 1
     ret.return_against = orig.name
-    ret.update_stock = 1
+    # Phase D — credit-only returns skip the Stock Ledger Entry. POS Invoices
+    # normally set update_stock=1 so the return reverses inventory; for
+    # credit-only the goods stay out (damaged/lost/fraud credit). Requires
+    # manager authorization — enforced below alongside the auto-approve gate.
+    credit_only_flag = cint(credit_only)
+    if credit_only_flag:
+        ret.update_stock = 0
+    else:
+        ret.update_stock = 1
 
     total_return_amount = 0
     for ri in return_items:
@@ -2608,6 +2701,13 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
         update_kwargs["custom_return_reason"] = return_reason
     if frappe.get_meta("Sales Invoice").has_field("custom_return_remarks"):
         update_kwargs["custom_return_remarks"] = return_remarks
+    # Phase D — stamp credit-only flag + replacement linkback when supplied.
+    _si_meta = frappe.get_meta("Sales Invoice")
+    if credit_only_flag and _si_meta.has_field("custom_credit_only_return"):
+        update_kwargs["custom_credit_only_return"] = 1
+    if replacement_invoice and _si_meta.has_field("custom_replacement_invoice"):
+        if frappe.db.exists("Sales Invoice", replacement_invoice):
+            update_kwargs["custom_replacement_invoice"] = replacement_invoice
     # Always echo into the standard remarks field so it is visible on the
     # printed credit note even when the custom field is not yet installed.
     existing_remarks = (ret.get("remarks") or "").strip()
@@ -3106,6 +3206,29 @@ def process_return_with_replacement(
         raise
 
     replacement_inv_name = replacement_result["name"]
+
+    # Phase D — cross-link return ↔ replacement so finance can navigate both
+    # directions and net the credit against the new invoice. Best-effort:
+    # failures here do not roll back the already-submitted invoices.
+    try:
+        _si_meta = frappe.get_meta("Sales Invoice")
+        if _si_meta.has_field("custom_replacement_invoice"):
+            frappe.db.set_value(
+                "Sales Invoice", return_inv_name,
+                "custom_replacement_invoice", replacement_inv_name,
+                update_modified=False,
+            )
+        if _si_meta.has_field("custom_original_invoice"):
+            frappe.db.set_value(
+                "Sales Invoice", replacement_inv_name,
+                "custom_original_invoice", return_inv_name,
+                update_modified=False,
+            )
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Return/replacement cross-link failed for {return_inv_name} ↔ {replacement_inv_name}",
+        )
 
     # ── 6. If we owe the customer, create a refund Payment Entry ───────────
     refund_pe_name = None
@@ -4940,7 +5063,7 @@ def get_pending_material_requests(pos_profile) -> list:
 
     out = []
     now_dt = now_datetime()
-    closed_statuses = {"Received", "Transferred", "Stopped", "Cancelled"}
+    closed_statuses = {"Received", "Transferred", "Stopped", "Cancelled", "Issued"}
 
     for req in requests:
         sla_due_by = req.get("sla_due_by")
@@ -4965,6 +5088,7 @@ def get_pending_material_requests(pos_profile) -> list:
             "name": req["name"],
             "transaction_date": str(sla_due_by or req.get("required_by_date") or req.get("creation")),
             "status": req.get("status"),
+            "display_status": req.get("display_status") or req.get("status"),
             "approval_status": req.get("approval_status", ""),
             "priority": req.get("priority", ""),
             "sla_breached": req.get("sla_breached", 0),
@@ -6111,11 +6235,11 @@ _SHARED_MODES = ["imei", "customer360", "reports"]
 COMPANY_MODE_MAP = {
     "retail": [
         "sell", "returns", "buyback", "material_request", "stock_transfer",
-        "guided", "model_compare", "claims", "exceptions", "queue",
+        "guided", "model_compare", "claims", "exceptions", "queue", "prebook",
     ] + _SHARED_MODES,
     "service": [
         "sell", "returns", "buyback", "repair", "queue", "service",
-        "guided", "exceptions",
+        "guided", "exceptions", "prebook",
     ] + _SHARED_MODES,
 }
 

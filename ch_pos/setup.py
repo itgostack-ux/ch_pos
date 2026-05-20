@@ -441,6 +441,30 @@ CUSTOM_FIELDS = {
             "depends_on": "eval:doc.custom_original_invoice",
             "module": "POS Core",
         },
+        # Phase D — Credit-only return (no stock reversal) + Replacement linkback
+        {
+            "fieldname": "custom_credit_only_return",
+            "fieldtype": "Check",
+            "label": "Credit Only (No Stock Reversal)",
+            "insert_after": "custom_original_invoice_reason",
+            "read_only": 1,
+            "no_copy": 1,
+            "depends_on": "eval:doc.is_return",
+            "description": "When set, the return posts the credit GL only; no Stock Ledger Entry is generated. Used when the customer keeps the goods (damaged write-off, lost, fraud credit).",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_replacement_invoice",
+            "fieldtype": "Link",
+            "label": "Replacement Sales Invoice",
+            "options": "Sales Invoice",
+            "insert_after": "custom_credit_only_return",
+            "read_only": 1,
+            "no_copy": 1,
+            "depends_on": "eval:doc.is_return",
+            "description": "Replacement sale issued against this return. Lets finance net the credit against the new invoice.",
+            "module": "POS Core",
+        },
         # Exception & Warranty links (applied during POS billing)
         {
             "fieldname": "custom_exception_request",

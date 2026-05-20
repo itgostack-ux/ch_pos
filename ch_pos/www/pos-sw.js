@@ -9,7 +9,7 @@
  * Cache names are versioned so old caches are purged on activate.
  */
 
-const SHELL_CACHE = "ch-pos-shell-v2";
+const SHELL_CACHE = "ch-pos-shell-v3";
 const API_CACHE   = "ch-pos-api-v1";
 
 // Assets that must be available offline for the POS to boot.

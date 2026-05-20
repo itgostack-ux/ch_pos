@@ -17,6 +17,7 @@ const MODE_SECTIONS = [
 		modes: [
 			{ key: "sell",    icon: "fa-shopping-bag", label: __("Sell") },
 			{ key: "returns", icon: "fa-undo",         label: __("Returns") },
+			{ key: "prebook", icon: "fa-bookmark",     label: __("Pre-Book / Proforma") },
 		],
 	},
 	{
