@@ -11,6 +11,26 @@ except ImportError:
 		return phone
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
+
+def _normalize_customer_approval_method(method: str | None) -> str:
+    """Normalize POS method values to Buyback's canonical approval methods."""
+    method = (method or "In-Store Signature").strip()
+    aliases = {
+        "OTP": "App Confirmation",
+        "OTP Verification": "App Confirmation",
+        "App OTP": "App Confirmation",
+        "Approval Link": "SMS Link",
+        "Token Link": "SMS Link",
+    }
+    method = aliases.get(method, method)
+    allowed = {"In-Store Signature", "SMS Link", "App Confirmation"}
+    if method not in allowed:
+        frappe.throw(
+            _("Invalid customer approval method: {0}").format(method),
+            title=_("Buyback Order Error"),
+        )
+    return method
+
 # ── Buyback Exchange Credit helpers ─────────────────────────────────────────
 
 _EXCHANGE_MOP = "Buyback Exchange Credit"
@@ -284,8 +304,12 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
     so.selling_price_list = profile.selling_price_list
     so.ignore_pricing_rule = 1
     so.order_type = "Sales"
+    if so.meta.has_field("set_warehouse") and profile.warehouse:
+        so.set_warehouse = profile.warehouse
     if so.meta.has_field("reserve_stock"):
         so.reserve_stock = cint(reserve_stock)
+    if flt(advance_amount) > 0 and so.meta.has_field("advance_paid"):
+        so.advance_paid = flt(advance_amount)
 
     if notes and so.meta.has_field("note"):
         so.note = notes
@@ -7554,6 +7578,16 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
             )
         return normalized
 
+    def _get_safe_actor() -> str:
+        actor = (frappe.session.user or "").strip()
+        if not actor or actor in {"Guest", "None"}:
+            actor = "Administrator"
+        if not frappe.db.exists("User", actor):
+            actor = "Administrator"
+        return actor
+
+    safe_actor = _get_safe_actor()
+    method = _normalize_customer_approval_method(method)
     is_submitted = cint(doc.docstatus) == 1
     update_after_submit = {}
 
@@ -7563,6 +7597,9 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
         result = doc.verify_otp(str(otp_code))
         if not result.get("valid"):
             frappe.throw(frappe._(result.get("message", "OTP verification failed.")))
+        # verify_otp() is the customer-approval event in OTP mode. Avoid
+        # calling customer_approve() again because status becomes OTP Verified.
+        doc.reload()
 
     if kyc_id_type:
         kyc_id_type = _normalize_kyc_type(kyc_id_type)
@@ -7629,19 +7666,19 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
     if payout_mode:
         if is_submitted:
             update_after_submit["customer_payout_updated_at"] = frappe.utils.now_datetime()
-            update_after_submit["customer_payout_updated_by"] = frappe.session.user
+            update_after_submit["customer_payout_updated_by"] = safe_actor
         else:
             doc.customer_payout_updated_at = frappe.utils.now_datetime()
-            doc.customer_payout_updated_by = frappe.session.user
+            doc.customer_payout_updated_by = safe_actor
 
     if kyc_id_type and kyc_id_number:
         if is_submitted:
             update_after_submit["kyc_verified"] = 1
-            update_after_submit["kyc_verified_by"] = frappe.session.user
+            update_after_submit["kyc_verified_by"] = safe_actor
             update_after_submit["kyc_verified_at"] = frappe.utils.now_datetime()
         else:
             doc.kyc_verified = 1
-            doc.kyc_verified_by = frappe.session.user
+            doc.kyc_verified_by = safe_actor
             doc.kyc_verified_at = frappe.utils.now_datetime()
 
     if is_submitted and update_after_submit:
@@ -7649,12 +7686,22 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
         doc.reload()
 
     doc.flags.ignore_permissions = True
-    doc.customer_approve(method=method)
+    if method != "OTP":
+        if doc.status in ("Approved", "Awaiting Customer Approval"):
+            doc.customer_approve(method=method)
+        elif cint(doc.customer_approved):
+            # Idempotent retry: order is already customer-approved in a prior call.
+            pass
+        else:
+            frappe.throw(
+                frappe._("Customer approval is only applicable in Approved or Awaiting Customer Approval status."),
+                exc=frappe.ValidationError,
+            )
 
     return {
         "order_name": doc.name,
         "status": doc.status,
-        "customer_approved": 1,
+        "customer_approved": cint(doc.customer_approved) or 1,
     }
 
 
@@ -8192,51 +8239,52 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None) -> 
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _get_oldest_fifo_serial(item_code, warehouse):
-	"""Return (serial_no, received_date) for the oldest FIFO serial in the warehouse.
+    """Return (serial_no, received_date) for the oldest FIFO serial in the warehouse.
 
-	Uses SNBB net-balance to determine what is currently in stock, then finds
-	the one with the earliest inward posting date.
-	"""
-	rows = frappe.db.sql("""
-		SELECT
-			available.serial_no,
-			MIN(DATE(sbb_in.posting_datetime)) AS received_date
-		FROM (
-			SELECT sbe.serial_no
-			FROM `tabSerial and Batch Entry` sbe
-			JOIN `tabSerial and Batch Bundle` sbb ON sbe.parent = sbb.name
-			WHERE sbb.item_code = %s
-			  AND sbb.warehouse = %s
-			  AND sbb.docstatus = 1
-			GROUP BY sbe.serial_no
-			HAVING SUM(sbe.qty) > 0
-		) available
-		JOIN `tabSerial and Batch Entry` sbe_in ON sbe_in.serial_no = available.serial_no
-		JOIN `tabSerial and Batch Bundle` sbb_in
-			ON sbe_in.parent = sbb_in.name
-			AND sbb_in.type_of_transaction = 'Inward'
-			AND sbb_in.docstatus = 1
-		GROUP BY available.serial_no
-		ORDER BY received_date ASC, available.serial_no ASC
-		LIMIT 1
-	""", (item_code, warehouse), as_dict=True)
+    Uses SNBB net-balance to determine what is currently in stock, then finds
+    the one with the earliest inward posting date.
+    """
+    rows = frappe.db.sql("""
+        SELECT
+            available.serial_no,
+            MIN(DATE(sbb_in.posting_datetime)) AS received_date
+        FROM (
+            SELECT sbe.serial_no
+            FROM `tabSerial and Batch Entry` sbe
+            JOIN `tabSerial and Batch Bundle` sbb ON sbe.parent = sbb.name
+            WHERE sbb.item_code = %s
+              AND sbb.warehouse = %s
+              AND sbb.docstatus = 1
+            GROUP BY sbe.serial_no
+            HAVING SUM(sbe.qty) > 0
+        ) available
+        JOIN `tabSerial and Batch Entry` sbe_in ON sbe_in.serial_no = available.serial_no
+        JOIN `tabSerial and Batch Bundle` sbb_in
+            ON sbe_in.parent = sbb_in.name
+            AND sbb_in.type_of_transaction = 'Inward'
+            AND sbb_in.docstatus = 1
+        GROUP BY available.serial_no
+        ORDER BY received_date ASC, available.serial_no ASC
+        LIMIT 1
+    """, (item_code, warehouse), as_dict=True)
 
-	if rows:
-		return rows[0].serial_no, rows[0].received_date
+    if rows:
+        return rows[0].serial_no, rows[0].received_date
 
-	# Fallback: use Serial No document purchase_document_date
-	fallback = frappe.db.sql("""
-		SELECT name, purchase_document_date
-		FROM `tabSerial No`
-		WHERE item_code = %s AND warehouse = %s AND status = 'Active'
-		ORDER BY purchase_document_date ASC, creation ASC
-		LIMIT 1
-	""", (item_code, warehouse), as_dict=True)
+    # Fallback: use Serial No document creation timestamp on sites that do not
+    # have the legacy purchase_document_date field.
+    fallback = frappe.db.sql("""
+        SELECT name, creation
+        FROM `tabSerial No`
+        WHERE item_code = %s AND warehouse = %s AND status = 'Active'
+        ORDER BY creation ASC
+        LIMIT 1
+    """, (item_code, warehouse), as_dict=True)
 
-	if fallback:
-		return fallback[0].name, fallback[0].purchase_document_date
+    if fallback:
+        return fallback[0].name, fallback[0].creation
 
-	return None, None
+    return None, None
 
 
 def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_serial, cashier):

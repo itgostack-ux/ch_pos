@@ -235,18 +235,21 @@ export class PrebookWorkspace {
 						if (!r.message) return;
 						dlg.hide();
 						const so = r.message;
+						const so_name = so.name || __("Sales Order");
+						const so_url = so.name ? `/app/sales-order/${encodeURIComponent(so.name)}` : "/app/sales-order";
 						frappe.msgprint({
 							title: __("Pre-Booking Created"),
 							indicator: so.docstatus === 1 ? "green" : "orange",
 							message: `
 								<div style="text-align:center;padding:12px;">
 									<i class="fa fa-bookmark text-success" style="font-size:42px;"></i>
-									<h4 style="margin:14px 0 6px;">${frappe.utils.escape_html(so.name)}</h4>
-									<p>${__("Status")}: <b>${so.status}</b></p>
-									<p class="text-muted">${__("Delivery")} ${so.delivery_date} · ${__("Stock reserved")}: ${so.reserve_stock ? __("Yes") : __("No")}</p>
-									${so.warning ? `<p class="text-warning">${so.warning}</p>` : ""}
-									<a class="btn btn-default btn-sm" target="_blank" href="/app/sales-order/${encodeURIComponent(so.name)}">
-										<i class="fa fa-external-link"></i> ${__("Open in Desk")}
+									<h4 style="margin:14px 0 6px;">${frappe.utils.escape_html(so_name)}</h4>
+									<p>${__("Created Sales Order")}: <b>${frappe.utils.escape_html(so_name)}</b></p>
+									<p>${__("Status")}: <b>${frappe.utils.escape_html(so.status || "-")}</b></p>
+									<p class="text-muted">${__("Delivery")}: ${frappe.utils.escape_html(so.delivery_date || "-")} · ${__("Stock reserved")}: ${so.reserve_stock ? __("Yes") : __("No")}</p>
+									${so.warning ? `<p class="text-warning">${frappe.utils.escape_html(so.warning)}</p>` : ""}
+									<a class="btn btn-default btn-sm" target="_blank" href="${so_url}">
+										<i class="fa fa-external-link"></i> ${__("Open Sales Order")}
 									</a>
 								</div>`,
 						});

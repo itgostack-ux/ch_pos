@@ -694,48 +694,37 @@ export class BuybackWorkspace {
 		const is_waiting = order_status === "Awaiting Customer Approval";
 		const approval_url = order ? (order.approval_url || "") : "";
 
-		// ── "Awaiting OTP": OTP already sent, customer needs to enter it ────────
-		if (order_status === "Awaiting OTP") {
+		// ── "Awaiting OTP" / "OTP Verified": resume the single approval wizard ─
+		// SINGLE FLOW: every customer-approval action funnels through
+		// _show_instore_approval_dialog → pos_approve_customer_buyback.
+		// The wizard adapts to the current order.status (skips Send-OTP when
+		// already sent, skips OTP entry entirely when already verified) so the
+		// cashier always has one entry point with one backend call.
+		if (order_status === "Awaiting OTP" || order_status === "OTP Verified") {
+			const is_verified = order_status === "OTP Verified";
 			return `
-				<div class="ch-bb-valuation-banner" style="background:#fef3c7;border-color:#f59e0b">
-					<div class="ch-bb-val-label" style="color:#92400e">
-						<i class="fa fa-mobile"></i> ${__("OTP Sent — Awaiting Verification")}
+				<div class="ch-bb-valuation-banner" style="background:${is_verified ? "#d1fae5" : "#fef3c7"};border-color:${is_verified ? "#10b981" : "#f59e0b"}">
+					<div class="ch-bb-val-label" style="color:${is_verified ? "#065f46" : "#92400e"}">
+						<i class="fa fa-${is_verified ? "check-circle" : "mobile"}"></i>
+						${is_verified ? __("OTP Verified — Complete KYC & Settlement") : __("OTP Sent — Awaiting Verification")}
 					</div>
-					<div class="ch-bb-val-amount" style="color:#92400e">₹${format_number(price)}</div>
-					<div class="ch-bb-val-sub" style="color:#92400e">
-						${mobile ? __("OTP sent to {0}", [masked]) : __("No mobile number on record")}
+					<div class="ch-bb-val-amount" style="color:${is_verified ? "#065f46" : "#92400e"}">₹${format_number(price)}</div>
+					<div class="ch-bb-val-sub" style="color:${is_verified ? "#065f46" : "#92400e"}">
+						${is_verified
+							? __("Customer approved. Capture ID proof and payout details to continue.")
+							: (mobile ? __("OTP sent to {0}", [masked]) : __("No mobile number on record"))}
 					</div>
 				</div>
-				<div class="ch-bb-info-note" style="margin-top:12px;background:#fef9c3;border-color:#facc15;color:#713f12">
+				<div class="ch-bb-info-note" style="margin-top:12px">
 					<i class="fa fa-info-circle"></i>
-					${__("Ask the customer for the OTP they received. Enter it below to verify, or use In-Store Approve if customer is physically present.")}
+					${is_verified
+						? __("Resume the approval wizard to capture KYC and settlement preference.")
+						: __("Ask the customer for the OTP they received and resume the approval wizard to verify it together with KYC and settlement details.")}
 				</div>
-				<div style="margin:14px 0;display:flex;gap:8px;align-items:flex-end">
-					<div style="flex:1">
-						<label class="ch-bb-field-label" style="font-size:12px;font-weight:600;display:block;margin-bottom:6px">
-							${__("Customer OTP")}
-						</label>
-						<input type="text" class="form-control ch-bb-otp-input"
-							maxlength="8" placeholder="e.g. 123456"
-							style="font-size:22px;font-weight:700;letter-spacing:4px;text-align:center;border-radius:var(--pos-radius,8px);padding:10px">
-					</div>
-					<button class="btn btn-success btn-lg ch-bb-act ch-bb-verify-otp-direct"
-						data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
-						style="border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px;padding:0 20px;white-space:nowrap">
-						<i class="fa fa-check-circle"></i> ${__("Verify OTP")}
-					</button>
-				</div>
-				<div class="ch-bb-actions" style="margin-top:6px;flex-direction:column;gap:8px">
-					${mobile ? `
-					<button class="btn btn-outline-primary ch-bb-act ch-bb-resend-otp-direct"
-						data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
-						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:600">
-						<i class="fa fa-paper-plane"></i> ${__("Resend OTP to")} ${masked}
-					</button>` : ""}
-					<button class="btn btn-outline-secondary ch-bb-act ch-bb-bypass-otp"
-						data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
-						style="width:100%;border-radius:var(--pos-radius,8px)">
-						<i class="fa fa-pencil"></i> ${__("Approve In-Store (Skip OTP)")}
+				<div class="ch-bb-actions" style="margin-top:14px;flex-direction:column;gap:8px">
+					<button class="btn btn-primary btn-lg ch-bb-act ch-bb-approve-instor"
+						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
+						<i class="fa fa-arrow-right"></i> ${__("Continue Customer Approval")}
 					</button>
 				</div>`;
 		}
@@ -1216,6 +1205,11 @@ export class BuybackWorkspace {
 	}
 
 	// ─────────────────────────────── In-Store Approval (OTP + KYC) ──
+	// SINGLE FLOW: this is the ONLY customer-approval entry point.
+	// All status branches (Approved / Awaiting Customer Approval / Awaiting OTP
+	// / OTP Verified) are handled here and finalised by a single backend call
+	// to pos_approve_customer_buyback. Do not add a parallel UI that calls
+	// pos_verify_otp_direct or any other approval endpoint from the workspace.
 	_show_instore_approval_dialog(data) {
 		const order = data.order;
 		const price = order.final_price || 0;
@@ -1224,11 +1218,29 @@ export class BuybackWorkspace {
 		const device_label = frappe.utils.escape_html(data.item_name || "");
 		const self = this;
 
-		const STEPS = [
-			{ key: "otp", label: __("OTP") },
-			{ key: "kyc", label: __("KYC & Photos") },
-			{ key: "settlement", label: __("Settlement") },
-		];
+		// Resume-state derived from order.status. Drives:
+		//   • whether Step "OTP" is rendered at all (skipped if already verified)
+		//   • whether the "Send OTP" button is shown (hidden if already sent)
+		//   • which `method` is passed to pos_approve_customer_buyback
+		const otp_already_sent = order.status === "Awaiting OTP";
+		const otp_already_verified = ["OTP Verified", "Ready to Pay", "Paid", "Closed"].includes(order.status);
+		// True if user-entered OTP is required from this dialog session.
+		// (Awaiting OTP: user types the OTP that was sent earlier.
+		//  Approved / Awaiting Customer Approval: user clicks "Send OTP" first.)
+		const otp_required = !otp_already_verified;
+		// OTP sent flag inside this dialog session. Pre-seeded if status says so.
+		let otp_sent_in_session = otp_already_sent;
+
+		const STEPS = otp_already_verified
+			? [
+				{ key: "kyc", label: __("KYC & Photos") },
+				{ key: "settlement", label: __("Settlement") },
+			]
+			: [
+				{ key: "otp", label: __("OTP") },
+				{ key: "kyc", label: __("KYC & Photos") },
+				{ key: "settlement", label: __("Settlement") },
+			];
 		let step = 0;
 		const state = {
 			otp_code: "", kyc_id_type: order.customer_id_type || "", kyc_id_number: order.customer_id_number || "",
@@ -1300,16 +1312,30 @@ export class BuybackWorkspace {
 
 		/* ── Step content builders ── */
 		function _step_otp() {
+			// Render mode depends on resume state. When OTP was already sent
+			// (status = Awaiting OTP), do NOT show another "Send OTP" button —
+			// just prompt for the code, with a resend link as escape hatch.
+			const sent_badge = otp_sent_in_session
+				? `<span style="color:var(--green-600);font-size:12px"><i class="fa fa-check-circle"></i> ${__("Sent to {0}", [masked])}</span>`
+				: "";
+			const send_btn = otp_sent_in_session
+				? `<button class="btn btn-link btn-sm ch-wz-send-otp" style="padding:0;font-size:12px">
+						<i class="fa fa-paper-plane"></i> ${__("Resend OTP")}
+				   </button>`
+				: `<button class="btn btn-primary btn-sm ch-wz-send-otp" style="border-radius:6px;font-weight:600;padding:6px 16px">
+						<i class="fa fa-paper-plane"></i> ${__("Send OTP to")} ${masked}
+				   </button>`;
+			const hint = otp_sent_in_session
+				? __("OTP has been sent to {0}. Ask the customer to read it out and enter it below.", [masked])
+				: __("An OTP will be sent to {0} for price approval.", [masked]);
 			return `<div class="ch-wz-card">
 				<div class="ch-wz-hint">
 					<i class="fa fa-info-circle"></i>
-					${__("An OTP will be sent to {0} for price approval.", [masked])}
+					${hint}
 				</div>
-				<div style="margin:16px 0">
-					<button class="btn btn-primary btn-sm ch-wz-send-otp" style="border-radius:6px;font-weight:600;padding:6px 16px">
-						<i class="fa fa-paper-plane"></i> ${__("Send OTP to")} ${masked}
-					</button>
-					<span class="ch-wz-otp-status" style="margin-left:10px;font-size:12px"></span>
+				<div style="margin:16px 0;display:flex;align-items:center;gap:12px">
+					${send_btn}
+					<span class="ch-wz-otp-status">${sent_badge}</span>
 				</div>
 				${_input("otp_code", __("Enter OTP"), "text", { reqd: true, placeholder: "e.g. 123456", desc: __("6-digit OTP sent to customer's mobile") })}
 			</div>`;
@@ -1368,7 +1394,10 @@ export class BuybackWorkspace {
 
 		/* ── Full render ── */
 		function _render() {
-			const step_fn = [_step_otp, _step_kyc, _step_settlement][step];
+			// Resolve step builder by key so the OTP step can be omitted when
+			// the order is already past OTP Verified (single-flow resume).
+			const builders = { otp: _step_otp, kyc: _step_kyc, settlement: _step_settlement };
+			const step_fn = builders[STEPS[step].key];
 			$body.html(`
 				<style>
 					.ch-wz{font-family:var(--font-stack);padding:0}
@@ -1477,6 +1506,7 @@ export class BuybackWorkspace {
 				btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Sending...")}`);
 				frappe.xcall("ch_pos.api.pos_api.pos_send_customer_otp", { order_name: order.name })
 				.then((res) => {
+					otp_sent_in_session = true;
 					btn.prop("disabled", true).html(`<i class="fa fa-check"></i> ${__("OTP Sent")}`).removeClass("btn-primary").addClass("btn-success");
 					$body.find(".ch-wz-otp-status").html(`<span style="color:var(--green-600)"><i class="fa fa-check-circle"></i> ${__("Sent to {0}", [res.masked_mobile])}</span>`);
 				}).catch((e) => {
@@ -1531,11 +1561,15 @@ export class BuybackWorkspace {
 
 		/* ── Per-step validation ── */
 		function _validate() {
-			if (step === 0) {
+			const key = STEPS[step].key;
+			if (key === "otp") {
+				if (!otp_sent_in_session) {
+					frappe.show_alert({ message: __("Please send OTP first"), indicator: "orange" }); return false;
+				}
 				if (!state.otp_code || state.otp_code.length < 4) {
 					frappe.show_alert({ message: __("Please enter a valid OTP"), indicator: "orange" }); return false;
 				}
-			} else if (step === 1) {
+			} else if (key === "kyc") {
 				if (!state.kyc_id_type || !state.kyc_id_number) {
 					frappe.show_alert({ message: __("ID Type and ID Number are required"), indicator: "orange" }); return false;
 				}
@@ -1560,10 +1594,20 @@ export class BuybackWorkspace {
 
 			$body.find(".ch-wz-submit").prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Verifying...")}`);
 
+			// SINGLE FLOW: one and only one customer-approval API call.
+			// Backend method selection rules:
+			//   • If OTP is required AND user entered a code → "OTP"
+			//     (backend verifies code, sets customer_approved, status → OTP Verified)
+			//   • If OTP is already verified upstream → "In-Store Signature"
+			//     (backend skips OTP verify, only persists KYC/settlement;
+			//      customer_approve is a no-op because it's already approved)
+			const send_method = otp_required ? "OTP" : "In-Store Signature";
+			const send_otp_code = otp_required ? state.otp_code : null;
+
 			frappe.xcall("ch_pos.api.pos_api.pos_approve_customer_buyback", {
 				order_name: order.name,
-				method: "OTP",
-				otp_code: state.otp_code,
+				method: send_method,
+				otp_code: send_otp_code,
 				kyc_id_type: state.kyc_id_type,
 				kyc_id_number: state.kyc_id_number,
 				customer_id_front: uploads.customer_id_front || null,
