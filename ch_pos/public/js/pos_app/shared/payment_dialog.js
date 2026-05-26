@@ -74,6 +74,8 @@ export class PaymentDialog {
 		this._disc_amt     = 0;
 		this._disc_reason  = "";
 		this._disc_reasons = [];
+		this._discount_authorized_by   = null;  // POS Executive name who authorised over-limit discount
+		this._discount_auth_name       = null;  // Display name for the authoriser
 		this._dlg_coupon_code      = "";
 		this._dlg_coupon_discount  = 0;
 		this._bank_offer           = null;  // { name, offer_name, value_type, value, discount }
@@ -135,6 +137,8 @@ export class PaymentDialog {
 			this._disc_pct    = saved.disc_pct    || 0;
 			this._disc_amt    = saved.disc_amt    || 0;
 			this._disc_reason = saved.disc_reason || "";
+			this._discount_authorized_by = saved.discount_authorized_by || null;
+			this._discount_auth_name     = saved.discount_auth_name     || null;
 			this._dlg_coupon_code     = saved.dlg_coupon_code     || "";
 			this._dlg_coupon_discount = saved.dlg_coupon_discount || 0;
 			this._dlg_voucher_code    = saved.dlg_voucher_code    || "";
@@ -169,6 +173,8 @@ export class PaymentDialog {
 			this._disc_pct    = 0;
 			this._disc_amt    = 0;
 			this._disc_reason = "";
+			this._discount_authorized_by = null;
+			this._discount_auth_name     = null;
 			this._dlg_coupon_code     = "";
 			this._dlg_coupon_discount = 0;
 			this._bank_offer          = null;
@@ -530,6 +536,7 @@ placeholder="0.00" min="0" step="1">
 </div>
 </div>
 <div id="ch-pay-disc-info" class="ch-pay-field-hint" style="display:none"></div>
+<div id="ch-disc-auth-banner" style="display:none;margin-top:8px"></div>
 </div>
 </div>`;
 const coupon_html = `
@@ -1308,6 +1315,8 @@ this._disc_pct = 0;
 this._disc_amt = 0;
 PosState.additional_discount_pct = 0;
 PosState.additional_discount_amt = 0;
+this._discount_authorized_by = null;
+this._discount_auth_name = null;
 $manual.hide();
 $info.hide();
 ov.find("#ch-pay-disc-pct, #ch-pay-disc-amt").val("");
@@ -1316,6 +1325,8 @@ this._disc_pct = 0;
 this._disc_amt = 0;
 PosState.additional_discount_pct = 0;
 PosState.additional_discount_amt = 0;
+this._discount_authorized_by = null;
+this._discount_auth_name = null;
 ov.find("#ch-pay-disc-pct, #ch-pay-disc-amt").val("");
 $manual.show();
 $info.text(reason.max_manual_percent
@@ -1339,13 +1350,17 @@ $info.text(__("₹{0} applied", [reason.discount_value])).show();
 }
 }
 this._update_totals();
+this._update_discount_auth_ui();
 });
 ov.on("change blur", "#ch-pay-disc-pct", e => {
 const pct = parseFloat($(e.currentTarget).val()) || 0;
 if (!$(e.currentTarget).val()) {
 this._disc_pct = 0;
 PosState.additional_discount_pct = 0;
+this._discount_authorized_by = null;
+this._discount_auth_name = null;
 this._update_totals();
+this._update_discount_auth_ui();
 return;
 }
 const reason = this._disc_reasons.find(r => r.name === this._disc_reason);
@@ -1359,14 +1374,20 @@ this._disc_amt = 0;
 PosState.additional_discount_pct = pct;
 PosState.additional_discount_amt = 0;
 ov.find("#ch-pay-disc-amt").val("");
+this._discount_authorized_by = null;
+this._discount_auth_name = null;
 this._update_totals();
+this._update_discount_auth_ui();
 });
 ov.on("change blur", "#ch-pay-disc-amt", e => {
 const amt = parseFloat($(e.currentTarget).val()) || 0;
 if (!$(e.currentTarget).val()) {
 this._disc_amt = 0;
 PosState.additional_discount_amt = 0;
+this._discount_authorized_by = null;
+this._discount_auth_name = null;
 this._update_totals();
+this._update_discount_auth_ui();
 return;
 }
 this._disc_amt = amt;
@@ -1374,7 +1395,10 @@ this._disc_pct = 0;
 PosState.additional_discount_pct = 0;
 PosState.additional_discount_amt = amt;
 ov.find("#ch-pay-disc-pct").val("");
+this._discount_authorized_by = null;
+this._discount_auth_name = null;
 this._update_totals();
+this._update_discount_auth_ui();
 });
 
 // ── Coupon / Voucher apply ────────────────────────────────────────────
@@ -2277,6 +2301,189 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		}
 	}
 
+	// ───────────────────────────────────── Discount Auth ──
+
+	/** Return the currently selected "Billed By" executive's discount limits, or null. */
+	_billed_by_exec_limits() {
+		const company = PosState.active_company;
+		const execs = (PosState.executive_access?.store_executives || {})[company] || [];
+		return execs.find(e => e.name === PosState.sales_executive) || null;
+	}
+
+	/** Return the cart net total (before additional discount) for pct→amount conversion. */
+	_cart_net_total() {
+		return PosState.cart.reduce((s, c) => s + flt(c.qty) * flt(c.rate), 0);
+	}
+
+	/**
+	 * True if the given discount (pct or amount) exceeds the billed-by executive's limit
+	 * and therefore requires an authoriser to confirm it.
+	 */
+	_discount_needs_auth(pct, amt) {
+		const exec = this._billed_by_exec_limits();
+		if (!exec) return false; // no executive record — allow without extra auth
+		if (!exec.can_give_discount) return (pct > 0 || amt > 0);
+
+		let effective_pct = flt(pct);
+		if (effective_pct <= 0 && flt(amt) > 0) {
+			const net = this._cart_net_total();
+			if (net > 0) effective_pct = flt(amt) / net * 100;
+		}
+		const max = flt(exec.max_discount_pct);
+		return max > 0 && effective_pct > max;
+	}
+
+	/**
+	 * Refresh the auth banner below the discount section.
+	 * Shows nothing when no discount or within limit.
+	 * Shows a locked warning with "Authorise" button when over limit and not yet approved.
+	 * Shows a green "Authorised by …" badge when approved.
+	 */
+	_update_discount_auth_ui() {
+		const $banner = this._overlay?.find("#ch-disc-auth-banner");
+		if (!$banner?.length) return;
+
+		const pct = this._disc_pct;
+		const amt = this._disc_amt;
+		if (pct <= 0 && amt <= 0) {
+			this._discount_authorized_by = null;
+			this._discount_auth_name = null;
+			$banner.hide().empty();
+			return;
+		}
+
+		if (!this._discount_needs_auth(pct, amt)) {
+			// Within billed-by exec's own limit — no external auth needed
+			this._discount_authorized_by = null;
+			this._discount_auth_name = null;
+			$banner.hide().empty();
+			return;
+		}
+
+		if (this._discount_authorized_by) {
+			const name = frappe.utils.escape_html(this._discount_auth_name || this._discount_authorized_by);
+			$banner.html(`
+				<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;
+					background:var(--green-50,#f0fdf4);border:1px solid var(--green-300,#86efac);
+					border-radius:6px;font-size:12px;color:var(--green-700,#15803d)">
+					<i class="fa fa-check-circle"></i>
+					<span>${__("Authorised by {0}", [name])}</span>
+					<button class="btn btn-link btn-xs ch-disc-auth-change"
+						style="margin-left:auto;padding:0;font-size:11px;color:var(--text-muted)">
+						${__("Change")}
+					</button>
+				</div>`).show();
+			$banner.find(".ch-disc-auth-change").on("click", () => {
+				this._discount_authorized_by = null;
+				this._discount_auth_name = null;
+				this._update_discount_auth_ui();
+			});
+		} else {
+			const exec = this._billed_by_exec_limits();
+			const exec_max = exec ? flt(exec.max_discount_pct) : 0;
+			const hint = exec_max > 0
+				? __("Discount exceeds your limit of {0}% — authorisation required", [exec_max])
+				: __("You are not permitted to give discounts — authorisation required");
+			$banner.html(`
+				<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+					background:var(--yellow-50,#fefce8);border:1px solid var(--yellow-300,#fde047);
+					border-radius:6px;font-size:12px;color:var(--yellow-800,#854d0e)">
+					<i class="fa fa-lock"></i>
+					<span>${frappe.utils.escape_html(hint)}</span>
+					<button class="btn btn-sm btn-warning ch-disc-auth-btn"
+						style="margin-left:auto;padding:3px 10px;font-size:12px;font-weight:600">
+						<i class="fa fa-key"></i> ${__("Authorise")}
+					</button>
+				</div>`).show();
+			$banner.find(".ch-disc-auth-btn").on("click", () =>
+				this._show_discount_auth_dialog(pct, amt)
+			);
+		}
+	}
+
+	/** Show the discount authorisation dialog. */
+	_show_discount_auth_dialog(pct, amt) {
+		const company = PosState.active_company;
+		const all_execs = (PosState.executive_access?.store_executives || {})[company] || [];
+		// Only show executives who can give discounts
+		const eligible = all_execs.filter(e => e.can_give_discount);
+
+		// Compute effective pct for display
+		let effective_pct = flt(pct);
+		if (effective_pct <= 0 && flt(amt) > 0) {
+			const net = this._cart_net_total();
+			if (net > 0) effective_pct = flt(amt) / net * 100;
+		}
+
+		if (!eligible.length) {
+			frappe.show_alert({
+				message: __("No executive at this store has discount permission. Contact administrator."),
+				indicator: "red",
+			});
+			return;
+		}
+
+		const exec_opts = eligible
+			.map(e => `${frappe.utils.escape_html(e.executive_name)} — ${e.role}, max ${e.max_discount_pct}%|${e.name}`)
+			.join("\n");
+
+		const dlg = new frappe.ui.Dialog({
+			title: __("Discount Authorisation"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					options: `<div style="padding:8px 0 12px;color:var(--yellow-800,#854d0e);font-size:13px">
+						<i class="fa fa-exclamation-triangle" style="margin-right:6px"></i>
+						${__("This discount of {0}% exceeds the current billing limit. An authorised executive must confirm with their own password.", [round(effective_pct, 1)])}
+					</div>`,
+				},
+				{
+					fieldname: "authorizer",
+					fieldtype: "Select",
+					label: __("Authorised By"),
+					options: exec_opts,
+					reqd: 1,
+				},
+				{
+					fieldname: "password",
+					fieldtype: "Password",
+					label: __("Password"),
+					reqd: 1,
+				},
+			],
+			primary_action_label: __("Authorise Discount"),
+			primary_action: (values) => {
+				if (!values.authorizer || !values.password) return;
+				const btn = dlg.get_primary_btn();
+				btn.prop("disabled", true).text(__("Verifying..."));
+				frappe.xcall("ch_pos.api.pos_api.verify_discount_auth", {
+					pos_profile: PosState.pos_profile,
+					authorizer_executive: values.authorizer,
+					password: values.password,
+					discount_pct: pct,
+					discount_amount: amt,
+					net_total: this._cart_net_total(),
+				}).then((r) => {
+					dlg.hide();
+					this._discount_authorized_by = r.authorized_executive;
+					this._discount_auth_name = r.authorized_by_name;
+					this._update_discount_auth_ui();
+					frappe.show_alert({
+						message: __("Discount authorised by {0}", [r.authorized_by_name]),
+						indicator: "green",
+					});
+				}).catch((e) => {
+					btn.prop("disabled", false).text(__("Authorise Discount"));
+					frappe.show_alert({
+						message: e.message || __("Authorisation failed"),
+						indicator: "red",
+					});
+				});
+			},
+		});
+		dlg.show();
+	}
+
 	// ───────────────────────────────────────── Invoice submit ──
 
 	_submit_invoice() {
@@ -2378,6 +2585,19 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			}
 		}
 
+		// Discount authorisation check — gate submission if over-limit discount lacks auth
+		if (!this._is_free_sale && (flt(PosState.additional_discount_pct) > 0 || flt(PosState.additional_discount_amt) > 0)) {
+			if (this._discount_needs_auth(PosState.additional_discount_pct, PosState.additional_discount_amt)
+					&& !this._discount_authorized_by) {
+				frappe.show_alert({
+					message: __("Discount requires authorisation — click 'Authorise' in the Discount section"),
+					indicator: "orange",
+				});
+				this._submitting = false;
+				return;
+			}
+		}
+
 		this._overlay.find("#ch-pay-submit").prop("disabled", true);
 		this._overlay.find("#ch-pay-submit-label").text(__("Processing..."));
 
@@ -2446,6 +2666,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			sale_reference:                 PosState.sale_reference || null,
 			finance_tenure:                 PosState.finance_tenure || null,
 			discount_reason:                PosState.discount_reason || null,
+			discount_authorized_by:         this._discount_authorized_by || null,
 			client_request_id:              this._gen_uuid(),
 			// New payment type fields
 			is_credit_sale:                 this._is_credit_sale ? 1 : 0,

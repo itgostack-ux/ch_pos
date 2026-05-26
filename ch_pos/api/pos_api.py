@@ -458,7 +458,8 @@ def create_pos_invoice(pos_profile, customer, items,
                        exception_request=None, warranty_claim=None,
                        customer_gstin=None,
                        original_invoice=None,
-                       original_invoice_reason=None) -> dict:
+                       original_invoice_reason=None,
+                       discount_authorized_by=None) -> dict:
     """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
@@ -1019,6 +1020,27 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.custom_discount_reason = discount_reason
     elif flt(additional_discount_percentage) > 0 or manual_discount_amount > 0:
         frappe.throw(frappe._("A discount reason is required when applying a discount"))
+
+    # Discount authorisation — validate and record who authorised an over-limit discount
+    if discount_authorized_by:
+        auth_exec = frappe.db.get_value(
+            "POS Executive",
+            {"name": discount_authorized_by, "is_active": 1},
+            ["name", "executive_name", "can_give_discount", "max_discount_pct"],
+            as_dict=True,
+        )
+        if not auth_exec or not cint(auth_exec.can_give_discount):
+            frappe.throw(frappe._("Discount authorizer does not have discount permission."))
+        # Re-verify pct cap (tamper guard — password was already verified in verify_discount_auth)
+        if flt(additional_discount_percentage) > 0 and flt(auth_exec.max_discount_pct) > 0:
+            if flt(additional_discount_percentage) > flt(auth_exec.max_discount_pct):
+                frappe.throw(
+                    frappe._("Discount {0}% exceeds {1}'s authorised limit of {2}%.").format(
+                        additional_discount_percentage, auth_exec.executive_name, auth_exec.max_discount_pct
+                    )
+                )
+        if frappe.db.has_column("Sales Invoice", "custom_discount_authorized_by"):
+            inv.custom_discount_authorized_by = discount_authorized_by
 
     # Coupon code — accept code string (e.g. TESTCOUPON10) or doc name
     if coupon_code:
@@ -4410,6 +4432,102 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
     }
 
 
+# ── Discount Authorisation ───────────────────────────────────────────────────
+
+@frappe.whitelist()
+def verify_discount_auth(
+    pos_profile: str,
+    authorizer_executive: str,
+    password: str,
+    discount_pct: float = 0,
+    discount_amount: float = 0,
+    net_total: float = 0,
+) -> dict:
+    """Verify that a POS executive is authorised to approve a given discount level.
+
+    Steps:
+      1. Resolve executive → Frappe user (must belong to this store)
+      2. Verify the supplied Frappe password for that user
+      3. Check can_give_discount=1 and effective_pct ≤ max_discount_pct
+      4. Log to business audit trail
+    Returns {authorized, authorized_executive, authorized_by_name, role, max_pct, message}
+    """
+    from frappe.utils.password import check_password
+    from ch_pos.audit import log_business_event
+
+    # Resolve store from POS Profile Extension
+    store = frappe.db.get_value("POS Profile Extension", {"pos_profile": pos_profile}, "store")
+
+    # Get executive record — must belong to this store and be active
+    filters = {"name": authorizer_executive, "is_active": 1}
+    if store:
+        filters["store"] = store
+
+    exec_doc = frappe.db.get_value(
+        "POS Executive",
+        filters,
+        ["name", "executive_name", "user", "role", "can_give_discount", "max_discount_pct"],
+        as_dict=True,
+    )
+    if not exec_doc:
+        frappe.throw(frappe._("Executive not found or not active for this store."), title=frappe._("Not Authorized"))
+
+    if not exec_doc.user:
+        frappe.throw(
+            frappe._("No Frappe user linked to {0}. Contact administrator.").format(exec_doc.executive_name),
+            title=frappe._("Configuration Error"),
+        )
+
+    # Verify password
+    try:
+        check_password(exec_doc.user, password)
+    except frappe.AuthenticationError:
+        frappe.throw(frappe._("Invalid password for {0}.").format(exec_doc.executive_name), title=frappe._("Auth Failed"))
+
+    # Check discount permission
+    if not cint(exec_doc.can_give_discount):
+        frappe.throw(
+            frappe._("{0} does not have permission to give discounts.").format(exec_doc.executive_name),
+            title=frappe._("Not Authorized"),
+        )
+
+    # Compute effective discount %
+    effective_pct = flt(discount_pct)
+    if effective_pct <= 0 and flt(discount_amount) > 0 and flt(net_total) > 0:
+        effective_pct = flt(discount_amount) / flt(net_total) * 100
+
+    max_pct = flt(exec_doc.max_discount_pct)
+    if max_pct > 0 and effective_pct > max_pct:
+        frappe.throw(
+            frappe._("Requested discount {0}% exceeds {1}'s authorised limit of {2}%.").format(
+                round(effective_pct, 2), exec_doc.executive_name, max_pct
+            ),
+            title=frappe._("Exceeds Limit"),
+        )
+
+    # Audit trail
+    try:
+        log_business_event(
+            event_type="Other",
+            ref_doctype="POS Profile",
+            ref_name=pos_profile,
+            before="Discount Pending",
+            after=f"Authorized {round(effective_pct, 2)}%",
+            remarks=f"Discount authorised by {exec_doc.executive_name} ({exec_doc.role}); limit {max_pct}%",
+        )
+    except Exception:
+        frappe.log_error(title="Discount auth audit log failed")
+
+    return {
+        "authorized": True,
+        "authorized_executive": exec_doc.name,
+        "authorized_by_name": exec_doc.executive_name,
+        "role": exec_doc.role,
+        "max_pct": max_pct,
+        "message": frappe._("Authorised by {0}").format(exec_doc.executive_name),
+    }
+
+
 @frappe.whitelist()
 def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Verification") -> dict:
     """Verify customer OTP used during POS quick customer creation."""
@@ -6260,10 +6378,11 @@ COMPANY_MODE_MAP = {
     "retail": [
         "sell", "returns", "buyback", "material_request", "stock_transfer",
         "guided", "model_compare", "claims", "exceptions", "queue", "prebook",
+        "pickup",
     ] + _SHARED_MODES,
     "service": [
         "sell", "returns", "buyback", "repair", "queue", "service",
-        "guided", "exceptions", "prebook",
+        "guided", "exceptions", "prebook", "pickup",
     ] + _SHARED_MODES,
 }
 
@@ -7587,11 +7706,15 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
         return actor
 
     safe_actor = _get_safe_actor()
+    # Keep the raw caller-supplied value for OTP routing BEFORE normalization,
+    # because _normalize_customer_approval_method("OTP") → "App Confirmation"
+    # which would make the `if method == "OTP"` branch unreachable.
+    raw_method = (method or "").strip()
     method = _normalize_customer_approval_method(method)
     is_submitted = cint(doc.docstatus) == 1
     update_after_submit = {}
 
-    if method == "OTP":
+    if raw_method == "OTP":
         if not otp_code:
             frappe.throw(frappe._("OTP code is required for OTP verification."))
         result = doc.verify_otp(str(otp_code))
@@ -7686,7 +7809,7 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
         doc.reload()
 
     doc.flags.ignore_permissions = True
-    if method != "OTP":
+    if raw_method != "OTP":
         if doc.status in ("Approved", "Awaiting Customer Approval"):
             doc.customer_approve(method=method)
         elif cint(doc.customer_approved):
@@ -8494,3 +8617,254 @@ def _post_free_sale_write_off(inv) -> None:
 	except Exception:
 		frappe.log_error(frappe.get_traceback(),
 		                 f"Free sale write-off GL failed for {inv.name}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Pickup Queue — Convert Pre-Booking (Sales Order) → POS Sales Invoice
+# ──────────────────────────────────────────────────────────────────────────
+
+@frappe.whitelist()
+def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
+                            overdue_only=0, limit=100):
+	"""Return submitted, pickup-pending Pre-Bookings (Sales Orders) for this POS profile.
+
+	A row is considered pickup-pending when:
+	  - docstatus = 1 (submitted)
+	  - per_billed < 100 (not yet fully invoiced)
+	  - status NOT IN ('Closed', 'Cancelled', 'Completed')
+	  - company matches the POS Profile's company
+	"""
+	frappe.has_permission("Sales Order", "read", throw=True)
+
+	if not pos_profile:
+		frappe.throw(_("POS Profile is required"))
+
+	profile = frappe.get_cached_doc("POS Profile", pos_profile)
+	company = profile.company
+	overdue_only = cint(overdue_only)
+	try:
+		days_ahead = int(days_ahead)
+	except (TypeError, ValueError):
+		days_ahead = 30
+	limit = min(max(cint(limit) or 100, 1), 500)
+
+	conditions = [
+		"so.docstatus = 1",
+		"so.company = %(company)s",
+		"so.per_billed < 100",
+		"so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')",
+	]
+	params = {"company": company}
+
+	if overdue_only:
+		conditions.append("so.delivery_date <= %(today)s")
+		params["today"] = nowdate()
+	elif days_ahead:
+		conditions.append("so.delivery_date <= %(horizon)s")
+		params["horizon"] = frappe.utils.add_days(nowdate(), days_ahead)
+
+	if search:
+		conditions.append(
+			"(so.name LIKE %(q)s OR so.customer LIKE %(q)s "
+			"OR so.customer_name LIKE %(q)s OR so.tracking_number LIKE %(q)s)"
+		)
+		params["q"] = f"%{search}%"
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT so.name, so.customer, so.customer_name, so.transaction_date,
+		       so.delivery_date, so.grand_total, so.advance_paid, so.currency,
+		       so.status, so.per_billed, so.per_delivered,
+		       COALESCE(so.reserve_stock, 0) AS reserve_stock,
+		       so.tracking_number, so.contact_mobile, so.contact_email
+		  FROM `tabSales Order` so
+		 WHERE {' AND '.join(conditions)}
+		 ORDER BY so.delivery_date ASC, so.transaction_date ASC
+		 LIMIT {limit}
+		""",
+		params, as_dict=True,
+	)
+	if not rows:
+		return []
+
+	so_names = [r.name for r in rows]
+	items = frappe.db.sql(
+		"""SELECT parent, item_code, item_name, qty, delivered_qty, billed_amt,
+		          rate, amount, warehouse, delivery_date
+		     FROM `tabSales Order Item`
+		    WHERE parent IN %(p)s
+		    ORDER BY idx""",
+		{"p": tuple(so_names)}, as_dict=True,
+	)
+	items_by_parent = {}
+	for it in items:
+		items_by_parent.setdefault(it.parent, []).append(it)
+
+	today = getdate(nowdate())
+	out = []
+	for r in rows:
+		bal = flt(r.grand_total) - flt(r.advance_paid)
+		dd = getdate(r.delivery_date) if r.delivery_date else None
+		days = (dd - today).days if dd else None
+		out.append({
+			"name": r.name,
+			"customer": r.customer,
+			"customer_name": r.customer_name or r.customer,
+			"transaction_date": str(r.transaction_date) if r.transaction_date else None,
+			"delivery_date": str(r.delivery_date) if r.delivery_date else None,
+			"days_to_delivery": days,
+			"is_overdue": bool(dd and dd < today),
+			"grand_total": flt(r.grand_total),
+			"advance_paid": flt(r.advance_paid),
+			"balance_due": bal if bal > 0 else 0,
+			"currency": r.currency,
+			"status": r.status,
+			"per_billed": flt(r.per_billed),
+			"per_delivered": flt(r.per_delivered),
+			"reserve_stock": cint(r.reserve_stock),
+			"tracking_number": r.tracking_number,
+			"contact_mobile": r.contact_mobile,
+			"contact_email": r.contact_email,
+			"items": items_by_parent.get(r.name, []),
+		})
+	return out
+
+
+@frappe.whitelist()
+def convert_prebooking_to_invoice(pos_profile, sales_order,
+                                  mode_of_payment=None, paid_amount=None,
+                                  apply_advance=1, client_request_id=None):
+	"""Create & submit a POS Sales Invoice from a pre-booking (Sales Order).
+
+	Uses ERPNext's standard `make_sales_invoice` mapper, then flips it to a
+	POS invoice (is_pos=1) tied to the supplied POS Profile. Optionally takes
+	a single payment at pickup time. Advance already collected on the SO is
+	pulled in automatically via the SO link.
+	"""
+	frappe.has_permission("Sales Invoice", "create", throw=True)
+
+	if not pos_profile:
+		frappe.throw(_("POS Profile is required"))
+	if not sales_order:
+		frappe.throw(_("Sales Order is required"))
+
+	# Session guard
+	from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+	active = get_active_session(pos_profile)
+	if not active:
+		frappe.throw(_("No active POS session. Open a session before billing."))
+
+	# Duplicate-submit guard (same pattern as create_pos_invoice)
+	if client_request_id:
+		existing = frappe.db.sql(
+			"""SELECT name FROM `tabSales Invoice`
+				WHERE custom_client_request_id = %(crid)s
+				  AND docstatus != 2
+				  AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+				LIMIT 1""",
+			{"crid": str(client_request_id)[:140]},
+			as_dict=True,
+		)
+		if existing:
+			inv = frappe.get_doc("Sales Invoice", existing[0].name)
+			return _pickup_invoice_response(inv, status="duplicate_prevented")
+
+	profile = frappe.get_cached_doc("POS Profile", pos_profile)
+	so = frappe.get_doc("Sales Order", sales_order)
+
+	if so.docstatus != 1:
+		frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
+	if so.company != profile.company:
+		frappe.throw(_("Sales Order company ({0}) does not match POS Profile company ({1})").format(
+			so.company, profile.company))
+	if flt(so.per_billed) >= 100:
+		frappe.throw(_("Sales Order {0} is already fully billed").format(sales_order))
+
+	# Reuse ERPNext's standard mapper — preserves taxes, advances, item mapping
+	from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+	inv = make_sales_invoice(source_name=sales_order, target_doc=None, ignore_permissions=False)
+
+	# Strip rows that are already fully billed (defensive)
+	inv.items = [d for d in inv.items if flt(d.qty) > 0]
+	if not inv.items:
+		frappe.throw(_("Nothing left to bill on Sales Order {0}").format(sales_order))
+
+	# ── POS flip ──────────────────────────────────────────────
+	inv.is_pos = 1
+	inv.update_stock = 1
+	inv.pos_profile = pos_profile
+	inv.custom_ch_pos_session = active.get("name")
+	inv.posting_date = str(active.get("business_date")) if active.get("business_date") else nowdate()
+	if profile.warehouse:
+		inv.set_warehouse = profile.warehouse
+		for it in inv.items:
+			if not it.warehouse:
+				it.warehouse = profile.warehouse
+
+	# Tax Category — fall back to In-State if customer doesn't have one
+	cust_tax_cat = frappe.db.get_value("Customer", inv.customer, "tax_category") if inv.customer else None
+	if not inv.get("tax_category"):
+		inv.tax_category = cust_tax_cat or "In-State"
+
+	if client_request_id and inv.meta.has_field("custom_client_request_id"):
+		inv.custom_client_request_id = str(client_request_id)[:140]
+
+	# Apply advance already collected on the SO (idempotent — set_advances() handles this)
+	if cint(apply_advance):
+		try:
+			inv.set_advances()
+		except Exception:
+			frappe.log_error(frappe.get_traceback(),
+			                 f"Pickup: set_advances failed for SO {sales_order}")
+
+	# Build payments table from POS Profile defaults
+	inv.set("payments", [])
+	for row in (profile.payments or []):
+		inv.append("payments", {
+			"mode_of_payment": row.mode_of_payment,
+			"account": row.account,
+			"type": row.type,
+			"default": row.default,
+			"amount": 0,
+		})
+
+	# Single payment at pickup (optional — staff may choose to collect later)
+	if mode_of_payment and flt(paid_amount or 0) > 0:
+		matched = next((p for p in inv.payments if p.mode_of_payment == mode_of_payment), None)
+		if matched:
+			matched.amount = flt(paid_amount)
+		else:
+			inv.append("payments", {
+				"mode_of_payment": mode_of_payment,
+				"amount": flt(paid_amount),
+			})
+
+	inv.flags.ignore_permissions = False
+	inv.insert()
+	inv.submit()
+
+	return _pickup_invoice_response(inv, status="ok")
+
+
+def _pickup_invoice_response(inv, status="ok"):
+	from urllib.parse import quote
+	print_format = None
+	try:
+		profile = frappe.get_cached_doc("POS Profile", inv.pos_profile) if inv.pos_profile else None
+		print_format = (profile.print_format if profile else None) or "Standard"
+	except Exception:
+		print_format = "Standard"
+	return {
+		"status": status,
+		"name": inv.name,
+		"docstatus": inv.docstatus,
+		"grand_total": flt(inv.grand_total),
+		"outstanding_amount": flt(inv.outstanding_amount),
+		"paid_amount": flt(inv.paid_amount),
+		"customer": inv.customer,
+		"customer_name": inv.customer_name,
+		"print_format": print_format,
+		"print_url": "/printview?doctype=Sales%20Invoice"
+		             f"&name={quote(inv.name)}"
+		             f"&format={quote(print_format)}&no_letterhead=0",
+	}

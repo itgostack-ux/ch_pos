@@ -1230,6 +1230,8 @@ export class BuybackWorkspace {
 		const otp_required = !otp_already_verified;
 		// OTP sent flag inside this dialog session. Pre-seeded if status says so.
 		let otp_sent_in_session = otp_already_sent;
+		// Tracks a successful backend OTP verification performed from this dialog.
+		let otp_verified_in_session = otp_already_verified;
 
 		const STEPS = otp_already_verified
 			? [
@@ -1484,7 +1486,33 @@ export class BuybackWorkspace {
 		/* ── Event binding ── */
 		function _bind_events() {
 			$body.find(".ch-wz-back").on("click", () => { _sync_state(); step--; _render(); });
-			$body.find(".ch-wz-next").on("click", () => { _sync_state(); if (_validate()) { step++; _render(); } });
+			$body.find(".ch-wz-next").on("click", function () {
+				_sync_state();
+				const key = STEPS[step].key;
+				if (key === "otp") {
+					if (!_validate()) return;
+					const btn = $(this);
+					btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Verifying OTP...")}`);
+					frappe.xcall("ch_pos.api.pos_api.pos_verify_otp_direct", {
+						order_name: order.name,
+						otp_code: state.otp_code,
+					}).then(() => {
+						otp_verified_in_session = true;
+						step++;
+						_render();
+						frappe.show_alert({ message: __("OTP verified. Continue with KYC."), indicator: "green" });
+					}).catch((e) => {
+						btn.prop("disabled", false).html(`${__("Next")} <i class="fa fa-arrow-right"></i>`);
+						frappe.show_alert({ message: e.message || __("OTP verification failed"), indicator: "red" });
+					});
+					return;
+				}
+
+				if (_validate()) {
+					step++;
+					_render();
+				}
+			});
 			$body.find(".ch-wz-submit").on("click", () => { _sync_state(); _submit(); });
 
 			/* settlement_type toggle */
@@ -1601,8 +1629,8 @@ export class BuybackWorkspace {
 			//   • If OTP is already verified upstream → "In-Store Signature"
 			//     (backend skips OTP verify, only persists KYC/settlement;
 			//      customer_approve is a no-op because it's already approved)
-			const send_method = otp_required ? "OTP" : "In-Store Signature";
-			const send_otp_code = otp_required ? state.otp_code : null;
+			const send_method = (otp_required && !otp_verified_in_session) ? "OTP" : "In-Store Signature";
+			const send_otp_code = (otp_required && !otp_verified_in_session) ? state.otp_code : null;
 
 			frappe.xcall("ch_pos.api.pos_api.pos_approve_customer_buyback", {
 				order_name: order.name,

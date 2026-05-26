@@ -18,6 +18,7 @@ const MODE_SECTIONS = [
 			{ key: "sell",    icon: "fa-shopping-bag", label: __("Sell") },
 			{ key: "returns", icon: "fa-undo",         label: __("Returns") },
 			{ key: "prebook", icon: "fa-bookmark",     label: __("Pre-Book / Proforma") },
+			{ key: "pickup",  icon: "fa-cube",         label: __("Pickup / Bill") },
 		],
 	},
 	{

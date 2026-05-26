@@ -33,6 +33,7 @@ import { RepairWorkspace } from "./pos_app/modules/repair/repair_workspace.js";
 import { ServiceWorkspace } from "./pos_app/modules/service/service_workspace.js";
 import { ReturnsWorkspace } from "./pos_app/modules/returns/returns_workspace.js";
 import { PrebookWorkspace } from "./pos_app/modules/prebook/prebook_workspace.js";
+import { PickupWorkspace } from "./pos_app/modules/pickup/pickup_workspace.js";
 import { ImeiWorkspace } from "./pos_app/modules/imei/imei_workspace.js";
 import { Customer360Workspace } from "./pos_app/modules/customer360/customer360_workspace.js";
 import { ReportsWorkspace } from "./pos_app/modules/reports/reports_workspace.js";
@@ -96,6 +97,7 @@ ch_pos.PosApp = class PosApp {
 		this.service_workspace = new ServiceWorkspace();
 		this.returns_workspace = new ReturnsWorkspace();
 		this.prebook_workspace = new PrebookWorkspace();
+		this.pickup_workspace = new PickupWorkspace();
 		this.imei_workspace = new ImeiWorkspace();
 		this.customer360_workspace = new Customer360Workspace();
 		this.reports_workspace = new ReportsWorkspace();
