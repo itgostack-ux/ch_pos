@@ -4,11 +4,11 @@ import frappe
 from frappe import _
 from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime, validate_email_address
 try:
-	from buyback.utils import validate_indian_phone
+    from buyback.utils import validate_indian_phone
 except ImportError:
-	def validate_indian_phone(phone):
-		"""Fallback: accept any phone if buyback app is not installed."""
-		return phone
+    def validate_indian_phone(phone):
+        """Fallback: accept any phone if buyback app is not installed."""
+        return phone
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
 
@@ -2244,59 +2244,59 @@ def scan_barcode(barcode, pos_profile=None) -> dict:
 
 @frappe.whitelist()
 def search_invoices_for_return(search_term, pos_profile=None) -> list:
-	"""Search Sales Invoices for return/exchange processing.
+    """Search Sales Invoices for return/exchange processing.
 
-	Company isolation: results are constrained to the active POS Session's company
-	so a cashier on a GoFix POS Profile cannot see GoGizmo invoices for the same
-	customer (and vice-versa). pos_profile is required for this guarantee.
-	"""
-	search_term = (search_term or "").strip()
-	if not search_term:
-		return []
+    Company isolation: results are constrained to the active POS Session's company
+    so a cashier on a GoFix POS Profile cannot see GoGizmo invoices for the same
+    customer (and vice-versa). pos_profile is required for this guarantee.
+    """
+    search_term = (search_term or "").strip()
+    if not search_term:
+        return []
 
-	if not pos_profile:
-		frappe.throw(frappe._("POS Profile is required to search invoices for return."))
+    if not pos_profile:
+        frappe.throw(frappe._("POS Profile is required to search invoices for return."))
 
-	company = frappe.db.get_value("POS Profile", pos_profile, "company")
-	if not company:
-		frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
+    company = frappe.db.get_value("POS Profile", pos_profile, "company")
+    if not company:
+        frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
 
-	filters = {
-		"docstatus": 1,
-		"is_return": 0,
-		"company": company,
-	}
+    filters = {
+        "docstatus": 1,
+        "is_return": 0,
+        "company": company,
+    }
 
-	or_filters = [
-		["name", "like", f"%{search_term}%"],
-		["customer", "like", f"%{search_term}%"],
-		["customer_name", "like", f"%{search_term}%"],
-		["contact_mobile", "like", f"%{search_term}%"],
-	]
+    or_filters = [
+        ["name", "like", f"%{search_term}%"],
+        ["customer", "like", f"%{search_term}%"],
+        ["customer_name", "like", f"%{search_term}%"],
+        ["contact_mobile", "like", f"%{search_term}%"],
+    ]
 
-	invoices = frappe.get_all(
-		"Sales Invoice",
-		filters=filters,
-		or_filters=or_filters,
-		fields=[
-			"name", "customer", "customer_name", "posting_date",
-			"grand_total", "status", "pos_profile", "company",
-		],
-		order_by="posting_date desc, creation desc",
-		limit_page_length=20,
-	)
+    invoices = frappe.get_all(
+        "Sales Invoice",
+        filters=filters,
+        or_filters=or_filters,
+        fields=[
+            "name", "customer", "customer_name", "posting_date",
+            "grand_total", "status", "pos_profile", "company",
+        ],
+        order_by="posting_date desc, creation desc",
+        limit_page_length=20,
+    )
 
-	from frappe.utils import date_diff
-	today = nowdate()
-	for inv in invoices:
-		inv["items_count"] = frappe.db.count(
-			"Sales Invoice Item", {"parent": inv["name"]}
-		)
-		days = cint(date_diff(today, str(inv["posting_date"])))
-		inv["days_since_purchase"] = days
-		inv["return_window_expired"] = days > 14
+    from frappe.utils import date_diff
+    today = nowdate()
+    for inv in invoices:
+        inv["items_count"] = frappe.db.count(
+            "Sales Invoice Item", {"parent": inv["name"]}
+        )
+        days = cint(date_diff(today, str(inv["posting_date"])))
+        inv["days_since_purchase"] = days
+        inv["return_window_expired"] = days > 14
 
-	return invoices
+    return invoices
 
 
 @frappe.whitelist()
@@ -3007,7 +3007,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     # return -- the credit note is already submitted; plan cancellation can be
     # retried by the warranty manager from CH Sold Plan list.
     cancelled_plans = _cancel_linked_sold_plans(_plans_to_cancel, ret.name)
-	phase4_side_effects = _apply_phase4_return_side_effects(ret)
+    phase4_side_effects = _apply_phase4_return_side_effects(ret)
 
     return {
         "name": ret.name,
@@ -3017,7 +3017,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
         "incentive_clawback": incentive_clawback,
         "auto_included_vas_rows": _auto_added_plans,
         "cancelled_sold_plans": cancelled_plans,
-		"phase4": phase4_side_effects,
+        "phase4": phase4_side_effects,
     }
 
 
@@ -3126,7 +3126,7 @@ def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) 
     doc.flags.ignore_permissions = True
     doc.save()
     doc.submit()
-	phase4_side_effects = _apply_phase4_return_side_effects(doc)
+    phase4_side_effects = _apply_phase4_return_side_effects(doc)
     frappe.db.commit()
 
     return {
@@ -3135,7 +3135,7 @@ def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) 
         "grand_total": doc.grand_total,
         "customer": doc.customer,
         "customer_name": doc.customer_name,
-		"phase4": phase4_side_effects,
+        "phase4": phase4_side_effects,
     }
 
 
@@ -7439,182 +7439,182 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _get_active_session_log(pos_profile):
-	"""Return the active POS Session Log name for this profile, or None."""
-	return frappe.db.get_value(
-		"POS Session Log",
-		{"pos_profile": pos_profile, "status": "Active", "docstatus": 1},
-		"name",
-		order_by="creation desc",
-	)
+    """Return the active POS Session Log name for this profile, or None."""
+    return frappe.db.get_value(
+        "POS Session Log",
+        {"pos_profile": pos_profile, "status": "Active", "docstatus": 1},
+        "name",
+        order_by="creation desc",
+    )
 
 
 @frappe.whitelist()
 def log_walkin(pos_profile, source="POS Counter") -> dict:
-	"""Increment walk-in counter on the active session log.
+    """Increment walk-in counter on the active session log.
 
-	Args:
-		pos_profile: Current POS Profile
-		source: 'POS Counter' | 'Kiosk'
-	"""
-	session_log = _get_active_session_log(pos_profile)
-	if not session_log:
-		return {"ok": False, "reason": "No active session log"}
+    Args:
+        pos_profile: Current POS Profile
+        source: 'POS Counter' | 'Kiosk'
+    """
+    session_log = _get_active_session_log(pos_profile)
+    if not session_log:
+        return {"ok": False, "reason": "No active session log"}
 
-	if source == "Kiosk":
-		frappe.db.sql(
-			"UPDATE `tabPOS Session Log` SET kiosk_count = kiosk_count + 1 WHERE name = %s",
-			(session_log,)
-		)
-	else:
-		frappe.db.sql(
-			"UPDATE `tabPOS Session Log` SET walkin_count = walkin_count + 1 WHERE name = %s",
-			(session_log,)
-		)
+    if source == "Kiosk":
+        frappe.db.sql(
+            "UPDATE `tabPOS Session Log` SET kiosk_count = kiosk_count + 1 WHERE name = %s",
+            (session_log,)
+        )
+    else:
+        frappe.db.sql(
+            "UPDATE `tabPOS Session Log` SET walkin_count = walkin_count + 1 WHERE name = %s",
+            (session_log,)
+        )
 
-	new_walkin = frappe.db.get_value("POS Session Log", session_log, "walkin_count") or 0
-	new_kiosk = frappe.db.get_value("POS Session Log", session_log, "kiosk_count") or 0
-	return {"ok": True, "session_log": session_log, "walkin_count": cint(new_walkin), "kiosk_count": cint(new_kiosk)}
+    new_walkin = frappe.db.get_value("POS Session Log", session_log, "walkin_count") or 0
+    new_kiosk = frappe.db.get_value("POS Session Log", session_log, "kiosk_count") or 0
+    return {"ok": True, "session_log": session_log, "walkin_count": cint(new_walkin), "kiosk_count": cint(new_kiosk)}
 
 
 @frappe.whitelist()
 def increment_repair_intake_count(pos_profile) -> dict:
-	"""Increment repair intake counter on active session log."""
-	session_log = _get_active_session_log(pos_profile)
-	if session_log:
-		frappe.db.sql(
-			"UPDATE `tabPOS Session Log` SET repair_intake_count = repair_intake_count + 1 WHERE name = %s",
-			(session_log,)
-		)
-	return {"ok": True}
+    """Increment repair intake counter on active session log."""
+    session_log = _get_active_session_log(pos_profile)
+    if session_log:
+        frappe.db.sql(
+            "UPDATE `tabPOS Session Log` SET repair_intake_count = repair_intake_count + 1 WHERE name = %s",
+            (session_log,)
+        )
+    return {"ok": True}
 
 
 @frappe.whitelist()
 def increment_buyback_count(pos_profile) -> dict:
-	"""Increment buyback assessment counter on active session log."""
-	session_log = _get_active_session_log(pos_profile)
-	if session_log:
-		frappe.db.sql(
-			"UPDATE `tabPOS Session Log` SET buyback_count = buyback_count + 1 WHERE name = %s",
-			(session_log,)
-		)
-	return {"ok": True}
+    """Increment buyback assessment counter on active session log."""
+    session_log = _get_active_session_log(pos_profile)
+    if session_log:
+        frappe.db.sql(
+            "UPDATE `tabPOS Session Log` SET buyback_count = buyback_count + 1 WHERE name = %s",
+            (session_log,)
+        )
+    return {"ok": True}
 
 
 @frappe.whitelist()
 def get_today_footfall(pos_profile) -> dict:
-	"""Return today's footfall summary derived from POS Kiosk Token records."""
-	today = nowdate()
+    """Return today's footfall summary derived from POS Kiosk Token records."""
+    today = nowdate()
 
-	# Primary source: POS Kiosk Token records
-	source_counts = frappe.db.sql("""
-		SELECT IFNULL(visit_source, 'Counter') AS visit_source, COUNT(*) AS cnt
-		FROM `tabPOS Kiosk Token`
-		WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
-		GROUP BY visit_source
-	""", (pos_profile, today), as_dict=True)
+    # Primary source: POS Kiosk Token records
+    source_counts = frappe.db.sql("""
+        SELECT IFNULL(visit_source, 'Counter') AS visit_source, COUNT(*) AS cnt
+        FROM `tabPOS Kiosk Token`
+        WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
+        GROUP BY visit_source
+    """, (pos_profile, today), as_dict=True)
 
-	source_map = {r.visit_source: cint(r.cnt) for r in source_counts}
-	walkin_count = source_map.get("Counter", 0)
-	kiosk_count = source_map.get("Kiosk", 0)
-	other_count = sum(v for k, v in source_map.items() if k not in ("Counter", "Kiosk"))
+    source_map = {r.visit_source: cint(r.cnt) for r in source_counts}
+    walkin_count = source_map.get("Counter", 0)
+    kiosk_count = source_map.get("Kiosk", 0)
+    other_count = sum(v for k, v in source_map.items() if k not in ("Counter", "Kiosk"))
 
-	purpose_counts = frappe.db.sql("""
-		SELECT IFNULL(visit_purpose, '') AS visit_purpose, COUNT(*) AS cnt
-		FROM `tabPOS Kiosk Token`
-		WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
-		GROUP BY visit_purpose
-	""", (pos_profile, today), as_dict=True)
+    purpose_counts = frappe.db.sql("""
+        SELECT IFNULL(visit_purpose, '') AS visit_purpose, COUNT(*) AS cnt
+        FROM `tabPOS Kiosk Token`
+        WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
+        GROUP BY visit_purpose
+    """, (pos_profile, today), as_dict=True)
 
-	purpose_map = {r.visit_purpose: cint(r.cnt) for r in purpose_counts}
-	repair_intake_count = purpose_map.get("Repair", 0)
-	buyback_count = purpose_map.get("Buyback", 0)
+    purpose_map = {r.visit_purpose: cint(r.cnt) for r in purpose_counts}
+    repair_intake_count = purpose_map.get("Repair", 0)
+    buyback_count = purpose_map.get("Buyback", 0)
 
-	# Invoices today
-	invoices_today = frappe.db.count("Sales Invoice", {
-		"pos_profile": pos_profile,
-		"posting_date": today,
-		"docstatus": 1,
-		"is_return": 0,
-	})
+    # Invoices today
+    invoices_today = frappe.db.count("Sales Invoice", {
+        "pos_profile": pos_profile,
+        "posting_date": today,
+        "docstatus": 1,
+        "is_return": 0,
+    })
 
-	# Status counts
-	status_counts = frappe.db.sql("""
-		SELECT status, COUNT(*) AS cnt
-		FROM `tabPOS Kiosk Token`
-		WHERE pos_profile = %s AND DATE(creation) = %s
-		GROUP BY status
-	""", (pos_profile, today), as_dict=True)
+    # Status counts
+    status_counts = frappe.db.sql("""
+        SELECT status, COUNT(*) AS cnt
+        FROM `tabPOS Kiosk Token`
+        WHERE pos_profile = %s AND DATE(creation) = %s
+        GROUP BY status
+    """, (pos_profile, today), as_dict=True)
 
-	status_map = {r.status: cint(r.cnt) for r in status_counts}
-	cancelled_count = cint(status_map.get("Cancelled", 0))
-	dropped_count = cint(status_map.get("Dropped", 0))
+    status_map = {r.status: cint(r.cnt) for r in status_counts}
+    cancelled_count = cint(status_map.get("Cancelled", 0))
+    dropped_count = cint(status_map.get("Dropped", 0))
 
-	total_footfall = walkin_count + kiosk_count + other_count
-	conversion_pct = round((invoices_today / total_footfall * 100) if total_footfall > 0 else 0, 1)
+    total_footfall = walkin_count + kiosk_count + other_count
+    conversion_pct = round((invoices_today / total_footfall * 100) if total_footfall > 0 else 0, 1)
 
-	return {
-		"walkin_count": walkin_count,
-		"kiosk_count": kiosk_count,
-		"repair_intake_count": repair_intake_count,
-		"buyback_count": buyback_count,
-		"cancelled_count": cancelled_count,
-		"dropped_count": dropped_count,
-		"total_footfall": total_footfall,
-		"invoices_today": invoices_today,
-		"conversion_pct": conversion_pct,
-	}
+    return {
+        "walkin_count": walkin_count,
+        "kiosk_count": kiosk_count,
+        "repair_intake_count": repair_intake_count,
+        "buyback_count": buyback_count,
+        "cancelled_count": cancelled_count,
+        "dropped_count": dropped_count,
+        "total_footfall": total_footfall,
+        "invoices_today": invoices_today,
+        "conversion_pct": conversion_pct,
+    }
 
 
 @frappe.whitelist()
 def flag_reprint_needed(pos_invoice, reason="Print failed") -> dict:
-	"""Mark an invoice as needing reprint.
+    """Mark an invoice as needing reprint.
 
-	Frontend calls this when the receipt printer is offline or errors.
-	Store managers can see pending reprints in the CH Store Operations workspace.
-	"""
-	if not frappe.db.exists("Sales Invoice", pos_invoice):
-		frappe.throw(frappe._("Sales Invoice {0} not found").format(pos_invoice))
+    Frontend calls this when the receipt printer is offline or errors.
+    Store managers can see pending reprints in the CH Store Operations workspace.
+    """
+    if not frappe.db.exists("Sales Invoice", pos_invoice):
+        frappe.throw(frappe._("Sales Invoice {0} not found").format(pos_invoice))
 
-	# Append to session log reprint queue if session log linked
-	session_log = frappe.db.get_value("POS Session Log", {"pos_profile": frappe.db.get_value("Sales Invoice", pos_invoice, "pos_profile"), "status": ["!=", "Closed"], "docstatus": 1}, "name")
+    # Append to session log reprint queue if session log linked
+    session_log = frappe.db.get_value("POS Session Log", {"pos_profile": frappe.db.get_value("Sales Invoice", pos_invoice, "pos_profile"), "status": ["!=", "Closed"], "docstatus": 1}, "name")
 
-	frappe.db.sql("""
-		INSERT INTO `tabPOS Reprint Queue`
-		  (name, parent, parenttype, parentfield, pos_invoice, reason, requested_at, status)
-		VALUES (%(n)s, %(p)s, 'POS Session Log', 'reprint_queue',
-		        %(inv)s, %(reason)s, NOW(), 'Pending')
-	""", {
-		"n": frappe.generate_hash(length=10),
-		"p": session_log or "",
-		"inv": pos_invoice,
-		"reason": (reason or "Print failed")[:200],
-	})
-	return {"status": "queued", "pos_invoice": pos_invoice}
+    frappe.db.sql("""
+        INSERT INTO `tabPOS Reprint Queue`
+          (name, parent, parenttype, parentfield, pos_invoice, reason, requested_at, status)
+        VALUES (%(n)s, %(p)s, 'POS Session Log', 'reprint_queue',
+                %(inv)s, %(reason)s, NOW(), 'Pending')
+    """, {
+        "n": frappe.generate_hash(length=10),
+        "p": session_log or "",
+        "inv": pos_invoice,
+        "reason": (reason or "Print failed")[:200],
+    })
+    return {"status": "queued", "pos_invoice": pos_invoice}
 
 
 @frappe.whitelist()
 def get_pending_reprints(pos_profile, limit=20) -> list:
-	"""Return pending reprint queue items for a POS profile.
+    """Return pending reprint queue items for a POS profile.
 
-	Used by the store manager workspace shortcut.
-	"""
-	return frappe.db.sql("""
-		SELECT rq.name, rq.pos_invoice, rq.reason, rq.requested_at, rq.status
-		FROM `tabPOS Reprint Queue` rq
-		JOIN `tabPOS Session Log` sl ON sl.name = rq.parent
-		WHERE sl.pos_profile = %(pos)s
-		  AND rq.status = 'Pending'
-		ORDER BY rq.requested_at DESC
-		LIMIT %(limit)s
-	""", {"pos": pos_profile, "limit": int(limit)}, as_dict=True)
+    Used by the store manager workspace shortcut.
+    """
+    return frappe.db.sql("""
+        SELECT rq.name, rq.pos_invoice, rq.reason, rq.requested_at, rq.status
+        FROM `tabPOS Reprint Queue` rq
+        JOIN `tabPOS Session Log` sl ON sl.name = rq.parent
+        WHERE sl.pos_profile = %(pos)s
+          AND rq.status = 'Pending'
+        ORDER BY rq.requested_at DESC
+        LIMIT %(limit)s
+    """, {"pos": pos_profile, "limit": int(limit)}, as_dict=True)
 
 
 @frappe.whitelist()
 def mark_reprint_done(reprint_name) -> dict:
-	"""Mark a reprint queue item as completed."""
-	frappe.db.set_value("POS Reprint Queue", reprint_name, "status", "Done",
-		update_modified=False)
-	return {"status": "done"}
+    """Mark a reprint queue item as completed."""
+    frappe.db.set_value("POS Reprint Queue", reprint_name, "status", "Done",
+        update_modified=False)
+    return {"status": "done"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -7623,33 +7623,33 @@ def mark_reprint_done(reprint_name) -> dict:
 
 @frappe.whitelist()
 def get_pos_buyback_detail(assessment_name) -> dict:
-	"""Return full buyback detail for POS: assessment + linked order + diagnostics.
+    """Return full buyback detail for POS: assessment + linked order + diagnostics.
 
-	Called on every stage transition so the frontend always has fresh data.
-	"""
-	a = frappe.get_doc("Buyback Assessment", assessment_name)
+    Called on every stage transition so the frontend always has fresh data.
+    """
+    a = frappe.get_doc("Buyback Assessment", assessment_name)
 
-	# Fix status stuck at Draft when already Frappe-submitted
-	if a.docstatus == 1 and a.status == "Draft":
-		a.db_set("status", "Submitted")
-		a.status = "Submitted"
+    # Fix status stuck at Draft when already Frappe-submitted
+    if a.docstatus == 1 and a.status == "Draft":
+        a.db_set("status", "Submitted")
+        a.status = "Submitted"
 
-	# Linked Buyback Order (if any)
-	order = None
-	order_name = frappe.db.get_value(
-		"Buyback Order",
-		{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
-		"name",
-		order_by="creation desc",
-	)
-	if order_name:
-		o = frappe.get_doc("Buyback Order", order_name)
-		order = {
-			"name": o.name,
-			"status": o.status,
-			"final_price": flt(o.final_price),
-			"base_price": flt(o.base_price),
-			"settlement_type": o.settlement_type or "",
+    # Linked Buyback Order (if any)
+    order = None
+    order_name = frappe.db.get_value(
+        "Buyback Order",
+        {"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+        "name",
+        order_by="creation desc",
+    )
+    if order_name:
+        o = frappe.get_doc("Buyback Order", order_name)
+        order = {
+            "name": o.name,
+            "status": o.status,
+            "final_price": flt(o.final_price),
+            "base_price": flt(o.base_price),
+            "settlement_type": o.settlement_type or "",
             "customer_payout_mode": o.customer_payout_mode or "",
             "customer_cash_receiver_name": o.customer_cash_receiver_name or "",
             "customer_upi_id": o.customer_upi_id or "",
@@ -7660,219 +7660,219 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "customer_payout_notes": o.customer_payout_notes or "",
             "customer_payout_updated_at": str(o.customer_payout_updated_at) if o.customer_payout_updated_at else "",
             "customer_payout_updated_by": o.customer_payout_updated_by or "",
-			"customer_approved": cint(o.customer_approved),
-			"otp_verified": cint(o.otp_verified),
-			"payment_status": o.payment_status or "",
-			"requires_approval": cint(o.requires_approval),
-			"approved_by": o.approved_by or "",
-			"approval_token": o.approval_token or "",
-			"approval_url": (
-				f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
-				if o.approval_token else ""
-			),
-		}
+            "customer_approved": cint(o.customer_approved),
+            "otp_verified": cint(o.otp_verified),
+            "payment_status": o.payment_status or "",
+            "requires_approval": cint(o.requires_approval),
+            "approved_by": o.approved_by or "",
+            "approval_token": o.approval_token or "",
+            "approval_url": (
+                f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
+                if o.approval_token else ""
+            ),
+        }
 
-	# Diagnostic test results (from mobile app or manual)
-	diagnostics = []
-	for d in (a.diagnostic_tests or []):
-		diagnostics.append({
-			"test_name": d.get("test_name") or d.get("test_code") or "",
-			"result": d.get("result") or "",
-			"details": d.get("details") or "",
-		})
+    # Diagnostic test results (from mobile app or manual)
+    diagnostics = []
+    for d in (a.diagnostic_tests or []):
+        diagnostics.append({
+            "test_name": d.get("test_name") or d.get("test_code") or "",
+            "result": d.get("result") or "",
+            "details": d.get("details") or "",
+        })
 
-	# Assessment question responses (customer self-assessment)
-	assessment_responses = []
-	for r in (a.responses or []):
-		assessment_responses.append({
-			"question": r.get("question") or "",
-			"question_code": r.get("question_code") or "",
-			"question_text": r.get("question_text") or "",
-			"answer_value": r.get("answer_value") or "",
-			"answer_label": r.get("answer_label") or "",
-			"price_impact_percent": flt(r.get("price_impact_percent")),
-		})
+    # Assessment question responses (customer self-assessment)
+    assessment_responses = []
+    for r in (a.responses or []):
+        assessment_responses.append({
+            "question": r.get("question") or "",
+            "question_code": r.get("question_code") or "",
+            "question_text": r.get("question_text") or "",
+            "answer_value": r.get("answer_value") or "",
+            "answer_label": r.get("answer_label") or "",
+            "price_impact_percent": flt(r.get("price_impact_percent")),
+        })
 
-	# Inspection data (if inspection exists)
-	inspection = None
-	if a.buyback_inspection:
-		try:
-			ins = frappe.get_doc("Buyback Inspection", a.buyback_inspection)
-			# Grade options for selector
-			grades = frappe.get_all(
-				"Grade Master", fields=["name", "grade_name"],
-				order_by="name asc",
-			)
-			# Inspection responses with side-by-side data
-			ins_responses = []
-			for ir in (ins.inspection_responses or []):
-				# Fetch answer options for inspector dropdown
-				options = []
-				if ir.question:
-					options = frappe.get_all(
-						"Buyback Question Option",
-						filters={"parent": ir.question},
-						fields=["option_value", "option_label", "price_impact_percent"],
-						order_by="idx asc",
-					)
-				ins_responses.append({
-					"question": ir.get("question") or "",
-					"question_code": ir.get("question_code") or "",
-					"question_text": ir.get("question_text") or "",
-					"assessment_answer": ir.get("assessment_answer") or "",
-					"assessment_answer_label": ir.get("assessment_answer_label") or "",
-					"assessment_impact": flt(ir.get("assessment_impact")),
-					"inspector_answer": ir.get("inspector_answer") or "",
-					"inspector_answer_label": ir.get("inspector_answer_label") or "",
-					"inspector_impact": flt(ir.get("inspector_impact")),
-					"options": [
-						{"value": o.option_value, "label": o.option_label,
-						 "impact": flt(o.price_impact_percent)}
-						for o in options
-					],
-				})
-			# Inspection diagnostics (automated tests)
-			ins_diagnostics = []
-			for id_ in (ins.inspection_diagnostics or []):
-				ins_diagnostics.append({
-					"test_name": id_.get("test_name") or "",
-					"test_code": id_.get("test_code") or "",
-					"assessment_result": id_.get("assessment_result") or "",
-					"assessment_depreciation": flt(id_.get("assessment_depreciation")),
-					"inspector_result": id_.get("inspector_result") or "",
-					"inspector_depreciation": flt(id_.get("inspector_depreciation")),
-				})
-			inspection = {
-				"name": ins.name,
-				"status": ins.status or "",
-				"inspector": ins.inspector or "",
-				"pre_inspection_grade": ins.pre_inspection_grade or "",
-				"post_inspection_grade": ins.post_inspection_grade or "",
-				"condition_grade": ins.condition_grade or "",
-				"estimated_price": flt(ins.estimated_price),
-				"quoted_price": flt(ins.quoted_price),
-				"revised_price": flt(ins.revised_price),
-				"price_override_reason": ins.price_override_reason or "",
-				"remarks": ins.remarks or "",
-				"responses": ins_responses,
-				"diagnostics": ins_diagnostics,
-				"grades": [
-					{"name": g.name, "label": g.grade_name or g.name}
-					for g in grades
-				],
-			}
-		except frappe.DoesNotExistError:
-			pass
+    # Inspection data (if inspection exists)
+    inspection = None
+    if a.buyback_inspection:
+        try:
+            ins = frappe.get_doc("Buyback Inspection", a.buyback_inspection)
+            # Grade options for selector
+            grades = frappe.get_all(
+                "Grade Master", fields=["name", "grade_name"],
+                order_by="name asc",
+            )
+            # Inspection responses with side-by-side data
+            ins_responses = []
+            for ir in (ins.inspection_responses or []):
+                # Fetch answer options for inspector dropdown
+                options = []
+                if ir.question:
+                    options = frappe.get_all(
+                        "Buyback Question Option",
+                        filters={"parent": ir.question},
+                        fields=["option_value", "option_label", "price_impact_percent"],
+                        order_by="idx asc",
+                    )
+                ins_responses.append({
+                    "question": ir.get("question") or "",
+                    "question_code": ir.get("question_code") or "",
+                    "question_text": ir.get("question_text") or "",
+                    "assessment_answer": ir.get("assessment_answer") or "",
+                    "assessment_answer_label": ir.get("assessment_answer_label") or "",
+                    "assessment_impact": flt(ir.get("assessment_impact")),
+                    "inspector_answer": ir.get("inspector_answer") or "",
+                    "inspector_answer_label": ir.get("inspector_answer_label") or "",
+                    "inspector_impact": flt(ir.get("inspector_impact")),
+                    "options": [
+                        {"value": o.option_value, "label": o.option_label,
+                         "impact": flt(o.price_impact_percent)}
+                        for o in options
+                    ],
+                })
+            # Inspection diagnostics (automated tests)
+            ins_diagnostics = []
+            for id_ in (ins.inspection_diagnostics or []):
+                ins_diagnostics.append({
+                    "test_name": id_.get("test_name") or "",
+                    "test_code": id_.get("test_code") or "",
+                    "assessment_result": id_.get("assessment_result") or "",
+                    "assessment_depreciation": flt(id_.get("assessment_depreciation")),
+                    "inspector_result": id_.get("inspector_result") or "",
+                    "inspector_depreciation": flt(id_.get("inspector_depreciation")),
+                })
+            inspection = {
+                "name": ins.name,
+                "status": ins.status or "",
+                "inspector": ins.inspector or "",
+                "pre_inspection_grade": ins.pre_inspection_grade or "",
+                "post_inspection_grade": ins.post_inspection_grade or "",
+                "condition_grade": ins.condition_grade or "",
+                "estimated_price": flt(ins.estimated_price),
+                "quoted_price": flt(ins.quoted_price),
+                "revised_price": flt(ins.revised_price),
+                "price_override_reason": ins.price_override_reason or "",
+                "remarks": ins.remarks or "",
+                "responses": ins_responses,
+                "diagnostics": ins_diagnostics,
+                "grades": [
+                    {"name": g.name, "label": g.grade_name or g.name}
+                    for g in grades
+                ],
+            }
+        except frappe.DoesNotExistError:
+            pass
 
-	return {
-		"name": a.name,
-		"source": a.source or "",
-		"status": a.status or "",
-		"customer": a.customer or "",
-		"customer_name": a.customer_name or "",
-		"mobile_no": a.mobile_no or "",
-		"item": a.item or "",
-		"item_name": a.item_name or "",
-		"brand": a.brand or "",
-		"imei_serial": a.imei_serial or "",
-		"device_age_months": a.device_age_months or "",
-		"warranty_status": a.warranty_status or "",
-		"estimated_grade": a.estimated_grade or "",
-		"estimated_price": flt(a.estimated_price),
-		"quoted_price": flt(a.quoted_price),
-		"remarks": a.remarks or "",
-		"diagnostics": diagnostics,
-		"assessment_responses": assessment_responses,
-		"inspection": inspection,
-		"order": order,
-		"buyback_inspection": a.buyback_inspection or "",
-	}
+    return {
+        "name": a.name,
+        "source": a.source or "",
+        "status": a.status or "",
+        "customer": a.customer or "",
+        "customer_name": a.customer_name or "",
+        "mobile_no": a.mobile_no or "",
+        "item": a.item or "",
+        "item_name": a.item_name or "",
+        "brand": a.brand or "",
+        "imei_serial": a.imei_serial or "",
+        "device_age_months": a.device_age_months or "",
+        "warranty_status": a.warranty_status or "",
+        "estimated_grade": a.estimated_grade or "",
+        "estimated_price": flt(a.estimated_price),
+        "quoted_price": flt(a.quoted_price),
+        "remarks": a.remarks or "",
+        "diagnostics": diagnostics,
+        "assessment_responses": assessment_responses,
+        "inspection": inspection,
+        "order": order,
+        "buyback_inspection": a.buyback_inspection or "",
+    }
 
 
 @frappe.whitelist()
 def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, inspector_notes=None) -> dict:
-	"""Create a Buyback Order from a Buyback Assessment in POS.
+    """Create a Buyback Order from a Buyback Assessment in POS.
 
-	Idempotent — returns existing order if one already exists for this assessment.
-	"""
-	frappe.has_permission("Buyback Order", "create", throw=True)
-	# Return existing order if already created
-	existing = frappe.db.get_value(
-		"Buyback Order",
-		{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
-		"name",
-	)
-	if existing:
-		if final_price:
-			frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
-		return {"order_name": existing, "created": False}
+    Idempotent — returns existing order if one already exists for this assessment.
+    """
+    frappe.has_permission("Buyback Order", "create", throw=True)
+    # Return existing order if already created
+    existing = frappe.db.get_value(
+        "Buyback Order",
+        {"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+        "name",
+    )
+    if existing:
+        if final_price:
+            frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
+        return {"order_name": existing, "created": False}
 
-	assessment = frappe.get_doc("Buyback Assessment", assessment_name)
-	warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse") or ""
-	company = frappe.db.get_value("POS Profile", pos_profile, "company") or frappe.defaults.get_global_default("company")
+    assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+    warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse") or ""
+    company = frappe.db.get_value("POS Profile", pos_profile, "company") or frappe.defaults.get_global_default("company")
 
-	price = flt(final_price) or flt(assessment.quoted_price) or flt(assessment.estimated_price)
+    price = flt(final_price) or flt(assessment.quoted_price) or flt(assessment.estimated_price)
 
-	order = frappe.new_doc("Buyback Order")
-	order.buyback_assessment = assessment_name
-	order.customer = assessment.customer or ""
-	order.customer_name = assessment.customer_name or ""
-	order.mobile_no = assessment.mobile_no or ""
-	order.store = warehouse
-	order.company = company
-	order.item = assessment.item or ""
-	order.item_name = assessment.item_name or ""
-	order.brand = assessment.brand or ""
-	order.imei_serial = assessment.imei_serial or ""
-	order.warranty_status = assessment.warranty_status or ""
-	order.condition_grade = assessment.estimated_grade or ""
-	order.base_price = flt(assessment.estimated_price)
-	order.final_price = price
-	order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
-	if inspector_notes:
-		order.remarks = str(inspector_notes)[:500]
+    order = frappe.new_doc("Buyback Order")
+    order.buyback_assessment = assessment_name
+    order.customer = assessment.customer or ""
+    order.customer_name = assessment.customer_name or ""
+    order.mobile_no = assessment.mobile_no or ""
+    order.store = warehouse
+    order.company = company
+    order.item = assessment.item or ""
+    order.item_name = assessment.item_name or ""
+    order.brand = assessment.brand or ""
+    order.imei_serial = assessment.imei_serial or ""
+    order.warranty_status = assessment.warranty_status or ""
+    order.condition_grade = assessment.estimated_grade or ""
+    order.base_price = flt(assessment.estimated_price)
+    order.final_price = price
+    order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
+    if inspector_notes:
+        order.remarks = str(inspector_notes)[:500]
 
-	order.flags.ignore_permissions = True
-	try:
-		order.insert()
-	except frappe.UniqueValidationError:
-		# Race condition: another request created an order for this assessment
-		existing = frappe.db.get_value(
-			"Buyback Order",
-			{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
-			"name",
-		)
-		if existing:
-			if final_price:
-				frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
-			return {"order_name": existing, "created": False}
-		raise
-	order.submit()
+    order.flags.ignore_permissions = True
+    try:
+        order.insert()
+    except frappe.UniqueValidationError:
+        # Race condition: another request created an order for this assessment
+        existing = frappe.db.get_value(
+            "Buyback Order",
+            {"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+            "name",
+        )
+        if existing:
+            if final_price:
+                frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
+            return {"order_name": existing, "created": False}
+        raise
+    order.submit()
 
-	return {"order_name": order.name, "created": True}
+    return {"order_name": order.name, "created": True}
 
 
 @frappe.whitelist()
 def pos_update_buyback_price(order_name, final_price, inspector_notes=None) -> dict:
-	"""Update the final buyback price on an existing Buyback Order."""
-	frappe.has_permission("Buyback Order", "write", throw=True)
+    """Update the final buyback price on an existing Buyback Order."""
+    frappe.has_permission("Buyback Order", "write", throw=True)
 
-	doc = frappe.get_doc("Buyback Order", order_name)
-	if doc.docstatus == 2:
-		frappe.throw(frappe._("Cannot update a cancelled order."))
+    doc = frappe.get_doc("Buyback Order", order_name)
+    if doc.docstatus == 2:
+        frappe.throw(frappe._("Cannot update a cancelled order."))
 
-	doc.final_price = flt(final_price)
-	if inspector_notes:
-		doc.remarks = (str(doc.remarks or "") + "\n" + str(inspector_notes))[:1000]
+    doc.final_price = flt(final_price)
+    if inspector_notes:
+        doc.remarks = (str(doc.remarks or "") + "\n" + str(inspector_notes))[:1000]
 
-	doc.flags.ignore_permissions = True
-	doc.save()
+    doc.flags.ignore_permissions = True
+    doc.save()
 
-	return {
-		"order_name": doc.name,
-		"final_price": doc.final_price,
-		"status": doc.status,
-	}
+    return {
+        "order_name": doc.name,
+        "final_price": doc.final_price,
+        "status": doc.status,
+    }
 
 
 @frappe.whitelist()
@@ -7921,14 +7921,14 @@ def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
 
 @frappe.whitelist()
 def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
-	"""Skip OTP for in-store customer approval.
+    """Skip OTP for in-store customer approval.
 
-	Thin wrapper so the POS can call the BBO method via xcall
-	(doctype method calls from POS require the standard frappe.call
-	pattern, but xcall to a whitelisted function is simpler from JS).
-	"""
-	doc = frappe.get_doc("Buyback Order", name)
-	return doc.bypass_otp_instore(remarks=remarks)
+    Thin wrapper so the POS can call the BBO method via xcall
+    (doctype method calls from POS require the standard frappe.call
+    pattern, but xcall to a whitelisted function is simpler from JS).
+    """
+    doc = frappe.get_doc("Buyback Order", name)
+    return doc.bypass_otp_instore(remarks=remarks)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -8107,70 +8107,70 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
 
 @frappe.whitelist()
 def pos_send_approval_link(order_name) -> dict:
-	"""Send a customer-facing approval link via WhatsApp + Email.
+    """Send a customer-facing approval link via WhatsApp + Email.
 
-	Transitions the order to "Awaiting Customer Approval" and returns the
-	masked mobile number so the UI can confirm which number was contacted.
-	"""
-	doc = frappe.get_doc("Buyback Order", order_name)
+    Transitions the order to "Awaiting Customer Approval" and returns the
+    masked mobile number so the UI can confirm which number was contacted.
+    """
+    doc = frappe.get_doc("Buyback Order", order_name)
 
-	if not doc.mobile_no:
-		frappe.throw(frappe._("No mobile number on this Buyback Order."))
-	if not doc.approval_token:
-		frappe.throw(frappe._("Approval token missing — please re-save the order."))
+    if not doc.mobile_no:
+        frappe.throw(frappe._("No mobile number on this Buyback Order."))
+    if not doc.approval_token:
+        frappe.throw(frappe._("Approval token missing — please re-save the order."))
 
-	approval_url = f"{frappe.utils.get_url()}/buyback-approval?token={doc.approval_token}"
+    approval_url = f"{frappe.utils.get_url()}/buyback-approval?token={doc.approval_token}"
 
-	item_label = doc.item_name or doc.item or "your device"
-	price_fmt = f"₹{flt(doc.final_price):,.0f}"
-	customer_name = doc.customer_name or "Customer"
+    item_label = doc.item_name or doc.item or "your device"
+    price_fmt = f"₹{flt(doc.final_price):,.0f}"
+    customer_name = doc.customer_name or "Customer"
 
-	# ── Send WhatsApp ────────────────────────────────────────────
-	try:
-		from ch_item_master.ch_core.whatsapp import send_template_message
+    # ── Send WhatsApp ────────────────────────────────────────────
+    try:
+        from ch_item_master.ch_core.whatsapp import send_template_message
 
-		settings = None
-		try:
-			s = frappe.get_cached_doc("CH WhatsApp Settings")
-			if s.enabled:
-				settings = s
-		except frappe.DoesNotExistError:
-			pass
+        settings = None
+        try:
+            s = frappe.get_cached_doc("CH WhatsApp Settings")
+            if s.enabled:
+                settings = s
+        except frappe.DoesNotExistError:
+            pass
 
-		template_name = getattr(settings, "buyback_customer_approval", "") if settings else ""
-		if template_name:
-			send_template_message(
-				phone=doc.mobile_no,
-				template_name=template_name,
-				body_values={
-					"1": customer_name,
-					"2": item_label,
-					"3": price_fmt,
-					"4": approval_url,
-				},
-				customer_name=customer_name,
-				ref_doctype="Buyback Order",
-				ref_name=doc.name,
-			)
-			frappe.logger().info(f"[pos_send_approval_link] WhatsApp sent to {doc.mobile_no}")
-		else:
-			frappe.logger().warning(
-				f"[pos_send_approval_link] No buyback_customer_approval template configured, skipping WhatsApp"
-			)
-	except Exception:
-		frappe.log_error(frappe.get_traceback(), f"Buyback approval WhatsApp failed for {doc.name}")
+        template_name = getattr(settings, "buyback_customer_approval", "") if settings else ""
+        if template_name:
+            send_template_message(
+                phone=doc.mobile_no,
+                template_name=template_name,
+                body_values={
+                    "1": customer_name,
+                    "2": item_label,
+                    "3": price_fmt,
+                    "4": approval_url,
+                },
+                customer_name=customer_name,
+                ref_doctype="Buyback Order",
+                ref_name=doc.name,
+            )
+            frappe.logger().info(f"[pos_send_approval_link] WhatsApp sent to {doc.mobile_no}")
+        else:
+            frappe.logger().warning(
+                f"[pos_send_approval_link] No buyback_customer_approval template configured, skipping WhatsApp"
+            )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Buyback approval WhatsApp failed for {doc.name}")
 
-	# ── Send Email ───────────────────────────────────────────────
-	try:
-		customer_email = None
-		if doc.customer:
-			customer_email = frappe.db.get_value("Customer", doc.customer, "email_id")
-		if not customer_email and doc.mobile_no:
-			customer_email = frappe.db.get_value(
-				"Customer", {"mobile_no": doc.mobile_no}, "email_id"
-			)
+    # ── Send Email ───────────────────────────────────────────────
+    try:
+        customer_email = None
+        if doc.customer:
+            customer_email = frappe.db.get_value("Customer", doc.customer, "email_id")
+        if not customer_email and doc.mobile_no:
+            customer_email = frappe.db.get_value(
+                "Customer", {"mobile_no": doc.mobile_no}, "email_id"
+            )
 
-		if customer_email:
+        if customer_email:
                         subject = f"Congruence Holdings | GoGizmo Buyback Approval | {doc.name}"
                         html = f"""
                         <div style="font-family:Segoe UI,Arial,sans-serif;max-width:620px;margin:auto;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
@@ -8204,318 +8204,318 @@ def pos_send_approval_link(order_name) -> dict:
                             message=html,
                         )
                         frappe.logger().info(f"[pos_send_approval_link] Email sent to {customer_email}")
-	except Exception:
-		frappe.log_error(frappe.get_traceback(), f"Buyback approval email failed for {doc.name}")
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Buyback approval email failed for {doc.name}")
 
-	# Advance order status so the UI reflects "waiting for customer"
-	if doc.status == "Approved":
-		doc.db_set("status", "Awaiting Customer Approval", notify=True)
+    # Advance order status so the UI reflects "waiting for customer"
+    if doc.status == "Approved":
+        doc.db_set("status", "Awaiting Customer Approval", notify=True)
 
-	masked = doc.mobile_no[:2] + "****" + doc.mobile_no[-2:]
-	return {
-		"sent": True,
-		"mobile_masked": masked,
-		"approval_url": approval_url,
-	}
+    masked = doc.mobile_no[:2] + "****" + doc.mobile_no[-2:]
+    return {
+        "sent": True,
+        "mobile_masked": masked,
+        "approval_url": approval_url,
+    }
 
 
 @frappe.whitelist()
 def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
-	"""Mark a buyback order as settled via direct cashback to customer.
+    """Mark a buyback order as settled via direct cashback to customer.
 
-	Records a payment entry on the order, marks it Paid, then auto-closes.
-	Idempotent — if already Paid/Closed, returns current state.
-	"""
-	frappe.has_permission("Buyback Order", "write", throw=True)
-	doc = frappe.get_doc("Buyback Order", order_name)
+    Records a payment entry on the order, marks it Paid, then auto-closes.
+    Idempotent — if already Paid/Closed, returns current state.
+    """
+    frappe.has_permission("Buyback Order", "write", throw=True)
+    doc = frappe.get_doc("Buyback Order", order_name)
 
-	# Idempotency: already settled
-	if doc.status in ("Paid", "Closed"):
-		return {
-			"order_name": doc.name,
-			"status": doc.status,
-			"final_price": flt(doc.final_price),
-			"payment_method": payment_method,
-		}
+    # Idempotency: already settled
+    if doc.status in ("Paid", "Closed"):
+        return {
+            "order_name": doc.name,
+            "status": doc.status,
+            "final_price": flt(doc.final_price),
+            "payment_method": payment_method,
+        }
 
-	if not doc.customer_approved:
-		# OTP verification by the customer on their registered mobile is itself a
-		# valid form of approval. Treat OTP-verified orders as approved (and
-		# self-heal the flag for legacy rows where verify_otp didn't set it).
-		if getattr(doc, "otp_verified", 0):
-			from frappe.utils import now_datetime
-			doc.customer_approved = 1
-			if not doc.customer_approved_at:
-				doc.customer_approved_at = doc.otp_verified_at or now_datetime()
-		else:
-			frappe.throw(frappe._("Customer must approve the final price before cashback settlement."))
+    if not doc.customer_approved:
+        # OTP verification by the customer on their registered mobile is itself a
+        # valid form of approval. Treat OTP-verified orders as approved (and
+        # self-heal the flag for legacy rows where verify_otp didn't set it).
+        if getattr(doc, "otp_verified", 0):
+            from frappe.utils import now_datetime
+            doc.customer_approved = 1
+            if not doc.customer_approved_at:
+                doc.customer_approved_at = doc.otp_verified_at or now_datetime()
+        else:
+            frappe.throw(frappe._("Customer must approve the final price before cashback settlement."))
 
-	from frappe.utils import now_datetime
-	doc.settlement_type = "Buyback"
+    from frappe.utils import now_datetime
+    doc.settlement_type = "Buyback"
 
-	# Avoid duplicate payments. The order may already have payment rows from
-	# another flow (customer-portal payout capture, manual entry, prior call
-	# of this same API on a doc that was reloaded). Add only the delta needed
-	# to reach final_price; if already fully paid, skip the append entirely.
-	final_price = flt(doc.final_price)
-	already_paid = sum(flt(p.amount) for p in (doc.payments or []))
-	remaining = flt(final_price - already_paid)
+    # Avoid duplicate payments. The order may already have payment rows from
+    # another flow (customer-portal payout capture, manual entry, prior call
+    # of this same API on a doc that was reloaded). Add only the delta needed
+    # to reach final_price; if already fully paid, skip the append entirely.
+    final_price = flt(doc.final_price)
+    already_paid = sum(flt(p.amount) for p in (doc.payments or []))
+    remaining = flt(final_price - already_paid)
 
-	txn_ref = f"POS-Cashback-{doc.name}"
-	already_exists = any(p.transaction_reference == txn_ref for p in (doc.payments or []))
-	if not already_exists and remaining > 0.01:
-		doc.append("payments", {
-			"payment_method": payment_method,
-			"amount": remaining,
-			"payment_date": now_datetime(),
-			"transaction_reference": txn_ref,
-		})
-	doc.flags.ignore_permissions = True
-	doc.save()
+    txn_ref = f"POS-Cashback-{doc.name}"
+    already_exists = any(p.transaction_reference == txn_ref for p in (doc.payments or []))
+    if not already_exists and remaining > 0.01:
+        doc.append("payments", {
+            "payment_method": payment_method,
+            "amount": remaining,
+            "payment_date": now_datetime(),
+            "transaction_reference": txn_ref,
+        })
+    doc.flags.ignore_permissions = True
+    doc.save()
 
-	# mark_paid validates payment_status == "Paid" first
-	doc._calculate_payment_totals()
-	if doc.payment_status == "Paid":
-		doc.mark_paid()
+    # mark_paid validates payment_status == "Paid" first
+    doc._calculate_payment_totals()
+    if doc.payment_status == "Paid":
+        doc.mark_paid()
 
-	# Auto-close after successful cashback — triggers lifecycle update
-	if doc.status == "Paid":
-		try:
-			doc.status = "Closed"
-			doc.flags.ignore_permissions = True
-			doc.save()
-		except Exception:
-			frappe.log_error(title=f"Buyback auto-close failed for {doc.name}")
+    # Auto-close after successful cashback — triggers lifecycle update
+    if doc.status == "Paid":
+        try:
+            doc.status = "Closed"
+            doc.flags.ignore_permissions = True
+            doc.save()
+        except Exception:
+            frappe.log_error(title=f"Buyback auto-close failed for {doc.name}")
 
-	try:
-		from ch_pos.audit import log_business_event
-		log_business_event(
-			event_type="Buyback Cashback",
-			ref_doctype="Buyback Order", ref_name=order_name,
-			before=str(doc.customer_name or doc.mobile_no),
-			after=f"₹{flt(doc.final_price):,.0f} via {payment_method}",
-			store=doc.store, company=doc.company,
-		)
-	except Exception:
-		pass
+    try:
+        from ch_pos.audit import log_business_event
+        log_business_event(
+            event_type="Buyback Cashback",
+            ref_doctype="Buyback Order", ref_name=order_name,
+            before=str(doc.customer_name or doc.mobile_no),
+            after=f"₹{flt(doc.final_price):,.0f} via {payment_method}",
+            store=doc.store, company=doc.company,
+        )
+    except Exception:
+        pass
 
-	return {
-		"order_name": doc.name,
-		"status": doc.status,
-		"final_price": flt(doc.final_price),
-		"payment_method": payment_method,
-	}
+    return {
+        "order_name": doc.name,
+        "status": doc.status,
+        "final_price": flt(doc.final_price),
+        "payment_method": payment_method,
+    }
 
 
 @frappe.whitelist()
 def pos_submit_assessment(assessment_name) -> dict:
-	"""Submit a Draft Buyback Assessment from POS."""
-	doc = frappe.get_doc("Buyback Assessment", assessment_name)
-	doc.check_permission("write")
+    """Submit a Draft Buyback Assessment from POS."""
+    doc = frappe.get_doc("Buyback Assessment", assessment_name)
+    doc.check_permission("write")
 
-	# If already Frappe-submitted (docstatus=1) but status stuck at Draft,
-	# just update the status field directly.
-	if doc.docstatus == 1 and doc.status == "Draft":
-		doc.db_set("status", "Submitted")
-		return {"name": doc.name, "status": "Submitted"}
+    # If already Frappe-submitted (docstatus=1) but status stuck at Draft,
+    # just update the status field directly.
+    if doc.docstatus == 1 and doc.status == "Draft":
+        doc.db_set("status", "Submitted")
+        return {"name": doc.name, "status": "Submitted"}
 
-	if doc.docstatus == 1 and doc.status != "Draft":
-		return {"name": doc.name, "status": doc.status}
+    if doc.docstatus == 1 and doc.status != "Draft":
+        return {"name": doc.name, "status": doc.status}
 
-	doc.submit_assessment()
-	return {"name": doc.name, "status": doc.status}
+    doc.submit_assessment()
+    return {"name": doc.name, "status": doc.status}
 
 
 @frappe.whitelist()
 def pos_create_inspection(assessment_name) -> dict:
-	"""Create or retrieve a Buyback Inspection from an assessment.
+    """Create or retrieve a Buyback Inspection from an assessment.
 
-	Idempotent — if inspection already exists, returns its current data.
-	Returns pre-fill data for the inline POS inspection panel.
-	"""
-	# Check if inspection already exists on the assessment
-	existing_inspection = frappe.db.get_value(
-		"Buyback Assessment", assessment_name, "buyback_inspection"
-	)
-	if existing_inspection:
-		ins = frappe.get_doc("Buyback Inspection", existing_inspection)
-	else:
-		# Auto-submit if still Draft (POS quick-assessments skip manual submit)
-		ba = frappe.get_doc("Buyback Assessment", assessment_name)
-		if ba.docstatus == 0:
-			ba.submit()
-			frappe.db.commit()
-		from buyback.api import create_inspection_from_assessment
-		# Pick a default checklist template (first active one) so the form opens pre-filled
-		default_template = frappe.db.get_value(
-			"Buyback Checklist Template", {"disabled": 0}, "name", order_by="creation asc"
-		)
-		result = create_inspection_from_assessment(assessment_name, checklist_template=default_template)
-		ins = frappe.get_doc("Buyback Inspection", result["name"])
+    Idempotent — if inspection already exists, returns its current data.
+    Returns pre-fill data for the inline POS inspection panel.
+    """
+    # Check if inspection already exists on the assessment
+    existing_inspection = frappe.db.get_value(
+        "Buyback Assessment", assessment_name, "buyback_inspection"
+    )
+    if existing_inspection:
+        ins = frappe.get_doc("Buyback Inspection", existing_inspection)
+    else:
+        # Auto-submit if still Draft (POS quick-assessments skip manual submit)
+        ba = frappe.get_doc("Buyback Assessment", assessment_name)
+        if ba.docstatus == 0:
+            ba.submit()
+            frappe.db.commit()
+        from buyback.api import create_inspection_from_assessment
+        # Pick a default checklist template (first active one) so the form opens pre-filled
+        default_template = frappe.db.get_value(
+            "Buyback Checklist Template", {"disabled": 0}, "name", order_by="creation asc"
+        )
+        result = create_inspection_from_assessment(assessment_name, checklist_template=default_template)
+        ins = frappe.get_doc("Buyback Inspection", result["name"])
 
-	# Also get grade options for the inline form selector
-	grades = frappe.get_all("Grade Master", fields=["name", "grade_name"], order_by="name asc")
+    # Also get grade options for the inline form selector
+    grades = frappe.get_all("Grade Master", fields=["name", "grade_name"], order_by="name asc")
 
-	# Build rich response data with answer options for inspector dropdowns
-	ins_responses = []
-	for ir in (ins.inspection_responses or []):
-		options = []
-		if ir.question:
-			options = frappe.get_all(
-				"Buyback Question Option",
-				filters={"parent": ir.question},
-				fields=["option_value", "option_label", "price_impact_percent"],
-				order_by="idx asc",
-			)
-		ins_responses.append({
-			"question": ir.get("question") or "",
-			"question_code": ir.get("question_code") or "",
-			"question_text": ir.get("question_text") or "",
-			"assessment_answer": ir.get("assessment_answer") or "",
-			"assessment_answer_label": ir.get("assessment_answer_label") or "",
-			"assessment_impact": flt(ir.get("assessment_impact")),
-			"inspector_answer": ir.get("inspector_answer") or "",
-			"inspector_answer_label": ir.get("inspector_answer_label") or "",
-			"inspector_impact": flt(ir.get("inspector_impact")),
-			"options": [
-				{"value": o.option_value, "label": o.option_label,
-				 "impact": flt(o.price_impact_percent)}
-				for o in options
-			],
-		})
+    # Build rich response data with answer options for inspector dropdowns
+    ins_responses = []
+    for ir in (ins.inspection_responses or []):
+        options = []
+        if ir.question:
+            options = frappe.get_all(
+                "Buyback Question Option",
+                filters={"parent": ir.question},
+                fields=["option_value", "option_label", "price_impact_percent"],
+                order_by="idx asc",
+            )
+        ins_responses.append({
+            "question": ir.get("question") or "",
+            "question_code": ir.get("question_code") or "",
+            "question_text": ir.get("question_text") or "",
+            "assessment_answer": ir.get("assessment_answer") or "",
+            "assessment_answer_label": ir.get("assessment_answer_label") or "",
+            "assessment_impact": flt(ir.get("assessment_impact")),
+            "inspector_answer": ir.get("inspector_answer") or "",
+            "inspector_answer_label": ir.get("inspector_answer_label") or "",
+            "inspector_impact": flt(ir.get("inspector_impact")),
+            "options": [
+                {"value": o.option_value, "label": o.option_label,
+                 "impact": flt(o.price_impact_percent)}
+                for o in options
+            ],
+        })
 
-	# Inspection diagnostics (automated test results)
-	ins_diagnostics = []
-	for id_ in (ins.inspection_diagnostics or []):
-		ins_diagnostics.append({
-			"test_name": id_.get("test_name") or "",
-			"test_code": id_.get("test_code") or "",
-			"assessment_result": id_.get("assessment_result") or "",
-			"assessment_depreciation": flt(id_.get("assessment_depreciation")),
-			"inspector_result": id_.get("inspector_result") or "",
-			"inspector_depreciation": flt(id_.get("inspector_depreciation")),
-		})
+    # Inspection diagnostics (automated test results)
+    ins_diagnostics = []
+    for id_ in (ins.inspection_diagnostics or []):
+        ins_diagnostics.append({
+            "test_name": id_.get("test_name") or "",
+            "test_code": id_.get("test_code") or "",
+            "assessment_result": id_.get("assessment_result") or "",
+            "assessment_depreciation": flt(id_.get("assessment_depreciation")),
+            "inspector_result": id_.get("inspector_result") or "",
+            "inspector_depreciation": flt(id_.get("inspector_depreciation")),
+        })
 
-	return {
-		"name": ins.name,
-		"status": ins.status or "",
-		"customer": ins.customer or "",
-		"customer_name": ins.customer_name or "",
-		"mobile_no": ins.mobile_no or "",
-		"store": ins.store or "",
-		"item": ins.item or "",
-		"item_name": ins.item_name or "",
-		"imei_serial": ins.imei_serial or "",
-		"quoted_price": flt(ins.quoted_price),
-		"revised_price": flt(ins.revised_price),
-		"condition_grade": ins.condition_grade or "",
-		"pre_inspection_grade": ins.pre_inspection_grade or "",
-		"post_inspection_grade": ins.post_inspection_grade or "",
-		"price_override_reason": ins.price_override_reason or "",
-		"remarks": ins.remarks or "",
-		"inspector": ins.inspector or "",
-		"responses": ins_responses,
-		"diagnostics": ins_diagnostics,
-		"grades": [{"name": g.name, "label": g.grade_name or g.name} for g in grades],
-	}
+    return {
+        "name": ins.name,
+        "status": ins.status or "",
+        "customer": ins.customer or "",
+        "customer_name": ins.customer_name or "",
+        "mobile_no": ins.mobile_no or "",
+        "store": ins.store or "",
+        "item": ins.item or "",
+        "item_name": ins.item_name or "",
+        "imei_serial": ins.imei_serial or "",
+        "quoted_price": flt(ins.quoted_price),
+        "revised_price": flt(ins.revised_price),
+        "condition_grade": ins.condition_grade or "",
+        "pre_inspection_grade": ins.pre_inspection_grade or "",
+        "post_inspection_grade": ins.post_inspection_grade or "",
+        "price_override_reason": ins.price_override_reason or "",
+        "remarks": ins.remarks or "",
+        "inspector": ins.inspector or "",
+        "responses": ins_responses,
+        "diagnostics": ins_diagnostics,
+        "grades": [{"name": g.name, "label": g.grade_name or g.name} for g in grades],
+    }
 
 
 @frappe.whitelist()
 def pos_complete_inspection(inspection_name, condition_grade, final_price,
-							price_override_reason="", remarks="") -> dict:
-	"""Complete the inline POS inspection and create a Buyback Order.
+                            price_override_reason="", remarks="") -> dict:
+    """Complete the inline POS inspection and create a Buyback Order.
 
-	Idempotent — if an order already exists for the assessment it is returned
-	without creating a second one.
-	"""
-	from buyback.api import complete_inspection
+    Idempotent — if an order already exists for the assessment it is returned
+    without creating a second one.
+    """
+    from buyback.api import complete_inspection
 
-	# Auto-start inspection if still in Draft (POS inline flow)
-	ins_status = frappe.db.get_value("Buyback Inspection", inspection_name, "status")
-	if ins_status == "Draft":
-		from buyback.api import start_inspection
-		start_inspection(inspection_name)
+    # Auto-start inspection if still in Draft (POS inline flow)
+    ins_status = frappe.db.get_value("Buyback Inspection", inspection_name, "status")
+    if ins_status == "Draft":
+        from buyback.api import start_inspection
+        start_inspection(inspection_name)
 
-	result = complete_inspection(
-		inspection_name=inspection_name,
-		condition_grade=condition_grade,
-		revised_price=flt(final_price),
-		price_override_reason=price_override_reason or None,
-	)
+    result = complete_inspection(
+        inspection_name=inspection_name,
+        condition_grade=condition_grade,
+        revised_price=flt(final_price),
+        price_override_reason=price_override_reason or None,
+    )
 
-	# Update remarks on the inspection if provided
-	if remarks:
-		frappe.db.set_value("Buyback Inspection", inspection_name, "remarks", str(remarks)[:1000])
+    # Update remarks on the inspection if provided
+    if remarks:
+        frappe.db.set_value("Buyback Inspection", inspection_name, "remarks", str(remarks)[:1000])
 
-	# Get the linked assessment
-	assessment_name = frappe.db.get_value("Buyback Inspection", inspection_name, "buyback_assessment")
+    # Get the linked assessment
+    assessment_name = frappe.db.get_value("Buyback Inspection", inspection_name, "buyback_assessment")
 
-	# Create Buyback Order (idempotent — return existing if already present)
-	existing_order = frappe.db.get_value(
-		"Buyback Order",
-		{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
-		"name",
-	)
-	if existing_order:
-		order_name = existing_order
-		order_status = frappe.db.get_value("Buyback Order", order_name, "status")
-	else:
-		ins = frappe.get_doc("Buyback Inspection", inspection_name)
-		assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+    # Create Buyback Order (idempotent — return existing if already present)
+    existing_order = frappe.db.get_value(
+        "Buyback Order",
+        {"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+        "name",
+    )
+    if existing_order:
+        order_name = existing_order
+        order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+    else:
+        ins = frappe.get_doc("Buyback Inspection", inspection_name)
+        assessment = frappe.get_doc("Buyback Assessment", assessment_name)
 
-		order = frappe.new_doc("Buyback Order")
-		order.buyback_assessment = assessment_name
-		order.buyback_inspection = inspection_name
-		order.customer = ins.customer or assessment.customer or ""
-		order.customer_name = ins.customer_name or assessment.customer_name or ""
-		order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
-		order.store = ins.store or assessment.store or frappe.defaults.get_user_default("warehouse") or ""
-		order.company = assessment.company or ins.company or frappe.defaults.get_global_default("company")
-		order.item = ins.item or assessment.item or ""
-		order.item_name = ins.item_name or assessment.item_name or ""
-		order.brand = assessment.brand or ""
-		order.imei_serial = ins.imei_serial or assessment.imei_serial or ""
-		order.warranty_status = assessment.warranty_status or ""
-		order.condition_grade = condition_grade
-		order.base_price = flt(assessment.estimated_price)
-		order.final_price = flt(final_price)
-		order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
-		if remarks:
-			order.remarks = str(remarks)[:500]
+        order = frappe.new_doc("Buyback Order")
+        order.buyback_assessment = assessment_name
+        order.buyback_inspection = inspection_name
+        order.customer = ins.customer or assessment.customer or ""
+        order.customer_name = ins.customer_name or assessment.customer_name or ""
+        order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
+        order.store = ins.store or assessment.store or frappe.defaults.get_user_default("warehouse") or ""
+        order.company = assessment.company or ins.company or frappe.defaults.get_global_default("company")
+        order.item = ins.item or assessment.item or ""
+        order.item_name = ins.item_name or assessment.item_name or ""
+        order.brand = assessment.brand or ""
+        order.imei_serial = ins.imei_serial or assessment.imei_serial or ""
+        order.warranty_status = assessment.warranty_status or ""
+        order.condition_grade = condition_grade
+        order.base_price = flt(assessment.estimated_price)
+        order.final_price = flt(final_price)
+        order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
+        if remarks:
+            order.remarks = str(remarks)[:500]
 
-		order.flags.ignore_permissions = True
-		try:
-			order.insert()
-		except frappe.UniqueValidationError:
-			# Race condition: another request created an order concurrently
-			existing_order = frappe.db.get_value(
-				"Buyback Order",
-				{"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
-				"name",
-			)
-			if existing_order:
-				order_name = existing_order
-				order_status = frappe.db.get_value("Buyback Order", order_name, "status")
-				return {
-					"inspection_name": inspection_name,
-					"status": result.get("status"),
-					"order_name": order_name,
-					"order_status": order_status,
-					"assessment_name": assessment_name,
-				}
-			raise
-		order.submit()
+        order.flags.ignore_permissions = True
+        try:
+            order.insert()
+        except frappe.UniqueValidationError:
+            # Race condition: another request created an order concurrently
+            existing_order = frappe.db.get_value(
+                "Buyback Order",
+                {"buyback_assessment": assessment_name, "docstatus": ["!=", 2]},
+                "name",
+            )
+            if existing_order:
+                order_name = existing_order
+                order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+                return {
+                    "inspection_name": inspection_name,
+                    "status": result.get("status"),
+                    "order_name": order_name,
+                    "order_status": order_status,
+                    "assessment_name": assessment_name,
+                }
+            raise
+        order.submit()
 
-		order_name = order.name
-		order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+        order_name = order.name
+        order_status = frappe.db.get_value("Buyback Order", order_name, "status")
 
-	return {
-		"inspection_name": inspection_name,
-		"status": result.get("status"),
-		"order_name": order_name,
-		"order_status": order_status,
-		"assessment_name": assessment_name,
-	}
+    return {
+        "inspection_name": inspection_name,
+        "status": result.get("status"),
+        "order_name": order_name,
+        "order_status": order_status,
+        "assessment_name": assessment_name,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -8688,212 +8688,212 @@ def _get_oldest_fifo_serial(item_code, warehouse):
 
 
 def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_serial, cashier):
-	"""Create Notification Log entries for RSM/ASM/Stock Managers on FIFO violation."""
-	subject = frappe._("FIFO Violation: Serial {0} selected out of order").format(selected_serial)
-	message = frappe._(
-		"FIFO violation at <b>{warehouse}</b>: cashier <b>{cashier}</b> is attempting to sell "
-		"serial <b>{selected}</b> for item <b>{item}</b>, but the oldest available serial is "
-		"<b>{oldest}</b>. Please investigate."
-	).format(
-		warehouse=warehouse,
-		cashier=cashier,
-		selected=selected_serial,
-		item=item_code,
-		oldest=oldest_serial,
-	)
+    """Create Notification Log entries for RSM/ASM/Stock Managers on FIFO violation."""
+    subject = frappe._("FIFO Violation: Serial {0} selected out of order").format(selected_serial)
+    message = frappe._(
+        "FIFO violation at <b>{warehouse}</b>: cashier <b>{cashier}</b> is attempting to sell "
+        "serial <b>{selected}</b> for item <b>{item}</b>, but the oldest available serial is "
+        "<b>{oldest}</b>. Please investigate."
+    ).format(
+        warehouse=warehouse,
+        cashier=cashier,
+        selected=selected_serial,
+        item=item_code,
+        oldest=oldest_serial,
+    )
 
-	# Notify users with RSM / ASM / Stock Manager / System Manager roles
-	alert_roles = ["RSM", "ASM", "Stock Manager", "System Manager", "Purchase Manager"]
-	notified = set()
+    # Notify users with RSM / ASM / Stock Manager / System Manager roles
+    alert_roles = ["RSM", "ASM", "Stock Manager", "System Manager", "Purchase Manager"]
+    notified = set()
 
-	for role in alert_roles:
-		users = frappe.db.sql(
-			"SELECT DISTINCT parent FROM `tabHas Role` WHERE role = %s AND parenttype = 'User'",
-			role, as_dict=True
-		)
-		for u in users:
-			uid = u.parent
-			if uid in notified or uid == "Administrator":
-				continue
-			notified.add(uid)
-			try:
-				frappe.get_doc({
-					"doctype": "Notification Log",
-					"subject": subject,
-					"email_content": message,
-					"type": "Alert",
-					"document_type": "Sales Invoice",
-					"document_name": "",
-					"from_user": frappe.session.user,
-					"for_user": uid,
-					"read": 0,
-				}).insert(ignore_permissions=True)
-			except Exception:
-				pass
+    for role in alert_roles:
+        users = frappe.db.sql(
+            "SELECT DISTINCT parent FROM `tabHas Role` WHERE role = %s AND parenttype = 'User'",
+            role, as_dict=True
+        )
+        for u in users:
+            uid = u.parent
+            if uid in notified or uid == "Administrator":
+                continue
+            notified.add(uid)
+            try:
+                frappe.get_doc({
+                    "doctype": "Notification Log",
+                    "subject": subject,
+                    "email_content": message,
+                    "type": "Alert",
+                    "document_type": "Sales Invoice",
+                    "document_name": "",
+                    "from_user": frappe.session.user,
+                    "for_user": uid,
+                    "read": 0,
+                }).insert(ignore_permissions=True)
+            except Exception:
+                pass
 
-	frappe.log_error(
-		message=f"FIFO Violation — warehouse={warehouse} cashier={cashier} "
-		        f"selected={selected_serial} oldest={oldest_serial} item={item_code}",
-		title="POS FIFO Violation",
-	)
+    frappe.log_error(
+        message=f"FIFO Violation — warehouse={warehouse} cashier={cashier} "
+                f"selected={selected_serial} oldest={oldest_serial} item={item_code}",
+        title="POS FIFO Violation",
+    )
 
 
 # ── Bundle / Free Items ──────────────────────────────────────────
 @frappe.whitelist()
 def get_bundle_items(item_code, warehouse=None, channel="POS") -> list:
-	"""Return free/bundled accessory items for a parent item.
+    """Return free/bundled accessory items for a parent item.
 
-	Looks up Product Bundle for ``item_code``.  Returns child items
-	(excluding the parent itself) with pricing and stock info so the
-	POS frontend can show a "Select free items" popup.
-	"""
-	if not frappe.db.exists("Product Bundle", {"new_item_code": item_code, "disabled": 0}):
-		return []
+    Looks up Product Bundle for ``item_code``.  Returns child items
+    (excluding the parent itself) with pricing and stock info so the
+    POS frontend can show a "Select free items" popup.
+    """
+    if not frappe.db.exists("Product Bundle", {"new_item_code": item_code, "disabled": 0}):
+        return []
 
-	bundle = frappe.get_doc("Product Bundle", {"new_item_code": item_code, "disabled": 0})
-	result = []
-	for row in bundle.items:
-		if row.item_code == item_code:
-			continue  # skip the parent item itself
+    bundle = frappe.get_doc("Product Bundle", {"new_item_code": item_code, "disabled": 0})
+    result = []
+    for row in bundle.items:
+        if row.item_code == item_code:
+            continue  # skip the parent item itself
 
-		item_fields = ["item_name", "image", "item_group", "stock_uom", "has_serial_no"]
-		if frappe.db.has_column("Item", "ch_item_type"):
-			item_fields.append("ch_item_type")
-		if frappe.db.has_column("Item", "ch_allow_zero_rate"):
-			item_fields.append("ch_allow_zero_rate")
+        item_fields = ["item_name", "image", "item_group", "stock_uom", "has_serial_no"]
+        if frappe.db.has_column("Item", "ch_item_type"):
+            item_fields.append("ch_item_type")
+        if frappe.db.has_column("Item", "ch_allow_zero_rate"):
+            item_fields.append("ch_allow_zero_rate")
 
-		item = frappe.db.get_value(
-			"Item", row.item_code,
-			item_fields,
-			as_dict=True,
-		)
-		if not item:
-			continue
+        item = frappe.db.get_value(
+            "Item", row.item_code,
+            item_fields,
+            as_dict=True,
+        )
+        if not item:
+            continue
 
-		# Pricing
-		ch_price = frappe.db.get_value(
-			"CH Item Price",
-			{"item_code": row.item_code, "channel": channel, "status": "Active"},
-			["selling_price", "mrp"],
-			as_dict=True,
-		)
-		selling_price = flt(ch_price.selling_price) if ch_price else 0
-		mrp = flt(ch_price.mrp) if ch_price else 0
+        # Pricing
+        ch_price = frappe.db.get_value(
+            "CH Item Price",
+            {"item_code": row.item_code, "channel": channel, "status": "Active"},
+            ["selling_price", "mrp"],
+            as_dict=True,
+        )
+        selling_price = flt(ch_price.selling_price) if ch_price else 0
+        mrp = flt(ch_price.mrp) if ch_price else 0
 
-		# Stock
-		stock_qty = 0
-		if warehouse:
-			stock_qty = flt(frappe.db.get_value(
-				"Bin", {"item_code": row.item_code, "warehouse": warehouse}, "actual_qty"
-			))
+        # Stock
+        stock_qty = 0
+        if warehouse:
+            stock_qty = flt(frappe.db.get_value(
+                "Bin", {"item_code": row.item_code, "warehouse": warehouse}, "actual_qty"
+            ))
 
-		result.append({
-			"item_code": row.item_code,
-			"item_name": item.item_name,
-			"image": item.image,
-			"item_group": item.item_group,
-			"stock_uom": item.stock_uom,
-			"has_serial_no": cint(item.has_serial_no),
-			"ch_item_type": (item.get("ch_item_type") or "") if item else "",
-			"ch_allow_zero_rate": cint(item.get("ch_allow_zero_rate")) if item else 0,
-			"selling_price": selling_price,
-			"mrp": mrp,
-			"stock_qty": stock_qty,
-			"bundle_qty": flt(row.qty),
-			"is_free_bundle_item": 1,
-		})
+        result.append({
+            "item_code": row.item_code,
+            "item_name": item.item_name,
+            "image": item.image,
+            "item_group": item.item_group,
+            "stock_uom": item.stock_uom,
+            "has_serial_no": cint(item.has_serial_no),
+            "ch_item_type": (item.get("ch_item_type") or "") if item else "",
+            "ch_allow_zero_rate": cint(item.get("ch_allow_zero_rate")) if item else 0,
+            "selling_price": selling_price,
+            "mrp": mrp,
+            "stock_qty": stock_qty,
+            "bundle_qty": flt(row.qty),
+            "is_free_bundle_item": 1,
+        })
 
-	return result
+    return result
 
 
 def _post_free_sale_write_off(inv) -> None:
-	"""Reclassify COGS of free-sale items as Promotional Expense.
+    """Reclassify COGS of free-sale items as Promotional Expense.
 
-	ERPNext already debits Cost of Goods Sold when the SI with update_stock=1
-	is submitted.  This JE moves that cost into a distinct Promotional Expense
-	account so Finance can see the true P&L impact of free promotions.
+    ERPNext already debits Cost of Goods Sold when the SI with update_stock=1
+    is submitted.  This JE moves that cost into a distinct Promotional Expense
+    account so Finance can see the true P&L impact of free promotions.
 
-	Silently skips (logs warning) if accounts are not configured.
-	"""
-	settings = frappe.get_cached_doc("CH POS Control Settings")
-	promo_account = settings.get("promotional_expense_account")
-	if not promo_account:
-		frappe.log_error(
-			f"Free sale write-off GL skipped for {inv.name}: "
-			"'Promotional Expense Account' not set in CH POS Control Settings → GL Accounts.",
-			"Free Sale GL"
-		)
-		return
+    Silently skips (logs warning) if accounts are not configured.
+    """
+    settings = frappe.get_cached_doc("CH POS Control Settings")
+    promo_account = settings.get("promotional_expense_account")
+    if not promo_account:
+        frappe.log_error(
+            f"Free sale write-off GL skipped for {inv.name}: "
+            "'Promotional Expense Account' not set in CH POS Control Settings → GL Accounts.",
+            "Free Sale GL"
+        )
+        return
 
-	company = inv.company
-	cost_center = frappe.db.get_value("Company", company, "cost_center")
-	total_cost = flt(0)
-	je_accounts = []
+    company = inv.company
+    cost_center = frappe.db.get_value("Company", company, "cost_center")
+    total_cost = flt(0)
+    je_accounts = []
 
-	for item in inv.items:
-		if flt(item.qty) <= 0:
-			continue
-		# Get the valuation rate from the Bin (current cost) as approximation
-		# Stock Ledger Entry incoming_rate would be more precise but requires SLE query
-		val_rate = flt(frappe.db.get_value(
-			"Bin",
-			{"item_code": item.item_code, "warehouse": item.warehouse or inv.set_warehouse},
-			"valuation_rate",
-		) or 0)
-		if val_rate <= 0:
-			continue
+    for item in inv.items:
+        if flt(item.qty) <= 0:
+            continue
+        # Get the valuation rate from the Bin (current cost) as approximation
+        # Stock Ledger Entry incoming_rate would be more precise but requires SLE query
+        val_rate = flt(frappe.db.get_value(
+            "Bin",
+            {"item_code": item.item_code, "warehouse": item.warehouse or inv.set_warehouse},
+            "valuation_rate",
+        ) or 0)
+        if val_rate <= 0:
+            continue
 
-		item_cost = flt(val_rate * flt(item.qty), 2)
-		total_cost += item_cost
+        item_cost = flt(val_rate * flt(item.qty), 2)
+        total_cost += item_cost
 
-		# Credit: expense_account on item (the COGS account ERPNext used)
-		cogs_account = item.expense_account or frappe.db.get_value(
-			"Item", item.item_code, "expense_account"
-		) or frappe.db.get_value("Company", company, "default_expense_account")
+        # Credit: expense_account on item (the COGS account ERPNext used)
+        cogs_account = item.expense_account or frappe.db.get_value(
+            "Item", item.item_code, "expense_account"
+        ) or frappe.db.get_value("Company", company, "default_expense_account")
 
-		if cogs_account:
-			je_accounts.append({
-				"account": cogs_account,
-				"credit_in_account_currency": item_cost,
-				"cost_center": cost_center,
-				"reference_type": "Sales Invoice",
-				"reference_name": inv.name,
-			})
+        if cogs_account:
+            je_accounts.append({
+                "account": cogs_account,
+                "credit_in_account_currency": item_cost,
+                "cost_center": cost_center,
+                "reference_type": "Sales Invoice",
+                "reference_name": inv.name,
+            })
 
-	if total_cost <= 0 or not je_accounts:
-		return
+    if total_cost <= 0 or not je_accounts:
+        return
 
-	# Debit side: single Promotional Expense line for the total
-	je_accounts.insert(0, {
-		"account": promo_account,
-		"debit_in_account_currency": total_cost,
-		"cost_center": cost_center,
-		"reference_type": "Sales Invoice",
-		"reference_name": inv.name,
-	})
+    # Debit side: single Promotional Expense line for the total
+    je_accounts.insert(0, {
+        "account": promo_account,
+        "debit_in_account_currency": total_cost,
+        "cost_center": cost_center,
+        "reference_type": "Sales Invoice",
+        "reference_name": inv.name,
+    })
 
-	try:
-		je = frappe.new_doc("Journal Entry")
-		je.update({
-			"voucher_type": "Journal Entry",
-			"company": company,
-			"posting_date": inv.posting_date or frappe.utils.today(),
-			"cheque_no": inv.name,
-			"cheque_date": inv.posting_date or frappe.utils.today(),
-			"remark": frappe._("Free sale promotional write-off — {0}").format(inv.name),
-			"accounts": je_accounts,
-		})
-		je.flags.ignore_permissions = True
-		je.insert(ignore_permissions=True)
-		je.submit()
-		frappe.db.set_value(
-			"Sales Invoice", inv.name,
-			"custom_promo_write_off_je", je.name,
-			update_modified=False,
-		)
-	except Exception:
-		frappe.log_error(frappe.get_traceback(),
-		                 f"Free sale write-off GL failed for {inv.name}")
+    try:
+        je = frappe.new_doc("Journal Entry")
+        je.update({
+            "voucher_type": "Journal Entry",
+            "company": company,
+            "posting_date": inv.posting_date or frappe.utils.today(),
+            "cheque_no": inv.name,
+            "cheque_date": inv.posting_date or frappe.utils.today(),
+            "remark": frappe._("Free sale promotional write-off — {0}").format(inv.name),
+            "accounts": je_accounts,
+        })
+        je.flags.ignore_permissions = True
+        je.insert(ignore_permissions=True)
+        je.submit()
+        frappe.db.set_value(
+            "Sales Invoice", inv.name,
+            "custom_promo_write_off_je", je.name,
+            update_modified=False,
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(),
+                         f"Free sale write-off GL failed for {inv.name}")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -8903,245 +8903,245 @@ def _post_free_sale_write_off(inv) -> None:
 @frappe.whitelist()
 def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
                             overdue_only=0, limit=100):
-	"""Return submitted, pickup-pending Pre-Bookings (Sales Orders) for this POS profile.
+    """Return submitted, pickup-pending Pre-Bookings (Sales Orders) for this POS profile.
 
-	A row is considered pickup-pending when:
-	  - docstatus = 1 (submitted)
-	  - per_billed < 100 (not yet fully invoiced)
-	  - status NOT IN ('Closed', 'Cancelled', 'Completed')
-	  - company matches the POS Profile's company
-	"""
-	frappe.has_permission("Sales Order", "read", throw=True)
+    A row is considered pickup-pending when:
+      - docstatus = 1 (submitted)
+      - per_billed < 100 (not yet fully invoiced)
+      - status NOT IN ('Closed', 'Cancelled', 'Completed')
+      - company matches the POS Profile's company
+    """
+    frappe.has_permission("Sales Order", "read", throw=True)
 
-	if not pos_profile:
-		frappe.throw(_("POS Profile is required"))
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required"))
 
-	profile = frappe.get_cached_doc("POS Profile", pos_profile)
-	company = profile.company
-	overdue_only = cint(overdue_only)
-	try:
-		days_ahead = int(days_ahead)
-	except (TypeError, ValueError):
-		days_ahead = 30
-	limit = min(max(cint(limit) or 100, 1), 500)
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    company = profile.company
+    overdue_only = cint(overdue_only)
+    try:
+        days_ahead = int(days_ahead)
+    except (TypeError, ValueError):
+        days_ahead = 30
+    limit = min(max(cint(limit) or 100, 1), 500)
 
-	conditions = [
-		"so.docstatus = 1",
-		"so.company = %(company)s",
-		"so.per_billed < 100",
-		"so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')",
-	]
-	params = {"company": company}
+    conditions = [
+        "so.docstatus = 1",
+        "so.company = %(company)s",
+        "so.per_billed < 100",
+        "so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')",
+    ]
+    params = {"company": company}
 
-	if overdue_only:
-		conditions.append("so.delivery_date <= %(today)s")
-		params["today"] = nowdate()
-	elif days_ahead:
-		conditions.append("so.delivery_date <= %(horizon)s")
-		params["horizon"] = frappe.utils.add_days(nowdate(), days_ahead)
+    if overdue_only:
+        conditions.append("so.delivery_date <= %(today)s")
+        params["today"] = nowdate()
+    elif days_ahead:
+        conditions.append("so.delivery_date <= %(horizon)s")
+        params["horizon"] = frappe.utils.add_days(nowdate(), days_ahead)
 
-	if search:
-		conditions.append(
-			"(so.name LIKE %(q)s OR so.customer LIKE %(q)s "
-			"OR so.customer_name LIKE %(q)s OR so.tracking_number LIKE %(q)s)"
-		)
-		params["q"] = f"%{search}%"
+    if search:
+        conditions.append(
+            "(so.name LIKE %(q)s OR so.customer LIKE %(q)s "
+            "OR so.customer_name LIKE %(q)s OR so.tracking_number LIKE %(q)s)"
+        )
+        params["q"] = f"%{search}%"
 
-	rows = frappe.db.sql(
-		f"""
-		SELECT so.name, so.customer, so.customer_name, so.transaction_date,
-		       so.delivery_date, so.grand_total, so.advance_paid, so.currency,
-		       so.status, so.per_billed, so.per_delivered,
-		       COALESCE(so.reserve_stock, 0) AS reserve_stock,
-		       so.tracking_number, so.contact_mobile, so.contact_email
-		  FROM `tabSales Order` so
-		 WHERE {' AND '.join(conditions)}
-		 ORDER BY so.delivery_date ASC, so.transaction_date ASC
-		 LIMIT {limit}
-		""",
-		params, as_dict=True,
-	)
-	if not rows:
-		return []
+    rows = frappe.db.sql(
+        f"""
+        SELECT so.name, so.customer, so.customer_name, so.transaction_date,
+               so.delivery_date, so.grand_total, so.advance_paid, so.currency,
+               so.status, so.per_billed, so.per_delivered,
+               COALESCE(so.reserve_stock, 0) AS reserve_stock,
+               so.tracking_number, so.contact_mobile, so.contact_email
+          FROM `tabSales Order` so
+         WHERE {' AND '.join(conditions)}
+         ORDER BY so.delivery_date ASC, so.transaction_date ASC
+         LIMIT {limit}
+        """,
+        params, as_dict=True,
+    )
+    if not rows:
+        return []
 
-	so_names = [r.name for r in rows]
-	items = frappe.db.sql(
-		"""SELECT parent, item_code, item_name, qty, delivered_qty, billed_amt,
-		          rate, amount, warehouse, delivery_date
-		     FROM `tabSales Order Item`
-		    WHERE parent IN %(p)s
-		    ORDER BY idx""",
-		{"p": tuple(so_names)}, as_dict=True,
-	)
-	items_by_parent = {}
-	for it in items:
-		items_by_parent.setdefault(it.parent, []).append(it)
+    so_names = [r.name for r in rows]
+    items = frappe.db.sql(
+        """SELECT parent, item_code, item_name, qty, delivered_qty, billed_amt,
+                  rate, amount, warehouse, delivery_date
+             FROM `tabSales Order Item`
+            WHERE parent IN %(p)s
+            ORDER BY idx""",
+        {"p": tuple(so_names)}, as_dict=True,
+    )
+    items_by_parent = {}
+    for it in items:
+        items_by_parent.setdefault(it.parent, []).append(it)
 
-	today = getdate(nowdate())
-	out = []
-	for r in rows:
-		bal = flt(r.grand_total) - flt(r.advance_paid)
-		dd = getdate(r.delivery_date) if r.delivery_date else None
-		days = (dd - today).days if dd else None
-		out.append({
-			"name": r.name,
-			"customer": r.customer,
-			"customer_name": r.customer_name or r.customer,
-			"transaction_date": str(r.transaction_date) if r.transaction_date else None,
-			"delivery_date": str(r.delivery_date) if r.delivery_date else None,
-			"days_to_delivery": days,
-			"is_overdue": bool(dd and dd < today),
-			"grand_total": flt(r.grand_total),
-			"advance_paid": flt(r.advance_paid),
-			"balance_due": bal if bal > 0 else 0,
-			"currency": r.currency,
-			"status": r.status,
-			"per_billed": flt(r.per_billed),
-			"per_delivered": flt(r.per_delivered),
-			"reserve_stock": cint(r.reserve_stock),
-			"tracking_number": r.tracking_number,
-			"contact_mobile": r.contact_mobile,
-			"contact_email": r.contact_email,
-			"items": items_by_parent.get(r.name, []),
-		})
-	return out
+    today = getdate(nowdate())
+    out = []
+    for r in rows:
+        bal = flt(r.grand_total) - flt(r.advance_paid)
+        dd = getdate(r.delivery_date) if r.delivery_date else None
+        days = (dd - today).days if dd else None
+        out.append({
+            "name": r.name,
+            "customer": r.customer,
+            "customer_name": r.customer_name or r.customer,
+            "transaction_date": str(r.transaction_date) if r.transaction_date else None,
+            "delivery_date": str(r.delivery_date) if r.delivery_date else None,
+            "days_to_delivery": days,
+            "is_overdue": bool(dd and dd < today),
+            "grand_total": flt(r.grand_total),
+            "advance_paid": flt(r.advance_paid),
+            "balance_due": bal if bal > 0 else 0,
+            "currency": r.currency,
+            "status": r.status,
+            "per_billed": flt(r.per_billed),
+            "per_delivered": flt(r.per_delivered),
+            "reserve_stock": cint(r.reserve_stock),
+            "tracking_number": r.tracking_number,
+            "contact_mobile": r.contact_mobile,
+            "contact_email": r.contact_email,
+            "items": items_by_parent.get(r.name, []),
+        })
+    return out
 
 
 @frappe.whitelist()
 def convert_prebooking_to_invoice(pos_profile, sales_order,
                                   mode_of_payment=None, paid_amount=None,
                                   apply_advance=1, client_request_id=None):
-	"""Create & submit a POS Sales Invoice from a pre-booking (Sales Order).
+    """Create & submit a POS Sales Invoice from a pre-booking (Sales Order).
 
-	Uses ERPNext's standard `make_sales_invoice` mapper, then flips it to a
-	POS invoice (is_pos=1) tied to the supplied POS Profile. Optionally takes
-	a single payment at pickup time. Advance already collected on the SO is
-	pulled in automatically via the SO link.
-	"""
-	frappe.has_permission("Sales Invoice", "create", throw=True)
+    Uses ERPNext's standard `make_sales_invoice` mapper, then flips it to a
+    POS invoice (is_pos=1) tied to the supplied POS Profile. Optionally takes
+    a single payment at pickup time. Advance already collected on the SO is
+    pulled in automatically via the SO link.
+    """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
 
-	if not pos_profile:
-		frappe.throw(_("POS Profile is required"))
-	if not sales_order:
-		frappe.throw(_("Sales Order is required"))
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required"))
+    if not sales_order:
+        frappe.throw(_("Sales Order is required"))
 
-	# Session guard
-	from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
-	active = get_active_session(pos_profile)
-	if not active:
-		frappe.throw(_("No active POS session. Open a session before billing."))
+    # Session guard
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+    active = get_active_session(pos_profile)
+    if not active:
+        frappe.throw(_("No active POS session. Open a session before billing."))
 
-	# Duplicate-submit guard (same pattern as create_pos_invoice)
-	if client_request_id:
-		existing = frappe.db.sql(
-			"""SELECT name FROM `tabSales Invoice`
-				WHERE custom_client_request_id = %(crid)s
-				  AND docstatus != 2
-				  AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-				LIMIT 1""",
-			{"crid": str(client_request_id)[:140]},
-			as_dict=True,
-		)
-		if existing:
-			inv = frappe.get_doc("Sales Invoice", existing[0].name)
-			return _pickup_invoice_response(inv, status="duplicate_prevented")
+    # Duplicate-submit guard (same pattern as create_pos_invoice)
+    if client_request_id:
+        existing = frappe.db.sql(
+            """SELECT name FROM `tabSales Invoice`
+                WHERE custom_client_request_id = %(crid)s
+                  AND docstatus != 2
+                  AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+                LIMIT 1""",
+            {"crid": str(client_request_id)[:140]},
+            as_dict=True,
+        )
+        if existing:
+            inv = frappe.get_doc("Sales Invoice", existing[0].name)
+            return _pickup_invoice_response(inv, status="duplicate_prevented")
 
-	profile = frappe.get_cached_doc("POS Profile", pos_profile)
-	so = frappe.get_doc("Sales Order", sales_order)
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    so = frappe.get_doc("Sales Order", sales_order)
 
-	if so.docstatus != 1:
-		frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
-	if so.company != profile.company:
-		frappe.throw(_("Sales Order company ({0}) does not match POS Profile company ({1})").format(
-			so.company, profile.company))
-	if flt(so.per_billed) >= 100:
-		frappe.throw(_("Sales Order {0} is already fully billed").format(sales_order))
+    if so.docstatus != 1:
+        frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
+    if so.company != profile.company:
+        frappe.throw(_("Sales Order company ({0}) does not match POS Profile company ({1})").format(
+            so.company, profile.company))
+    if flt(so.per_billed) >= 100:
+        frappe.throw(_("Sales Order {0} is already fully billed").format(sales_order))
 
-	# Reuse ERPNext's standard mapper — preserves taxes, advances, item mapping
-	from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
-	inv = make_sales_invoice(source_name=sales_order, target_doc=None, ignore_permissions=False)
+    # Reuse ERPNext's standard mapper — preserves taxes, advances, item mapping
+    from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+    inv = make_sales_invoice(source_name=sales_order, target_doc=None, ignore_permissions=False)
 
-	# Strip rows that are already fully billed (defensive)
-	inv.items = [d for d in inv.items if flt(d.qty) > 0]
-	if not inv.items:
-		frappe.throw(_("Nothing left to bill on Sales Order {0}").format(sales_order))
+    # Strip rows that are already fully billed (defensive)
+    inv.items = [d for d in inv.items if flt(d.qty) > 0]
+    if not inv.items:
+        frappe.throw(_("Nothing left to bill on Sales Order {0}").format(sales_order))
 
-	# ── POS flip ──────────────────────────────────────────────
-	inv.is_pos = 1
-	inv.update_stock = 1
-	inv.pos_profile = pos_profile
-	inv.custom_ch_pos_session = active.get("name")
-	inv.posting_date = str(active.get("business_date")) if active.get("business_date") else nowdate()
-	if profile.warehouse:
-		inv.set_warehouse = profile.warehouse
-		for it in inv.items:
-			if not it.warehouse:
-				it.warehouse = profile.warehouse
+    # ── POS flip ──────────────────────────────────────────────
+    inv.is_pos = 1
+    inv.update_stock = 1
+    inv.pos_profile = pos_profile
+    inv.custom_ch_pos_session = active.get("name")
+    inv.posting_date = str(active.get("business_date")) if active.get("business_date") else nowdate()
+    if profile.warehouse:
+        inv.set_warehouse = profile.warehouse
+        for it in inv.items:
+            if not it.warehouse:
+                it.warehouse = profile.warehouse
 
-	# Tax Category — fall back to In-State if customer doesn't have one
-	cust_tax_cat = frappe.db.get_value("Customer", inv.customer, "tax_category") if inv.customer else None
-	if not inv.get("tax_category"):
-		inv.tax_category = cust_tax_cat or "In-State"
+    # Tax Category — fall back to In-State if customer doesn't have one
+    cust_tax_cat = frappe.db.get_value("Customer", inv.customer, "tax_category") if inv.customer else None
+    if not inv.get("tax_category"):
+        inv.tax_category = cust_tax_cat or "In-State"
 
-	if client_request_id and inv.meta.has_field("custom_client_request_id"):
-		inv.custom_client_request_id = str(client_request_id)[:140]
+    if client_request_id and inv.meta.has_field("custom_client_request_id"):
+        inv.custom_client_request_id = str(client_request_id)[:140]
 
-	# Apply advance already collected on the SO (idempotent — set_advances() handles this)
-	if cint(apply_advance):
-		try:
-			inv.set_advances()
-		except Exception:
-			frappe.log_error(frappe.get_traceback(),
-			                 f"Pickup: set_advances failed for SO {sales_order}")
+    # Apply advance already collected on the SO (idempotent — set_advances() handles this)
+    if cint(apply_advance):
+        try:
+            inv.set_advances()
+        except Exception:
+            frappe.log_error(frappe.get_traceback(),
+                             f"Pickup: set_advances failed for SO {sales_order}")
 
-	# Build payments table from POS Profile defaults
-	inv.set("payments", [])
-	for row in (profile.payments or []):
-		inv.append("payments", {
-			"mode_of_payment": row.mode_of_payment,
-			"account": row.account,
-			"type": row.type,
-			"default": row.default,
-			"amount": 0,
-		})
+    # Build payments table from POS Profile defaults
+    inv.set("payments", [])
+    for row in (profile.payments or []):
+        inv.append("payments", {
+            "mode_of_payment": row.mode_of_payment,
+            "account": row.account,
+            "type": row.type,
+            "default": row.default,
+            "amount": 0,
+        })
 
-	# Single payment at pickup (optional — staff may choose to collect later)
-	if mode_of_payment and flt(paid_amount or 0) > 0:
-		matched = next((p for p in inv.payments if p.mode_of_payment == mode_of_payment), None)
-		if matched:
-			matched.amount = flt(paid_amount)
-		else:
-			inv.append("payments", {
-				"mode_of_payment": mode_of_payment,
-				"amount": flt(paid_amount),
-			})
+    # Single payment at pickup (optional — staff may choose to collect later)
+    if mode_of_payment and flt(paid_amount or 0) > 0:
+        matched = next((p for p in inv.payments if p.mode_of_payment == mode_of_payment), None)
+        if matched:
+            matched.amount = flt(paid_amount)
+        else:
+            inv.append("payments", {
+                "mode_of_payment": mode_of_payment,
+                "amount": flt(paid_amount),
+            })
 
-	inv.flags.ignore_permissions = False
-	inv.insert()
-	inv.submit()
+    inv.flags.ignore_permissions = False
+    inv.insert()
+    inv.submit()
 
-	return _pickup_invoice_response(inv, status="ok")
+    return _pickup_invoice_response(inv, status="ok")
 
 
 def _pickup_invoice_response(inv, status="ok"):
-	from urllib.parse import quote
-	print_format = None
-	try:
-		profile = frappe.get_cached_doc("POS Profile", inv.pos_profile) if inv.pos_profile else None
-		print_format = (profile.print_format if profile else None) or "Standard"
-	except Exception:
-		print_format = "Standard"
-	return {
-		"status": status,
-		"name": inv.name,
-		"docstatus": inv.docstatus,
-		"grand_total": flt(inv.grand_total),
-		"outstanding_amount": flt(inv.outstanding_amount),
-		"paid_amount": flt(inv.paid_amount),
-		"customer": inv.customer,
-		"customer_name": inv.customer_name,
-		"print_format": print_format,
-		"print_url": "/printview?doctype=Sales%20Invoice"
-		             f"&name={quote(inv.name)}"
-		             f"&format={quote(print_format)}&no_letterhead=0",
-	}
+    from urllib.parse import quote
+    print_format = None
+    try:
+        profile = frappe.get_cached_doc("POS Profile", inv.pos_profile) if inv.pos_profile else None
+        print_format = (profile.print_format if profile else None) or "Standard"
+    except Exception:
+        print_format = "Standard"
+    return {
+        "status": status,
+        "name": inv.name,
+        "docstatus": inv.docstatus,
+        "grand_total": flt(inv.grand_total),
+        "outstanding_amount": flt(inv.outstanding_amount),
+        "paid_amount": flt(inv.paid_amount),
+        "customer": inv.customer,
+        "customer_name": inv.customer_name,
+        "print_format": print_format,
+        "print_url": "/printview?doctype=Sales%20Invoice"
+                     f"&name={quote(inv.name)}"
+                     f"&format={quote(print_format)}&no_letterhead=0",
+    }
