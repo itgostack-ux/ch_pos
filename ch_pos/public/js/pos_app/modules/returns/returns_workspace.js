@@ -268,6 +268,24 @@ export class ReturnsWorkspace {
 						description: __("Optional — link the new sale that replaces this return so finance can net the credit."),
 						get_query: () => ({ filters: { is_return: 0, docstatus: 1 } }),
 					});
+					fields.push({ fieldtype: "Section Break", label: __("Phase 4 Closed Loop") });
+					fields.push({
+						fieldname: "refund_method",
+						fieldtype: "Select",
+						label: __("Refund Method"),
+						options: "Original Tender\nStore Credit\nExchange Voucher",
+						default: "Original Tender",
+						description: __("Original Tender posts a regular credit note. Store Credit creates a wallet credit. Exchange Voucher issues a redeemable return-credit voucher."),
+					});
+					fields.push({ fieldtype: "Column Break" });
+					fields.push({
+						fieldname: "physical_condition",
+						fieldtype: "Select",
+						label: __("Physical Condition"),
+						options: "Resalable\nDamaged\nRefurbish Required\nDead on Arrival",
+						default: "Resalable",
+						description: __("Damaged / Refurbish Required / DOA returns auto-create Refurbishment Order records after the credit note posts."),
+					});
 				}
 
 				const dlg = new frappe.ui.Dialog({
@@ -371,6 +389,8 @@ export class ReturnsWorkspace {
 										manager_pin: values.manager_pin,
 										credit_only: values.credit_only ? 1 : 0,
 										replacement_invoice: values.replacement_invoice || "",
+										refund_method: values.refund_method || "Original Tender",
+										physical_condition: values.physical_condition || "Resalable",
 									});
 								} else {
 									this._process_product_exchange(invoice_name, return_items, total_credit);
@@ -390,6 +410,8 @@ export class ReturnsWorkspace {
 								manager_pin: values.manager_pin,
 								credit_only: values.credit_only ? 1 : 0,
 								replacement_invoice: values.replacement_invoice || "",
+								refund_method: values.refund_method || "Original Tender",
+								physical_condition: values.physical_condition || "Resalable",
 							});
 						} else {
 							this._process_product_exchange(invoice_name, return_items, total_credit);
@@ -435,6 +457,8 @@ export class ReturnsWorkspace {
 				manager_pin: justification.manager_pin || "",
 				credit_only: justification.credit_only ? 1 : 0,
 				replacement_invoice: justification.replacement_invoice || "",
+				refund_method: justification.refund_method || "Original Tender",
+				physical_condition: justification.physical_condition || "Resalable",
 			},
 			freeze: true,
 			freeze_message: __("Processing Return..."),
@@ -475,6 +499,9 @@ export class ReturnsWorkspace {
 							<p><b>${cn.name}</b></p>
 							<p>${__("Refund Amount")}: <b class="text-success">₹${format_number(Math.abs(cn.grand_total))}</b></p>
 							<p class="text-muted">${__("Customer")}: ${frappe.utils.escape_html(cn.customer_name || cn.customer)}</p>
+							${cn.phase4 && cn.phase4.store_credit_wallet ? `<p class="text-muted">${__("Store Credit Wallet")}: <b>${frappe.utils.escape_html(cn.phase4.store_credit_wallet.wallet || "")}</b></p><p class="text-muted">${__("Voucher Code")}: <b>${frappe.utils.escape_html(cn.phase4.store_credit_wallet.voucher_code || "")}</b></p>` : ""}
+							${cn.phase4 && cn.phase4.return_credit_voucher ? `<p class="text-muted">${__("Exchange Voucher")}: <b>${frappe.utils.escape_html(cn.phase4.return_credit_voucher.voucher_code || cn.phase4.return_credit_voucher.voucher_name || "")}</b></p>` : ""}
+							${cn.phase4 && (cn.phase4.refurb_orders || []).length ? `<p class="text-muted">${__("Refurb Orders")}: <b>${(cn.phase4.refurb_orders || []).map(x => frappe.utils.escape_html(x)).join(", ")}</b></p>` : ""}
 						</div>`,
 				});
 			},

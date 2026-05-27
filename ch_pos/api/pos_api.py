@@ -2566,12 +2566,127 @@ def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
     return cancelled
 
 
+def _extract_phase4_return_context(return_doc) -> dict:
+    remarks = return_doc.get("remarks") or ""
+    refund_method = "Original Tender"
+    physical_condition = "Resalable"
+    for line in remarks.splitlines():
+        line = line.strip()
+        if line.startswith("[PHASE4_REFUND_METHOD=") and line.endswith("]"):
+            refund_method = line[len("[PHASE4_REFUND_METHOD="):-1] or refund_method
+        elif line.startswith("[PHASE4_PHYSICAL_CONDITION=") and line.endswith("]"):
+            physical_condition = line[len("[PHASE4_PHYSICAL_CONDITION="):-1] or physical_condition
+    return {
+        "refund_method": refund_method,
+        "physical_condition": physical_condition,
+    }
+
+
+def _apply_phase4_return_side_effects(return_doc) -> dict:
+    ctx = _extract_phase4_return_context(return_doc)
+    refund_method = ctx["refund_method"]
+    physical_condition = ctx["physical_condition"]
+    amount = abs(flt(return_doc.rounded_total or return_doc.grand_total or 0))
+    result = {
+        "refund_method": refund_method,
+        "physical_condition": physical_condition,
+        "store_credit_wallet": None,
+        "return_credit_voucher": None,
+        "refurb_orders": [],
+    }
+
+    # Refund instruments — idempotent by source_document=return invoice.
+    existing_voucher = frappe.db.get_value(
+        "CH Voucher",
+        {"source_document": return_doc.name, "source_type": "Return"},
+        ["name", "voucher_code", "voucher_type"],
+        as_dict=True,
+    )
+    if refund_method == "Store Credit":
+        if existing_voucher:
+            wallet_name = frappe.db.get_value(
+                "Store Credit Wallet",
+                {"customer": return_doc.customer, "company": return_doc.company},
+                "name",
+            )
+            result["store_credit_wallet"] = {
+                "wallet": wallet_name,
+                "voucher_name": existing_voucher.name,
+                "voucher_code": existing_voucher.voucher_code,
+                "voucher_type": existing_voucher.voucher_type,
+            }
+        else:
+            from buyback.buyback.doctype.store_credit_wallet.store_credit_wallet import issue_wallet_credit
+            result["store_credit_wallet"] = issue_wallet_credit(
+                customer=return_doc.customer,
+                amount=amount,
+                company=return_doc.company,
+                pos_invoice=return_doc.name,
+                reason=frappe._("Store credit issued against return {0}").format(return_doc.name),
+            )
+    elif refund_method == "Exchange Voucher":
+        if existing_voucher:
+            result["return_credit_voucher"] = {
+                "voucher_name": existing_voucher.name,
+                "voucher_code": existing_voucher.voucher_code,
+                "voucher_type": existing_voucher.voucher_type,
+            }
+        else:
+            from ch_item_master.ch_item_master.voucher_api import issue_voucher
+            result["return_credit_voucher"] = issue_voucher(
+                voucher_type="Return Credit",
+                amount=amount,
+                company=return_doc.company,
+                customer=return_doc.customer,
+                source_type="Return",
+                source_document=return_doc.name,
+                reason=frappe._("Exchange voucher issued against return {0}").format(return_doc.name),
+                valid_days=180,
+            )
+
+    # Closed loop for damaged physical returns -> Refurbishment Order(s).
+    if cint(return_doc.update_stock) and physical_condition in ("Damaged", "Refurbish Required", "Dead on Arrival"):
+        existing_orders = frappe.get_all(
+            "Refurbishment Order",
+            filters={"return_invoice": return_doc.name},
+            pluck="name",
+        )
+        if existing_orders:
+            result["refurb_orders"] = existing_orders
+        else:
+            from buyback.buyback.doctype.refurbishment_order.refurbishment_order import create_from_return
+            items = [
+                {
+                    "item_code": row.item_code,
+                    "serial_no": row.serial_no or "",
+                    "qty": abs(flt(row.qty)),
+                    "warehouse": row.warehouse,
+                }
+                for row in (return_doc.items or [])
+                if abs(flt(row.qty)) > 0
+            ]
+            created = create_from_return(
+                return_invoice=return_doc.name,
+                original_invoice=return_doc.return_against,
+                items=items,
+                customer=return_doc.customer,
+                company=return_doc.company,
+                physical_condition=physical_condition,
+                return_reason=frappe.db.get_value("Sales Invoice", return_doc.name, "custom_return_reason") if frappe.get_meta("Sales Invoice").has_field("custom_return_reason") else None,
+                return_remarks=return_doc.remarks,
+            )
+            result["refurb_orders"] = created.get("orders") or []
+
+    return result
+
+
 
 @frappe.whitelist()
 def create_pos_return(original_invoice, return_items, sales_executive=None,
                       return_reason=None, return_remarks=None,
                       manager_pin=None, credit_only=0,
-                      replacement_invoice=None) -> dict:
+                      replacement_invoice=None,
+                      refund_method=None, physical_condition=None) -> dict:
     """Create a Sales Invoice return (credit note) for specific items.
 
     Market-standard maker-checker (SAP credit memo / Oracle Returns Mgmt):
@@ -2594,6 +2709,13 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     frappe.has_permission("Sales Invoice", "create", throw=True)
     if isinstance(return_items, str):
         return_items = frappe.parse_json(return_items)
+
+    refund_method = (refund_method or "Original Tender").strip() or "Original Tender"
+    if refund_method not in ("Original Tender", "Store Credit", "Exchange Voucher"):
+        frappe.throw(frappe._("Invalid refund method: {0}").format(refund_method))
+    physical_condition = (physical_condition or "Resalable").strip() or "Resalable"
+    if physical_condition not in ("Resalable", "Damaged", "Refurbish Required", "Dead on Arrival"):
+        frappe.throw(frappe._("Invalid physical condition: {0}").format(physical_condition))
 
     # ── Mandatory remarks/reason (SAP "Reason for Rejection" parity) ───
     return_reason = (return_reason or "").strip()
@@ -2785,6 +2907,11 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     composed_remarks = f"[Return] {return_reason or 'Reason not set'}: {return_remarks}"
     if existing_remarks:
         composed_remarks = f"{existing_remarks}\n{composed_remarks}"
+    composed_remarks = (
+        f"{composed_remarks}\n"
+        f"[PHASE4_REFUND_METHOD={refund_method}]\n"
+        f"[PHASE4_PHYSICAL_CONDITION={physical_condition}]"
+    )
     update_kwargs["remarks"] = composed_remarks
     if update_kwargs:
         for k, v in update_kwargs.items():
@@ -2880,6 +3007,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     # return -- the credit note is already submitted; plan cancellation can be
     # retried by the warranty manager from CH Sold Plan list.
     cancelled_plans = _cancel_linked_sold_plans(_plans_to_cancel, ret.name)
+	phase4_side_effects = _apply_phase4_return_side_effects(ret)
 
     return {
         "name": ret.name,
@@ -2889,6 +3017,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
         "incentive_clawback": incentive_clawback,
         "auto_included_vas_rows": _auto_added_plans,
         "cancelled_sold_plans": cancelled_plans,
+		"phase4": phase4_side_effects,
     }
 
 
@@ -2997,6 +3126,7 @@ def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) 
     doc.flags.ignore_permissions = True
     doc.save()
     doc.submit()
+	phase4_side_effects = _apply_phase4_return_side_effects(doc)
     frappe.db.commit()
 
     return {
@@ -3005,6 +3135,7 @@ def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) 
         "grand_total": doc.grand_total,
         "customer": doc.customer,
         "customer_name": doc.customer_name,
+		"phase4": phase4_side_effects,
     }
 
 
