@@ -298,12 +298,14 @@ def pos_item_search(
             serial_item_codes = [r.item_code for r in items_raw if r.has_serial_no]
             if serial_item_codes:
                 serial_counts = frappe.db.sql(
-                    """SELECT item_code, COUNT(*) as cnt
-                       FROM `tabSerial No`
-                       WHERE item_code IN %(item_codes)s
-                         AND warehouse = %(warehouse)s
-                         AND status = 'Active'
-                       GROUP BY item_code""",
+                    """SELECT sn.item_code, COUNT(*) as cnt
+                       FROM `tabSerial No` sn
+                       LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
+                       WHERE sn.item_code IN %(item_codes)s
+                         AND sn.warehouse = %(warehouse)s
+                         AND sn.status = 'Active'
+                         AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
+                       GROUP BY sn.item_code""",
                     {"item_codes": serial_item_codes, "warehouse": warehouse},
                     as_dict=True,
                 )

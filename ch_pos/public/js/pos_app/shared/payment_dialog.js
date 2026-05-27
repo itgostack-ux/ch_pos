@@ -2434,7 +2434,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 					fieldtype: "HTML",
 					options: `<div style="padding:8px 0 12px;color:var(--yellow-800,#854d0e);font-size:13px">
 						<i class="fa fa-exclamation-triangle" style="margin-right:6px"></i>
-						${__("This discount of {0}% exceeds the current billing limit. An authorised executive must confirm with their own password.", [round(effective_pct, 1)])}
+						${__("This discount of {0}% exceeds the current billing limit. An authorised executive must confirm with their own password.", [flt(effective_pct, 1)])}
 					</div>`,
 				},
 				{
