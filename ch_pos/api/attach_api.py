@@ -27,9 +27,27 @@ def get_attach_offers(item_code, pos_profile=None) -> dict:
     )
     rules = get_attach_rules_for_item(item_code)
 
+    # 3. Phase-3 VAS Attach Rule layer (brand/category/price-band aware)
+    # Reuses existing POS payload shape so front-end rendering remains unchanged.
+    vas_rules = []
+    try:
+        item_price = frappe.db.get_value(
+            "CH Item Price",
+            {"item_code": item_code, "channel": "POS", "status": "Active"},
+            "selling_price",
+        )
+        if frappe.db.exists("DocType", "VAS Attach Rule"):
+            from ch_item_master.ch_item_master.vas.api import get_vas_attach_offers
+            vas_rules = get_vas_attach_offers(
+                item_code=item_code,
+                selling_price=flt(item_price or 0),
+            )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "VAS attach offers failed")
+
     return {
         "warranty_plans": warranty_plans,
-        "attach_rules": rules,
+        "attach_rules": rules + (vas_rules or []),
     }
 
 
