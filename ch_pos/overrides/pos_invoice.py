@@ -322,6 +322,19 @@ def update_serial_lifecycle(doc, method=None):
             _ensure_lifecycle_exists(sn, item_code=item.item_code,
                                      company=doc.company, warehouse=wh)
 
+            # If the device is still in "Received" state (e.g. goods receipt
+            # happened but no explicit check-in), auto-advance to "In Stock"
+            # first so the subsequent "Sold" transition is valid.
+            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            if current_status == "Received":
+                _update_serial_status(
+                    serial_no=sn,
+                    new_status="In Stock",
+                    company=doc.company,
+                    warehouse=wh,
+                    remarks=f"Auto-advanced Received → In Stock on sale via {doc.name}",
+                )
+
             _update_serial_status(
                 serial_no=sn,
                 new_status="Sold",
