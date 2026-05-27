@@ -128,6 +128,9 @@ def get_report_summary(filters):
             COUNT(DISTINCT il.invoice)                                          AS billings,
             SUM(il.billing_amount)                                              AS billing_amount,
             SUM(il.incentive_amount)                                            AS total_incentive,
+            SUM(CASE WHEN il.transaction_type = 'Sale'    THEN il.incentive_amount ELSE 0 END) AS sales_incentive,
+            SUM(CASE WHEN il.transaction_type = 'VAS'     THEN il.incentive_amount ELSE 0 END) AS vas_incentive,
+            SUM(CASE WHEN il.transaction_type = 'Service' THEN il.incentive_amount ELSE 0 END) AS service_incentive,
             SUM(CASE WHEN il.status = 'Paid'    THEN il.incentive_amount ELSE 0 END) AS paid,
             SUM(CASE WHEN il.status = 'Pending' THEN il.incentive_amount ELSE 0 END) AS pending
         FROM `tabPOS Incentive Ledger` il
@@ -143,6 +146,9 @@ def get_report_summary(filters):
         {"label": _("Total Billings"),    "value": int(t.billings or 0),            "datatype": "Int",      "indicator": "blue"},
         {"label": _("Billing Amount"),    "value": flt(t.billing_amount or 0),      "datatype": "Currency", "indicator": "blue"},
         {"label": _("Total Earned"),      "value": flt(t.total_incentive or 0),     "datatype": "Currency", "indicator": "green"},
+        {"label": _("Sales Incentive"),   "value": flt(t.sales_incentive or 0),     "datatype": "Currency", "indicator": "blue"},
+        {"label": _("VAS Incentive"),     "value": flt(t.vas_incentive or 0),       "datatype": "Currency", "indicator": "green"},
+        {"label": _("Service Incentive"), "value": flt(t.service_incentive or 0),   "datatype": "Currency", "indicator": "purple"},
         {"label": _("Paid Out"),          "value": flt(t.paid or 0),                "datatype": "Currency", "indicator": "green"},
         {"label": _("Pending Payout"),    "value": flt(t.pending or 0),             "datatype": "Currency", "indicator": "orange"},
     ]

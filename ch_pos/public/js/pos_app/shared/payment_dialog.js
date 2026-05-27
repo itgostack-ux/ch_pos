@@ -2808,6 +2808,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const inv_name  = result.name;
 		const grand     = this._calc_grand_total();
 		const incentive = flt(result.incentive_earned || 0);
+		const incentive_warning = result.incentive_warning || "";
 		const vouchers  = result.generated_vouchers || [];
 		const change    = this._payments.reduce((s, p) => s + flt(p.amount), 0) +
 			(this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0) - grand;
@@ -2823,6 +2824,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				<div class="ch-pay-success-amount">₹${format_number(grand)}</div>
 				${change > 0.005 ? `<div class="ch-pay-success-change"><i class="fa fa-money"></i> ${__("Change to return")}: <b>₹${format_number(change)}</b></div>` : ""}
 				${incentive > 0 ? `<div class="ch-pay-success-meta"><i class="fa fa-star text-warning"></i> ₹${format_number(incentive)} ${__("incentive earned")}</div>` : ""}
+				${incentive_warning ? `<div class="ch-pay-success-meta text-warning"><i class="fa fa-exclamation-triangle"></i> ${frappe.utils.escape_html(incentive_warning)}</div>` : ""}
 				${vouchers.length ? `<div class="ch-pay-success-meta"><i class="fa fa-gift text-primary"></i> ${vouchers.length} ${__("VAS voucher(s) sent to customer")}</div>` : ""}
 				<div class="ch-pay-success-actions">
 					<button class="btn btn-default ch-pay-print-btn" data-name="${frappe.utils.escape_html(inv_name)}">

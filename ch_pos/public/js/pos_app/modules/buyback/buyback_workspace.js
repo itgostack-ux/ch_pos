@@ -50,6 +50,32 @@ const STAGE_LABELS = [
 	{ key: STAGE.SETTLE, label: "Settle" },
 ];
 
+function _api_error_message(e, fallback) {
+	let msg = (e && (e.message || e.exc_type || e.exc)) || "";
+	if (!msg && e && e._server_messages) {
+		try {
+			const raw = JSON.parse(e._server_messages);
+			if (Array.isArray(raw) && raw.length) {
+				msg = raw[0];
+			}
+		} catch (_err) {
+			// ignore parsing errors; fallback below
+		}
+	}
+
+	msg = frappe.utils.strip_html(String(msg || "")).trim();
+	if (!msg) {
+		return fallback;
+	}
+
+	const lmsg = msg.toLowerCase();
+	if (lmsg.includes("not whitelisted") || lmsg.includes("login to access")) {
+		return __("Session expired. Please login again and retry.");
+	}
+
+	return msg;
+}
+
 export class BuybackWorkspace {
 	constructor() {
 		this._panel = null;
@@ -1093,7 +1119,7 @@ export class BuybackWorkspace {
 			}).catch((e) => {
 				btn.prop("disabled", false)
 					.html(`<i class="fa fa-check-circle"></i> ${__("Verify OTP")}`);
-				frappe.show_alert({ message: e.message || __("Invalid OTP"), indicator: "red" });
+				frappe.show_alert({ message: _api_error_message(e, __("Invalid OTP")), indicator: "red" });
 			});
 		});
 
@@ -1113,7 +1139,7 @@ export class BuybackWorkspace {
 			}).catch((e) => {
 				btn.prop("disabled", false)
 					.html(`<i class="fa fa-paper-plane"></i> ${__("Resend OTP")}`);
-				frappe.show_alert({ message: e.message || __("Failed to resend OTP"), indicator: "red" });
+				frappe.show_alert({ message: _api_error_message(e, __("Failed to resend OTP")), indicator: "red" });
 			});
 		});
 
@@ -1503,7 +1529,7 @@ export class BuybackWorkspace {
 						frappe.show_alert({ message: __("OTP verified. Continue with KYC."), indicator: "green" });
 					}).catch((e) => {
 						btn.prop("disabled", false).html(`${__("Next")} <i class="fa fa-arrow-right"></i>`);
-						frappe.show_alert({ message: e.message || __("OTP verification failed"), indicator: "red" });
+						frappe.show_alert({ message: _api_error_message(e, __("OTP verification failed")), indicator: "red" });
 					});
 					return;
 				}
@@ -1539,7 +1565,7 @@ export class BuybackWorkspace {
 					$body.find(".ch-wz-otp-status").html(`<span style="color:var(--green-600)"><i class="fa fa-check-circle"></i> ${__("Sent to {0}", [res.masked_mobile])}</span>`);
 				}).catch((e) => {
 					btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Retry Send OTP")}`);
-					frappe.show_alert({ message: e.message || __("Failed to send OTP"), indicator: "red" });
+					frappe.show_alert({ message: _api_error_message(e, __("Failed to send OTP")), indicator: "red" });
 				});
 			});
 
@@ -1654,7 +1680,7 @@ export class BuybackWorkspace {
 				self._reload();
 			}).catch((e) => {
 				$body.find(".ch-wz-submit").prop("disabled", false).html(`<i class="fa fa-check"></i> ${__("Verify & Approve")}`);
-				frappe.show_alert({ message: e.message || __("Verification failed"), indicator: "red" });
+				frappe.show_alert({ message: _api_error_message(e, __("Verification failed")), indicator: "red" });
 			});
 		}
 

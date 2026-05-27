@@ -25,18 +25,20 @@ frappe.query_reports["Executive Incentive Statement"] = {
 		{
 			fieldname: "pos_executive",
 			label: __("Pos Executive"),
-			fieldtype: "Data",
+			fieldtype: "Link",
+			options: "POS Executive",
 		},
 		{
 			fieldname: "status",
 			label: __("Status"),
 			fieldtype: "Select",
+			options: "\nPending\nPaid\nApproved\nCancelled",
 		},
 		{
 			fieldname: "store",
 			label: __("Store"),
 			fieldtype: "Link",
-			options: "Warehouse",
+			options: "CH Store",
 		},
 		{
 			fieldname: "to_date",
@@ -47,7 +49,9 @@ frappe.query_reports["Executive Incentive Statement"] = {
 		{
 			fieldname: "view",
 			label: __("View"),
-			fieldtype: "Data",
+			fieldtype: "Select",
+			options: "Summary\nDetail",
+			default: "Summary",
 		}
 	],
 };

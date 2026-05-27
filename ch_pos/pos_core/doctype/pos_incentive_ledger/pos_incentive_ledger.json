@@ -92,7 +92,7 @@
    "fieldname": "transaction_type",
    "fieldtype": "Select",
    "label": "Transaction Type",
-   "options": "Sale\nReturn\nExchange\nSwap\nWarranty\nVAS\nAccessory",
+    "options": "Sale\nService\nReturn\nExchange\nSwap\nWarranty\nVAS\nAccessory\nAttach Rate",
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,

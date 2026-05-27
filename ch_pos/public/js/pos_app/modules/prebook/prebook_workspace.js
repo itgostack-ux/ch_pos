@@ -115,6 +115,9 @@ export class PrebookWorkspace {
 	}
 
 	_proforma_flow(cart, customer) {
+		const cart_total = (cart || []).reduce(
+			(s, it) => s + flt(it.qty || 1) * flt(it.rate || 0), 0,
+		);
 		const dlg = new frappe.ui.Dialog({
 			title: __("Generate Proforma Invoice"),
 			fields: [
@@ -126,10 +129,28 @@ export class PrebookWorkspace {
 					fieldname: "valid_till", fieldtype: "Date", label: __("Valid Till"),
 					default: frappe.datetime.add_days(frappe.datetime.nowdate(), 15),
 				},
+				{ fieldname: "column_break_a", fieldtype: "Column Break" },
+				{
+					fieldname: "advance_amount", fieldtype: "Currency",
+					label: __("Advance Amount"),
+					description: __("Optional. Shown on the Proforma as Advance Received and Balance Due. Collect via Payment Entry separately."),
+				},
+				{ fieldname: "section_break_b", fieldtype: "Section Break" },
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Terms / Notes") },
+				{
+					fieldname: "html_total", fieldtype: "HTML",
+					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> \u20B9${format_number(cart_total)}</div>`,
+				},
 			],
 			primary_action_label: __("Generate"),
 			primary_action: (v) => {
+				if (flt(v.advance_amount) > cart_total + 0.005) {
+					frappe.show_alert({
+						message: __("Advance cannot exceed Order Total"),
+						indicator: "orange",
+					});
+					return;
+				}
 				frappe.call({
 					method: "ch_pos.api.pos_api.create_pos_quotation",
 					args: {
@@ -144,6 +165,7 @@ export class PrebookWorkspace {
 						})),
 						valid_till: v.valid_till,
 						notes: v.notes,
+						advance_amount: flt(v.advance_amount),
 					},
 					freeze: true,
 					freeze_message: __("Creating Proforma..."),
@@ -161,6 +183,12 @@ export class PrebookWorkspace {
 	_show_proforma_success(qtn) {
 		const print_url = `/printview?doctype=Quotation&name=${encodeURIComponent(qtn.name)}`
 			+ `&format=${encodeURIComponent(qtn.print_format || "Proforma Invoice")}&no_letterhead=0`;
+		const adv = flt(qtn.advance_received);
+		const bal = flt(qtn.balance_due);
+		const advance_html = adv > 0
+			? `<p>${__("Advance Received")}: <b>₹${format_number(adv)}</b></p>
+			   <p>${__("Balance Due")}: <b>₹${format_number(bal)}</b></p>`
+			: "";
 		frappe.msgprint({
 			title: __("Proforma Created"),
 			indicator: "green",
@@ -169,6 +197,7 @@ export class PrebookWorkspace {
 					<i class="fa fa-check-circle text-success" style="font-size:42px;"></i>
 					<h4 style="margin:14px 0 6px;">${frappe.utils.escape_html(qtn.name)}</h4>
 					<p>${__("Grand Total")}: <b>₹${format_number(qtn.grand_total)}</b></p>
+					${advance_html}
 					<p class="text-muted">${__("Valid till")} ${qtn.valid_till}</p>
 					<div style="margin-top:14px;display:flex;gap:8px;justify-content:center;">
 						<a class="btn btn-primary btn-sm" target="_blank" href="${print_url}">
@@ -235,6 +264,7 @@ export class PrebookWorkspace {
 						if (!r.message) return;
 						dlg.hide();
 						const so = r.message;
+						PosState.reset_transaction();
 						const so_name = so.name || __("Sales Order");
 						const so_url = so.name ? `/app/sales-order/${encodeURIComponent(so.name)}` : "/app/sales-order";
 						frappe.msgprint({

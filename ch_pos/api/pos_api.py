@@ -371,13 +371,19 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
 
 @frappe.whitelist()
 def create_pos_quotation(pos_profile, customer, items, valid_till=None,
-                          notes=None, sales_executive=None) -> dict:
+                          notes=None, sales_executive=None,
+                          advance_amount=0) -> dict:
     """Create a Quotation from the POS cart so the operator can issue a
     Proforma Invoice (printed via the ch_erp15 "Proforma Invoice" format).
 
     Reuse-first: this is a thin convenience over `frappe.new_doc("Quotation")`
     so the POS can hand a draft quote to the customer without leaving the
     cashier screen. The same Proforma print format used in Desk works here.
+
+    If ``advance_amount`` is provided, it is stamped on the Quotation's
+    ``custom_advance_received`` field so the Proforma print format shows
+    Advance Received and Balance Due. The actual Payment Entry is still
+    expected to be created via the Collect Advance flow on Desk.
     """
     frappe.has_permission("Quotation", "create", throw=True)
 
@@ -421,12 +427,23 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
         frappe.log_error(frappe.get_traceback(), f"Proforma quotation submit failed for {qtn.name}")
         qtn.reload()
 
+    # Stamp advance on the submitted Quotation (field is read_only +
+    # allow_on_submit, so bypass with db.set_value). Cap at grand_total.
+    advance = flt(advance_amount)
+    if advance > 0 and qtn.meta.has_field("custom_advance_received"):
+        capped = min(advance, flt(qtn.grand_total))
+        frappe.db.set_value("Quotation", qtn.name, "custom_advance_received", capped,
+                            update_modified=False)
+        qtn.reload()
+
     return {
         "doctype": "Quotation",
         "name": qtn.name,
         "docstatus": qtn.docstatus,
         "status": qtn.status,
         "grand_total": flt(qtn.grand_total),
+        "advance_received": flt(getattr(qtn, "custom_advance_received", 0)),
+        "balance_due": flt(qtn.grand_total) - flt(getattr(qtn, "custom_advance_received", 0)),
         "valid_till": str(qtn.valid_till),
         "print_format": "Proforma Invoice",
     }
@@ -1425,6 +1442,7 @@ def create_pos_invoice(pos_profile, customer, items,
 
     # Create incentive ledger entries for the sales executive
     incentive_total = 0
+    incentive_warning = ""
     if sales_executive:
         try:
             incentive_total = _create_incentive_entries(
@@ -1432,8 +1450,14 @@ def create_pos_invoice(pos_profile, customer, items,
                 pos_executive=sales_executive,
                 transaction_type="Sale",
             )
+            if _missing_incentive_setup(inv, sales_executive):
+                incentive_warning = frappe._(
+                    "Incentive setup missing for this executive/company. "
+                    "Please configure active POS Incentive Slabs."
+                )
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"Incentive ledger failed for {inv.name}")
+            incentive_warning = frappe._("Incentive calculation failed. Please check Error Log.")
 
     # ── Audit logging (best-effort, never blocks sale) ────────────────────────
     try:
@@ -1499,6 +1523,7 @@ def create_pos_invoice(pos_profile, customer, items,
         "grand_total": inv.grand_total,
         "sold_plans": sold_plans,
         "incentive_earned": incentive_total,
+        "incentive_warning": incentive_warning,
         "voucher_redeemed": voucher_redeemed,
         "generated_vouchers": generated_vouchers,
     }
@@ -3496,22 +3521,28 @@ def check_serial_returnable(serial_no, original_invoice=None) -> dict:
     if sn.status == "Expired":
         return {"returnable": False, "reason": frappe._("Serial No {0} has been scrapped").format(serial_no)}
 
-    # Check if transferred out (outgoing stock entry after sale)
-    transferred = frappe.db.sql("""
-        SELECT se.name
-        FROM `tabStock Entry Detail` sed
-        JOIN `tabStock Entry` se ON se.name = sed.parent
-        WHERE sed.serial_no LIKE %s
-          AND se.docstatus = 1
-          AND se.stock_entry_type = 'Material Transfer'
-          AND se.posting_date >= CURDATE() - INTERVAL 365 DAY
-        ORDER BY se.posting_date DESC
-        LIMIT 1
-    """, (f"%{serial_no}%",))
-    if transferred:
-        return {"returnable": False, "reason": frappe._("Serial No {0} was transferred via {1}").format(
-            serial_no, transferred[0][0]
-        )}
+    # Check if transferred out (outgoing stock entry after sale).
+    # For POS returns against a known original invoice, a transfer alone should
+    # NOT block the return — the return invoice reverses the sale and posts
+    # stock back through the standard return flow. The transfer guard only
+    # applies when no original invoice context is supplied (e.g. ad-hoc
+    # eligibility check from elsewhere).
+    if not original_invoice:
+        transferred = frappe.db.sql("""
+            SELECT se.name
+            FROM `tabStock Entry Detail` sed
+            JOIN `tabStock Entry` se ON se.name = sed.parent
+            WHERE sed.serial_no LIKE %s
+              AND se.docstatus = 1
+              AND se.stock_entry_type = 'Material Transfer'
+              AND se.posting_date >= CURDATE() - INTERVAL 365 DAY
+            ORDER BY se.posting_date DESC
+            LIMIT 1
+        """, (f"%{serial_no}%",))
+        if transferred:
+            return {"returnable": False, "reason": frappe._("Serial No {0} was transferred via {1}").format(
+                serial_no, transferred[0][0]
+            )}
 
     # Check if in a completed buyback
     buyback = frappe.db.get_value(
@@ -6564,16 +6595,20 @@ def get_executive_incentive_summary(pos_executive, from_date=None, to_date=None)
 
     total = sum(flt(r.total_incentive) for r in ledger)
     total_billing = sum(flt(r.total_billing) for r in ledger)
+    by_type = {r.transaction_type: {
+        "incentive": flt(r.total_incentive),
+        "billing": flt(r.total_billing),
+        "count": cint(r.total_transactions),
+    } for r in ledger}
 
     return {
         "total_incentive": total,
         "total_billing": total_billing,
         "total_transactions": sum(cint(r.total_transactions) for r in ledger),
-        "by_type": {r.transaction_type: {
-            "incentive": flt(r.total_incentive),
-            "billing": flt(r.total_billing),
-            "count": cint(r.total_transactions),
-        } for r in ledger},
+        "sales_incentive": flt((by_type.get("Sale") or {}).get("incentive", 0)),
+        "vas_incentive": flt((by_type.get("VAS") or {}).get("incentive", 0)),
+        "service_incentive": flt((by_type.get("Service") or {}).get("incentive", 0)),
+        "by_type": by_type,
         "from_date": str(from_date),
         "to_date": str(to_date),
     }
@@ -6644,6 +6679,11 @@ def _create_incentive_entries(invoice, pos_executive, transaction_type="Sale"):
     for item in invoice.items:
         # Warranty / VAS items get their own incentive type
         item_type = transaction_type
+        item_group = frappe.db.get_value("Item", item.item_code, "item_group") or ""
+        brand = frappe.db.get_value("Item", item.item_code, "brand") or ""
+
+        if item_group in ("Repair Services", "Mobile Parts", "Spares", "Sub Assemblies"):
+            item_type = "Service"
         if item.get("custom_warranty_plan"):
             wp_type = frappe.db.get_value(
                 "CH Warranty Plan", item.custom_warranty_plan, "plan_type"
@@ -6657,9 +6697,6 @@ def _create_incentive_entries(invoice, pos_executive, transaction_type="Sale"):
         if billing_amount <= 0:
             continue
 
-        item_group = frappe.db.get_value("Item", item.item_code, "item_group") or ""
-        brand = frappe.db.get_value("Item", item.item_code, "brand") or ""
-
         slab = _find_incentive_slab(
             company=exec_doc.company,
             item_group=item_group,
@@ -6667,6 +6704,17 @@ def _create_incentive_entries(invoice, pos_executive, transaction_type="Sale"):
             billing_amount=billing_amount,
             transaction_type=item_type,
         )
+
+        # Backward compatibility: many existing configurations only define
+        # Sale slabs for repair/service item groups.
+        if not slab and item_type == "Service":
+            slab = _find_incentive_slab(
+                company=exec_doc.company,
+                item_group=item_group,
+                brand=brand,
+                billing_amount=billing_amount,
+                transaction_type="Sale",
+            )
 
         incentive_amount = 0
         if slab:
@@ -6704,6 +6752,28 @@ def _create_incentive_entries(invoice, pos_executive, transaction_type="Sale"):
         total_incentive += flt(incentive_amount, 2)
 
     return total_incentive
+
+
+def _missing_incentive_setup(invoice, sales_executive) -> bool:
+    """Return True when incentive setup is clearly missing for this billing context."""
+    if not sales_executive:
+        return False
+
+    exec_doc = frappe.db.get_value(
+        "POS Executive", sales_executive,
+        ["name", "company"], as_dict=True,
+    )
+    if not exec_doc or not exec_doc.company:
+        return True
+
+    has_active_slab = frappe.db.exists("POS Incentive Slab", {
+        "company": exec_doc.company,
+        "is_active": 1,
+    })
+    if not has_active_slab:
+        return True
+
+    return False
 
 
 def _create_return_incentive_entries(return_invoice, pos_executive):
@@ -6782,6 +6852,73 @@ def _create_return_incentive_entries(return_invoice, pos_executive):
         total_clawback += flt(clawback, 2)
 
     return total_clawback
+
+
+@frappe.whitelist()
+def backfill_missing_incentive_ledger(from_date=None, to_date=None, company=None) -> dict:
+    """Backfill POS Incentive Ledger for submitted invoices missing entries.
+
+    Safe behavior:
+    - Processes only submitted non-return Sales Invoices
+    - Requires linked custom_sales_executive
+    - Skips invoices that already have ledger rows for same invoice+executive
+    """
+    if not any(r in frappe.get_roles() for r in ("System Manager", "POS Manager", "Accounts Manager")):
+        frappe.throw(frappe._("Not permitted"), frappe.PermissionError)
+
+    conditions = ["docstatus = 1", "IFNULL(custom_sales_executive, '') != ''", "IFNULL(is_return, 0) = 0"]
+    values = {}
+
+    if from_date:
+        conditions.append("posting_date >= %(from_date)s")
+        values["from_date"] = from_date
+    if to_date:
+        conditions.append("posting_date <= %(to_date)s")
+        values["to_date"] = to_date
+    if company:
+        conditions.append("company = %(company)s")
+        values["company"] = company
+
+    invoices = frappe.db.sql(
+        """
+        SELECT name, custom_sales_executive
+        FROM `tabSales Invoice`
+        WHERE {conditions}
+        ORDER BY posting_date, creation
+        """.format(conditions=" AND ".join(conditions)),
+        values,
+        as_dict=True,
+    )
+
+    stats = {
+        "examined": len(invoices),
+        "processed": 0,
+        "created": 0,
+        "skipped_existing": 0,
+        "errors": 0,
+    }
+
+    for row in invoices:
+        try:
+            exists = frappe.db.exists("POS Incentive Ledger", {
+                "invoice": row.name,
+                "pos_executive": row.custom_sales_executive,
+            })
+            if exists:
+                stats["skipped_existing"] += 1
+                continue
+
+            inv = frappe.get_doc("Sales Invoice", row.name)
+            earned = flt(_create_incentive_entries(inv, row.custom_sales_executive, transaction_type="Sale"))
+            stats["processed"] += 1
+            if earned or frappe.db.exists("POS Incentive Ledger", {"invoice": row.name}):
+                stats["created"] += 1
+        except Exception:
+            stats["errors"] += 1
+            frappe.log_error(frappe.get_traceback(), f"Incentive backfill failed for {row.name}")
+
+    frappe.db.commit()
+    return stats
 
 
 def calculate_attach_rate_bonus(company=None, payout_month=None):
@@ -7609,37 +7746,46 @@ def pos_update_buyback_price(order_name, final_price, inspector_notes=None) -> d
 
 @frappe.whitelist()
 def pos_send_customer_otp(order_name) -> dict:
-	"""Generate and send an OTP to the customer's mobile for buyback price approval."""
-	doc = frappe.get_doc("Buyback Order", order_name)
-	mobile_no = doc.mobile_no
-	if not mobile_no:
-		frappe.throw(frappe._("No mobile number on this Buyback Order."))
+    """Generate and send an OTP to the customer's mobile for buyback price approval."""
+    from buyback.api import _as_system_user
 
-	# Delegate to BuybackOrder.send_otp() so the purpose, status transition, and
-	# delivery logic stay in one place. Using "Buyback Customer Approval" here
-	# previously caused a mismatch with BuybackOrder.verify_otp() which looks up
-	# purpose="Buyback Confirmation".
-	doc.flags.ignore_permissions = True
-	doc.send_otp()
-	return {
-		"sent": True,
-		"masked_mobile": mobile_no[:2] + "****" + mobile_no[-2:],
-		"expires_in": 300,
-	}
+    doc = frappe.get_doc("Buyback Order", order_name)
+    mobile_no = doc.mobile_no
+    if not mobile_no:
+        frappe.throw(frappe._("No mobile number on this Buyback Order."))
+
+    # Delegate to BuybackOrder.send_otp() so the purpose, status transition, and
+    # delivery logic stay in one place. Using "Buyback Customer Approval" here
+    # previously caused a mismatch with BuybackOrder.verify_otp() which looks up
+    # purpose="Buyback Confirmation".
+    doc.flags.ignore_permissions = True
+    with _as_system_user():
+        doc.send_otp()
+
+    return {
+        "sent": True,
+        "masked_mobile": mobile_no[:2] + "****" + mobile_no[-2:],
+        "expires_in": 300,
+    }
 
 
 @frappe.whitelist()
 def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
-	"""Verify OTP entered by cashier on behalf of customer.
+    """Verify OTP entered by cashier on behalf of customer.
 
-	Called from the POS "Awaiting OTP" stage when cashier types the OTP
-	the customer received on their mobile.
-	"""
-	doc = frappe.get_doc("Buyback Order", order_name)
-	result = doc.verify_otp(otp_code=otp_code)
-	if not result.get("valid"):
-		frappe.throw(result.get("message") or frappe._("Invalid or expired OTP."))
-	return {"verified": True}
+    Called from the POS "Awaiting OTP" stage when cashier types the OTP
+    the customer received on their mobile.
+    """
+    from buyback.api import _as_system_user
+
+    doc = frappe.get_doc("Buyback Order", order_name)
+    with _as_system_user():
+        result = doc.verify_otp(otp_code=otp_code)
+
+    if not result.get("valid"):
+        frappe.throw(result.get("message") or frappe._("Invalid or expired OTP."))
+
+    return {"verified": True}
 
 
 @frappe.whitelist()

@@ -61,7 +61,7 @@
    "fieldname": "applicable_on",
    "fieldtype": "Select",
    "label": "Applicable On",
-   "options": "Sale\nReturn\nWarranty\nVAS\nAccessory\nExchange\nSwap",
+    "options": "Sale\nService\nReturn\nWarranty\nVAS\nAccessory\nExchange\nSwap\nAttach Rate",
    "default": "Sale",
    "reqd": 1,
    "in_list_view": 1,
