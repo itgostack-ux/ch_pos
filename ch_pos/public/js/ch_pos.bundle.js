@@ -49,9 +49,13 @@ import { QueueWorkspace } from "./pos_app/modules/queue/queue_workspace.js";
 // Shared
 import { PaymentDialog } from "./pos_app/shared/payment_dialog.js";
 import { NetworkStatus } from "./pos_app/app_shell/network_status.js";
+import { open_camera_scan } from "./pos_app/shared/camera_scanner.js";
 
 // ── Make globally available for Frappe page lifecycle ────
 frappe.provide("ch_pos");
+// Phase 2 — expose camera scanner globally so toolbars / workspaces can use it
+// without re-importing (lazy ZXing load happens on first invocation).
+ch_pos.open_camera_scan = open_camera_scan;
 
 ch_pos.PosApp = class PosApp {
 	constructor(wrapper) {
@@ -287,14 +291,23 @@ ch_pos.PosApp = class PosApp {
 
 			if (e.key === "F2") {
 				e.preventDefault();
-				// Focus search bar
+				// Focus search bar / IMEI scan input
 				EventBus.emit("search:focus");
+			} else if (e.key === "F3") {
+				// Phase 2 — focus the customer Link control
+				e.preventDefault();
+				EventBus.emit("customer:focus");
 			} else if (e.key === "F4") {
 				e.preventDefault();
 				EventBus.emit("cart:pay");
-			} else if (e.key === "F8") {
+			} else if (e.key === "F8" || e.key === "F9") {
+				// F8 retained for backward-compat; F9 added to match plan spec.
 				e.preventDefault();
 				EventBus.emit("cart:hold");
+			} else if (e.key === "F10") {
+				// Phase 2 — recall held bills
+				e.preventDefault();
+				EventBus.emit("held_bills:open");
 			} else if (e.key === "Escape") {
 				// Only if no dialog is open
 				if (!$(".modal.show").length) {

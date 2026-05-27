@@ -24,6 +24,11 @@ export class ContextualToolbar {
 						<input type="text" class="form-control ch-pos-imei-input"
 							placeholder="${__("Scan IMEI / Serial...")}"
 							autocomplete="off">
+						<button class="btn btn-xs btn-default ch-pos-cam-scan"
+							title="${__("Scan with camera")}"
+							style="margin-left:6px">
+							<i class="fa fa-camera"></i>
+						</button>
 					</div>
 					<div class="ch-pos-search-wrap">
 						<i class="fa fa-search ch-pos-search-icon"></i>
@@ -82,6 +87,24 @@ export class ContextualToolbar {
 					panel.find(".ch-pos-imei-input").val("");
 				}
 			}
+		});
+
+		// Phase 2 — Camera scan button (lazy-loads ZXing on first click)
+		panel.on("click", ".ch-pos-cam-scan", (e) => {
+			e.preventDefault();
+			if (!(window.ch_pos && window.ch_pos.open_camera_scan)) {
+				frappe.show_alert({ message: __("Camera scanner not loaded yet — try again."), indicator: "orange" });
+				return;
+			}
+			window.ch_pos.open_camera_scan((code) => {
+				if (!code) return;
+				const input = panel.find(".ch-pos-imei-input");
+				input.val(code).focus();
+				if (code.length >= 4) {
+					this._handle_scan(code);
+					input.val("");
+				}
+			});
 		});
 
 		// F2 / Escape → focus IMEI input first, then search

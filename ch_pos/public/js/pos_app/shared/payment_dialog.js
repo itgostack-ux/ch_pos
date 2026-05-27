@@ -2830,6 +2830,9 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 					<button class="btn btn-default ch-pay-print-btn" data-name="${frappe.utils.escape_html(inv_name)}">
 						<i class="fa fa-print"></i> ${__("Print Receipt")}
 					</button>
+					<button class="btn btn-default ch-pay-share-btn" data-name="${frappe.utils.escape_html(inv_name)}">
+						<i class="fa fa-share-alt"></i> ${__("Share")}
+					</button>
 					<button class="btn btn-success ch-pay-next-btn">
 						<i class="fa fa-shopping-basket"></i>
 						<span class="ch-pay-next-label">${__("Next Sale")}</span>
@@ -2880,6 +2883,75 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				// Server-rendered PDF → header on every page (no browser print quirks)
 				print_invoice_pdf(name, fmt);
 			});
+		});
+
+		// Phase 2 — Share Receipt (one-click multi-channel fanout)
+		this._overlay.on("click", ".ch-pay-share-btn", e => {
+			clearTimeout(this._auto_timer);
+			countdown = 30; // pause auto-close while user picks channels
+			this._overlay.find("#ch-pay-cd-sec").text(countdown);
+			this._overlay.find(".ch-pay-countdown-badge").text(countdown);
+			const name = $(e.currentTarget).data("name");
+			this._open_share_dialog(name).finally(() => {
+				this._auto_timer = setTimeout(tick, 1000);
+			});
+		});
+	}
+
+	/** Phase 2 — Channel picker for share_invoice */
+	_open_share_dialog(invoice_name) {
+		return new Promise((resolve) => {
+			const dlg = new frappe.ui.Dialog({
+				title: __("Share Receipt — {0}", [invoice_name]),
+				fields: [
+					{ fieldtype: "Check", fieldname: "ch_print",    label: __("Print"),       default: 1 },
+					{ fieldtype: "Check", fieldname: "ch_whatsapp", label: __("WhatsApp") },
+					{ fieldtype: "Check", fieldname: "ch_email",    label: __("Email") },
+					{ fieldtype: "Check", fieldname: "ch_einvoice", label: __("Generate E-Invoice (IRN)") },
+					{ fieldtype: "Section Break" },
+					{ fieldtype: "Data", fieldname: "mobile_no", label: __("Override Mobile (optional)") },
+					{ fieldtype: "Data", fieldname: "email",     label: __("Override Email (optional)") },
+				],
+				primary_action_label: __("Send"),
+				primary_action: (v) => {
+					const channels = [
+						v.ch_print && "print",
+						v.ch_whatsapp && "whatsapp",
+						v.ch_email && "email",
+						v.ch_einvoice && "einvoice",
+					].filter(Boolean);
+					if (!channels.length) {
+						frappe.show_alert({ message: __("Pick at least one channel."), indicator: "orange" });
+						return;
+					}
+					dlg.hide();
+					frappe.xcall("ch_pos.api.share_api.share_invoice", {
+						invoice_name,
+						channels,
+						mobile_no: (v.mobile_no || "").trim() || null,
+						email: (v.email || "").trim() || null,
+					})
+					.then((res) => {
+						const results = (res && res.results) || {};
+						Object.entries(results).forEach(([ch, r]) => {
+							frappe.show_alert({
+								message: `${ch}: ${r.success ? __("OK") : (r.message || __("Failed"))}`,
+								indicator: r.success ? "green" : "red",
+							});
+						});
+						if (results.print && results.print.pdf_url) {
+							// Open the print PDF in a new tab so the cashier can hand to printer
+							window.open(results.print.pdf_url, "_blank");
+						}
+					})
+					.catch((err) => {
+						frappe.show_alert({ message: __("Share failed: {0}", [err.message || err]), indicator: "red" });
+					})
+					.finally(() => resolve());
+				},
+			});
+			dlg.onhide = () => resolve();
+			dlg.show();
 		});
 	}
 

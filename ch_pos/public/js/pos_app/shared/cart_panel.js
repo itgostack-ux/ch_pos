@@ -265,6 +265,13 @@ export class CartPanel {
 			});
 		}
 
+		// Phase 2 — F3 hotkey: focus this customer Link control
+		EventBus.on("customer:focus", () => {
+			if (this.customer_field && this.customer_field.$input) {
+				this.customer_field.$input.focus().select();
+			}
+		});
+
 		// Quick-create customer button — appended into the actions row beside the tag
 		const btn_wrap = $(`<button class="btn btn-xs btn-link ch-pos-btn-new-customer" style="padding:0 4px;font-size:11px">
 			<i class="fa fa-user-plus"></i> ${__("New Customer")}
