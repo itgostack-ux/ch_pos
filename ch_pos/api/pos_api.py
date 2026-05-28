@@ -9095,12 +9095,13 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
                              f"Pickup: set_advances failed for SO {sales_order}")
 
     # Build payments table from POS Profile defaults
+    from erpnext.accounts.doctype.sales_invoice.sales_invoice import get_bank_cash_account
     inv.set("payments", [])
     for row in (profile.payments or []):
+        acct = get_bank_cash_account(row.mode_of_payment, profile.company).get("account")
         inv.append("payments", {
             "mode_of_payment": row.mode_of_payment,
-            "account": row.account,
-            "type": row.type,
+            "account": acct,
             "default": row.default,
             "amount": 0,
         })
