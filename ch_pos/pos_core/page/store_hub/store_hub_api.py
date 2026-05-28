@@ -228,6 +228,8 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
                LEFT JOIN `tabCH Store` cs ON cs.warehouse = b.warehouse
                LEFT JOIN `tabItem Reorder` ir ON ir.parent = b.item_code AND ir.warehouse = b.warehouse
                WHERE b.warehouse = %(store)s
+               AND i.disabled = 0
+               AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
                AND b.actual_qty <= COALESCE(ir.warehouse_reorder_level, 0)
                AND COALESCE(ir.warehouse_reorder_level, 0) > 0
                ORDER BY b.actual_qty ASC LIMIT 20""", prm, as_dict=True

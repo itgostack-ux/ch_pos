@@ -3801,10 +3801,23 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     sr_doc = frappe.get_doc("Service Request", service_request)
 
-    # Find or create a repair service item
-    repair_item = frappe.db.get_value("Item", {"item_name": "Repair Service", "disabled": 0}, "name")
+    # Find or create a repair service item (must be sellable: Active lifecycle)
+    repair_item = frappe.db.get_value(
+        "Item",
+        {"item_name": "Repair Service", "disabled": 0, "ch_lifecycle_status": "Active"},
+        "name",
+    )
     if not repair_item:
-        repair_item = frappe.db.get_value("Item", {"item_group": "Services", "disabled": 0, "is_stock_item": 0}, "name")
+        repair_item = frappe.db.get_value(
+            "Item",
+            {
+                "item_group": "Services",
+                "disabled": 0,
+                "is_stock_item": 0,
+                "ch_lifecycle_status": "Active",
+            },
+            "name",
+        )
     if not repair_item:
         frappe.throw(frappe._("No 'Repair Service' item found. Please create a non-stock service item named 'Repair Service'."))
 
@@ -5153,6 +5166,7 @@ def store_dashboard(pos_profile) -> dict:
                FROM `tabBin` b
                JOIN `tabItem` i ON i.name = b.item_code
                WHERE b.warehouse = %s AND b.actual_qty <= 5 AND i.disabled = 0
+                 AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
                ORDER BY b.actual_qty ASC
                LIMIT 15""",
             (warehouse,),
@@ -5168,6 +5182,7 @@ def store_dashboard(pos_profile) -> dict:
                 """SELECT i.name AS item_code, i.item_name, 0 AS qty
                    FROM `tabItem` i
                    WHERE i.disabled = 0 AND i.is_stock_item = 1
+                     AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
                      AND NOT EXISTS (
                          SELECT 1 FROM `tabBin` b
                          WHERE b.item_code = i.name AND b.warehouse = %s
