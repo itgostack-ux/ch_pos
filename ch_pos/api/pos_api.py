@@ -469,7 +469,7 @@ def create_pos_invoice(pos_profile, customer, items,
                        credit_grace_period=0, credit_partial_payment=0,
                        credit_approved_by=None,
                        is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
-                       free_sale_approved_at=None,
+                       free_sale_approved_at=None, free_sale_approval_name=None,
                        advance_amount=0, kiosk_token=None,
                        guided_session=None,
                        exception_request=None, warranty_claim=None,
@@ -718,16 +718,32 @@ def create_pos_invoice(pos_profile, customer, items,
                          "Please request approval before proceeding."),
                 title=frappe._("Free Sale Not Approved"),
             )
-        approval_name = frappe.db.get_value(
-            "CH Free Sale Approval",
-            {
-                "requested_by": frappe.session.user,
-                "status": "Approved",
-                "used": 0,
-            },
-            "name",
-            order_by="modified desc",
-        )
+        # Prefer the explicit approval name supplied by the client (created when
+        # the cashier clicked "Request Approval"). Fall back to the most recent
+        # unused approval for this cashier — needed for offline-queued invoices
+        # where the client may not have persisted the approval name.
+        approval_name = None
+        if free_sale_approval_name:
+            approval_name = frappe.db.get_value(
+                "CH Free Sale Approval",
+                {
+                    "name": free_sale_approval_name,
+                    "status": "Approved",
+                    "used": 0,
+                },
+                "name",
+            )
+        if not approval_name:
+            approval_name = frappe.db.get_value(
+                "CH Free Sale Approval",
+                {
+                    "requested_by": frappe.session.user,
+                    "status": "Approved",
+                    "used": 0,
+                },
+                "name",
+                order_by="modified desc",
+            )
         if not approval_name:
             frappe.throw(
                 frappe._("Free sale requires an approved CH Free Sale Approval. "
