@@ -9093,6 +9093,49 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
             if not it.warehouse:
                 it.warehouse = profile.warehouse
 
+    # ── Serial/Batch reservation bundles ──────────────────────
+    # ERPNext's make_sales_invoice mapper (unlike make_delivery_note) does NOT
+    # build Serial and Batch Bundles for SO rows backed by a Stock Reservation
+    # Entry. With update_stock=1, selling_controller.update_stock_reservation_entries
+    # then does frappe.get_doc("Serial and Batch Bundle", item.serial_and_batch_bundle)
+    # and blows up with "Serial and Batch Bundle None not found" when serials
+    # were reserved on the SO. Mirror the DN mapper's behaviour here.
+    try:
+        from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
+            get_sre_details_for_voucher,
+            get_ssb_bundle_for_voucher,
+        )
+
+        sre_list = get_sre_details_for_voucher("Sales Order", sales_order) or []
+        if sre_list:
+            use_serial_batch_fields = frappe.get_single_value(
+                "Stock Settings", "use_serial_batch_fields"
+            )
+            sre_by_detail = {s.voucher_detail_no: s for s in sre_list}
+            for it in inv.items:
+                if it.get("serial_and_batch_bundle"):
+                    continue
+                sre = sre_by_detail.get(it.so_detail)
+                if not sre:
+                    continue
+                if (
+                    not use_serial_batch_fields
+                    and sre.reservation_based_on == "Serial and Batch"
+                    and (sre.has_serial_no or sre.has_batch_no)
+                ):
+                    bundle = get_ssb_bundle_for_voucher(sre)
+                    if bundle:
+                        it.serial_and_batch_bundle = (
+                            bundle.name if hasattr(bundle, "name") else bundle
+                        )
+                        if sre.warehouse and not it.warehouse:
+                            it.warehouse = sre.warehouse
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Pickup: serial/batch bundle hydration failed for SO {sales_order}",
+        )
+
     # Tax Category — fall back to In-State if customer doesn't have one
     cust_tax_cat = frappe.db.get_value("Customer", inv.customer, "tax_category") if inv.customer else None
     if not inv.get("tax_category"):
