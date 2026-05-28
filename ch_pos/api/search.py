@@ -117,14 +117,14 @@ def pos_item_search(
     brand_expr = "IFNULL(NULLIF(i.brand, ''), IFNULL(tmpl.brand, ''))"
 
     conditions = ["i.disabled = 0", "i.is_sales_item = 1", "i.has_variants = 0"]
-    # Lifecycle status rules:
-    #   blank (draft/unconfigured) → never show
-    #   Active                     → always show
-    #   End of Life / Discontinued → show only if stock exists (any warehouse)
+    # Lifecycle status rules (canonical Select: Draft / Pending Review / Active / Obsolete / Blocked):
+    #   Draft, Pending Review, Blocked → never show
+    #   Active                         → always show
+    #   Obsolete                       → show only if stock exists (sell-down old inventory)
     if has_lifecycle_status:
         conditions.append(
             "(IFNULL(i.ch_lifecycle_status, '') = 'Active'"
-            " OR (IFNULL(i.ch_lifecycle_status, '') IN ('End of Life', 'Discontinued')"
+            " OR (IFNULL(i.ch_lifecycle_status, '') = 'Obsolete'"
             "   AND ("
             "     (i.has_serial_no = 1 AND EXISTS ("
             "       SELECT 1 FROM `tabSerial No` sn"

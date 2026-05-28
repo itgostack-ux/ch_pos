@@ -74,4 +74,12 @@ class POSRepairIntake(Document):
         if not self.device_brand and not self.device_model:
             return None
         search = f"{self.device_brand or ''} {self.device_model or ''}".strip()
-        return frappe.db.get_value("Item", {"item_name": ["like", f"%{search}%"]}, "name")
+        return frappe.db.get_value(
+            "Item",
+            {
+                "item_name": ["like", f"%{search}%"],
+                "disabled": 0,
+                "ch_lifecycle_status": ["in", ("Active", "Obsolete")],
+            },
+            "name",
+        )

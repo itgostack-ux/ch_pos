@@ -134,6 +134,7 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
            LEFT JOIN `tabBin` b ON b.item_code = i.name AND b.warehouse = %(wh)s
            WHERE i.ch_sub_category = %(sub_cat)s
              AND i.disabled = 0 AND i.is_sales_item = 1 AND i.has_variants = 0
+             AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
              AND (b.actual_qty > 0 OR %(wh)s IS NULL)
            ORDER BY i.item_name""",
         {"sub_cat": sub_category, "wh": warehouse},

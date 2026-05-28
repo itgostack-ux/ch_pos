@@ -109,6 +109,8 @@ def get_full_item_catalog(pos_profile, company=None, page=0, page_size=200):
             AND ip.selling = 1
         WHERE i.disabled = 0
             AND i.is_sales_item = 1
+            AND i.has_variants = 0
+            AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
             {group_clause}
         GROUP BY i.item_code
         ORDER BY i.item_name

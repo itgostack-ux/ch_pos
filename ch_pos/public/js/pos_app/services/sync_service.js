@@ -16,7 +16,7 @@
 import { PosState, EventBus } from "../state.js";
 
 const DB_NAME    = "ch_pos_offline";
-const DB_VERSION = 2;        // bumped for customers store schema fix
+const DB_VERSION = 3;        // bumped to force-clear stale items cached before lifecycle filter (Active/Obsolete only)
 
 export class SyncService {
 	constructor() {
@@ -55,6 +55,16 @@ export class SyncService {
 					// v2: catalog_meta — tracks last warm timestamp and item count
 					if (!db.objectStoreNames.contains("catalog_meta")) {
 						db.createObjectStore("catalog_meta", { keyPath: "key" });
+					}
+				}
+				if (old < 3) {
+					// v3: server-side lifecycle filter now hides Draft/Pending Review/Blocked items.
+					// Wipe stale cached items + reset warm marker so the next session triggers a re-warm.
+					if (db.objectStoreNames.contains("items")) {
+						e.target.transaction.objectStore("items").clear();
+					}
+					if (db.objectStoreNames.contains("catalog_meta")) {
+						e.target.transaction.objectStore("catalog_meta").clear();
 					}
 				}
 			};
