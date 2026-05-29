@@ -264,7 +264,7 @@ def get_brand_models(brand: str) -> dict:
     rows = frappe.get_all(
         "Item",
         filters={"brand": ("in", db_brands), "disabled": 0},
-        fields=["distinct item_name as item_name"],
+        fields=["item_name"],
         order_by="item_name asc",
         limit_page_length=200,
     )
@@ -1176,7 +1176,7 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
         "contact_number": token.customer_phone,
         "company": profile.company,
         "source_warehouse": profile.warehouse,
-        "walkin_source": "Walk-in",    # Walkin Source master record named 'Walk-in'
+        "walkin_source": frappe.db.get_value("Walk-in Source", {}, "name"),  # first available walk-in source
         "decision": "Accepted",        # Customer is present — accepting the device
         "device_item": device_item or None,
         "device_item_name": _device_label(token.device_brand, token.device_model) if not device_item else None,

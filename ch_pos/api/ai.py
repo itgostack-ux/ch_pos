@@ -1,6 +1,7 @@
 import json
 
 import frappe
+from frappe import _
 from frappe.utils import cint, flt, now_datetime
 
 
@@ -204,7 +205,7 @@ def _ai_compare(item_codes, preferences, settings):
 		model_name = frappe.db.get_value("Item", code, "ch_model")
 		if model_name:
 			model_doc = frappe.get_cached_doc("CH Model", model_name)
-			specs = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}
+			specs = {sv.spec: sv.spec_value for sv in (model_doc.spec_values or [])}
 		price = flt(frappe.db.get_value(
 			"CH Item Price",
 			{"item_code": code, "channel": "POS", "status": "Active"},
@@ -262,7 +263,7 @@ def _static_compare(item_codes, preferences):
 		model_name = frappe.db.get_value("Item", code, "ch_model")
 		if model_name:
 			model_doc = frappe.get_cached_doc("CH Model", model_name)
-			specs = {sv.specification: sv.value for sv in (model_doc.spec_values or [])}
+			specs = {sv.spec: sv.spec_value for sv in (model_doc.spec_values or [])}
 		price = flt(frappe.db.get_value(
 			"CH Item Price",
 			{"item_code": code, "channel": "POS", "status": "Active"},

@@ -491,9 +491,12 @@ def test_14_convert_token_to_gofix_service_request():
             _skip(FLOW, "14 convert token to GoFix", "No POS Profile configured")
             return
 
-        # Check if Service Request doctype exists (GoFix module required)
+        # Check if Service Request doctype and Walk-in Source doctype exist (GoFix module required)
         if not frappe.db.exists("DocType", "Service Request"):
             _skip(FLOW, "14 convert token to GoFix", "Service Request doctype not available (GoFix not installed)")
+            return
+        if not frappe.db.exists("DocType", "Walk-in Source"):
+            _skip(FLOW, "14 convert token to GoFix", "Walk-in Source doctype not installed")
             return
 
         # Ensure POS Manager role

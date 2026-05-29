@@ -4,6 +4,22 @@ from textwrap import dedent
 
 
 CUSTOM_FIELDS = {
+    "Accounts Settings": [
+        {
+            "fieldname": "ch_daily_cash_receipt_limit",
+            "fieldtype": "Currency",
+            "label": "Daily Cash Receipt Limit per Customer (Sec. 269ST)",
+            "insert_after": "default_ageing_range",
+            "default": "200000",
+            "description": (
+                "Hard block on Sales Invoice submission when same-day cash "
+                "receipts from one customer reach this amount. Section 269ST "
+                "of the Income-Tax Act sets the statutory ceiling at "
+                "₹2,00,000. Set 0 to fall back to the statutory default."
+            ),
+            "module": "POS Core",
+        },
+    ],
     "POS Profile": [
         {
             "fieldname": "custom_pos_mode",
