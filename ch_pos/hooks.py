@@ -69,6 +69,7 @@ doc_events = {
             "ch_pos.api.isolation_api.validate_pos_invoice_isolation",
             "ch_pos.api.isolation_api.validate_no_post_close_transaction",
             "ch_pos.overrides.cash_receipt_limit.validate_section_269st_cash_limit",
+            "ch_pos.overrides.cutoff_time_guard.validate_pos_cutoff_time",
         ],
         "on_submit": [
             "ch_pos.overrides.pos_invoice.create_customer_device_records",

@@ -55,6 +55,24 @@ CUSTOM_FIELDS = {
             "default": "30",
             "module": "POS Core",
         },
+        {
+            "fieldname": "ch_cutoff_time",
+            "fieldtype": "Time",
+            "label": "Daily Cut-off Time",
+            "insert_after": "custom_return_window_days",
+            "description": "After this server time, new POS invoices are blocked unless the user holds the override role. Leave blank to disable.",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "ch_cutoff_override_role",
+            "fieldtype": "Link",
+            "options": "Role",
+            "label": "Cut-off Override Role",
+            "insert_after": "ch_cutoff_time",
+            "default": "POS Manager",
+            "description": "Role permitted to bill after the cut-off time. System Manager always bypasses.",
+            "module": "POS Core",
+        },
     ],
     "Sales Invoice": [
         {
