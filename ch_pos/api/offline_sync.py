@@ -42,10 +42,14 @@ def create_pos_invoice_offline(**kwargs):
                 "status": "already_exists",
             }
 
-    # Delegate to the main POS API (which handles all validation, stock, GL etc.)
+    # Delegate via frappe.call so get_newargs strips Frappe-internal keys
+    # (cmd, csrf_token, ignore_permissions, etc.) that arrive in **kwargs
+    # because this function uses VAR_KEYWORD and receives the raw form_dict.
     from ch_pos.api.pos_api import create_pos_invoice  # noqa
 
-    result = create_pos_invoice(**{k: v for k, v in kwargs.items() if k != "client_id"})
+    _FRAPPE_INTERNAL = {"cmd", "csrf_token", "client_id", "data", "ignore_permissions", "flags"}
+    clean_kwargs = {k: v for k, v in kwargs.items() if k not in _FRAPPE_INTERNAL}
+    result = frappe.call(create_pos_invoice, **clean_kwargs)
 
     # Stamp the client_id on the created invoice so future retries hit the guard
     if result and client_id:
