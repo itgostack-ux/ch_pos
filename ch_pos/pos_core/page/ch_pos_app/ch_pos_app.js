@@ -47,8 +47,13 @@ frappe.pages["ch-pos-app"].on_page_show = function (wrapper) {
 };
 
 frappe.pages["ch-pos-app"].on_page_hide = function (wrapper) {
-	// Restore Frappe desk sidebar when leaving POS
+	// Restore Frappe desk sidebar and navbar when leaving POS.
+	// layout_manager._apply_fullscreen() calls $("header.navbar").hide() which
+	// adds an inline style="display:none". Removing the CSS class alone is not
+	// enough — we must explicitly call .show() to clear that inline style.
 	$("body").removeClass("ch-pos-fullscreen");
+	$("header.navbar").show();
+	$(".body-sidebar-container, .body-sidebar").show();
 };
 
 frappe.pages["ch-pos-app"].refresh = function (wrapper) {

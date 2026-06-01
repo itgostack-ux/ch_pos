@@ -89,6 +89,25 @@ export class ReportsWorkspace {
 						${sales.map(k => kpiCard(k, k.cls === "revenue" || k.cls === "avg-basket" ? "₹0" : "0")).join("")}
 					</div>
 
+					<div class="ch-rpt-section ch-rpt-ai">
+						<div class="ch-rpt-section-head">
+							<span>
+								<span class="ch-rpt-ai-badge">AI</span>
+								${__("Insights & Recommendations")}
+								<span class="ch-rpt-ai-sub">${__("Context-aware for this store")}</span>
+							</span>
+							<button class="btn btn-xs btn-default ch-rpt-ai-refresh" title="${__("Re-generate insights")}">
+								<i class="fa fa-refresh"></i> ${__("Refresh")}
+							</button>
+						</div>
+						<div class="ch-rpt-section-body ch-rpt-ai-body">
+							<div class="ch-rpt-ai-loading">
+								<i class="fa fa-spinner fa-spin"></i> ${__("Generating insights…")}
+							</div>
+							<div class="ch-rpt-ai-list" style="display:none"></div>
+						</div>
+					</div>
+
 					<div class="ch-rpt-section">
 						<div class="ch-rpt-section-head"><i class="fa fa-area-chart"></i> ${__("Hourly Sales")}</div>
 						<div class="ch-rpt-section-body">
@@ -175,6 +194,39 @@ export class ReportsWorkspace {
 		});
 		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
 
+		// AI Insights — refresh / execute / dismiss
+		panel.on("click", ".ch-rpt-ai-refresh", () => this._load_ai_insights(panel, true));
+		panel.on("click", ".ch-rpt-ai-card [data-action='execute']", (e) => {
+			const btn = $(e.currentTarget);
+			const name = btn.attr("data-name");
+			if (!name) return;
+			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Running…")}`);
+			frappe.call({
+				method: "ch_mg_reports.ai.api.execute_recommendation",
+				args: { recommendation: name },
+				callback: () => {
+					frappe.show_alert({ message: __("AI action executed"), indicator: "green" });
+					this._load_ai_insights(panel, true);
+				},
+				error: () => btn.prop("disabled", false).text(__("Retry")),
+			});
+		});
+		panel.on("click", ".ch-rpt-ai-card [data-action='dismiss']", (e) => {
+			const btn = $(e.currentTarget);
+			const name = btn.attr("data-name");
+			if (!name) return;
+			btn.prop("disabled", true);
+			frappe.call({
+				method: "ch_mg_reports.ai.api.dismiss_recommendation",
+				args: { recommendation: name },
+				callback: () => this._load_ai_insights(panel, true),
+			});
+		});
+		panel.on("click", ".ch-rpt-ai-card [data-action='open-ref']", function () {
+			const dt = $(this).attr("data-dt"), dn = $(this).attr("data-dn");
+			if (dt && dn) frappe.set_route("Form", dt, dn);
+		});
+
 		// KPI cards → open filtered list in new tab
 		panel.on("click", ".ch-rpt-kpi--link", function () {
 			const href = $(this).attr("data-href");
@@ -195,6 +247,8 @@ export class ReportsWorkspace {
 	}
 
 	_load_data(panel) {
+		this._load_ai_insights(panel, false);
+
 		frappe.call({
 			method: "ch_pos.api.pos_api.get_today_footfall",
 			args: { pos_profile: PosState.pos_profile },
@@ -338,6 +392,93 @@ export class ReportsWorkspace {
 				if (!(d.stock_transfers || []).length) {
 					st_list.html(`<div class="ch-rpt-empty" style="padding:20px">${__("No recent transfers")}</div>`);
 				}
+			},
+		});
+	}
+
+	_load_ai_insights(panel, force) {
+		const section = panel.find(".ch-rpt-ai");
+		if (!section.length) return;
+		const loading = section.find(".ch-rpt-ai-loading");
+		const list = section.find(".ch-rpt-ai-list");
+		loading.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Generating insights…")}`).show();
+		list.hide();
+
+		const ctx = {
+			route_type: "Page",
+			route_key: "ch-pos-app",
+			doctype: "POS Profile",
+			name: PosState.pos_profile || null,
+			filters: {
+				company: PosState.company || null,
+				warehouse: PosState.warehouse || null,
+				store: PosState.store || null,
+				business_date: PosState.business_date || frappe.datetime.get_today(),
+			},
+		};
+
+		frappe.call({
+			method: "ch_mg_reports.ai.api.get_page_brief",
+			args: { context: JSON.stringify(ctx), force: force ? 1 : 0 },
+			callback: (r) => {
+				const brief = (r && r.message) || {};
+				const recos = brief.recommendations || [];
+				loading.hide();
+				list.show().empty();
+
+				if (brief.disabled) {
+					list.html(`<div class="ch-rpt-empty" style="padding:16px">${__("AI insights are disabled. Enable them in CH AI Settings.")}</div>`);
+					return;
+				}
+				if (!recos.length) {
+					list.html(`<div class="ch-rpt-empty" style="padding:16px"><i class="fa fa-check-circle" style="color:#16a34a"></i> ${__("No actionable items right now — operations look healthy.")}</div>`);
+					return;
+				}
+
+				const esc = frappe.utils.escape_html;
+				const fmtMd = (md) => esc(md || "")
+					.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+					.replace(/\n- /g, "<br>• ")
+					.replace(/\n/g, "<br>");
+
+				recos.forEach((rec) => {
+					const sev = (rec.severity || "Info");
+					const sevCls = "ch-rpt-ai-sev--" + sev.toLowerCase();
+					const impact = rec.estimated_impact
+						? `<span class="ch-rpt-ai-impact" title="${__("Estimated impact")}">₹${Number(rec.estimated_impact).toLocaleString("en-IN")}</span>`
+						: "";
+					const conf = rec.confidence != null
+						? `<span class="ch-rpt-ai-conf">${Math.round(rec.confidence)}%</span>`
+						: "";
+					const refLink = rec.ref_doctype && rec.ref_name
+						? `<button class="btn btn-xs btn-link" data-action="open-ref" data-dt="${esc(rec.ref_doctype)}" data-dn="${esc(rec.ref_name)}"><i class="fa fa-external-link"></i> ${esc(rec.ref_name)}</button>`
+						: "";
+					const execBtn = (rec.action_key && rec.status === "New")
+						? `<button class="btn btn-xs btn-primary" data-action="execute" data-name="${esc(rec.name)}">${esc(rec.action_label || __("Execute"))}</button>`
+						: "";
+					const dismissBtn = rec.status === "New"
+						? `<button class="btn btn-xs btn-default" data-action="dismiss" data-name="${esc(rec.name)}">${__("Dismiss")}</button>`
+						: `<span class="ch-rpt-ai-status">${esc(rec.status || "")}</span>`;
+
+					list.append(`
+						<div class="ch-rpt-ai-card ${sevCls}">
+							<div class="ch-rpt-ai-card-head">
+								<span class="ch-rpt-ai-sev">${esc(sev)}</span>
+								<strong class="ch-rpt-ai-title">${esc(rec.title || "")}</strong>
+								<span class="ch-rpt-ai-meta">${impact} ${conf}</span>
+							</div>
+							<div class="ch-rpt-ai-body-md">${fmtMd(rec.body)}</div>
+							<div class="ch-rpt-ai-footer">${refLink}${execBtn}${dismissBtn}</div>
+						</div>
+					`);
+				});
+
+				if (brief.degraded) {
+					list.append(`<div class="ch-rpt-ai-degraded"><i class="fa fa-info-circle"></i> ${__("Using rule-based fallback (LLM unavailable).")}</div>`);
+				}
+			},
+			error: () => {
+				loading.html(`<div class="ch-rpt-empty" style="padding:16px;color:#dc2626"><i class="fa fa-exclamation-triangle"></i> ${__("Unable to load AI insights")}</div>`);
 			},
 		});
 	}

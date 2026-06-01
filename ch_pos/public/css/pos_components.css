@@ -5622,3 +5622,131 @@ body > .desk-alert-container,
   font-size: 15px;
   flex-shrink: 0;
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+   Store Dashboard — AI Insights panel
+   Reuses .ch-rpt-section base; adds AI-specific accents.
+   ───────────────────────────────────────────────────────────────────── */
+.ch-rpt-ai {
+  border: 1px solid #e0e7ff;
+  background: linear-gradient(180deg, #fafbff 0%, #ffffff 70%);
+}
+.ch-rpt-ai .ch-rpt-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ch-rpt-ai-badge {
+  display: inline-block;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.ch-rpt-ai-sub {
+  color: #6b7280;
+  font-weight: 400;
+  font-size: 0.8rem;
+  margin-left: 8px;
+}
+.ch-rpt-ai-body {
+  padding: 12px;
+}
+.ch-rpt-ai-loading {
+  color: #6b7280;
+  font-size: 0.85rem;
+  padding: 12px 4px;
+}
+.ch-rpt-ai-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ch-rpt-ai-card {
+  position: relative;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-left: 4px solid #94a3b8;
+  border-radius: 8px;
+  padding: 12px 14px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.ch-rpt-ai-card.ch-rpt-ai-sev--critical { border-left-color: #dc2626; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--high     { border-left-color: #ea580c; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--medium   { border-left-color: #d97706; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--low      { border-left-color: #2563eb; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--info     { border-left-color: #16a34a; }
+.ch-rpt-ai-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ch-rpt-ai-card .ch-rpt-ai-sev {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: #f1f5f9;
+  color: #475569;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.ch-rpt-ai-card.ch-rpt-ai-sev--critical .ch-rpt-ai-sev { background:#fee2e2; color:#dc2626; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--high     .ch-rpt-ai-sev { background:#ffedd5; color:#ea580c; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--medium   .ch-rpt-ai-sev { background:#fef3c7; color:#d97706; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--low      .ch-rpt-ai-sev { background:#dbeafe; color:#2563eb; }
+.ch-rpt-ai-card.ch-rpt-ai-sev--info     .ch-rpt-ai-sev { background:#dcfce7; color:#16a34a; }
+.ch-rpt-ai-title {
+  font-size: 0.92rem;
+  color: #0f172a;
+  flex: 1;
+  min-width: 200px;
+}
+.ch-rpt-ai-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.ch-rpt-ai-impact {
+  font-weight: 600;
+  color: #16a34a;
+  font-size: 0.8rem;
+}
+.ch-rpt-ai-conf {
+  color: #6b7280;
+  font-size: 0.75rem;
+}
+.ch-rpt-ai-body-md {
+  color: #334155;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.ch-rpt-ai-footer {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.ch-rpt-ai-status {
+  color: #6b7280;
+  font-size: 0.75rem;
+  font-style: italic;
+}
+.ch-rpt-ai-degraded {
+  color: #6b7280;
+  font-size: 0.75rem;
+  padding: 6px 4px;
+  border-top: 1px dashed #e5e7eb;
+  margin-top: 6px;
+}
