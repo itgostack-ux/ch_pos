@@ -4871,8 +4871,16 @@ body > .desk-alert-container,
    ═══════════════════════════════════════════════════════════ */
 .ch-pos-imei-wrap {
   position: relative;
-  min-width: 200px;
-  max-width: 260px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 240px;
+  max-width: 300px;
+}
+.ch-pos-imei-wrap .ch-pos-imei-input-box {
+  position: relative;
+  flex: 1;
+  min-width: 0;
 }
 .ch-pos-imei-icon {
   position: absolute;
@@ -4882,8 +4890,10 @@ body > .desk-alert-container,
   color: var(--pos-warning);
   font-size: 14px;
   z-index: 1;
+  pointer-events: none;
 }
 .ch-pos-imei-input {
+  width: 100%;
   padding-left: 36px !important;
   height: 40px !important;
   border: 2px solid var(--pos-warning) !important;
@@ -4902,6 +4912,31 @@ body > .desk-alert-container,
 .ch-pos-imei-input::placeholder {
   font-family: var(--pos-font);
   font-weight: 400;
+}
+.ch-pos-cam-scan {
+  flex-shrink: 0;
+  height: 40px !important;
+  width: 40px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--pos-warning) !important;
+  border-radius: var(--pos-radius-sm) !important;
+  background: #fffbeb !important;
+  color: var(--pos-warning) !important;
+  transition: all var(--pos-transition);
+}
+.ch-pos-cam-scan:hover,
+.ch-pos-cam-scan:focus {
+  background: var(--pos-warning) !important;
+  color: #fff !important;
+  box-shadow: 0 0 0 3px rgba(245,158,11,0.15) !important;
+}
+.ch-pos-cam-scan i {
+  font-size: 14px;
+  line-height: 1;
 }
 
 /* ── Toolbar left now has two inputs ─────────────────────── */

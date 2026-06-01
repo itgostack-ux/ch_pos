@@ -20,13 +20,15 @@ export class ContextualToolbar {
 			<div class="ch-pos-toolbar">
 				<div class="ch-pos-toolbar-left">
 					<div class="ch-pos-imei-wrap">
-						<i class="fa fa-barcode ch-pos-imei-icon"></i>
-						<input type="text" class="form-control ch-pos-imei-input"
-							placeholder="${__("Scan IMEI / Serial...")}"
-							autocomplete="off">
-						<button class="btn btn-xs btn-default ch-pos-cam-scan"
+						<div class="ch-pos-imei-input-box">
+							<i class="fa fa-barcode ch-pos-imei-icon"></i>
+							<input type="text" class="form-control ch-pos-imei-input"
+								placeholder="${__("Scan IMEI / Serial...")}"
+								autocomplete="off">
+						</div>
+						<button class="btn btn-default ch-pos-cam-scan"
 							title="${__("Scan with camera")}"
-							style="margin-left:6px">
+							aria-label="${__("Scan with camera")}">
 							<i class="fa fa-camera"></i>
 						</button>
 					</div>
