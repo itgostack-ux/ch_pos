@@ -476,7 +476,8 @@ def create_pos_invoice(pos_profile, customer, items,
                        customer_gstin=None,
                        original_invoice=None,
                        original_invoice_reason=None,
-                       discount_authorized_by=None) -> dict:
+                       discount_authorized_by=None,
+                       **_ignored) -> dict:
     """Create and submit a Sales Invoice from the CH POS App cart.
 
     Supports both legacy single-payment and new multi-payment (split) modes:
