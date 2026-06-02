@@ -10,6 +10,7 @@ import secrets
 
 import frappe
 from frappe import _
+from frappe.rate_limiter import rate_limit
 from frappe.utils import now_datetime, get_url
 
 
@@ -242,6 +243,7 @@ def _send_approval_email(approval_doc, manager_info, token):
 
 
 @frappe.whitelist(allow_guest=True)
+@rate_limit(limit=20, seconds=300, ip_based=True)
 def respond_to_approval(token: str, manager: str, action: str) -> None:
     """Handle manager's response from email link.
 

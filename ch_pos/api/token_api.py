@@ -7,6 +7,7 @@ import re
 
 import frappe
 from frappe import _
+from frappe.rate_limiter import rate_limit
 from frappe.utils import now_datetime, get_datetime
 
 from buyback.utils import normalize_indian_phone, validate_indian_phone
@@ -178,6 +179,7 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist(allow_guest=True)
+@rate_limit(limit=120, seconds=60, ip_based=True)
 def get_store_config(pos_profile: str) -> dict:
     """
     Returns store configuration for the kiosk page dropdowns.
@@ -238,6 +240,7 @@ def get_store_config(pos_profile: str) -> dict:
 
 
 @frappe.whitelist(allow_guest=True)
+@rate_limit(limit=120, seconds=60, ip_based=True)
 def get_brand_models(brand: str) -> dict:
     """
     Return distinct device model names for a given brand from Item Master.
@@ -281,6 +284,7 @@ def get_brand_models(brand: str) -> dict:
 
 
 @frappe.whitelist(allow_guest=True)
+@rate_limit(limit=20, seconds=300, methods=["POST"], ip_based=True)
 def create_token(
     pos_profile: str,
     customer_name: str,

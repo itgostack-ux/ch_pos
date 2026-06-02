@@ -11,18 +11,42 @@ from frappe.utils import flt
 
 
 def _pick_assessment() -> str:
+    # Pick an assessment whose item is in Active lifecycle AND is not
+    # serial-tracked. Serial-tracked items would require a Serial &
+    # Batch Bundle to be created during the close-order Stock Entry —
+    # outside the scope of this OTP-gate e2e.
     row = frappe.db.sql(
         """
-        SELECT name
-        FROM `tabBuyback Assessment`
-        WHERE docstatus < 2
-        ORDER BY modified DESC
+        SELECT a.name
+        FROM `tabBuyback Assessment` a
+        JOIN `tabItem` i ON i.name = a.item
+        WHERE a.docstatus < 2
+          AND COALESCE(i.ch_lifecycle_status, 'Active') = 'Active'
+          AND COALESCE(i.disabled, 0) = 0
+          AND COALESCE(i.has_serial_no, 0) = 0
+          AND COALESCE(i.has_batch_no, 0) = 0
+        ORDER BY a.modified DESC
         LIMIT 1
         """,
         as_dict=True,
     )
     if not row:
-        raise AssertionError("No Buyback Assessment found")
+        # Fallback: any Active, non-disabled item
+        row = frappe.db.sql(
+            """
+            SELECT a.name
+            FROM `tabBuyback Assessment` a
+            JOIN `tabItem` i ON i.name = a.item
+            WHERE a.docstatus < 2
+              AND COALESCE(i.ch_lifecycle_status, 'Active') = 'Active'
+              AND COALESCE(i.disabled, 0) = 0
+            ORDER BY a.modified DESC
+            LIMIT 1
+            """,
+            as_dict=True,
+        )
+    if not row:
+        raise AssertionError("No Buyback Assessment with an Active item found")
     return row[0].name
 
 
@@ -82,6 +106,13 @@ def run():
     order = frappe.get_doc("Buyback Order", order_name)
     if not order.mobile_no:
         order.db_set("mobile_no", "9876543210", update_modified=True)
+        order.reload()
+
+    # Ensure a non-zero final_price so record_payment has something to
+    # post. Picked assessments may have final_price=0 when the source
+    # quote was a placeholder; we set a deterministic test value.
+    if flt(order.final_price) <= 0:
+        order.db_set("final_price", 1000.0, update_modified=True)
         order.reload()
 
     if order.status not in ("Approved", "Awaiting Customer Approval", "Awaiting OTP", "OTP Verified", "Ready to Pay", "Paid", "Closed"):

@@ -2,6 +2,7 @@ import datetime
 
 import frappe
 from frappe import _
+from frappe.rate_limiter import rate_limit
 from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime, validate_email_address
 try:
     from buyback.utils import validate_indian_phone
@@ -871,6 +872,25 @@ def create_pos_invoice(pos_profile, customer, items,
         if ch_item_type in ("Refurbished", "Pre-Owned"):
             row["custom_is_margin_item"] = 1
 
+        # P0 FIX: Block sale of in-transit or non-sellable serials
+        item_serial_check = (item.get("serial_no") or "").strip()
+        if item_serial_check:
+            _sbin = frappe.db.get_value(
+                "CH Stock Bin",
+                {"serial_no": item_serial_check, "is_active": 1},
+                "bin_type"
+            )
+            if _sbin == "Transfer":
+                frappe.throw(
+                    frappe._("Serial {0} is currently in transit and cannot be sold. Wait for store receipt.").format(item_serial_check),
+                    title=frappe._("Serial In Transit")
+                )
+            if _sbin in ("Damaged", "Defect", "DOA", "Scrapped", "Lost", "Buyback"):
+                frappe.throw(
+                    frappe._("Serial {0} (bin type: {1}) is not available for sale.").format(item_serial_check, _sbin),
+                    title=frappe._("Serial Not Sellable")
+                )
+
         inv.append("items", row)
 
         # Safety: If any item has exception pricing, ensure pricing rules are bypassed
@@ -930,10 +950,14 @@ def create_pos_invoice(pos_profile, customer, items,
                          "No unused approved request found for the current user."),
                 title=frappe._("Free Sale Not Approved"),
             )
-        # Mark the approval as used immediately — prevents the same approval
-        # from being submitted twice (e.g. double-click or network retry).
-        frappe.db.set_value("CH Free Sale Approval", approval_name, "used", 1)
-        frappe.db.set_value("CH Free Sale Approval", approval_name, "used_in_invoice", inv.name or "pending")
+        # P0 FIX: Atomic mark-as-used to prevent replay
+        _rows = frappe.db.sql(
+            "UPDATE `tabCH Free Sale Approval` SET used=1, used_in_invoice=%s, modified=NOW() WHERE name=%s AND used=0",
+            (inv.name or "pending", approval_name)
+        )
+        if frappe.db.sql("SELECT ROW_COUNT()")[0][0] == 0:
+            frappe.throw(frappe._("Free Sale Approval {0} has already been used. Cannot reuse.").format(approval_name),
+                         title=frappe._("Approval Already Used"))
 
         # Free sale — set custom fields, no payment required
         inv.custom_is_free_sale = 1
@@ -1216,6 +1240,34 @@ def create_pos_invoice(pos_profile, customer, items,
     if coupon_code and not coupon_discount_amount and manual_discount_amount > 0 and flt(additional_discount_percentage) <= 0 and not discount_reason:
         coupon_discount_amount = manual_discount_amount
         manual_discount_amount = 0
+
+    # P0 FIX: MSP guard before any discount application
+    if (flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0 or flt(voucher_amount) > 0) and not cint(is_free_sale):
+        _total_item_amount = sum(flt(i.get("rate", 0)) * flt(i.get("qty", 1)) for i in items)
+        _total_discount_rs = (
+            _total_item_amount * flt(additional_discount_percentage) / 100
+            + flt(additional_discount_amount)
+            + flt(voucher_amount)
+        )
+        for _chk in items:
+            _ic = _chk.get("item_code")
+            if not _ic:
+                continue
+            _msp = frappe.db.get_value("CH Item Price", {"item_code": _ic, "status": "Active"}, "min_selling_rate")
+            if not _msp:
+                continue
+            _rate = flt(_chk.get("rate", 0))
+            _qty = flt(_chk.get("qty", 1))
+            if _qty <= 0 or _total_item_amount <= 0:
+                continue
+            _item_share = (_rate * _qty) / _total_item_amount
+            _eff_rate = _rate - (_total_discount_rs * _item_share / max(_qty, 1))
+            if _eff_rate < flt(_msp):
+                frappe.throw(
+                    frappe._("{0}: effective rate ₹{1} after discount is below minimum selling price ₹{2}. Remove discount or use Free Sale Approval.").format(
+                        _ic, round(_eff_rate, 2), _msp),
+                    title=frappe._("Below Minimum Selling Price")
+                )
 
     # Additional discount
     if flt(additional_discount_percentage) > 0:
@@ -8270,6 +8322,7 @@ def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
 
 
 @frappe.whitelist(allow_guest=True)
+@rate_limit(limit=20, seconds=300, ip_based=True)
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
                                  kyc_id_type=None, kyc_id_number=None,
                                  customer_id_front=None, customer_id_back=None,
