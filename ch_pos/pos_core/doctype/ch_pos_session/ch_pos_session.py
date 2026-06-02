@@ -217,13 +217,12 @@ class CHPOSSession(Document):
             )
 
     def _calculate_totals(self):
-        """Fetch invoice totals for this session's date range and profile."""
+        """Fetch invoice totals for this session."""
         invoices = frappe.get_all(
             "Sales Invoice",
             filters={
-                "pos_profile": self.pos_profile,
+                "custom_ch_pos_session": self.name,
                 "docstatus": 1,
-                "posting_date": self.business_date,
             },
             fields=["name", "grand_total", "is_return"],
         )
@@ -253,11 +252,10 @@ class CHPOSSession(Document):
             SELECT sip.mode_of_payment, SUM(sip.amount) AS expected_amount
             FROM `tabSales Invoice` pi
             JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
-            WHERE pi.pos_profile = %(pos_profile)s
+            WHERE pi.custom_ch_pos_session = %(session)s
               AND pi.docstatus = 1
-              AND pi.posting_date = %(bdate)s
             GROUP BY sip.mode_of_payment
-        """, {"pos_profile": self.pos_profile, "bdate": self.business_date}, as_dict=True)
+        """, {"session": self.name}, as_dict=True)
 
         existing = {r.mode_of_payment: r for r in (self.payment_details or [])}
         self.set("payment_details", [])
@@ -355,77 +353,87 @@ class CHPOSSession(Document):
     def close_session(self, closing_cash, denomination_rows=None, variance_reason=None,
                       manager_pin_user=None):
         """Close this session — called from POS UI."""
-        if self.status not in ("Open", "Locked", "Pending Close"):
-            frappe.throw(_("Session is not in a closable state (current: {0})").format(self.status), title=_("Ch Pos Session Error"))
+        _lk = f"sess_close_{frappe.scrub(self.name)}"
+        if not frappe.db.sql("SELECT GET_LOCK(%s, 20)", (_lk,))[0][0]:
+            frappe.throw(frappe._("Session {0} is already being closed.").format(self.name))
+        try:
+            _fresh = frappe.db.get_value("CH POS Session", self.name, "status")
+            if _fresh != "Open":
+                frappe.throw(frappe._("Session {0} is already {1}.").format(self.name, _fresh))
 
-        self.status = "Closing"
-        self.shift_end = now_datetime()
-        self.closing_cash_actual = flt(closing_cash)
-        self.variance_reason = variance_reason or ""
+            if self.status not in ("Open", "Locked", "Pending Close"):
+                frappe.throw(_("Session is not in a closable state (current: {0})").format(self.status), title=_("Ch Pos Session Error"))
 
-        if self.shift_start and self.shift_end:
-            self.duration_minutes = int(time_diff_in_seconds(self.shift_end, self.shift_start) / 60)
+            self.status = "Closing"
+            self.shift_end = now_datetime()
+            self.closing_cash_actual = flt(closing_cash)
+            self.variance_reason = variance_reason or ""
 
-        # Denomination breakdown
-        if denomination_rows:
-            self.set("denomination_details", [])
-            for d in denomination_rows:
-                self.append("denomination_details", {
-                    "denomination": flt(d.get("denomination")),
-                    "count": cint(d.get("count")),
-                    "amount": flt(d.get("denomination")) * cint(d.get("count")),
-                })
+            if self.shift_start and self.shift_end:
+                self.duration_minutes = int(time_diff_in_seconds(self.shift_end, self.shift_start) / 60)
 
-        if manager_pin_user:
-            self.closing_approved_by = manager_pin_user
-            self.closing_approved_at = now_datetime()
-        else:
-            self.closing_approved_by = None
-            self.closing_approved_at = None
+            # Denomination breakdown
+            if denomination_rows:
+                self.set("denomination_details", [])
+                for d in denomination_rows:
+                    self.append("denomination_details", {
+                        "denomination": flt(d.get("denomination")),
+                        "count": cint(d.get("count")),
+                        "amount": flt(d.get("denomination")) * cint(d.get("count")),
+                    })
 
-        # Calculate totals and variance (runs _calculate_totals + _calculate_cash_variance + _validate_variance)
-        self._calculate_totals()
-        self._calculate_cash_variance()
-        self._validate_variance()
+            if manager_pin_user:
+                self.closing_approved_by = manager_pin_user
+                self.closing_approved_at = now_datetime()
+            else:
+                self.closing_approved_by = None
+                self.closing_approved_at = None
 
-        # Persist all computed fields (save() on submitted doc won't persist them)
-        update_fields = {
-            "status": "Closed",
-            "shift_end": self.shift_end,
-            "closing_cash_actual": self.closing_cash_actual,
-            "closing_cash_expected": self.closing_cash_expected,
-            "cash_variance": self.cash_variance,
-            "total_cash_drops": self.total_cash_drops,
-            "variance_reason": self.variance_reason,
-            "total_invoices": self.total_invoices,
-            "total_sales": self.total_sales,
-            "total_returns": self.total_returns,
-            "total_return_amount": self.total_return_amount,
-            "net_sales": self.net_sales,
-        }
-        if hasattr(self, 'duration_minutes'):
-            update_fields["duration_minutes"] = self.duration_minutes
-        update_fields["closing_approved_by"] = self.closing_approved_by
-        update_fields["closing_approved_at"] = self.closing_approved_at
+            # Calculate totals and variance (runs _calculate_totals + _calculate_cash_variance + _validate_variance)
+            self._calculate_totals()
+            self._calculate_cash_variance()
+            self._validate_variance()
 
-        for field, value in update_fields.items():
-            self.db_set(field, value, update_modified=False)
+            # Persist all computed fields (save() on submitted doc won't persist them)
+            update_fields = {
+                "status": "Closed",
+                "shift_end": self.shift_end,
+                "closing_cash_actual": self.closing_cash_actual,
+                "closing_cash_expected": self.closing_cash_expected,
+                "cash_variance": self.cash_variance,
+                "total_cash_drops": self.total_cash_drops,
+                "variance_reason": self.variance_reason,
+                "total_invoices": self.total_invoices,
+                "total_sales": self.total_sales,
+                "total_returns": self.total_returns,
+                "total_return_amount": self.total_return_amount,
+                "net_sales": self.net_sales,
+            }
+            if hasattr(self, 'duration_minutes'):
+                update_fields["duration_minutes"] = self.duration_minutes
+            update_fields["closing_approved_by"] = self.closing_approved_by
+            update_fields["closing_approved_at"] = self.closing_approved_at
 
-        self.db_set("modified", now_datetime())
-        self.status = "Closed"
+            for field, value in update_fields.items():
+                self.db_set(field, value, update_modified=False)
 
-        # Mark the linked ERPNext POS Opening Entry as closed so that
-        # check_opening_entry() (which filters pos_closing_entry=None) stops
-        # showing this entry in the "Open POS Session" dialog.
-        if getattr(self, "pos_opening_entry", None):
-            frappe.db.set_value(
-                "POS Opening Entry",
-                self.pos_opening_entry,
-                {"pos_closing_entry": self.name, "status": "Closed"},
-                update_modified=False,
-            )
+            self.db_set("modified", now_datetime())
+            self.status = "Closed"
 
-        self._log_close_event()
+            # Mark the linked ERPNext POS Opening Entry as closed so that
+            # check_opening_entry() (which filters pos_closing_entry=None) stops
+            # showing this entry in the "Open POS Session" dialog.
+            if getattr(self, "pos_opening_entry", None):
+                frappe.db.set_value(
+                    "POS Opening Entry",
+                    self.pos_opening_entry,
+                    {"pos_closing_entry": self.name, "status": "Closed"},
+                    update_modified=False,
+                )
+
+            self._log_close_event()
+        finally:
+            frappe.db.sql("SELECT RELEASE_LOCK(%s)", (_lk,))
 
     def _log_close_event(self):
         try:

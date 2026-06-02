@@ -218,8 +218,8 @@ class CHPOSSettlement(Document):
                 ],
             })
             je.flags.ignore_permissions = True
-            je.insert(ignore_permissions=True)
-            je.submit()
+            je.insert()
+            frappe.msgprint(frappe._("Variance JE {0} created as Draft — Finance Manager must submit.").format(je.name), indicator="orange")
             self.db_set("variance_journal_entry", je.name, update_modified=False)
         except Exception:
             frappe.log_error(
