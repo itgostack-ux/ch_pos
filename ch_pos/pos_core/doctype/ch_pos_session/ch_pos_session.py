@@ -358,9 +358,11 @@ class CHPOSSession(Document):
             frappe.throw(frappe._("Session {0} is already being closed.").format(self.name))
         try:
             _fresh = frappe.db.get_value("CH POS Session", self.name, "status")
-            if _fresh != "Open":
+            if _fresh not in ("Open", "Locked", "Pending Close"):
                 frappe.throw(frappe._("Session {0} is already {1}.").format(self.name, _fresh))
 
+            if self.status not in ("Open", "Locked", "Pending Close"):
+                self.reload()
             if self.status not in ("Open", "Locked", "Pending Close"):
                 frappe.throw(_("Session is not in a closable state (current: {0})").format(self.status), title=_("Ch Pos Session Error"))
 
