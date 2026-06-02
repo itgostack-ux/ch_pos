@@ -27,6 +27,21 @@
   },
   {
    "role": "System Manager"
+  },
+  {
+   "role": "POS User"
+  },
+  {
+   "role": "POS Manager"
+  },
+  {
+   "role": "Store Manager"
+  },
+  {
+   "role": "CH Store Executive"
+  },
+  {
+   "role": "Technician"
   }
  ],
  "script": null,
