@@ -2813,8 +2813,14 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const change    = this._payments.reduce((s, p) => s + flt(p.amount), 0) +
 			(this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0) - grand;
 
-		// Auto-clear countdown (5 seconds)
-		let countdown = 5;
+		// Auto-clear countdown — driven by POS Profile Extension.invoice_autoclose_seconds.
+		// Defaults: 30s when not configured (matches POS Profile Extension default).
+		// Set to 0 on the extension to disable auto-close — cashier must click "Next Sale".
+		const _ext = (PosState && PosState.pos_ext) || {};
+		const _configured = parseInt(_ext.invoice_autoclose_seconds, 10);
+		const _initial = Number.isFinite(_configured) ? _configured : 30;
+		const auto_close_disabled = _initial <= 0;
+		let countdown = auto_close_disabled ? 0 : _initial;
 
 		this._overlay.find(".ch-pay-screen").html(`
 			<div class="ch-pay-success">
@@ -2857,7 +2863,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				this._auto_timer = setTimeout(tick, 1000);
 			}
 		};
-		this._auto_timer = setTimeout(tick, 1000);
+		if (!auto_close_disabled) {
+			this._auto_timer = setTimeout(tick, 1000);
+		} else {
+			// Auto-close disabled: hide countdown UI and keep the receipt up indefinitely.
+			this._overlay.find(".ch-pay-countdown-badge").hide();
+			this._overlay.find(".ch-pay-auto-note").hide();
+		}
 
 		// Manual "Next Sale" cancels timer and proceeds immediately
 		this._overlay.on("click", ".ch-pay-next-btn", () => {
@@ -2869,10 +2881,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Print resets/pauses countdown but does not close
 		this._overlay.on("click", ".ch-pay-print-btn", e => {
 			clearTimeout(this._auto_timer);
-			countdown = 10; // extend after print
-			this._overlay.find("#ch-pay-cd-sec").text(countdown);
-			this._overlay.find(".ch-pay-countdown-badge").text(countdown);
-			this._auto_timer = setTimeout(tick, 1000);
+			if (!auto_close_disabled) {
+				countdown = 10; // extend after print
+				this._overlay.find("#ch-pay-cd-sec").text(countdown);
+				this._overlay.find(".ch-pay-countdown-badge").text(countdown);
+				this._auto_timer = setTimeout(tick, 1000);
+			}
 			const name = $(e.currentTarget).data("name");
 			// Check if this is a GoFix invoice by looking up the SR link
 			frappe.xcall("frappe.client.get_value", {
@@ -2888,12 +2902,16 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Phase 2 — Share Receipt (one-click multi-channel fanout)
 		this._overlay.on("click", ".ch-pay-share-btn", e => {
 			clearTimeout(this._auto_timer);
-			countdown = 30; // pause auto-close while user picks channels
-			this._overlay.find("#ch-pay-cd-sec").text(countdown);
-			this._overlay.find(".ch-pay-countdown-badge").text(countdown);
+			if (!auto_close_disabled) {
+				countdown = Math.max(_initial, 30); // pause auto-close while user picks channels
+				this._overlay.find("#ch-pay-cd-sec").text(countdown);
+				this._overlay.find(".ch-pay-countdown-badge").text(countdown);
+			}
 			const name = $(e.currentTarget).data("name");
 			this._open_share_dialog(name).finally(() => {
-				this._auto_timer = setTimeout(tick, 1000);
+				if (!auto_close_disabled) {
+					this._auto_timer = setTimeout(tick, 1000);
+				}
 			});
 		});
 	}

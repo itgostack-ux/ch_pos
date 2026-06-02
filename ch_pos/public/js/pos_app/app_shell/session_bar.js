@@ -43,6 +43,11 @@ export class SessionBar {
 						<span class="ch-session-shortcut" title="${__("Hold")}">F5 ${__("Hold")}</span>
 						<span class="ch-session-shortcut" title="${__("Cancel")}">Esc ${__("Cancel")}</span>
 					</div>
+					<button type="button" class="ch-session-refresh-btn"
+						title="${__("Refresh current screen (F9)")}"
+						aria-label="${__("Refresh")}">
+						<i class="fa fa-refresh"></i>
+					</button>
 					<div class="ch-session-profile-slot"></div>
 				</div>
 			</div>
@@ -66,6 +71,32 @@ export class SessionBar {
 			this.wrapper.find(".ch-session-store-name").text(PosState.store || "");
 			this.wrapper.find(".ch-session-date-val").text(PosState.business_date || frappe.datetime.nowdate());
 			this.wrapper.find(".ch-session-status-val").text(PosState.session_status || "—");
+		});
+
+		// Global Refresh — re-renders the active workspace by re-emitting mode:switch.
+		// Each module's workspace listens to "workspace:render" and rebuilds from data.
+		// Modules can additionally listen to EventBus.on("workspace:refresh") for a
+		// lighter refresh (e.g. just reload data without re-rendering chrome).
+		this.wrapper.on("click", ".ch-session-refresh-btn", (e) => {
+			const $btn = $(e.currentTarget);
+			$btn.addClass("is-spinning");
+			EventBus.emit("workspace:refresh", { mode: PosState.active_mode });
+			if (PosState.active_mode) {
+				EventBus.emit("mode:switch", PosState.active_mode);
+			}
+			setTimeout(() => $btn.removeClass("is-spinning"), 600);
+		});
+
+		// F9 keyboard shortcut for global refresh.
+		$(document).on("keydown.ch-session-refresh", (ev) => {
+			if (ev.key === "F9" && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+				// Ignore when typing in an input or when a modal/payment overlay is open.
+				const tag = (ev.target && ev.target.tagName) || "";
+				if (["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+				if ($(".modal.show").length || $(".ch-pay-overlay.ch-pay-visible").length) return;
+				ev.preventDefault();
+				this.wrapper.find(".ch-session-refresh-btn").trigger("click");
+			}
 		});
 	}
 }

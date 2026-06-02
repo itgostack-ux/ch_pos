@@ -267,6 +267,7 @@ export class QueueWorkspace {
 		const _proceed = () => {
 			// Store token reference in state — will be passed to Sales Invoice
 			PosState.kiosk_token = token.name;
+			PosState.kiosk_token_status = token.status || null;
 
 			// Auto-set customer from token data
 			this._resolve_customer(token).then((customer) => {
@@ -349,6 +350,10 @@ export class QueueWorkspace {
 					fieldname: "drop_reason",
 					options: WITHDRAW_REASONS.join("\n"),
 					reqd: 1,
+					// Pre-fill from token if the customer already declared an
+					// intent at the kiosk (or a prior cancel attempt). The
+					// cashier can still override from the dropdown.
+					default: token.drop_reason || "",
 					description: __("Required for funnel analytics — pick the closest match"),
 				},
 				{
@@ -356,12 +361,14 @@ export class QueueWorkspace {
 					fieldtype: "Data",
 					fieldname: "drop_sub_reason",
 					depends_on: "drop_reason",
+					default: token.drop_sub_reason || "",
 				},
 				{
 					label: __("Remarks"),
 					fieldtype: "Small Text",
 					fieldname: "drop_remarks",
 					reqd: 1,
+					default: token.drop_remarks || "",
 					placeholder: __("Capture why the customer did not convert (mandatory for audit)"),
 				},
 			],

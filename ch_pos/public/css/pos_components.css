@@ -4723,6 +4723,33 @@ body > .desk-alert-container,
   letter-spacing: 0.3px;
   white-space: nowrap;
 }
+.ch-session-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin: 0 6px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: var(--pos-radius-sm);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.85);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.ch-session-refresh-btn:hover {
+  background: rgba(255,255,255,0.14);
+  border-color: rgba(255,255,255,0.28);
+  color: #fff;
+}
+.ch-session-refresh-btn.is-spinning i {
+  animation: ch-session-refresh-spin 0.6s linear;
+}
+@keyframes ch-session-refresh-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
 .ch-session-profile-tools {
   display: flex;
   align-items: center;

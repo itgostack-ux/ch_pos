@@ -94,6 +94,7 @@ export const PosState = {
 	// ── Kiosk Token ────────────────────────────────────
 	default_customer: null,     // POS Profile default customer (Walk-in Customer)
 	kiosk_token: null,          // linked POS Kiosk Token name (for billing from queue)
+	kiosk_token_status: null,   // status of linked kiosk token — surfaced as a pill on the cart banner
 	guided_session: null,       // linked POS Guided Session name (for assisted sell flow)
 
 	// ── Exception & Warranty ───────────────────────────
@@ -141,6 +142,7 @@ export const PosState = {
 		this.service_job_items = [];
 		this.customer_summary = null;
 		this.kiosk_token = null;
+		this.kiosk_token_status = null;
 		this.guided_session = null;
 		this.exception_request = null;
 		this.exception_request_data = null;

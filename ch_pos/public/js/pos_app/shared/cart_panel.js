@@ -66,6 +66,14 @@ export class CartPanel {
 				<div class="ch-pos-credit-warning" style="display:none"></div>
 			</div>
 
+			<!-- B2. Sale Type pills (#15 — relocated from payment dialog so the
+			     cashier picks it up-front; persists on PosState.sale_type and is
+			     re-read by payment_dialog.js) -->
+			<div class="ch-pos-cart-saletype" id="ch-pos-cart-saletype" style="display:none">
+				<label class="ch-pos-cart-saletype-label">${__("Sale Type")}</label>
+				<div class="ch-pos-cart-saletype-pills" id="ch-pos-cart-saletype-pills"></div>
+			</div>
+
 			<!-- C. Cart Header -->
 			<div class="ch-pos-cart-header">
 				<span>${__("Item")}</span>
@@ -129,6 +137,51 @@ export class CartPanel {
 
 		this._render_customer_selector();
 		this._render_executive_bar();
+		this._render_sale_type_pills();
+	}
+
+	// ── #15 Sale Type pills (mirrored from payment_dialog) ──────────────
+	_render_sale_type_pills() {
+		const wrap = this.wrapper.find("#ch-pos-cart-saletype");
+		const pills = this.wrapper.find("#ch-pos-cart-saletype-pills");
+		if (!wrap.length || !pills.length) return;
+
+		// Lazy-load the sale-type catalogue (cached on PosState).
+		const company = PosState.active_company || PosState.company;
+		const fetchTypes = PosState._sale_types_cache
+			? Promise.resolve(PosState._sale_types_cache)
+			: frappe.xcall("ch_pos.api.pos_api.get_sale_types", { company })
+				.then((rows) => {
+					PosState._sale_types_cache = rows || [];
+					return PosState._sale_types_cache;
+				}).catch(() => []);
+
+		fetchTypes.then((rows) => {
+			if (!rows || !rows.length) {
+				wrap.hide();
+				return;
+			}
+			wrap.show();
+			pills.empty();
+			for (const r of rows) {
+				const code = r.code || r.sale_type_name;
+				const isActive = (PosState.sale_type === r.sale_type_name) ? "active" : "";
+				const pill = $(
+					`<button type="button" class="btn btn-xs ch-pos-cart-saletype-btn ${isActive}"
+						data-name="${frappe.utils.escape_html(r.sale_type_name)}"
+						data-code="${frappe.utils.escape_html(code || "")}">
+						${frappe.utils.escape_html(code || r.sale_type_name)}
+					</button>`
+				);
+				pill.on("click", () => {
+					PosState.sale_type = r.sale_type_name;
+					pills.find(".ch-pos-cart-saletype-btn").removeClass("active");
+					pill.addClass("active");
+					EventBus.emit("sale_type:changed", { sale_type: r.sale_type_name });
+				});
+				pills.append(pill);
+			}
+		});
 	}
 
 	/** Populate the executive / company bar from PosState.executive_access */
@@ -200,12 +253,32 @@ export class CartPanel {
 	_update_token_banner() {
 		const banner = this.wrapper.find(".ch-pos-token-banner");
 		if (PosState.kiosk_token) {
+			const status = PosState.kiosk_token_status || "";
+			// Map kiosk status → pill color (matches POS Kiosk Token status options).
+			const _STATUS_COLORS = {
+				"Waiting":     { bg: "#fef3c7", fg: "#92400e" },
+				"Engaged":     { bg: "#dbeafe", fg: "#1e40af" },
+				"In Progress": { bg: "#e0e7ff", fg: "#3730a3" },
+				"Completed":   { bg: "#d1fae5", fg: "#065f46" },
+				"Converted":   { bg: "#d1fae5", fg: "#065f46" },
+				"Cancelled":   { bg: "#fee2e2", fg: "#991b1b" },
+				"Dropped":     { bg: "#fee2e2", fg: "#991b1b" },
+				"Expired":     { bg: "#f3f4f6", fg: "#374151" },
+			};
+			const sc = _STATUS_COLORS[status] || { bg: "#f3f4f6", fg: "#374151" };
+			const status_pill = status
+				? `<span class="ch-pos-token-status-pill"
+						style="background:${sc.bg};color:${sc.fg};padding:2px 8px;border-radius:999px;
+							font-size:11px;font-weight:700;letter-spacing:.2px;margin-left:4px;"
+						title="${__("Kiosk Token Status")}">${frappe.utils.escape_html(status)}</span>`
+				: "";
 			banner.html(`
 				<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;
 					background:rgba(79,110,247,0.1);border-radius:var(--pos-radius-sm,6px);
 					margin-bottom:6px;font-size:12px;font-weight:600;color:var(--pos-primary,#4f6ef7)">
 					<i class="fa fa-ticket"></i>
 					<span>${__("Token")}: ${frappe.utils.escape_html(PosState.kiosk_token)}</span>
+					${status_pill}
 					<button class="btn btn-link btn-xs ch-pos-unlink-token" style="margin-left:auto;padding:0;font-size:11px;color:var(--pos-text-muted)"
 						title="${__("Unlink token")}">
 						<i class="fa fa-times"></i>
@@ -214,6 +287,7 @@ export class CartPanel {
 			`).show();
 			banner.find(".ch-pos-unlink-token").on("click", () => {
 				PosState.kiosk_token = null;
+				PosState.kiosk_token_status = null;
 				this._update_token_banner();
 			});
 		} else {

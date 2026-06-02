@@ -102,6 +102,73 @@ def _ensure_buyback_exchange_mop(account, company):
     return _EXCHANGE_MOP
 
 
+def _allocate_customer_advance(inv, requested):
+    """Allocate up to ``requested`` from the customer's unallocated Payment Entries
+    onto ``inv.advances``.
+
+    This is the ERPNext-idiomatic way to apply an advance to a Sales Invoice:
+    the Payment Entry's unallocated balance is consumed and the SI's outstanding
+    is reduced via the ``advances`` child table — GST is computed on the full
+    grand_total (NOT on a fictitious "discount") and the customer ledger stays
+    correct.
+
+    Returns the total amount actually allocated. Throws if the front-end
+    requested more advance than the customer actually has unallocated.
+
+    The previous implementation added ``advance_amount`` to ``inv.discount_amount``
+    which (a) corrupted the GST base because GST is computed on net of discount,
+    and (b) never reduced the customer's unallocated PE balance — so the same
+    advance could be "spent" multiple times.
+    """
+    requested = flt(requested)
+    if requested <= 0 or not inv.customer or inv.customer == "Walk-in Customer":
+        return 0.0
+
+    rows = frappe.db.sql(
+        """
+        SELECT pe.name, pe.unallocated_amount
+          FROM `tabPayment Entry` pe
+         WHERE pe.docstatus = 1
+           AND pe.party_type = 'Customer'
+           AND pe.party = %(party)s
+           AND pe.company = %(company)s
+           AND pe.unallocated_amount > 0.005
+         ORDER BY pe.posting_date, pe.creation
+        """,
+        {"party": inv.customer, "company": inv.company},
+        as_dict=True,
+    )
+
+    remaining = requested
+    allocated_total = 0.0
+    for r in rows:
+        if remaining <= 0.005:
+            break
+        alloc = min(flt(r.unallocated_amount), remaining)
+        if alloc <= 0:
+            continue
+        inv.append("advances", {
+            "reference_type": "Payment Entry",
+            "reference_name": r.name,
+            "advance_amount": flt(r.unallocated_amount),
+            "allocated_amount": alloc,
+            "remarks": "POS advance allocation",
+        })
+        allocated_total += alloc
+        remaining -= alloc
+
+    if remaining > 0.5:
+        frappe.throw(
+            frappe._(
+                "Cannot apply advance of ₹{0}. Only ₹{1} of unallocated Payment Entries "
+                "is available for {2}. Refresh the cart or have the customer pay the difference."
+            ).format(requested, allocated_total, inv.customer),
+            title=frappe._("Advance Mismatch"),
+        )
+
+    return allocated_total
+
+
 def _enforce_token_linkage(pos_profile, kiosk_token):
     """Block billing without a linked kiosk token when enforcement is enabled."""
     if kiosk_token:
@@ -282,8 +349,20 @@ def _ensure_pre_booking_sale_type():
 @frappe.whitelist()
 def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=None,
                        delivery_date=None, sales_executive=None, sale_reference=None,
-                       reserve_stock=1, client_request_id=None) -> dict:
-    """Create a reservation-style Sales Order for pre-booking / advance orders."""
+                       reserve_stock=1, client_request_id=None,
+                       mode_of_payment=None, payment_reference_no=None) -> dict:
+    """Create a reservation-style Sales Order for pre-booking / advance orders.
+
+    When ``advance_amount`` > 0 and ``mode_of_payment`` is provided, a Draft
+    Payment Entry is also created referencing the new Sales Order
+    (``allocated_amount = advance_amount``). The Payment Entry inherits the
+    standard maker-checker workflow and, once approved/submitted, drives
+    ``Sales Order.advance_paid`` via the framework — no manual stamping.
+
+    For backward compatibility, if ``mode_of_payment`` is omitted we fall
+    back to stamping ``advance_paid`` directly so legacy callers keep
+    working. New callers (POS UI) MUST pass ``mode_of_payment``.
+    """
     frappe.has_permission("Sales Order", "create", throw=True)
 
     if isinstance(items, str):
@@ -308,7 +387,9 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         so.set_warehouse = profile.warehouse
     if so.meta.has_field("reserve_stock"):
         so.reserve_stock = cint(reserve_stock)
-    if flt(advance_amount) > 0 and so.meta.has_field("advance_paid"):
+    # Legacy fallback only — when MOP is provided, the Payment Entry drives
+    # advance_paid via the framework (set_total_advance_paid).
+    if flt(advance_amount) > 0 and not mode_of_payment and so.meta.has_field("advance_paid"):
         so.advance_paid = flt(advance_amount)
 
     if notes and so.meta.has_field("note"):
@@ -357,6 +438,26 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         except Exception:
             pass
 
+    # ── Advance Payment Entry ────────────────────────────────────────────
+    # Reuse the same advance pattern as ch_payments.advance_payments —
+    # create a Draft Payment Entry referencing this Sales Order with
+    # allocated_amount = advance_amount. ERPNext's set_total_advance_paid
+    # will keep SO.advance_paid in sync once the PE is submitted by the
+    # workflow Checker.
+    advance_pe_name = None
+    advance_pe_warning = None
+    if flt(advance_amount) > 0 and mode_of_payment and so.docstatus == 1:
+        try:
+            advance_pe_name = _create_pre_booking_advance_pe(
+                so, mode_of_payment, flt(advance_amount), payment_reference_no
+            )
+        except Exception:
+            advance_pe_warning = frappe.get_traceback()
+            frappe.log_error(
+                advance_pe_warning,
+                f"Pre-booking advance PE failed for {so.name}",
+            )
+
     return {
         "doctype": "Sales Order",
         "name": so.name,
@@ -364,9 +465,71 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         "status": so.status,
         "reserve_stock": cint(getattr(so, "reserve_stock", 0)),
         "advance_amount": flt(advance_amount),
+        "advance_payment_entry": advance_pe_name,
         "delivery_date": requested_delivery,
-        "warning": _("Saved as draft") if so.docstatus == 0 and submit_warning else None,
+        "warning": _("Saved as draft") if so.docstatus == 0 and submit_warning else (
+            _("Advance recorded but Payment Entry could not be created — please raise it manually")
+            if advance_pe_warning else None
+        ),
     }
+
+
+def _create_pre_booking_advance_pe(so, mode_of_payment: str, amount: float,
+                                   reference_no: str | None = None) -> str:
+    """Create a Draft Payment Entry against ``so`` for ``amount``.
+
+    Mirrors ``ch_payments.advance_payments.create_advance_from_quotation``
+    but references a Sales Order instead of a Quotation, so ERPNext's
+    standard ``set_total_advance_paid`` keeps ``SO.advance_paid`` in sync
+    once the PE clears the maker-checker workflow.
+    """
+    company = so.company
+    mop = frappe.get_doc("Mode of Payment", mode_of_payment)
+    paid_to_account = None
+    for acc_row in (mop.accounts or []):
+        if acc_row.company == company and acc_row.default_account:
+            paid_to_account = acc_row.default_account
+            break
+    if not paid_to_account:
+        frappe.throw(
+            _("Mode of Payment <b>{0}</b> has no default account set for company <b>{1}</b>")
+            .format(mode_of_payment, company)
+        )
+
+    receivable_account = frappe.db.get_value(
+        "Company", company, "default_receivable_account"
+    )
+    if not receivable_account:
+        frappe.throw(_("Company {0} has no default Receivable account").format(company))
+
+    pe = frappe.new_doc("Payment Entry")
+    pe.payment_type = "Receive"
+    pe.posting_date = nowdate()
+    pe.company = company
+    pe.mode_of_payment = mode_of_payment
+    pe.party_type = "Customer"
+    pe.party = so.customer
+    pe.paid_from = receivable_account
+    pe.paid_to = paid_to_account
+    pe.paid_amount = amount
+    pe.received_amount = amount
+    pe.source_exchange_rate = 1
+    pe.target_exchange_rate = 1
+    pe.reference_no = reference_no or so.name
+    pe.reference_date = nowdate()
+    # Allocated against the SO so SO.advance_paid recomputes on PE submit.
+    pe.append("references", {
+        "reference_doctype": "Sales Order",
+        "reference_name": so.name,
+        "due_date": so.delivery_date,
+        "total_amount": flt(so.grand_total) or amount,
+        "outstanding_amount": flt(so.grand_total) or amount,
+        "allocated_amount": amount,
+    })
+    pe.remarks = _("Pre-booking advance against Sales Order {0}").format(so.name)
+    pe.flags.ignore_permissions = True
+    pe.insert(ignore_permissions=True)
+    return pe.name
 
 
 @frappe.whitelist()
@@ -477,6 +640,8 @@ def create_pos_invoice(pos_profile, customer, items,
                        original_invoice=None,
                        original_invoice_reason=None,
                        discount_authorized_by=None,
+                       allow_surplus_refund=0,
+                       surplus_refund_mode_of_payment=None,
                        **_ignored) -> dict:
     """Create and submit a Sales Invoice from the CH POS App cart.
 
@@ -538,11 +703,25 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.posting_date = str(active.get("business_date")) if active.get("business_date") else nowdate()
     inv.is_pos = 1
     inv.update_stock = 1
+    # POS sale: payment is captured at billing — clear due_date so the receipt
+    # template ({% if doc.due_date %}) does not print a misleading "Due Date".
+    # Free Sale (set later in this function) is also payment-on-bill; we clear
+    # again after that branch to be safe.
+    inv.due_date = None
 
     # Tax Category — required by india_compliance GST validation.
     # Pull from customer record; fall back to "In-State" for all POS retail sales.
     cust_tax_cat = frappe.db.get_value("Customer", customer, "tax_category") if customer else None
     inv.tax_category = cust_tax_cat or "In-State"
+
+    # Loyalty Program — propagate from customer so ERPNext awards points on submit.
+    # ERPNext's `make_loyalty_point_entry()` runs in Sales Invoice on_submit
+    # only when `inv.loyalty_program` is populated. Customer-level enrolment
+    # alone is not enough — the value must be on the invoice itself.
+    if customer and customer != "Walk-in Customer":
+        cust_loyalty = frappe.db.get_value("Customer", customer, "loyalty_program")
+        if cust_loyalty:
+            inv.loyalty_program = cust_loyalty
 
     # B2B/B2C — GSTIN provided at billing time overrides saved GSTIN
     if customer_gstin:
@@ -875,11 +1054,14 @@ def create_pos_invoice(pos_profile, customer, items,
         if credit_approved_by:
             inv.custom_credit_approved_by = str(credit_approved_by)[:140]
 
-    # Advance adjustment — reduce effective amount due
+    # Advance adjustment — allocate from customer's unallocated Payment Entries
+    # via the standard ERPNext `advances` table. This reduces SI outstanding
+    # without touching grand_total / discount_amount, so GST stays correct on
+    # the full taxable value and the customer ledger reconciles.
     if flt(advance_amount) > 0 and not cint(is_free_sale):
-        inv.custom_advance_adjusted = flt(advance_amount)
-        # Treat advance as discount so grand_total reduces for ERPNext validation
-        inv.discount_amount = flt(inv.discount_amount or 0) + flt(advance_amount)
+        allocated = _allocate_customer_advance(inv, advance_amount)
+        # Stamp for receipt printing / reporting parity with prior behaviour.
+        inv.custom_advance_adjusted = flt(allocated)
 
     # Taxes from POS Profile
     for tax in (profile.get("taxes") or []):
@@ -969,26 +1151,44 @@ def create_pos_invoice(pos_profile, customer, items,
         except Exception:
             pass
         pre_exchange_total = flt(inv.rounded_total or inv.grand_total or 0)
+        surplus_refund_amount = 0.0
         if exchange_credit - pre_exchange_total > 0.5:  # 50p tolerance for rounding
             surplus = exchange_credit - pre_exchange_total
             _cur = inv.currency or "INR"
-            frappe.throw(
-                frappe._(
-                    "Exchange credit {credit} exceeds the new purchase value {total}. "
-                    "Customer is owed {surplus} as refund and the sale cannot be billed "
-                    "with surplus credit silently dropped."
-                    "<br><br>Resolve by either:"
-                    "<br>&bull; Adding items to the cart so the new purchase value "
-                    "matches or exceeds the exchange credit, OR"
-                    "<br>&bull; Cancelling exchange and using <b>Buyback &rarr; Cashback</b> "
-                    "to pay the customer {surplus} directly."
-                ).format(
-                    credit=fmt_money(exchange_credit, currency=_cur),
-                    total=fmt_money(pre_exchange_total, currency=_cur),
-                    surplus=fmt_money(surplus, currency=_cur),
-                ),
-                title=frappe._("Exchange Credit Surplus -- Cannot Bill"),
-            )
+            if cint(allow_surplus_refund):
+                # Req #17: cashier opted in to refund the surplus rather than
+                # block the sale. Cap the exchange credit at the new-purchase
+                # value (so the SI nets to ₹0 with no orphan credit), stamp
+                # the surplus on the invoice, and remember it — a Journal
+                # Entry posted after submit will clear the residual liability
+                # against Cash (or the chosen MOP) so the customer is paid out.
+                exchange_credit = pre_exchange_total
+                surplus_refund_amount = flt(surplus)
+                inv.custom_exchange_amount = exchange_credit
+                # Surplus is recorded on the post-submit Journal Entry
+                # (cheque_no=SI name, remarks include Assessment) — Sales
+                # Invoice's custom-field row is already at the MySQL
+                # row-size cap so we can't add another Currency stamp here.
+            else:
+                frappe.throw(
+                    frappe._(
+                        "Exchange credit {credit} exceeds the new purchase value {total}. "
+                        "Customer is owed {surplus} as refund and the sale cannot be billed "
+                        "with surplus credit silently dropped."
+                        "<br><br>Resolve by either:"
+                        "<br>&bull; Adding items to the cart so the new purchase value "
+                        "matches or exceeds the exchange credit, OR"
+                        "<br>&bull; Cancelling exchange and using <b>Buyback &rarr; Cashback</b> "
+                        "to pay the customer {surplus} directly, OR"
+                        "<br>&bull; Re-submitting with <code>allow_surplus_refund=1</code> to "
+                        "refund the surplus automatically as cashback."
+                    ).format(
+                        credit=fmt_money(exchange_credit, currency=_cur),
+                        total=fmt_money(pre_exchange_total, currency=_cur),
+                        surplus=fmt_money(surplus, currency=_cur),
+                    ),
+                    title=frappe._("Exchange Credit Surplus -- Cannot Bill"),
+                )
 
         # ── ACCOUNTING-CORRECT EXCHANGE CREDIT ──────────────────────────────
         # Add exchange credit as a payment row (not a discount) so the GL debit
@@ -1284,6 +1484,57 @@ def create_pos_invoice(pos_profile, customer, items,
             update_modified=False,
         )
 
+    # Req #17: post the surplus refund Journal Entry. The SI consumed only
+    # `exchange_credit` from the Buyback Liability; the residual `surplus`
+    # is still owed to the customer. This JE clears that residual against
+    # the chosen cash MOP so the books reconcile and the customer is paid.
+    surplus_refund_je = None
+    _surplus_amt = flt(locals().get("surplus_refund_amount") or 0)
+    if exchange_assessment and _surplus_amt > 0.5:
+        try:
+            _liability_acc = _get_buyback_liability_account(inv.company)
+            _refund_mop = surplus_refund_mode_of_payment or "Cash"
+            _refund_acc = frappe.db.get_value(
+                "Mode of Payment Account",
+                {"parent": _refund_mop, "company": inv.company},
+                "default_account",
+            )
+            if not _refund_acc:
+                # Fall back to Company.default_cash_account so we never silently drop the JE.
+                _refund_acc = frappe.db.get_value("Company", inv.company, "default_cash_account")
+            if _liability_acc and _refund_acc:
+                je = frappe.new_doc("Journal Entry")
+                je.voucher_type = "Cash Entry" if _refund_mop == "Cash" else "Bank Entry"
+                je.company = inv.company
+                je.posting_date = inv.posting_date or nowdate()
+                je.cheque_no = inv.name
+                je.cheque_date = je.posting_date
+                je.user_remark = (
+                    f"Buyback exchange surplus refund — Assessment {exchange_assessment} "
+                    f"vs Sales Invoice {inv.name}"
+                )
+                je.append("accounts", {
+                    "account": _liability_acc,
+                    "debit_in_account_currency": flt(_surplus_amt),
+                    "credit_in_account_currency": 0,
+                    "reference_type": "Sales Invoice",
+                    "reference_name": inv.name,
+                })
+                je.append("accounts", {
+                    "account": _refund_acc,
+                    "debit_in_account_currency": 0,
+                    "credit_in_account_currency": flt(_surplus_amt),
+                })
+                je.flags.ignore_permissions = True
+                je.insert()
+                je.submit()
+                surplus_refund_je = je.name
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Surplus refund JE failed for {inv.name}",
+            )
+
     # Back-link Buyback Order → Sales Invoice (marks the exchange as consumed)
     if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
         try:
@@ -1543,6 +1794,8 @@ def create_pos_invoice(pos_profile, customer, items,
         "incentive_warning": incentive_warning,
         "voucher_redeemed": voucher_redeemed,
         "generated_vouchers": generated_vouchers,
+        "surplus_refund_amount": flt(locals().get("_surplus_amt") or 0),
+        "surplus_refund_journal_entry": locals().get("surplus_refund_je"),
     }
 
 
@@ -5270,6 +5523,39 @@ def store_dashboard(pos_profile) -> dict:
             as_dict=True,
         )
 
+    # Stock value & aging stock value for this warehouse.
+    # stock_value: SUM(actual_qty * valuation_rate) — equivalent to
+    # the same number Stock Balance / Bin reports use.
+    # aging_stock_value: stock that has received no inward movement in the
+    # last 90 days (proxy for slow-moving / aged stock). The 90-day threshold
+    # mirrors the bucket used in hub_api aging reports.
+    stock_value = 0.0
+    aging_stock_value = 0.0
+    if warehouse:
+        sv_row = frappe.db.sql(
+            """SELECT COALESCE(SUM(b.actual_qty * b.valuation_rate), 0) AS val
+               FROM `tabBin` b
+               WHERE b.warehouse = %s AND b.actual_qty > 0""",
+            (warehouse,),
+        )
+        stock_value = flt(sv_row[0][0]) if sv_row else 0.0
+
+        ag_row = frappe.db.sql(
+            """SELECT COALESCE(SUM(b.actual_qty * b.valuation_rate), 0) AS val
+               FROM `tabBin` b
+               WHERE b.warehouse = %s AND b.actual_qty > 0
+                 AND NOT EXISTS (
+                     SELECT 1 FROM `tabStock Ledger Entry` sle
+                     WHERE sle.warehouse = b.warehouse
+                       AND sle.item_code = b.item_code
+                       AND sle.actual_qty > 0
+                       AND sle.is_cancelled = 0
+                       AND sle.posting_date >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+                 )""",
+            (warehouse,),
+        )
+        aging_stock_value = flt(ag_row[0][0]) if ag_row else 0.0
+
     return {
         "total_revenue": total_revenue,
         "total_invoices": total_invoices,
@@ -5281,6 +5567,9 @@ def store_dashboard(pos_profile) -> dict:
         "hourly_sales": hourly_sales,
         "material_requests": material_requests,
         "stock_transfers": stock_transfers,
+        "stock_value": stock_value,
+        "aging_stock_value": aging_stock_value,
+        "warehouse": warehouse,
     }
 
 
@@ -7534,8 +7823,20 @@ def increment_buyback_count(pos_profile) -> dict:
 
 @frappe.whitelist()
 def get_today_footfall(pos_profile) -> dict:
-    """Return today's footfall summary derived from POS Kiosk Token records."""
+    """Return today's footfall summary derived from POS Kiosk Token records.
+
+    When the POS Profile Extension is configured for a non-Kiosk pos_mode
+    (System / Tablet), kiosk-specific counters are forced to zero so that
+    counter-only stores never see misleading kiosk widgets.
+    """
     today = nowdate()
+
+    # Decouple from kiosk: when this profile is not a kiosk, zero out the
+    # kiosk counters so the front-end can hide kiosk widgets entirely.
+    pos_mode = frappe.db.get_value(
+        "POS Profile Extension", {"pos_profile": pos_profile}, "pos_mode"
+    ) or "System"
+    kiosk_enabled = (pos_mode == "Kiosk")
 
     # Primary source: POS Kiosk Token records
     source_counts = frappe.db.sql("""
@@ -7584,9 +7885,14 @@ def get_today_footfall(pos_profile) -> dict:
     total_footfall = walkin_count + kiosk_count + other_count
     conversion_pct = round((invoices_today / total_footfall * 100) if total_footfall > 0 else 0, 1)
 
+    if not kiosk_enabled:
+        # Mask kiosk-only metrics for counter-only profiles.
+        kiosk_count = 0
+
     return {
         "walkin_count": walkin_count,
         "kiosk_count": kiosk_count,
+        "kiosk_enabled": cint(kiosk_enabled),
         "repair_intake_count": repair_intake_count,
         "buyback_count": buyback_count,
         "cancelled_count": cancelled_count,

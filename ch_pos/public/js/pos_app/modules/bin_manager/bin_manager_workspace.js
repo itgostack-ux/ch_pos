@@ -9,15 +9,16 @@
  */
 import { PosState, EventBus } from "../../state.js";
 
-const BIN_TYPES = ["Sellable", "In-Transit", "Damaged", "Disposed", "Reserved"];
+const BIN_TYPES = ["Sellable", "In-Transit", "Damaged", "Disposed", "Reserved", "Demo"];
 
 // Visual config per bin type (theme tokens used by ch-pos styles)
 const BIN_META = {
 	"Sellable":   { icon: "fa-check-circle",   tone: "success", color: "#1f8f5f", bg: "#e8f7ef", hint: __("Available for sale on the shop floor") },
 	"In-Transit": { icon: "fa-truck",          tone: "info",    color: "#0b6bcb", bg: "#e7f1ff", hint: __("In-flight between store and zone hub") },
 	"Damaged":    { icon: "fa-wrench",         tone: "warning", color: "#b45309", bg: "#fef3c7", hint: __("Awaiting inspection or repair") },
-	"Disposed":   { icon: "fa-trash",          tone: "danger",  color: "#b91c1c", bg: "#fee2e2", hint: __("Scrapped / written off — locked") },
+	"Disposed":   { icon: "fa-trash",          tone: "danger",  color: "#b91c1c", bg: "#fee2e2", hint: __("Scrapped / written off \u2014 locked") },
 	"Reserved":   { icon: "fa-bookmark",       tone: "purple",  color: "#6d28d9", bg: "#ede9fe", hint: __("Held against bookings / customer orders") },
+	"Demo":       { icon: "fa-mobile",         tone: "info",    color: "#0891b2", bg: "#cffafe", hint: __("In-store demonstration units \u2014 valued stock") },
 };
 
 export class BinManagerWorkspace {

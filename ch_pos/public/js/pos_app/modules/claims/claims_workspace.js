@@ -1073,7 +1073,9 @@ export class ClaimsWorkspace {
 		}
 
 		// Intake QC (after receiving)
-		if (["Device Received", "QC Pending"].includes(s)) {
+		// #25 — Hide for GoGizmo* roles; intake QC is store/ops only.
+		const _is_gogizmo_user = (frappe.user_roles || []).some((r) => /^GoGizmo/i.test(r));
+		if (!_is_gogizmo_user && ["Device Received", "QC Pending"].includes(s)) {
 			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="perform_qc"><i class="fa fa-check-square-o"></i> ${__("Perform Intake QC")}</button>`);
 		}
 

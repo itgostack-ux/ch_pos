@@ -38,6 +38,11 @@ export class ReportsWorkspace {
 			{ cls: "avg-basket", icon: "fa-calculator",  color: "#4f46e5", bg: "#e0e7ff", label: __("Avg Basket") },
 			{ cls: "returns",    icon: "fa-undo",        color: "#dc2626", bg: "#fef2f2", label: __("Returns"),    link: `/desk/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=1` },
 		];
+		// Stock-value KPIs — populated from store_dashboard response (warehouse-level totals).
+		const stock = [
+			{ cls: "stock-value",       icon: "fa-cubes",   color: "#0d9488", bg: "#ccfbf1", label: __("Stock Value") },
+			{ cls: "aging-stock-value", icon: "fa-hourglass-half", color: "#b45309", bg: "#fef3c7", label: __("Aging Stock (>90d)") },
+		];
 
 		const kpiCard = (k, def) => {
 			const clickable = k.link ? " ch-rpt-kpi--link" : "";
@@ -87,6 +92,9 @@ export class ReportsWorkspace {
 					</div>
 					<div class="ch-rpt-kpi-row">
 						${sales.map(k => kpiCard(k, k.cls === "revenue" || k.cls === "avg-basket" ? "₹0" : "0")).join("")}
+					</div>
+					<div class="ch-rpt-kpi-row">
+						${stock.map(k => kpiCard(k, "₹0")).join("")}
 					</div>
 
 					<div class="ch-rpt-section ch-rpt-ai">
@@ -254,6 +262,12 @@ export class ReportsWorkspace {
 			args: { pos_profile: PosState.pos_profile },
 			callback: (r) => {
 				const f = r.message || {};
+				// Hide kiosk KPI tile entirely when this profile is not kiosk-enabled.
+				if (!parseInt(f.kiosk_enabled, 10)) {
+					panel.find(".ch-rpt-kpi:has(.ch-rpt-kiosk)").hide();
+				} else {
+					panel.find(".ch-rpt-kpi:has(.ch-rpt-kiosk)").show();
+				}
 				panel.find(".ch-rpt-walkins").text(f.walkin_count || 0);
 				panel.find(".ch-rpt-kiosk").text(f.kiosk_count || 0);
 				panel.find(".ch-rpt-conversion").text((f.conversion_pct || 0) + "%");
@@ -280,6 +294,15 @@ export class ReportsWorkspace {
 				const avg = d.total_invoices ? (d.total_revenue / d.total_invoices) : 0;
 				content.find(".ch-rpt-avg-basket").text(`₹${format_number(avg)}`);
 				content.find(".ch-rpt-returns").text(d.total_returns || 0);
+
+				// Stock-value KPIs (warehouse total + aged > 90 days)
+				content.find(".ch-rpt-stock-value").text(`₹${format_number(d.stock_value || 0)}`);
+				content.find(".ch-rpt-aging-stock-value").text(`₹${format_number(d.aging_stock_value || 0)}`);
+				if (d.warehouse) {
+					const stock_href = `/desk/bin?warehouse=${encodeURIComponent(d.warehouse)}&actual_qty=${enc([">", 0])}`;
+					content.find(".ch-rpt-kpi:has(.ch-rpt-stock-value)").attr("data-href", stock_href).addClass("ch-rpt-kpi--link");
+					content.find(".ch-rpt-kpi:has(.ch-rpt-aging-stock-value)").attr("data-href", stock_href).addClass("ch-rpt-kpi--link");
+				}
 
 				// Hourly chart
 				const hourly = d.hourly_sales || [];

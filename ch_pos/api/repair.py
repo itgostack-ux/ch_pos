@@ -8,6 +8,14 @@ def create_repair_intake(data, pos_profile=None) -> dict:
     if isinstance(data, str):
         data = frappe.parse_json(data)
 
+    # Default store (GoGizmo source warehouse) from POS Profile when caller did not pass one.
+    # Ensures Service Request gets correctly tagged to the originating store even
+    # if the kiosk/POS UI omits it from the payload.
+    if not data.get("store") and pos_profile:
+        ws = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
+        if ws:
+            data["store"] = ws
+
     # Validate and normalise phone number if provided
     if data.get("customer_phone"):
         data["customer_phone"] = validate_indian_phone(

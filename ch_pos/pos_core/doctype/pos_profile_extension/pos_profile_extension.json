@@ -25,6 +25,7 @@
   "allow_rate_change",
   "column_break_display",
   "receipt_template",
+  "invoice_autoclose_seconds",
   "kiosk_section",
   "kiosk_idle_timeout_sec",
   "kiosk_allowed_item_groups",
@@ -147,6 +148,14 @@
    "fieldtype": "Link",
    "label": "Receipt Template",
    "options": "Print Format"
+  },
+  {
+   "default": "30",
+   "description": "Seconds after a successful invoice before the receipt overlay auto-closes and POS resets for the next sale. Set to 0 to disable auto-close (cashier must click Next Sale).",
+   "fieldname": "invoice_autoclose_seconds",
+   "fieldtype": "Int",
+   "label": "Invoice Auto-Close (seconds)",
+   "non_negative": 1
   },
   {
    "depends_on": "eval:doc.pos_mode === 'Kiosk'",
