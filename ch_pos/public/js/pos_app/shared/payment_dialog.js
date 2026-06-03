@@ -835,7 +835,16 @@ placeholder="${__("Enter code...")}">
 		ov.on("click", ".ch-pay-row-remove", e => {
 			const idx = parseInt($(e.currentTarget).data("idx"));
 			if (this._mop_type(this._payments[idx]?.mode) === "finance") return;
+			const removed_mode = (this._payments[idx]?.mode || "").toLowerCase();
 			this._payments.splice(idx, 1);
+			// TC_038: If the removed MOP is the Buyback Exchange Credit row, clear the
+			// exchange state from PosState so the cart panel recalculates correctly.
+			if (removed_mode.includes("exchange") && removed_mode.includes("credit")) {
+				PosState.exchange_amount      = 0;
+				PosState.exchange_assessment  = null;
+				PosState.exchange_order       = null;
+				EventBus.emit("cart:updated");
+			}
 			if (this._is_finance_sale_type(PosState.sale_type)) {
 				this._sync_finance_payments();
 			}

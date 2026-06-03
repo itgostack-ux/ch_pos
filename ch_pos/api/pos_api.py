@@ -401,15 +401,62 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
     if sale_reference and so.meta.has_field("tracking_number"):
         so.tracking_number = sale_reference
 
+    # ── TC_023 — duplicate-IMEI prebooking guard ───────────────────────
+    # Reject upfront if any line carries a serial that is already reserved
+    # on another open Sales Order. We check submitted, non-Closed/Cancelled
+    # SOs only; cancelled rows free their IMEI naturally on cancel.
+    seen_in_cart: dict[str, str] = {}
+    so_item_meta = frappe.get_meta("Sales Order Item")
+    has_custom_serial = so_item_meta.has_field("custom_serial_no")
     for item in items:
-        so.append("items", {
+        serial = (item.get("serial_no") or "").strip()
+        if not serial:
+            continue
+        # Cross-row uniqueness within the same cart
+        if serial in seen_in_cart and seen_in_cart[serial] != item.get("item_code"):
+            frappe.throw(
+                frappe._("IMEI {0} appears on more than one item in the cart.")
+                .format(serial),
+                title=frappe._("Duplicate IMEI"),
+            )
+        seen_in_cart[serial] = item.get("item_code")
+
+        if has_custom_serial:
+            dup = frappe.db.sql(
+                """
+                SELECT soi.parent
+                FROM `tabSales Order Item` soi
+                JOIN `tabSales Order` so ON so.name = soi.parent
+                WHERE soi.custom_serial_no LIKE %(needle)s
+                  AND so.docstatus = 1
+                  AND so.status NOT IN ('Closed', 'Cancelled', 'Completed')
+                LIMIT 1
+                """,
+                {"needle": f"%{serial}%"},
+            )
+            if dup:
+                frappe.throw(
+                    frappe._("IMEI {0} is already reserved on Sales Order {1}.")
+                    .format(serial, dup[0][0]),
+                    title=frappe._("Duplicate IMEI"),
+                )
+
+    for item in items:
+        serial = (item.get("serial_no") or "").strip()
+        row = {
             "item_code": item.get("item_code"),
             "qty": flt(item.get("qty", 1)),
             "rate": flt(item.get("rate", 0)),
             "uom": item.get("uom") or "Nos",
             "warehouse": item.get("warehouse") or profile.warehouse,
             "delivery_date": item.get("delivery_date") or requested_delivery,
-        })
+        }
+        # TC_024 — propagate IMEI so SO row carries the reservation and the
+        # downstream Sales Invoice / Stock Reservation Engine can move the
+        # serial out of the Sellable bin on pickup.
+        if has_custom_serial and serial:
+            row["custom_serial_no"] = serial
+        so.append("items", row)
 
     if sales_executive and so.meta.has_field("custom_sales_executive"):
         so.custom_sales_executive = sales_executive
@@ -877,7 +924,7 @@ def create_pos_invoice(pos_profile, customer, items,
         if item_serial_check:
             _sbin = frappe.db.get_value(
                 "CH Stock Bin",
-                {"serial_no": item_serial_check, "is_active": 1},
+                {"serial_no": item_serial_check},
                 "bin_type"
             )
             if _sbin == "Transfer":
@@ -889,6 +936,35 @@ def create_pos_invoice(pos_profile, customer, items,
                 frappe.throw(
                     frappe._("Serial {0} (bin type: {1}) is not available for sale.").format(item_serial_check, _sbin),
                     title=frappe._("Serial Not Sellable")
+                )
+
+            # TC_045 — Defence-in-depth: an IMEI can only be sold once. The
+            # CH Serial Lifecycle FSM normally rejects In Stock → Sold when
+            # already Sold, but it runs only at on_submit. Reject up front
+            # at draft time so the cashier sees the error immediately and
+            # cannot accidentally produce a second submitted Sales Invoice
+            # for the same IMEI (e.g. via parallel terminals or if the bin
+            # row was not updated for any reason).
+            _life_status = frappe.db.get_value(
+                "CH Serial Lifecycle", item_serial_check, "lifecycle_status"
+            )
+            if _life_status == "Sold":
+                last_sale = frappe.db.get_value(
+                    "CH Serial Lifecycle", item_serial_check, "sale_document"
+                )
+                frappe.throw(
+                    frappe._("Serial / IMEI {0} has already been sold (Sales Invoice {1}). "
+                             "Process a return on the original invoice before re-selling.").format(
+                        item_serial_check, last_sale or frappe._("unknown")
+                    ),
+                    title=frappe._("Serial Already Sold"),
+                )
+            if _life_status == "In Service":
+                frappe.throw(
+                    frappe._("Serial / IMEI {0} is currently In Service and cannot be sold.").format(
+                        item_serial_check
+                    ),
+                    title=frappe._("Serial In Service"),
                 )
 
         inv.append("items", row)
@@ -2583,6 +2659,15 @@ def search_invoices_for_return(search_term, pos_profile=None) -> list:
     if not company:
         frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
 
+    # TC_016 — restrict the Return tab to invoices issued from the same
+    # store. Cashier on Store-A must NOT see invoices that originated at
+    # Store-B even if the same Customer transacted at both stores. We use
+    # the POS Profile's set_warehouse / warehouse as the store anchor and
+    # match against Sales Invoice.set_warehouse + each row's warehouse.
+    profile_warehouse = frappe.db.get_value(
+        "POS Profile", pos_profile, "warehouse"
+    )
+
     filters = {
         "docstatus": 1,
         "is_return": 0,
@@ -2603,10 +2688,30 @@ def search_invoices_for_return(search_term, pos_profile=None) -> list:
         fields=[
             "name", "customer", "customer_name", "posting_date",
             "grand_total", "status", "pos_profile", "company",
+            "set_warehouse",
         ],
         order_by="posting_date desc, creation desc",
-        limit_page_length=20,
+        limit_page_length=40,
     )
+
+    # TC_016 — second pass: drop invoices that did not originate from this
+    # store. We accept either the header set_warehouse or any line item
+    # warehouse matching the profile's store warehouse.
+    if profile_warehouse:
+        kept = []
+        for inv in invoices:
+            if inv.get("set_warehouse") == profile_warehouse:
+                kept.append(inv)
+                continue
+            row_match = frappe.db.exists(
+                "Sales Invoice Item",
+                {"parent": inv["name"], "warehouse": profile_warehouse},
+            )
+            if row_match:
+                kept.append(inv)
+        invoices = kept[:20]
+    else:
+        invoices = invoices[:20]
 
     from frappe.utils import date_diff
     today = nowdate()
@@ -5555,13 +5660,23 @@ def store_dashboard(pos_profile) -> dict:
             as_dict=True,
         )
 
-    # Recent Stock Transfers involving this warehouse
+    # Recent Stock Transfers involving this warehouse.
+    # TC_042 / TC_043 — surface from/to warehouse and a primary item label
+    # on the Reports workspace card so cashiers can identify a transfer
+    # without drilling into the Stock Entry document.
     stock_transfers = []
     if warehouse:
         stock_transfers = frappe.db.sql(
             """SELECT se.name, se.posting_date, se.docstatus,
+                      se.from_warehouse, se.to_warehouse,
                       (SELECT COUNT(*) FROM `tabStock Entry Detail` sed
-                       WHERE sed.parent = se.name) AS item_count
+                       WHERE sed.parent = se.name) AS item_count,
+                      (SELECT sed2.item_name FROM `tabStock Entry Detail` sed2
+                       WHERE sed2.parent = se.name
+                       ORDER BY sed2.idx ASC LIMIT 1) AS primary_item_name,
+                      (SELECT sed3.item_code FROM `tabStock Entry Detail` sed3
+                       WHERE sed3.parent = se.name
+                       ORDER BY sed3.idx ASC LIMIT 1) AS primary_item_code
                FROM `tabStock Entry` se
                WHERE se.stock_entry_type = 'Material Transfer'
                  AND se.docstatus IN (0, 1)
@@ -9033,12 +9148,22 @@ def _get_oldest_fifo_serial(item_code, warehouse):
     """Return (serial_no, received_date) for the oldest FIFO serial in the warehouse.
 
     Uses SNBB net-balance to determine what is currently in stock, then finds
-    the one with the earliest inward posting date.
+    the one whose **most recent** inward into THIS warehouse is the earliest.
+
+    TC_017 — for a buy-back unit that is re-onboarded into the Sellable
+    warehouse, the FIFO clock must restart from the date it re-entered the
+    warehouse. Previously this query took ``MIN(posting_datetime)`` over every
+    inward SNBB ever recorded against the serial, which meant a
+    bought-back-then-resold unit kept its original purchase date and was
+    perpetually flagged as the "oldest" FIFO serial — blocking sale of fresh
+    stock with the same item_code. We now scope inwards to the current
+    warehouse and use the latest such inward as the received-date, then take
+    the minimum across serials to find the FIFO leader.
     """
     rows = frappe.db.sql("""
         SELECT
             available.serial_no,
-            MIN(DATE(sbb_in.posting_datetime)) AS received_date
+            MAX(DATE(sbb_in.posting_datetime)) AS received_date
         FROM (
             SELECT sbe.serial_no
             FROM `tabSerial and Batch Entry` sbe
@@ -9054,10 +9179,11 @@ def _get_oldest_fifo_serial(item_code, warehouse):
             ON sbe_in.parent = sbb_in.name
             AND sbb_in.type_of_transaction = 'Inward'
             AND sbb_in.docstatus = 1
+            AND sbb_in.warehouse = %s
         GROUP BY available.serial_no
         ORDER BY received_date ASC, available.serial_no ASC
         LIMIT 1
-    """, (item_code, warehouse), as_dict=True)
+    """, (item_code, warehouse, warehouse), as_dict=True)
 
     if rows:
         return rows[0].serial_no, rows[0].received_date

@@ -224,6 +224,39 @@ export class Sidebar {
 					fieldtype: "Data",
 					placeholder: __("Optional"),
 				},
+				// Walk-in interest capture (TC follow-up): record what the
+				// customer asked for so footfall reports can correlate
+				// enquiries → conversions by brand/model/item.
+				{
+					fieldtype: "Section Break",
+					label: __("What are they looking for?"),
+					collapsible: 0,
+				},
+				{
+					label: __("Brand"),
+					fieldname: "device_brand",
+					fieldtype: "Data",
+					placeholder: __("e.g. Apple, Samsung, OnePlus"),
+				},
+				{
+					fieldtype: "Column Break",
+				},
+				{
+					label: __("Model"),
+					fieldname: "device_model",
+					fieldtype: "Data",
+					placeholder: __("e.g. iPhone 15, Galaxy S24"),
+				},
+				{
+					label: __("Item / Product Interest"),
+					fieldname: "item_code",
+					fieldtype: "Link",
+					options: "Item",
+					placeholder: __("Optional — pick a catalogue item"),
+					get_query: () => ({
+						filters: { disabled: 0 },
+					}),
+				},
 				{
 					label: __("Remarks"),
 					fieldname: "remarks",
@@ -246,6 +279,9 @@ export class Sidebar {
 						customer_name: values.customer_name || "",
 						customer_phone: values.customer_phone || "",
 						remarks: values.remarks || "",
+						device_brand: values.device_brand || "",
+						device_model: values.device_model || "",
+						item_code: values.item_code || "",
 					},
 					callback: (r) => {
 						const res = r.message || {};

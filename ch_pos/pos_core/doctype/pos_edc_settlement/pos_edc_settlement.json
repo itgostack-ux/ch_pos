@@ -9,6 +9,7 @@
   "naming_series",
   "company",
   "store",
+  "session",
   "column_break_info",
   "settlement_date",
   "terminal_id",
@@ -51,6 +52,13 @@
    "in_list_view": 1,
    "label": "Store",
    "options": "Warehouse"
+  },
+  {
+   "fieldname": "session",
+   "fieldtype": "Link",
+   "label": "POS Session",
+   "options": "CH POS Session",
+   "description": "P2-15: links the EDC batch to the cashier session it covers, so card receipts can be auto-reconciled per session."
   },
   {
    "fieldname": "column_break_info",

@@ -1463,13 +1463,18 @@ export class ClaimsWorkspace {
 			claim_status: ["not in", ["Closed", "Cancelled"]],
 			company: PosState.active_company || PosState.company || "",
 		};
-		// Filter chip — VAS family vs manufacturer-only
+		// Filter chip — VAS family vs manufacturer-only.
+		// TC_041 — coverage_type is stored as snake_case on CH Warranty Claim
+		// (options: anniversary_warranty, vas_plan, repair_warranty,
+		// manufacturer_warranty, paid_repair, goodwill). Earlier the chips
+		// filtered against Title-Case strings so VAS / Manufacturer never
+		// matched any row.
 		const f = this._claim_filter || "all";
-		const VAS_TYPES = ["Extended Warranty", "Value Added Service", "Protection Plan", "Post-Repair Warranty"];
+		const VAS_TYPES = ["vas_plan", "anniversary_warranty", "repair_warranty"];
 		if (f === "vas") {
 			filters.coverage_type = ["in", VAS_TYPES];
 		} else if (f === "manufacturer") {
-			filters.coverage_type = "Manufacturer Warranty";
+			filters.coverage_type = "manufacturer_warranty";
 		}
 
 		frappe.xcall("frappe.client.get_list", {

@@ -401,12 +401,28 @@ export class ReportsWorkspace {
 				(d.stock_transfers || []).forEach((se) => {
 					const status_label = se.docstatus === 0 ? __("Draft") : __("Completed");
 					const cls = se.docstatus === 0 ? "ch-rpt-badge--warning" : "ch-rpt-badge--success";
+					// TC_042 / TC_043 — show From → To warehouse pair and the
+					// primary item name (or "+N more" when a transfer has
+					// multiple lines) instead of the bare item count.
+					const from_wh = frappe.utils.escape_html(se.from_warehouse || "—");
+					const to_wh = frappe.utils.escape_html(se.to_warehouse || "—");
+					const item_count = se.item_count || 0;
+					const primary = se.primary_item_name || se.primary_item_code || "";
+					const item_label = primary
+						? (item_count > 1
+							? `${frappe.utils.escape_html(primary)} <span class="text-muted">+${item_count - 1} ${__("more")}</span>`
+							: frappe.utils.escape_html(primary))
+						: `${item_count} ${__("items")}`;
 					st_list.append(`
 						<div class="ch-rpt-doc-row" data-href="/desk/stock-entry/${encodeURIComponent(se.name)}">
 							<div>
 								<div class="ch-rpt-doc-id">${frappe.utils.escape_html(se.name)}</div>
 								<div class="ch-rpt-doc-meta">
-									${frappe.datetime.str_to_user(se.posting_date)} · ${se.item_count} ${__("items")}
+									${frappe.datetime.str_to_user(se.posting_date)} · ${item_label}
+								</div>
+								<div class="ch-rpt-doc-meta" style="margin-top:2px;font-size:11px">
+									<i class="fa fa-arrow-right" style="opacity:0.5"></i>
+									${from_wh} → ${to_wh}
 								</div>
 							</div>
 							<span class="ch-rpt-badge ${cls}">${status_label}</span>

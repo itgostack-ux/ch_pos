@@ -735,6 +735,31 @@ def _apply_margin_scheme(doc):
 
         base_value = rate - exempt_per_unit
         if base_value < 0:
+            # P2-20: below-cost sale — selling price under exempted (purchase) value.
+            # Margin scheme cannot create a negative base; clamp to zero, but log to
+            # audit so finance can review unusual clearance pricing rather than the
+            # silent zero-tax behaviour the previous code had.
+            try:
+                from ch_pos.audit import log_business_event
+                log_business_event(
+                    event_type="Margin Below Cost",
+                    ref_doctype="Sales Invoice",
+                    ref_name=getattr(doc, "name", "") or "new",
+                    before=f"exempt_per_unit={exempt_per_unit:.2f}",
+                    after=f"selling_rate={rate:.2f}",
+                    remarks=(
+                        f"Item {item.item_code}: selling rate \u20b9{rate:.2f} below "
+                        f"purchase exempt value \u20b9{exempt_per_unit:.2f}; margin base "
+                        "clamped to zero."
+                    ),
+                    company=getattr(doc, "company", "") or "",
+                )
+            except Exception:
+                # Audit logger is best-effort; never block billing because of it.
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    f"Below-cost margin audit log failed for {item.item_code}",
+                )
             base_value = 0
 
         # POS-15 fix: Dynamic GST rate lookup instead of hardcoded 1.18

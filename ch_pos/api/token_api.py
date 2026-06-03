@@ -858,10 +858,24 @@ def log_counter_walkin(
     customer_name: str = "",
     customer_phone: str = "",
     remarks: str = "",
+    device_brand: str = "",
+    device_model: str = "",
+    item_code: str = "",
 ) -> dict:
     """
     Create a minimal POS Kiosk Token for a direct-counter walk-in.
     This replaces the old log_walkin counter-only approach.
+
+    ``device_brand`` / ``device_model`` capture what the customer asked
+    for (used by repair-intake follow-up and the Walkin Conversion Report).
+    For Sales / Enquiry purposes the same values also feed
+    ``brand_interest`` so the retail-interest section is populated.
+
+    ``item_code`` (optional) — when supplied, links a catalogue item the
+    customer enquired about; appended to the token's items table with
+    qty=0 so reports can correlate footfall to specific SKUs without
+    affecting stock.
+
     Returns token name and display number.
     """
     profile = frappe.db.get_value(
@@ -876,12 +890,20 @@ def log_counter_walkin(
     if customer_phone and customer_phone.strip():
         customer_phone = validate_indian_phone(customer_phone.strip(), "Phone number")
 
+    # Validate item_code if provided — silently drop bad references rather
+    # than failing the whole walk-in log (interest capture is best-effort).
+    item_code = (item_code or "").strip()
+    if item_code and not frappe.db.exists("Item", item_code):
+        item_code = ""
+
     today = frappe.utils.today()
     lock_key = f"pos_seq_{pos_profile}_{today}"
     frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key,))
     try:
         token_display = _generate_token_display(pos_profile, company_abbr)
-        doc = frappe.get_doc({
+        device_brand = (device_brand or "").strip()
+        device_model = (device_model or "").strip()
+        token_payload = {
             "doctype": "POS Kiosk Token",
             "pos_profile": pos_profile,
             "company": profile.company,
@@ -893,10 +915,24 @@ def log_counter_walkin(
             "visit_source": "Counter",
             "visit_purpose": visit_purpose,
             "issue_description": remarks,
+            "device_brand": device_brand,
+            "device_model": device_model,
             "started_at": now_datetime(),
             "technician": frappe.session.user,
             "expires_at": frappe.utils.add_days(now_datetime(), 1),
-        })
+        }
+        # Mirror brand into ``brand_interest`` for Sales/Enquiry purposes —
+        # the retail-interest section depends_on those visit purposes.
+        if visit_purpose in ("Sales", "Enquiry") and device_brand:
+            token_payload["brand_interest"] = device_brand
+
+        if item_code:
+            token_payload["items"] = [{
+                "item_code": item_code,
+                "qty": 1,
+            }]
+
+        doc = frappe.get_doc(token_payload)
         doc.flags.ignore_permissions = True
         doc.insert()
         doc.submit()

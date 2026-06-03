@@ -513,26 +513,37 @@ def auto_close_overnight_sessions():
     Runs every day at 06:00 AM. Closes any session still in Open / Locked /
     Suspended state from yesterday or earlier, so cashiers are forced to
     open a fresh session when the store opens at 10:00 AM.
+
+    P2-13: serialised via GET_LOCK so that overlapping scheduler workers
+    cannot duplicate close audit logs / settlement attempts at the cron
+    boundary.
     """
     from frappe.utils import add_days
-    yesterday = getdate(add_days(nowdate(), -1))
-    open_sessions = frappe.get_all(
-        "CH POS Session",
-        filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", yesterday)},
-        fields=["name", "pos_profile", "store", "business_date"],
-    )
-    for s in open_sessions:
-        try:
-            doc = frappe.get_doc("CH POS Session", s.name)
-            doc.auto_closed = 1
-            doc.close_session(
-                closing_cash=0,
-                variance_reason="Auto-closed: overnight session expiry (6 AM close)",
-            )
-            frappe.logger("session").info(
-                f"Overnight auto-close: {s.name} (store: {s.store}, biz date: {s.business_date})"
-            )
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), f"Overnight auto-close failed for {s.name}")
-    if open_sessions:
-        frappe.db.commit()
+    lock_key = "auto_close_overnight_sessions_lock"
+    lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 5)", (lock_key,))[0][0]
+    if not lock_result:
+        return
+    try:
+        yesterday = getdate(add_days(nowdate(), -1))
+        open_sessions = frappe.get_all(
+            "CH POS Session",
+            filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", yesterday)},
+            fields=["name", "pos_profile", "store", "business_date"],
+        )
+        for s in open_sessions:
+            try:
+                doc = frappe.get_doc("CH POS Session", s.name)
+                doc.auto_closed = 1
+                doc.close_session(
+                    closing_cash=0,
+                    variance_reason="Auto-closed: overnight session expiry (6 AM close)",
+                )
+                frappe.logger("session").info(
+                    f"Overnight auto-close: {s.name} (store: {s.store}, biz date: {s.business_date})"
+                )
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), f"Overnight auto-close failed for {s.name}")
+        if open_sessions:
+            frappe.db.commit()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))

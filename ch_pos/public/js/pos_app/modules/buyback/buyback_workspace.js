@@ -113,6 +113,11 @@ export class BuybackWorkspace {
 						style="border-radius:var(--pos-radius,8px);font-weight:700;padding:0 18px">
 						<i class="fa fa-search"></i>
 					</button>
+					<button class="btn btn-outline-secondary ch-bb-refresh-btn"
+						style="border-radius:var(--pos-radius,8px);font-weight:700;white-space:nowrap"
+						title="${__("Refresh")}">
+						<i class="fa fa-refresh"></i>
+					</button>
 					<button class="btn btn-outline-primary ch-bb-new-btn"
 						style="border-radius:var(--pos-radius,8px);font-weight:700;white-space:nowrap">
 						<i class="fa fa-plus"></i> ${__("New")}
@@ -157,6 +162,22 @@ export class BuybackWorkspace {
 
 		panel.on("click", ".ch-bb-lookup", do_search);
 		panel.find(".ch-bb-search").on("keypress", (e) => { if (e.which === 13) do_search(); });
+		// TC_037 — top-level Refresh button: re-runs the last search and
+		// reloads the currently-selected detail so cashiers can pick up
+		// status changes (mobile-app submissions, manager approvals,
+		// settlement updates) without leaving and re-entering the workspace.
+		panel.on("click", ".ch-bb-refresh-btn", () => {
+			const q = panel.find(".ch-bb-search").val().trim();
+			if (q) {
+				this._search(panel, q);
+			}
+			if (this._current_data && this._current_data.name) {
+				this._load_detail(panel, this._current_data.name);
+			}
+			if (!q && !(this._current_data && this._current_data.name)) {
+				frappe.show_alert({ message: __("Enter a search term to refresh"), indicator: "orange" });
+			}
+		});
 		panel.on("click", ".ch-bb-card", (e) => {
 			panel.find(".ch-bb-card").removeClass("selected");
 			$(e.currentTarget).addClass("selected");
@@ -1110,8 +1131,9 @@ export class BuybackWorkspace {
 			}
 			const btn = $(e.currentTarget);
 			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i>`);
-			frappe.xcall("ch_pos.api.pos_api.pos_verify_otp_direct", {
+			frappe.xcall("ch_pos.api.pos_api.pos_approve_customer_buyback", {
 				order_name: data.order.name,
+				method: "OTP",
 				otp_code,
 			}).then(() => {
 				frappe.show_alert({ message: __("OTP Verified!"), indicator: "green" });
@@ -1234,8 +1256,8 @@ export class BuybackWorkspace {
 	// SINGLE FLOW: this is the ONLY customer-approval entry point.
 	// All status branches (Approved / Awaiting Customer Approval / Awaiting OTP
 	// / OTP Verified) are handled here and finalised by a single backend call
-	// to pos_approve_customer_buyback. Do not add a parallel UI that calls
-	// pos_verify_otp_direct or any other approval endpoint from the workspace.
+	// to pos_approve_customer_buyback. The OTP step uses method="OTP" and
+	// the final step reuses the same endpoint to persist KYC + settlement.
 	_show_instore_approval_dialog(data) {
 		const order = data.order;
 		const price = order.final_price || 0;
@@ -1519,8 +1541,9 @@ export class BuybackWorkspace {
 					if (!_validate()) return;
 					const btn = $(this);
 					btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Verifying OTP...")}`);
-					frappe.xcall("ch_pos.api.pos_api.pos_verify_otp_direct", {
+					frappe.xcall("ch_pos.api.pos_api.pos_approve_customer_buyback", {
 						order_name: order.name,
+						method: "OTP",
 						otp_code: state.otp_code,
 					}).then(() => {
 						otp_verified_in_session = true;
