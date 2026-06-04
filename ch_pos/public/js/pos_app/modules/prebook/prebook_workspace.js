@@ -200,9 +200,14 @@ export class PrebookWorkspace {
 					${advance_html}
 					<p class="text-muted">${__("Valid till")} ${qtn.valid_till}</p>
 					<div style="margin-top:14px;display:flex;gap:8px;justify-content:center;">
-						<a class="btn btn-primary btn-sm" target="_blank" href="${print_url}">
-							<i class="fa fa-print"></i> ${__("Print Proforma")}
-						</a>
+						${qtn.docstatus === 1
+							? `<a class="btn btn-primary btn-sm" target="_blank" href="${print_url}">
+								<i class="fa fa-print"></i> ${__("Print Proforma")}
+							</a>`
+							: `<span class="text-warning" style="font-size:12px;align-self:center;">
+								<i class="fa fa-exclamation-triangle"></i> ${__("Proforma saved as draft — submit manually before printing.")}
+							</span>`
+						}
 						<a class="btn btn-default btn-sm" target="_blank" href="/app/quotation/${encodeURIComponent(qtn.name)}">
 							<i class="fa fa-external-link"></i> ${__("Open in Desk")}
 						</a>

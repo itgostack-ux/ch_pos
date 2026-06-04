@@ -630,13 +630,9 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
         qtn.custom_sales_executive = sales_executive
 
     qtn.flags.ignore_permissions = True
+    qtn.flags.ignore_workflow = True
     qtn.insert(ignore_permissions=True)
-
-    try:
-        qtn.submit()
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), f"Proforma quotation submit failed for {qtn.name}")
-        qtn.reload()
+    qtn.submit()
 
     # Stamp advance on the submitted Quotation (field is read_only +
     # allow_on_submit, so bypass with db.set_value). Cap at grand_total.
