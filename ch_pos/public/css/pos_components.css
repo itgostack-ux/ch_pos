@@ -2614,6 +2614,61 @@
   border-radius: var(--pos-radius-sm);
 }
 
+/* ── Cart Sale Type (TC_030) ───────────────────────── */
+.ch-pos-cart-saletype {
+  padding: 8px 20px 10px;
+  border-top: 1px solid var(--pos-border-light, #e5e7eb);
+  background: var(--pos-surface-sunken, #f8fafc);
+}
+.ch-pos-cart-saletype-label {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--pos-text-muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+}
+.ch-pos-cart-saletype-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+}
+.ch-pos-cart-saletype-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 5px 12px;
+  border: 1.5px solid var(--pos-border, #d1d5db);
+  border-radius: var(--pos-radius-pill, 999px);
+  background: var(--pos-surface, #ffffff);
+  color: var(--pos-text-secondary, #475569);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: normal;
+  word-break: break-word;
+  text-align: center;
+  transition: all var(--pos-transition, 0.15s ease);
+}
+.ch-pos-cart-saletype-btn:hover {
+  border-color: var(--pos-primary, #1d4ed8);
+  color: var(--pos-primary, #1d4ed8);
+  background: var(--pos-primary-light, #eff6ff);
+}
+.ch-pos-cart-saletype-btn.active {
+  border-color: var(--pos-primary, #1d4ed8);
+  background: var(--pos-primary, #1d4ed8);
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(29, 78, 216, 0.22);
+}
+
 /* ═══════════════════════════════════════════════════════════════
    Buyback Workspace — Stage-aware Flow Styles
    Added for full POS buyback flow (ASSESS → INSPECT → APPROVE → SETTLE)
@@ -3209,12 +3264,18 @@
   pointer-events: all;
 }
 
-/* Ensure Frappe modals & alerts appear above payment overlay */
-body > .modal-backdrop {
+/* Ensure Frappe modals & alerts appear above payment overlay.
+   Use descendant selector (no >) so it covers nested containers too. */
+.modal-backdrop {
   z-index: 9995 !important;
 }
-body > .modal {
+.modal {
   z-index: 9996 !important;
+}
+/* While any Frappe modal is open, suppress overlay pointer-events so
+   clicks on the dialog are never intercepted by the payment overlay. */
+body.modal-open .ch-pay-overlay {
+  pointer-events: none !important;
 }
 body > .desk-alert-container,
 #alert-container {

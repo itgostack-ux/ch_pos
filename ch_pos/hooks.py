@@ -41,6 +41,7 @@ override_whitelisted_methods = {
 # Client scripts
 doctype_js = {
     "Sales Invoice": "custom/pos_invoice.js",
+    "CH Manager PIN": "pos_core/doctype/ch_manager_pin/ch_manager_pin.js",
 }
 
 # App-level JS (extends POS UI)

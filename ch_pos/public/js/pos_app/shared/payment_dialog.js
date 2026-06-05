@@ -494,17 +494,18 @@ export class PaymentDialog {
 				</div>
 			</div>` : "";
 
-		// Sale type selector (DS, CS, FS, FREE, SS)
+		// Sale type is selected in cart_panel.js.
+		// Keep a hidden pill container here as an internal state engine only,
+		// and expose only dependent sub-controls (finance partner/sub-type).
 		const sale_type_html = `
-			<div class="ch-pay-sale-type-section" id="ch-pay-sale-type-section">
-				<div class="ch-pay-sale-type-label">${__("Sale Type")}</div>
+			<div id="ch-pay-sale-type-engine" style="display:none">
 				<div class="ch-pay-sale-type-pills" id="ch-pay-sale-type-pills"></div>
-				<div class="ch-pay-sale-sub-row" id="ch-pay-sale-sub-row" style="display:none">
-					<select class="form-control form-control-sm" id="ch-pay-sale-sub-select"></select>
-					<select class="form-control form-control-sm" id="ch-pay-sale-fin-tenure" style="display:none;max-width:140px"></select>
-					<input type="text" class="form-control form-control-sm" id="ch-pay-sale-ref-input"
-						placeholder="${__("Reference No...")}" style="display:none;max-width:180px">
-				</div>
+			</div>
+			<div class="ch-pay-sale-sub-row" id="ch-pay-sale-sub-row" style="display:none">
+				<select class="form-control form-control-sm" id="ch-pay-sale-sub-select"></select>
+				<select class="form-control form-control-sm" id="ch-pay-sale-fin-tenure" style="display:none;max-width:140px"></select>
+				<input type="text" class="form-control form-control-sm" id="ch-pay-sale-ref-input"
+					placeholder="${__("Reference No...")}" style="display:none;max-width:180px">
 			</div>`;
 
 		// ── Discount / Coupon controls in setup zone ──────────────────────────
@@ -624,7 +625,7 @@ placeholder="${__("Enter code...")}">
 						<!-- Hidden sale mode checkboxes (driven by pills) -->
 						${sale_modes_html}
 
-						<!-- ─ Step 1: Sale Type ─ -->
+										<!-- ─ Step 1: Sale Details (type chosen in cart) ─ -->
 						${sale_type_html}
 
 						<!-- ─ Step 2: Sale-mode specific details ─ -->
@@ -1762,11 +1763,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		});
 	}
 
-	/** Sync finance sale type selections into the payment row's finance fields */
+	/** Sync finance sale-detail selections into the payment row's finance fields */
 	_sync_finance_to_payment(provider, tenure, approval_id) {
 		for (let i = 0; i < this._payments.length; i++) {
 			const p = this._payments[i];
-			// Provider, tenure, approval are captured in the Sale Type section —
+			// Provider, tenure, approval are captured in the Sale Details section —
 			// store on payment object for submission but don't re-render the row.
 			p.finance_provider = provider || "";
 			p.finance_tenure = tenure || "";

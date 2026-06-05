@@ -7,7 +7,7 @@ respect of a single transaction / single event). Penalty under section 271DA
 equals the amount received.
 
 This module wires a ``validate`` / ``before_submit`` hook on Sales Invoice
-that blocks submission when same-customer same-day cash receipts (across
+that blocks submission when same-customer same-company same-day cash receipts (across
 Sales Invoice payments table + standalone Payment Entries with Cash MoP)
 would breach the configured threshold.
 
@@ -56,9 +56,9 @@ def _invoice_cash_amount(doc) -> float:
 	return max(total, 0.0)
 
 
-def _same_day_existing_cash(customer: str, posting_date, exclude: str | None) -> float:
+def _same_day_existing_cash(customer: str, company: str, posting_date, exclude: str | None) -> float:
 	cash_modes = _cash_modes()
-	if not customer or not posting_date:
+	if not customer or not company or not posting_date:
 		return 0.0
 
 	# Sales Invoice payments (submitted only)
@@ -68,6 +68,7 @@ def _same_day_existing_cash(customer: str, posting_date, exclude: str | None) ->
 		FROM `tabSales Invoice Payment` sip
 		JOIN `tabSales Invoice` si ON si.name = sip.parent
 		WHERE si.customer = %(customer)s
+		  AND si.company = %(company)s
 		  AND si.posting_date = %(posting_date)s
 		  AND si.docstatus = 1
 		  AND sip.mode_of_payment IN %(cash_modes)s
@@ -75,6 +76,7 @@ def _same_day_existing_cash(customer: str, posting_date, exclude: str | None) ->
 		""",
 		{
 			"customer": customer,
+			"company": company,
 			"posting_date": posting_date,
 			"cash_modes": tuple(cash_modes),
 			"exclude": exclude or "",
@@ -88,12 +90,14 @@ def _same_day_existing_cash(customer: str, posting_date, exclude: str | None) ->
 		FROM `tabPayment Entry`
 		WHERE party_type = 'Customer'
 		  AND party = %(customer)s
+		  AND company = %(company)s
 		  AND posting_date = %(posting_date)s
 		  AND docstatus = 1
 		  AND mode_of_payment IN %(cash_modes)s
 		""",
 		{
 			"customer": customer,
+			"company": company,
 			"posting_date": posting_date,
 			"cash_modes": tuple(cash_modes),
 		},
@@ -106,11 +110,14 @@ def validate_section_269st_cash_limit(doc, method=None):
 	"""doc_events hook for Sales Invoice ``validate`` / ``before_submit``.
 
 	Blocks submission when the aggregate same-day cash receipts from the
-	invoice customer would breach the configured limit (default ₹2,00,000).
+	invoice customer within the same company would breach the configured
+	limit (default ₹2,00,000).
 	"""
 	if getattr(frappe.flags, "ignore_cash_receipt_limit", False):
 		return
 	if not getattr(doc, "customer", None):
+		return
+	if not getattr(doc, "company", None):
 		return
 	if getattr(doc, "is_return", 0):
 		return
@@ -119,7 +126,7 @@ def validate_section_269st_cash_limit(doc, method=None):
 	if this_cash <= 0:
 		return
 
-	existing = _same_day_existing_cash(doc.customer, getdate(doc.posting_date), doc.name)
+	existing = _same_day_existing_cash(doc.customer, doc.company, getdate(doc.posting_date), doc.name)
 	limit = _resolve_limit()
 	total = this_cash + existing
 

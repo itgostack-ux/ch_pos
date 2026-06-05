@@ -19,13 +19,14 @@ from ch_pos.overrides import cash_receipt_limit as crl
 class _StubDoc:
 	"""Minimal Sales Invoice stand-in for validator tests."""
 
-	def __init__(self, customer, payments, posting_date=None, name="SI-TEST", is_return=0, change_amount=0):
+	def __init__(self, customer, payments, posting_date=None, name="SI-TEST", is_return=0, change_amount=0, company="_Test Company"):
 		self.customer = customer
 		self.payments = payments
 		self.posting_date = posting_date or nowdate()
 		self.name = name
 		self.is_return = is_return
 		self.change_amount = change_amount
+		self.company = company
 
 	def get(self, key, default=None):
 		return getattr(self, key, default)
@@ -111,6 +112,24 @@ def run():
 	doc = _StubDoc("CUST-001", [_Row("Cash", 70000)], change_amount=30000)
 	# effective cash 40k + 150k = 190k → below 2L
 	results.append(_expect_pass(doc, "T8: 70k cash − 30k change + 1.5L prior = 1.9L"))
+
+	# 9. Company scope is forwarded to aggregation helper
+	captured = {}
+	def _spy(customer, company, *_args, **_kwargs):
+		captured["customer"] = customer
+		captured["company"] = company
+		return 0.0
+	crl._same_day_existing_cash = _spy
+	crl._resolve_limit = lambda: 200000.0
+	crl._cash_modes = lambda: ["Cash"]
+	doc = _StubDoc("CUST-001", [_Row("Cash", 1000)], company="COMP-A")
+	results.append(_expect_pass(doc, "T9: company forwarded to aggregator"))
+	if captured.get("company") != "COMP-A":
+		print(f"❌  T9b: expected company=COMP-A, got {captured!r}")
+		results.append(False)
+	else:
+		print("✅  T9b: company scope captured correctly")
+		results.append(True)
 
 	passed = sum(1 for r in results if r)
 	total = len(results)

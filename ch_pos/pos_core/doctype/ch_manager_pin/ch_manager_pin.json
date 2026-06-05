@@ -46,7 +46,7 @@
    "fieldtype": "Password",
    "label": "Manager PIN",
    "reqd": 1,
-   "description": "4-6 digit PIN for quick in-store approvals"
+    "description": "4-6 digit PIN for quick in-store approvals. Saved PIN is masked for security; verify by using manager approval flows."
   },
   {
    "fieldname": "store",
