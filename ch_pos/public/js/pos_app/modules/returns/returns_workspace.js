@@ -162,6 +162,15 @@ export class ReturnsWorkspace {
 					},
 				];
 
+				const refund_mop_options = (() => {
+					const modes = (PosState.payment_modes || [])
+						.map((m) => (m.mode_of_payment || "").trim())
+						.filter(Boolean);
+					return [...new Set(modes)];
+				})();
+				const default_refund_mop =
+					((PosState.payment_modes || []).find((m) => m.default)?.mode_of_payment || refund_mop_options[0] || "Cash");
+
 				// Build a row-name -> index map so we can wire device <-> VAS auto-fill
 				const idx_by_row = {};
 				items.forEach((it, i) => { idx_by_row[it.name] = i; });
@@ -277,6 +286,15 @@ export class ReturnsWorkspace {
 						default: "Original Tender",
 						description: __("Original Tender posts a regular credit note. Store Credit creates a wallet credit. Exchange Voucher issues a redeemable return-credit voucher."),
 					});
+					fields.push({
+						fieldname: "refund_mode_of_payment",
+						fieldtype: "Select",
+						label: __("Refund Payment"),
+						options: refund_mop_options.join("\n"),
+						default: default_refund_mop,
+						depends_on: "eval:doc.refund_method=='Original Tender'",
+						description: __("Payment mode used to refund the customer for Original Tender returns."),
+					});
 					fields.push({ fieldtype: "Column Break" });
 					fields.push({
 						fieldname: "physical_condition",
@@ -390,6 +408,7 @@ export class ReturnsWorkspace {
 										credit_only: values.credit_only ? 1 : 0,
 										replacement_invoice: values.replacement_invoice || "",
 										refund_method: values.refund_method || "Original Tender",
+										refund_mode_of_payment: values.refund_mode_of_payment || default_refund_mop,
 										physical_condition: values.physical_condition || "Resalable",
 									});
 								} else {
@@ -411,6 +430,7 @@ export class ReturnsWorkspace {
 								credit_only: values.credit_only ? 1 : 0,
 								replacement_invoice: values.replacement_invoice || "",
 								refund_method: values.refund_method || "Original Tender",
+								refund_mode_of_payment: values.refund_mode_of_payment || default_refund_mop,
 								physical_condition: values.physical_condition || "Resalable",
 							});
 						} else {
@@ -458,6 +478,7 @@ export class ReturnsWorkspace {
 				credit_only: justification.credit_only ? 1 : 0,
 				replacement_invoice: justification.replacement_invoice || "",
 				refund_method: justification.refund_method || "Original Tender",
+				refund_mode_of_payment: justification.refund_mode_of_payment || "",
 				physical_condition: justification.physical_condition || "Resalable",
 			},
 			freeze: true,

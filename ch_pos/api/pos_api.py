@@ -1658,6 +1658,15 @@ def create_pos_invoice(pos_profile, customer, items,
                 frappe.get_traceback(),
                 f"Surplus refund JE failed for {inv.name}",
             )
+            # Flag the invoice so finance can manually post the missing JE
+            try:
+                frappe.db.set_value(
+                    "Sales Invoice", inv.name,
+                    "custom_surplus_je_pending", 1,
+                    update_modified=False,
+                )
+            except Exception:
+                pass
 
     # Back-link Buyback Order → Sales Invoice (marks the exchange as consumed)
     if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
@@ -1679,11 +1688,17 @@ def create_pos_invoice(pos_profile, customer, items,
 
     # Back-link exception request to this invoice (marks it as consumed)
     if exception_request:
-        frappe.db.set_value(
-            "CH Exception Request", exception_request,
-            "pos_invoice", inv.name,
-            update_modified=False,
-        )
+        try:
+            frappe.db.set_value(
+                "CH Exception Request", exception_request,
+                "pos_invoice", inv.name,
+                update_modified=False,
+            )
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Exception request link failed for {exception_request} → {inv.name}",
+            )
 
     # Back-link warranty claim — mark processing fee as paid
     if warranty_claim:
@@ -3109,7 +3124,8 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
                       return_reason=None, return_remarks=None,
                       manager_pin=None, credit_only=0,
                       replacement_invoice=None,
-                      refund_method=None, physical_condition=None) -> dict:
+                      refund_method=None, refund_mode_of_payment=None,
+                      physical_condition=None) -> dict:
     """Create a Sales Invoice return (credit note) for specific items.
 
     Market-standard maker-checker (SAP credit memo / Oracle Returns Mgmt):
@@ -3299,6 +3315,20 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
             default_mode = p.mode_of_payment
             break
 
+    selected_refund_mop = (refund_mode_of_payment or "").strip()
+    if refund_method == "Original Tender" and selected_refund_mop:
+        allowed_modes = frappe.get_all(
+            "POS Payment Method",
+            filters={"parent": orig.pos_profile},
+            pluck="mode_of_payment",
+        )
+        if allowed_modes and selected_refund_mop not in allowed_modes:
+            frappe.throw(
+                frappe._("Invalid Refund Payment mode: {0}").format(selected_refund_mop),
+                title=frappe._("Invalid Refund Payment"),
+            )
+        default_mode = selected_refund_mop
+
     ret.append("payments", {
         "mode_of_payment": default_mode,
         "amount": correct_payment,
@@ -3333,6 +3363,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     composed_remarks = (
         f"{composed_remarks}\n"
         f"[PHASE4_REFUND_METHOD={refund_method}]\n"
+        f"[PHASE4_REFUND_MOP={default_mode}]\n"
         f"[PHASE4_PHYSICAL_CONDITION={physical_condition}]"
     )
     update_kwargs["remarks"] = composed_remarks

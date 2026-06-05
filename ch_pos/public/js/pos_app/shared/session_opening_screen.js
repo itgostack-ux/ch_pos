@@ -178,7 +178,7 @@ export class SessionOpeningScreen {
 						}
 						this._show_store_picker(stores, _done, this._get_saved_store() || ctx.default_store);
 					} else if (ctx.day_closed) {
-						// Day closed for regular user — show advance dialog immediately
+						// Day closed — no access until date is advanced (market standard)
 						this._show_day_closed_message({ store: ctx.store, business_date: ctx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
 					} else if (ctx.existing_session) {
 						// Active session — auto-resume using context from get_pos_context
