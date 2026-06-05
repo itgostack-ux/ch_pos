@@ -1171,18 +1171,9 @@ placeholder="${__("Enter code...")}">
 				}
 				this._sync_finance_payments();
 			} else if (had_finance) {
-				// Switching AWAY from finance — remove Finance row, restore single Cash row
-				const grand = this._calc_grand_total();
-				this._payments = this._payments.filter(p => this._mop_type(p.mode) !== "finance");
-				// Clean up down payment flags
-				this._payments.forEach(p => { delete p.is_down_payment; });
-				// Ensure at least one row covering full grand total
-				if (!this._payments.length) {
-					this._payments = [{ mode: "Cash", amount: grand, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
-				} else if (this._payments.length === 1) {
-					// Re-seed to full amount
-					this._payments[0].amount = grand;
-				}
+				// Switching AWAY from finance must hard-reset payment state so stale
+				// finance/gateway metadata never keeps fields locked for Direct Sale.
+				this._reset_after_finance_exit();
 			}
 			// Always re-render rows and ensure #ch-pay-rows / #ch-pay-mop-section are visible
 			ov.find("#ch-pay-mop-section").show();
@@ -1494,6 +1485,37 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		this._payments[idx].amount = amt;
 		this._sync_payment_amount_inputs();
 		this._update_totals();
+	}
+
+	_new_payment_row(mode = "Cash", amount = 0, extra = {}) {
+		return {
+			mode,
+			amount,
+			upi_transaction_id: "",
+			card_reference: "",
+			card_last_four: "",
+			bank_partner: "",
+			bank_reference: "",
+			finance_provider: "",
+			finance_tenure: "",
+			finance_approval_id: "",
+			finance_down_payment: 0,
+			...extra,
+		};
+	}
+
+	_reset_after_finance_exit() {
+		const grand = this._calc_grand_total();
+		this._payments = [this._new_payment_row("Cash", grand)];
+
+		// Finance-only selections must be cleared when user switches to non-finance type.
+		PosState.sale_sub_type = null;
+		PosState.finance_tenure = null;
+		PosState.sale_reference = null;
+
+		if (this._is_credit_sale) {
+			this._seed_credit_down_payment();
+		}
 	}
 
 	_sync_payment_amount_inputs() {

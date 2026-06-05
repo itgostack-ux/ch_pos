@@ -5907,13 +5907,47 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
         wh_filter = "se.from_warehouse = %s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` sed WHERE sed.parent = se.name AND sed.s_warehouse = %s)"
         params = (warehouse, warehouse)
 
-    entries = frappe.db.sql(
-        """SELECT se.name, se.posting_date, se.docstatus,
-                   se.from_warehouse, se.to_warehouse, se.remarks,
+        entries = frappe.db.sql(
+                """SELECT se.name, se.posting_date, se.docstatus,
+                                     COALESCE(
+                                             se.from_warehouse,
+                                             (SELECT sed.s_warehouse
+                                                    FROM `tabStock Entry Detail` sed
+                                                 WHERE sed.parent = se.name
+                                                     AND IFNULL(sed.s_warehouse, '') != ''
+                                                 ORDER BY sed.idx ASC
+                                                 LIMIT 1)
+                                     ) AS from_warehouse,
+                                     COALESCE(
+                                             se.to_warehouse,
+                                             (SELECT sed.t_warehouse
+                                                    FROM `tabStock Entry Detail` sed
+                                                 WHERE sed.parent = se.name
+                                                     AND IFNULL(sed.t_warehouse, '') != ''
+                                                 ORDER BY sed.idx ASC
+                                                 LIMIT 1)
+                                     ) AS to_warehouse,
+                                     se.remarks,
                    se.custom_status, se.custom_logistics_status,
                    se.custom_logistics_person,
                    (SELECT COUNT(*) FROM `tabStock Entry Detail` sed
-                    WHERE sed.parent = se.name) AS item_count
+                                        WHERE sed.parent = se.name) AS item_count,
+                                     (SELECT COALESCE(i.item_name, sed.item_code)
+                                            FROM `tabStock Entry Detail` sed
+                                            LEFT JOIN `tabItem` i ON i.name = sed.item_code
+                                         WHERE sed.parent = se.name
+                                         ORDER BY sed.idx ASC
+                                         LIMIT 1) AS primary_item_name,
+                                     (SELECT item_code
+                                            FROM `tabStock Entry Detail` sed
+                                         WHERE sed.parent = se.name
+                                         ORDER BY sed.idx ASC
+                                         LIMIT 1) AS primary_item_code,
+                                     GREATEST(
+                                             (SELECT COUNT(*) FROM `tabStock Entry Detail` sed
+                                                 WHERE sed.parent = se.name) - 1,
+                                             0
+                                     ) AS additional_item_count
             FROM `tabStock Entry` se
             WHERE se.stock_entry_type = 'Material Transfer'
               AND se.docstatus IN (0, 1)
@@ -9606,9 +9640,6 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
 
         sre_list = get_sre_details_for_voucher("Sales Order", sales_order) or []
         if sre_list:
-            use_serial_batch_fields = frappe.get_single_value(
-                "Stock Settings", "use_serial_batch_fields"
-            )
             sre_by_detail = {s.voucher_detail_no: s for s in sre_list}
             for it in inv.items:
                 if it.get("serial_and_batch_bundle"):
@@ -9617,8 +9648,7 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
                 if not sre:
                     continue
                 if (
-                    not use_serial_batch_fields
-                    and sre.reservation_based_on == "Serial and Batch"
+                    sre.reservation_based_on == "Serial and Batch"
                     and (sre.has_serial_no or sre.has_batch_no)
                 ):
                     bundle = get_ssb_bundle_for_voucher(sre)

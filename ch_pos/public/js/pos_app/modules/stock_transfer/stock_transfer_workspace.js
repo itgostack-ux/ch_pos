@@ -167,8 +167,17 @@ export class StockTransferWorkspace {
 			? `<i class="fa fa-arrow-right" style="color:var(--pos-success);margin:0 6px"></i>`
 			: `<i class="fa fa-arrow-right" style="color:var(--pos-danger);margin:0 6px"></i>`;
 
-		const from_wh = frappe.utils.escape_html(se.from_warehouse || "");
-		const to_wh = frappe.utils.escape_html(se.to_warehouse || "");
+		const from_wh_raw = se.from_warehouse || "—";
+		const to_wh_raw = se.to_warehouse || "—";
+		const from_wh = frappe.utils.escape_html(from_wh_raw);
+		const to_wh = frappe.utils.escape_html(to_wh_raw);
+		const primary_item = frappe.utils.escape_html(
+			se.primary_item_name || se.primary_item_code || ""
+		);
+		const more_count = parseInt(se.additional_item_count || 0, 10) || 0;
+		const item_label = primary_item
+			? (more_count > 0 ? `${primary_item} +${more_count} ${__("more")}` : primary_item)
+			: __(`${se.item_count || 0} items`);
 
 		// Receive button — only when ready (after logistics delivers)
 		const can_receive = tab === "incoming" && ["Ready For Receive", "Receive At Transit"].includes(cs);
@@ -232,7 +241,7 @@ export class StockTransferWorkspace {
 						<div>
 							<div style="font-weight:700;font-size:var(--pos-fs-sm)">${frappe.utils.escape_html(se.name)}</div>
 							<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
-								${frappe.datetime.str_to_user(se.posting_date)} · ${se.item_count} ${__("items")}
+								${frappe.datetime.str_to_user(se.posting_date)} · ${item_label}
 							</div>
 						</div>
 						<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
@@ -246,9 +255,11 @@ export class StockTransferWorkspace {
 							</button>
 						</div>
 					</div>
-					<div style="display:flex;align-items:center;font-size:var(--pos-fs-xs);color:var(--pos-text-secondary)">
+					<div style="display:flex;align-items:center;gap:6px;font-size:var(--pos-fs-xs);color:var(--pos-text-secondary);flex-wrap:wrap">
+						<span style="font-size:11px;color:var(--pos-text-muted)">${__("From")}</span>
 						<span style="padding:3px 8px;background:var(--pos-surface-sunken);border-radius:var(--pos-radius-sm)">${from_wh}</span>
 						${direction_icon}
+						<span style="font-size:11px;color:var(--pos-text-muted)">${__("To")}</span>
 						<span style="padding:3px 8px;background:var(--pos-surface-sunken);border-radius:var(--pos-radius-sm)">${to_wh}</span>
 					</div>
 					${courier_html}

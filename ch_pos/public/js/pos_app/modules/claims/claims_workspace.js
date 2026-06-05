@@ -16,6 +16,7 @@ export class ClaimsWorkspace {
 		this._dashboard = null;
 		this._selected_device = null;
 		this._refresh_timer = null;
+		this._claim_filter = "vas";
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "claims") {
 				this._stop_auto_refresh();
@@ -76,12 +77,10 @@ export class ClaimsWorkspace {
 				<!-- Pending Claims Pipeline -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
-						<span><i class="fa fa-list"></i> ${__("Recent Claims")}</span>
+						<span><i class="fa fa-list"></i> ${__("Recent VAS Claims")}</span>
 						<div style="display:flex;align-items:center;gap:6px">
 							<div class="ch-claim-filter-chips" style="display:flex;gap:4px">
-								<button class="btn btn-xs btn-default ch-claim-filter active" data-filter="all" style="border-radius:var(--pos-radius-sm)">${__("All")}</button>
-								<button class="btn btn-xs btn-default ch-claim-filter" data-filter="manufacturer" style="border-radius:var(--pos-radius-sm)">${__("Manufacturer")}</button>
-								<button class="btn btn-xs btn-default ch-claim-filter" data-filter="vas" style="border-radius:var(--pos-radius-sm)">${__("VAS / Extended")}</button>
+								<button class="btn btn-xs btn-primary ch-claim-filter active" data-filter="vas" style="border-radius:var(--pos-radius-sm)">${__("VAS / Extended")}</button>
 							</div>
 							<button class="btn btn-xs btn-default ch-claim-refresh" style="border-radius:var(--pos-radius-sm)">
 								<i class="fa fa-refresh"></i>
@@ -133,12 +132,12 @@ export class ClaimsWorkspace {
 
 		panel.on("click", ".ch-claim-refresh", () => this._load_claims_pipeline(panel));
 
-		// Filter chips for the claims pipeline (All / Manufacturer / VAS)
+		// Filter chips for the claims pipeline (VAS only)
 		panel.on("click", ".ch-claim-filter", (e) => {
 			const $btn = $(e.currentTarget);
 			panel.find(".ch-claim-filter").removeClass("active btn-primary").addClass("btn-default");
 			$btn.removeClass("btn-default").addClass("active btn-primary");
-			this._claim_filter = $btn.data("filter") || "all";
+			this._claim_filter = $btn.data("filter") || "vas";
 			this._load_claims_pipeline(panel);
 		});
 
@@ -1463,18 +1462,12 @@ export class ClaimsWorkspace {
 			claim_status: ["not in", ["Closed", "Cancelled"]],
 			company: PosState.active_company || PosState.company || "",
 		};
-		// Filter chip — VAS family vs manufacturer-only.
-		// TC_041 — coverage_type is stored as snake_case on CH Warranty Claim
-		// (options: anniversary_warranty, vas_plan, repair_warranty,
-		// manufacturer_warranty, paid_repair, goodwill). Earlier the chips
-		// filtered against Title-Case strings so VAS / Manufacturer never
-		// matched any row.
-		const f = this._claim_filter || "all";
+		// TC_041: Claims list must show only VAS-linked plan records.
+		// coverage_type values are snake_case on CH Warranty Claim.
+		const f = this._claim_filter || "vas";
 		const VAS_TYPES = ["vas_plan", "anniversary_warranty", "repair_warranty"];
 		if (f === "vas") {
 			filters.coverage_type = ["in", VAS_TYPES];
-		} else if (f === "manufacturer") {
-			filters.coverage_type = "manufacturer_warranty";
 		}
 
 		frappe.xcall("frappe.client.get_list", {

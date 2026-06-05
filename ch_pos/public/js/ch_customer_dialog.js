@@ -263,7 +263,7 @@
 					return { filters };
 				  } },
 				{ fieldname: "state", fieldtype: "Link", options: "CH State", label: __("State"), reqd: 1,
-				  get_query: () => ({ filters: { disabled: 0 } }) },
+				  get_query: () => ({ filters: { disabled: 0, country: "India" } }) },
 				{ fieldtype: "Section Break" },
 				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode") },
 				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality") },
@@ -279,7 +279,7 @@
 				  depends_on: "eval:!doc.same_as_billing" },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "shipping_state", fieldtype: "Link", options: "CH State", label: __("Shipping State"),
-				  depends_on: "eval:!doc.same_as_billing", get_query: () => ({ filters: { disabled: 0 } }) },
+				  depends_on: "eval:!doc.same_as_billing", get_query: () => ({ filters: { disabled: 0, country: "India" } }) },
 				{ fieldname: "shipping_pincode", fieldtype: "Data", label: __("Shipping Pincode"),
 				  depends_on: "eval:!doc.same_as_billing" },
 			],
