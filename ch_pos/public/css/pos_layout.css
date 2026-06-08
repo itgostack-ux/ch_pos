@@ -411,7 +411,7 @@ body.ch-pos-fullscreen .container { max-width: 100% !important; padding: 0 !impo
   display: flex !important;
   flex-direction: column !important;
   overflow: hidden;
-  padding: var(--pos-space-lg) var(--pos-space-xl) var(--pos-space-sm) !important;
+  padding: var(--pos-space-md) var(--pos-space-sm) var(--pos-space-sm) !important;
   gap: var(--pos-space-md) !important;
   min-width: 0 !important;
   background: var(--pos-bg) !important;
