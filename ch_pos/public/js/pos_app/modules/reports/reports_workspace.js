@@ -103,7 +103,7 @@ export class ReportsWorkspace {
 							<span>
 								<span class="ch-rpt-ai-badge">AI</span>
 								${__("Insights & Recommendations")}
-								<span class="ch-rpt-ai-sub">${__("Context-aware for this store")}</span>
+								<span class="ch-rpt-ai-sub">${__("Live from your data")}</span>
 							</span>
 							<button class="btn btn-xs btn-default ch-rpt-ai-refresh" title="${__("Re-generate insights")}">
 								<i class="fa fa-refresh"></i> ${__("Refresh")}
@@ -203,37 +203,16 @@ export class ReportsWorkspace {
 		});
 		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
 
-		// AI Insights — refresh / execute / dismiss
+		// Store Insights — refresh + open referenced document
 		panel.on("click", ".ch-rpt-ai-refresh", () => this._load_ai_insights(panel, true));
-		panel.on("click", ".ch-rpt-ai-card [data-action='execute']", (e) => {
-			const btn = $(e.currentTarget);
-			const name = btn.attr("data-name");
-			if (!name) return;
-			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Running…")}`);
-			frappe.call({
-				method: "ch_mg_reports.ai.api.execute_recommendation",
-				args: { recommendation: name },
-				callback: () => {
-					frappe.show_alert({ message: __("AI action executed"), indicator: "green" });
-					this._load_ai_insights(panel, true);
-				},
-				error: () => btn.prop("disabled", false).text(__("Retry")),
-			});
+		panel.on("click", ".ch-rpt-ai-card[data-href]", function (e) {
+			if ($(e.target).closest("a,button").length) return;
+			window.open($(this).attr("data-href"), "_blank");
 		});
-		panel.on("click", ".ch-rpt-ai-card [data-action='dismiss']", (e) => {
-			const btn = $(e.currentTarget);
-			const name = btn.attr("data-name");
-			if (!name) return;
-			btn.prop("disabled", true);
-			frappe.call({
-				method: "ch_mg_reports.ai.api.dismiss_recommendation",
-				args: { recommendation: name },
-				callback: () => this._load_ai_insights(panel, true),
-			});
-		});
-		panel.on("click", ".ch-rpt-ai-card [data-action='open-ref']", function () {
+		panel.on("click", ".ch-rpt-ai-card [data-action='open-ref']", function (e) {
+			e.stopPropagation();
 			const dt = $(this).attr("data-dt"), dn = $(this).attr("data-dn");
-			if (dt && dn) frappe.set_route("Form", dt, dn);
+			if (dt && dn) window.open(`/desk/${frappe.router.slug(dt)}/${encodeURIComponent(dn)}`, "_blank");
 		});
 
 		// KPI cards → open filtered list in new tab
@@ -441,84 +420,67 @@ export class ReportsWorkspace {
 		if (!section.length) return;
 		const loading = section.find(".ch-rpt-ai-loading");
 		const list = section.find(".ch-rpt-ai-list");
-		loading.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Generating insights…")}`).show();
+		loading.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Analysing your store…")}`).show();
 		list.hide();
 
-		const ctx = {
-			route_type: "Page",
-			route_key: "ch-pos-app",
-			doctype: "POS Profile",
-			name: PosState.pos_profile || null,
-			filters: {
-				company: PosState.company || null,
-				warehouse: PosState.warehouse || null,
-				store: PosState.store || null,
-				business_date: PosState.business_date || frappe.datetime.get_today(),
-			},
-		};
-
 		frappe.call({
-			method: "ch_mg_reports.ai.api.get_page_brief",
-			args: { context: JSON.stringify(ctx), force: force ? 1 : 0 },
+			method: "ch_pos.api.store_insights.store_insights",
+			args: { pos_profile: PosState.pos_profile },
 			callback: (r) => {
-				const brief = (r && r.message) || {};
-				const recos = brief.recommendations || [];
+				const data = (r && r.message) || {};
+				const cards = data.insights || [];
 				loading.hide();
 				list.show().empty();
 
-				if (brief.disabled) {
-					list.html(`<div class="ch-rpt-empty" style="padding:16px">${__("AI insights are disabled. Enable them in CH AI Settings.")}</div>`);
-					return;
+				// Stamp "as of HH:MM" next to the section sub-heading.
+				if (data.generated_on) {
+					section.find(".ch-rpt-ai-sub").text(
+						__("Live from your data · as of {0}", [data.generated_on])
+					);
 				}
-				if (!recos.length) {
-					list.html(`<div class="ch-rpt-empty" style="padding:16px"><i class="fa fa-check-circle" style="color:#16a34a"></i> ${__("No actionable items right now — operations look healthy.")}</div>`);
+
+				if (!cards.length) {
+					list.html(`<div class="ch-rpt-ai-allgood">
+						<i class="fa fa-check-circle"></i>
+						<div>
+							<strong>${__("Everything looks healthy")}</strong>
+							<span>${__("No issues need your attention right now.")}</span>
+						</div>
+					</div>`);
 					return;
 				}
 
 				const esc = frappe.utils.escape_html;
-				const fmtMd = (md) => esc(md || "")
-					.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-					.replace(/\n- /g, "<br>• ")
-					.replace(/\n/g, "<br>");
-
-				recos.forEach((rec) => {
-					const sev = (rec.severity || "Info");
+				cards.forEach((c) => {
+					const sev = c.severity || "Info";
 					const sevCls = "ch-rpt-ai-sev--" + sev.toLowerCase();
-					const impact = rec.estimated_impact
-						? `<span class="ch-rpt-ai-impact" title="${__("Estimated impact")}">₹${Number(rec.estimated_impact).toLocaleString("en-IN")}</span>`
-						: "";
-					const conf = rec.confidence != null
-						? `<span class="ch-rpt-ai-conf">${Math.round(rec.confidence)}%</span>`
-						: "";
-					const refLink = rec.ref_doctype && rec.ref_name
-						? `<button class="btn btn-xs btn-link" data-action="open-ref" data-dt="${esc(rec.ref_doctype)}" data-dn="${esc(rec.ref_name)}"><i class="fa fa-external-link"></i> ${esc(rec.ref_name)}</button>`
-						: "";
-					const execBtn = (rec.action_key && rec.status === "New")
-						? `<button class="btn btn-xs btn-primary" data-action="execute" data-name="${esc(rec.name)}">${esc(rec.action_label || __("Execute"))}</button>`
-						: "";
-					const dismissBtn = rec.status === "New"
-						? `<button class="btn btn-xs btn-default" data-action="dismiss" data-name="${esc(rec.name)}">${__("Dismiss")}</button>`
-						: `<span class="ch-rpt-ai-status">${esc(rec.status || "")}</span>`;
+					const icon = c.icon || "fa-info-circle";
+					const metric = c.metric
+						? `<span class="ch-rpt-ai-metric">${esc(c.metric)}</span>` : "";
+					const action = (c.ref_doctype && c.ref_name)
+						? `<button class="btn btn-xs btn-default" data-action="open-ref" data-dt="${esc(c.ref_doctype)}" data-dn="${esc(c.ref_name)}"><i class="fa fa-external-link"></i> ${__("Open")} ${esc(c.ref_name)}</button>`
+						: (c.href ? `<span class="ch-rpt-ai-hint">${__("Click to view")} →</span>` : "");
 
-					list.append(`
+					const card = $(`
 						<div class="ch-rpt-ai-card ${sevCls}">
-							<div class="ch-rpt-ai-card-head">
-								<span class="ch-rpt-ai-sev">${esc(sev)}</span>
-								<strong class="ch-rpt-ai-title">${esc(rec.title || "")}</strong>
-								<span class="ch-rpt-ai-meta">${impact} ${conf}</span>
+							<div class="ch-rpt-ai-ico"><i class="fa ${esc(icon)}"></i></div>
+							<div class="ch-rpt-ai-main">
+								<div class="ch-rpt-ai-card-head">
+									<span class="ch-rpt-ai-sev">${esc(sev)}</span>
+									<strong class="ch-rpt-ai-title">${esc(c.title || "")}</strong>
+									${metric}
+								</div>
+								<div class="ch-rpt-ai-detail">${esc(c.detail || "")}</div>
+								${action ? `<div class="ch-rpt-ai-footer">${action}</div>` : ""}
 							</div>
-							<div class="ch-rpt-ai-body-md">${fmtMd(rec.body)}</div>
-							<div class="ch-rpt-ai-footer">${refLink}${execBtn}${dismissBtn}</div>
 						</div>
 					`);
+					if (c.href) card.attr("data-href", c.href);
+					list.append(card);
 				});
-
-				if (brief.degraded) {
-					list.append(`<div class="ch-rpt-ai-degraded"><i class="fa fa-info-circle"></i> ${__("Using rule-based fallback (LLM unavailable).")}</div>`);
-				}
 			},
 			error: () => {
-				loading.html(`<div class="ch-rpt-empty" style="padding:16px;color:#dc2626"><i class="fa fa-exclamation-triangle"></i> ${__("Unable to load AI insights")}</div>`);
+				loading.html(`<div class="ch-rpt-empty" style="padding:16px;color:#dc2626"><i class="fa fa-exclamation-triangle"></i> ${__("Unable to load insights")}</div>`);
 			},
 		});
 	}
