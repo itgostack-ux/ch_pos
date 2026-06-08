@@ -94,6 +94,13 @@ def run() -> dict:
         if serial_no not in serials:
             raise AssertionError("TC_044: moved serial not present in Damaged bin list")
 
+        # UI list loads unfiltered rows; the transferred serial must still appear
+        # in the regular Damaged-bin dataset (not just when explicitly searched).
+        damaged_rows_unfiltered = get_store_bin_serials(bin_type="Damaged", store=store, limit=50)
+        serials_unfiltered = {r.get("serial_no") for r in (damaged_rows_unfiltered or {}).get("serials", [])}
+        if serial_no not in serials_unfiltered:
+            raise AssertionError("TC_044: moved serial missing from unfiltered Damaged bin listing")
+
         print(f"PASS: TC_044 exact serial tracked in Damaged bin ({serial_no})")
         return {"pass": 1, "fail": 0}
     finally:

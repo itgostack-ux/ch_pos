@@ -753,6 +753,16 @@ def create_pos_invoice(pos_profile, customer, items,
     # again after that branch to be safe.
     inv.due_date = None
 
+    # company_address + company_gstin — India Compliance mandates company_gstin on every
+    # GST invoice (B2B and B2C). Propagate from POS Profile if configured; fall back to
+    # the Company record's gstin field so the invoice is always GST-compliant.
+    if getattr(profile, "company_address", None):
+        inv.company_address = profile.company_address
+    if not getattr(inv, "company_gstin", None):
+        _co_gstin = (frappe.db.get_value("Company", profile.company, "gstin") or "").strip()
+        if _co_gstin:
+            inv.company_gstin = _co_gstin
+
     # Tax Category — required by india_compliance GST validation.
     # Pull from customer record; fall back to "In-State" for all POS retail sales.
     cust_tax_cat = frappe.db.get_value("Customer", customer, "tax_category") if customer else None
@@ -1226,6 +1236,16 @@ def create_pos_invoice(pos_profile, customer, items,
                         frappe.bold(exchange_assessment)),
                     title=frappe._("Customer Confirmation Required"),
                 )
+        # TC_060: enforce that the exchange credit belongs to the same customer
+        if ba.customer and customer and ba.customer != customer:
+            frappe.throw(
+                frappe._("Exchange credit {0} belongs to customer <b>{1}</b> but this "
+                         "transaction is for customer <b>{2}</b>. "
+                         "Exchange credit can only be applied to the same customer's transaction.").format(
+                    frappe.bold(exchange_assessment), ba.customer, customer),
+                title=frappe._("Exchange Credit Customer Mismatch"),
+            )
+
         if ba.linked_pos_invoice:
             frappe.throw(
                 frappe._("Buyback Assessment {0} was already used in invoice {1}").format(
@@ -2199,28 +2219,39 @@ def find_previous_device_invoice(phone, imei) -> dict:
 
 
 @frappe.whitelist()
-def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None) -> dict:
+def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None, customer=None) -> dict:
     """Find a Buyback Assessment/Order eligible for exchange at POS.
 
     Returns exchange details or None if nothing found.
+
+    TC_060: status filter must match the set accepted by create_pos_invoice so a
+    cashier never sees "No eligible exchange found" for a valid quote-stage assessment.
+    'Draft' is excluded (unquoted); 'Quoted' / 'Quote Accepted' are the common
+    post-quote statuses and must be included.
+
+    If `customer` is provided we enforce ownership — prevents looking up another
+    customer's exchange credit at a busy multi-counter store.
     """
     assessment_name = None
 
-    valid_statuses = ["Draft", "Submitted", "Inspection Created"]
+    # Must match _VALID_EXCHANGE_STATUSES in create_pos_invoice exactly.
+    valid_statuses = ["Quoted", "Quote Accepted", "Submitted", "Inspection Created"]
+
+    filters_base = {"status": ["in", valid_statuses], "linked_pos_invoice": ["is", "not set"]}
 
     if assessment:
         assessment_name = assessment
     elif imei_serial:
         assessment_name = frappe.db.get_value(
             "Buyback Assessment",
-            {"imei_serial": imei_serial, "status": ["in", valid_statuses]},
+            {**filters_base, "imei_serial": imei_serial},
             "name",
         )
     elif mobile_no:
         mobile_no = validate_indian_phone(mobile_no, "Mobile No")
         assessment_name = frappe.db.get_value(
             "Buyback Assessment",
-            {"mobile_no": mobile_no, "status": ["in", valid_statuses]},
+            {**filters_base, "mobile_no": mobile_no},
             "name",
             order_by="creation desc",
         )
@@ -2229,6 +2260,20 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None) -> dict:
         return None
 
     ba = frappe.get_doc("Buyback Assessment", assessment_name)
+
+    # Validate status here too (covers direct assessment-ID lookup where we
+    # couldn't pre-filter by status in the dict above).
+    if ba.status not in valid_statuses:
+        return None
+
+    # Customer ownership guard — if caller passes the current POS customer,
+    # reject assessments that belong to a different customer.
+    if customer and ba.customer and ba.customer != customer:
+        frappe.throw(
+            frappe._("Exchange credit {0} belongs to a different customer and cannot be applied "
+                     "to this transaction.").format(frappe.bold(assessment_name)),
+            title=frappe._("Customer Mismatch"),
+        )
 
     # Check for an existing Buyback Order
     order_name = frappe.db.get_value(

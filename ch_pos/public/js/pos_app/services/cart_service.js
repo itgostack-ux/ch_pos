@@ -1171,6 +1171,9 @@ export class CartService {
 
 			if (!args.assessment && !args.imei_serial && !args.mobile_no) return;
 
+			// Pass current customer so the server enforces ownership
+			if (PosState.customer) args.customer = PosState.customer;
+
 			frappe.call({
 				method: "ch_pos.api.pos_api.lookup_exchange",
 				args: args,
