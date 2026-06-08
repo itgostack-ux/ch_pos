@@ -95,6 +95,8 @@ export class PaymentDialog {
 
 	_bind_events() {
 		EventBus.on("payment:open", () => this.show());
+		EventBus.on("executive:changed", () => this._sync_executive_badge());
+		EventBus.on("profile:loaded", () => this._sync_executive_badge());
 	}
 
 	show() {
@@ -216,6 +218,7 @@ export class PaymentDialog {
 		this._overlay = $("#ch-pos-payment-overlay");
 		requestAnimationFrame(() => this._overlay.addClass("ch-pay-visible"));
 		this._bind_overlay();
+		this._sync_executive_badge();
 		this._render_payments();
 		this._render_mop_buttons();   // ensure MOP buttons are populated even if build-time modes were empty
 		this._update_totals();
@@ -225,6 +228,29 @@ export class PaymentDialog {
 		this._load_disc_reasons();
 		this._load_finance_partners();
 		this._load_payment_machines();
+	}
+
+	_sync_executive_badge() {
+		if (!this._overlay?.length) return;
+
+		const $info = this._overlay.find(".ch-pay-cust-info");
+		if (!$info.length) return;
+
+		const name = PosState.sales_executive_name || "";
+		let $badge = $info.find(".ch-pay-exec-tag");
+
+		if (name) {
+			const html = `<span class="ch-pay-exec-tag"><i class="fa fa-id-badge"></i> ${frappe.utils.escape_html(name)}</span>`;
+			if ($badge.length) {
+				$badge.replaceWith(html);
+			} else {
+				$info.append(html);
+			}
+		} else if ($badge.length) {
+			$badge.remove();
+		}
+
+		this._update_discount_auth_ui();
 	}
 
 	/** Re-render the Add Payment buttons from PosState.payment_modes.
