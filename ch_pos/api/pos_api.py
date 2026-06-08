@@ -6088,6 +6088,20 @@ def scan_for_stock_transfer(barcode, from_warehouse):
         return {"ok": False, "code": "not_found", "message": _("Serial / IMEI {0} not found").format(barcode)}
 
     sn = sn_row[0]
+
+    # Pickup/Bill guard: if this serial is reserved on an open pre-booking
+    # (Sales Order reserve_stock=1), do not allow it to leave the store via
+    # transfer. It must be billed/picked up against the reservation.
+    reserved_so = _get_open_reserved_sales_order_for_serial(sn.name, from_warehouse)
+    if reserved_so:
+        return {
+            "ok": False,
+            "code": "reserved_for_pickup",
+            "message": _("{0} is reserved on Sales Order {1}; transfer is blocked.").format(
+                sn.name, reserved_so
+            ),
+        }
+
     if (sn.warehouse or "") != from_warehouse:
         return {
             "ok": False,
@@ -6114,6 +6128,49 @@ def scan_for_stock_transfer(barcode, from_warehouse):
         "uom": item.get("stock_uom") or "Nos",
         "warehouse": sn.warehouse,
     }
+
+
+def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | None = None) -> str | None:
+    """Return an open reserve-stock Sales Order name if this serial is reserved.
+
+    Reservation source of truth for pickup flow is Sales Order Item.custom_serial_no
+    with Sales Order.reserve_stock=1. If a warehouse is provided, scope to that
+    warehouse to avoid cross-store false positives.
+    """
+    serial_no = (serial_no or "").strip()
+    if not serial_no:
+        return None
+
+    so_item_meta = frappe.get_meta("Sales Order Item")
+    if not so_item_meta.has_field("custom_serial_no"):
+        return None
+
+    warehouse_filter = ""
+    params = {
+        "serial_token": f"%\\n{serial_no}\\n%",
+    }
+
+    if warehouse:
+        warehouse_filter = " AND (IFNULL(soi.warehouse, '') = %(warehouse)s OR IFNULL(so.set_warehouse, '') = %(warehouse)s)"
+        params["warehouse"] = warehouse
+
+    row = frappe.db.sql(
+        f"""
+        SELECT so.name
+          FROM `tabSales Order Item` soi
+          JOIN `tabSales Order` so ON so.name = soi.parent
+         WHERE so.docstatus = 1
+           AND so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
+           AND COALESCE(so.reserve_stock, 0) = 1
+           AND CONCAT('\n', REPLACE(IFNULL(soi.custom_serial_no, ''), '\\r', ''), '\n') LIKE %(serial_token)s
+           {warehouse_filter}
+         ORDER BY so.modified DESC
+         LIMIT 1
+        """,
+        params,
+        as_dict=True,
+    )
+    return row[0].name if row else None
 
 
 @frappe.whitelist()
@@ -6157,6 +6214,18 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
             serial_list = [s for s in (str(x).strip() for x in raw_serials) if s]
         else:
             serial_list = [s.strip() for s in str(raw_serials).splitlines() if s.strip()]
+
+        # Enforce reservation guard server-side too (not only scan API), so
+        # direct API calls cannot move pickup-reserved serials.
+        for sn in serial_list:
+            reserved_so = _get_open_reserved_sales_order_for_serial(sn, from_warehouse)
+            if reserved_so:
+                frappe.throw(
+                    _("Serial/IMEI {0} is reserved on Sales Order {1}; transfer is blocked.").format(
+                        frappe.bold(sn), frappe.bold(reserved_so)
+                    ),
+                    title=_("Reserved for Pickup"),
+                )
 
         # Dedupe within the line, then across the document.
         line_serials = []
