@@ -3264,12 +3264,13 @@
   pointer-events: all;
 }
 
-/* Ensure Frappe modals & alerts appear above payment overlay.
-   Use descendant selector (no >) so it covers nested containers too. */
-.modal-backdrop {
+/* Boost Frappe modal z-index ONLY when the POS payment overlay is active.
+   Scoping via :has() prevents these overrides from leaking to every desk page
+   and breaking child-table row editing dialogs elsewhere in the app. */
+body:has(.ch-pay-overlay.ch-pay-visible) .modal-backdrop {
   z-index: 9995 !important;
 }
-.modal {
+body:has(.ch-pay-overlay.ch-pay-visible) .modal {
   z-index: 9996 !important;
 }
 /* While any Frappe modal is open, suppress overlay pointer-events so
