@@ -1769,19 +1769,19 @@
 /* ── KPI Cards ──────────────────────────── */
 .ch-rpt-kpi-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 10px;
-  margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
 }
 .ch-rpt-kpi {
   display: flex;
   align-items: stretch;
   background: #fff;
   border: none;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  border-radius: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07), 0 1px 2px rgba(0,0,0,0.05);
   overflow: hidden;
-  min-height: 64px;
+  min-height: 80px;
   transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
 .ch-rpt-kpi:hover {
@@ -1794,25 +1794,25 @@
   transform: translateY(-1px);
 }
 .ch-rpt-kpi-accent {
-  width: 4px;
+  width: 5px;
   flex-shrink: 0;
 }
 .ch-rpt-kpi-body {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 12px;
+  padding: 14px 16px;
   flex: 1;
   min-width: 0;
 }
 .ch-rpt-kpi-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 17px;
   flex-shrink: 0;
 }
 .ch-rpt-kpi-info {
@@ -1821,7 +1821,7 @@
   overflow: hidden;
 }
 .ch-rpt-kpi-value {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 800;
   color: var(--text-color, #111827);
   line-height: 1.15;
@@ -1875,23 +1875,29 @@
 .ch-rpt-section-body--flush {
   padding: 0;
 }
-/* Responsive KPI rows — narrower panels (< 900px) */
+/* Responsive KPI rows */
+@media (max-width: 1100px) {
+  .ch-rpt-kpi-row {
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 12px;
+  }
+}
 @media (max-width: 900px) {
   .ch-rpt-kpi-row {
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 10px;
   }
   .ch-rpt-kpi-body {
-    padding: 8px 10px;
-    gap: 6px;
+    padding: 12px 12px;
+    gap: 10px;
   }
   .ch-rpt-kpi-icon {
-    width: 28px;
-    height: 28px;
-    font-size: 12px;
+    width: 34px;
+    height: 34px;
+    font-size: 14px;
   }
   .ch-rpt-kpi-value {
-    font-size: 16px;
+    font-size: 17px;
   }
   .ch-rpt-two-col {
     grid-template-columns: 1fr;
@@ -1900,13 +1906,16 @@
 @media (max-width: 600px) {
   .ch-rpt-kpi-row {
     grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
+    gap: 8px;
   }
   .ch-rpt-kpi-value {
-    font-size: 14px;
+    font-size: 15px;
   }
   .ch-rpt-kpi-icon {
     display: none;
+  }
+  .ch-rpt-kpi-body {
+    padding: 10px 8px;
   }
 }
 
