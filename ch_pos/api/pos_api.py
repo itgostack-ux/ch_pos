@@ -1333,8 +1333,14 @@ def create_pos_invoice(pos_profile, customer, items,
         coupon_discount_amount = manual_discount_amount
         manual_discount_amount = 0
 
-    # P0 FIX: MSP guard before any discount application
-    if (flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0 or flt(voucher_amount) > 0) and not cint(is_free_sale):
+    # P0 FIX: MSP guard before any discount application.
+    # If the cashier completed the approved discount flow, ``discount_authorized_by``
+    # is present and validated below; do not block the bill here.
+    if (
+        (flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0 or flt(voucher_amount) > 0)
+        and not cint(is_free_sale)
+        and not discount_authorized_by
+    ):
         _total_item_amount = sum(flt(i.get("rate", 0)) * flt(i.get("qty", 1)) for i in items)
         _total_discount_rs = (
             _total_item_amount * flt(additional_discount_percentage) / 100
@@ -5975,6 +5981,11 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
     """Get recent stock transfers (Stock Entries of type Material Transfer)."""
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     warehouse = profile.warehouse
+    entries = []
+
+    direction = (direction or "incoming").strip().lower()
+    if direction not in {"incoming", "outgoing"}:
+        direction = "incoming"
 
     if direction == "incoming":
         wh_filter = "se.to_warehouse = %s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` sed WHERE sed.parent = se.name AND sed.t_warehouse = %s)"
