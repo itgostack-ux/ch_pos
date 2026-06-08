@@ -62,6 +62,11 @@ frappe.ch_pos.show_bin_transfer_dialog = function (opts = {}) {
 				label: __("From Bin"),
 				options: ["", ...BIN_TYPES].join("\n"),
 				reqd: 1,
+				// Changing the source bin invalidates any previously picked item
+				// (the item list is scoped to the selected bin's stock).
+				onchange: () => {
+					dlg.set_value("item_code", "");
+				},
 			},
 			{
 				fieldname: "to_bin_type",
@@ -77,7 +82,21 @@ frappe.ch_pos.show_bin_transfer_dialog = function (opts = {}) {
 				label: __("Item"),
 				options: "Item",
 				reqd: 1,
-				get_query: () => ({ filters: { disabled: 0, is_stock_item: 1 } }),
+				// Only list items that actually have stock in the selected store +
+				// source bin (parity with the POS Sell menu). Until both Store and
+				// From Bin are chosen, the picker returns nothing.
+				get_query: () => {
+					const store = dlg.get_value("store");
+					const from_bin_type = dlg.get_value("from_bin_type");
+					if (!store || !from_bin_type) {
+						return { filters: { name: ["in", []] } };
+					}
+					return {
+						query: "ch_item_master.ch_core.bin_transfer.get_bin_items",
+						filters: { store, from_bin_type },
+					};
+				},
+				onchange: () => refresh_summary(dlg),
 			},
 			{
 				fieldname: "qty",
