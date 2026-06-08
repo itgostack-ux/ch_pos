@@ -17,6 +17,7 @@ export class ClaimsWorkspace {
 		this._selected_device = null;
 		this._refresh_timer = null;
 		this._claim_filter = "vas";
+		this._claim_tab = "action";
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "claims") {
 				this._stop_auto_refresh();
@@ -77,15 +78,17 @@ export class ClaimsWorkspace {
 				<!-- Pending Claims Pipeline -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
-						<span><i class="fa fa-list"></i> ${__("Recent VAS Claims")}</span>
-						<div style="display:flex;align-items:center;gap:6px">
-							<div class="ch-claim-filter-chips" style="display:flex;gap:4px">
-								<button class="btn btn-xs btn-primary ch-claim-filter active" data-filter="vas" style="border-radius:var(--pos-radius-sm)">${__("VAS / Extended")}</button>
-							</div>
-							<button class="btn btn-xs btn-default ch-claim-refresh" style="border-radius:var(--pos-radius-sm)">
-								<i class="fa fa-refresh"></i>
-							</button>
-						</div>
+						<span><i class="fa fa-list-alt"></i> ${__("VAS Claims Board")}
+							<span class="badge ch-claim-filter" data-filter="vas"
+								style="background:#fff7ed;color:#92400e;font-size:10px;margin-left:6px;padding:2px 6px;border-radius:10px;vertical-align:middle">
+								<i class="fa fa-shield"></i> ${__("VAS / Extended")}</span>
+						</span>
+						<button class="btn btn-xs btn-default ch-claim-refresh" style="border-radius:var(--pos-radius-sm)">
+							<i class="fa fa-refresh"></i>
+						</button>
+					</div>
+					<div class="ch-claim-tabs" style="display:flex;gap:2px;padding:8px 10px 0;border-bottom:1px solid #eef1f4;overflow-x:auto">
+						<div class="text-muted" style="padding:6px 0;font-size:11px">${__("Loading...")}</div>
 					</div>
 					<div class="section-body ch-claim-pipeline">
 						<div class="text-muted text-center" style="padding:16px">${__("Loading...")}</div>
@@ -132,13 +135,13 @@ export class ClaimsWorkspace {
 
 		panel.on("click", ".ch-claim-refresh", () => this._load_claims_pipeline(panel));
 
-		// Filter chips for the claims pipeline (VAS only)
-		panel.on("click", ".ch-claim-filter", (e) => {
-			const $btn = $(e.currentTarget);
-			panel.find(".ch-claim-filter").removeClass("active btn-primary").addClass("btn-default");
-			$btn.removeClass("btn-default").addClass("active btn-primary");
-			this._claim_filter = $btn.data("filter") || "vas";
-			this._load_claims_pipeline(panel);
+		// Status-group tabs for the VAS claims board (scope stays VAS-only).
+		panel.on("click", ".ch-claim-tab", (e) => {
+			const tab = $(e.currentTarget).data("tab");
+			if (!tab || tab === this._claim_tab) return;
+			this._claim_tab = tab;
+			this._claim_filter = "vas";
+			this._render_claim_board(panel);
 		});
 
 		// VAS activity refresh
@@ -1453,16 +1456,55 @@ export class ClaimsWorkspace {
 
 	// ── Claims Pipeline ─────────────────────────────────────────────
 
+	// Lifecycle status groups for the bifurcated VAS claims board. Each tab
+	// segments the VAS-only claim set by where it sits in the service flow,
+	// mirroring how modern service desks (Freshdesk/Zendesk) bucket tickets.
+	_claim_status_groups() {
+		return {
+			action: {
+				label: __("To Action"), icon: "fa-bolt", color: "#b45309",
+				statuses: ["Draft", "Pending Coverage Check", "Coverage Identified",
+					"Pending Approval", "Need More Information", "Additional Approval Pending",
+					"QC Pending", "Fee Pending", "Final QC Pending", "Invoice Pending",
+					"Payment Pending", "Awaiting Spare"],
+			},
+			progress: {
+				label: __("In Progress"), icon: "fa-cog", color: "#1e40af",
+				statuses: ["Approved", "Partially Approved", "Pickup Requested",
+					"Pickup Scheduled", "Picked Up", "Device Received", "QC Passed",
+					"Fee Paid", "Fee Waived", "Ticket Created", "Sent to Manufacturer",
+					"In Repair", "Repair Complete", "Final QC Passed", "Invoice Raised",
+					"Payment Received", "Out for Delivery"],
+			},
+			completed: {
+				label: __("Completed"), icon: "fa-check-circle", color: "#166534",
+				statuses: ["Delivered", "Closed"],
+			},
+			exceptions: {
+				label: __("Exceptions"), icon: "fa-exclamation-triangle", color: "#991b1b",
+				statuses: ["Rejected", "QC Failed", "Cancelled", "Not Repairable"],
+			},
+		};
+	}
+
+	_claim_tab_for_status(status) {
+		const groups = this._claim_status_groups();
+		for (const key of Object.keys(groups)) {
+			if (groups[key].statuses.indexOf(status) !== -1) return key;
+		}
+		// Unmapped runtime statuses default to the active work queue.
+		return "action";
+	}
+
 	_load_claims_pipeline(panel) {
 		const pipe = panel.find(".ch-claim-pipeline");
 		pipe.html(`<div class="text-muted text-center" style="padding:12px"><i class="fa fa-spinner fa-spin"></i></div>`);
 
 		const filters = {
 			docstatus: ["!=", 2],
-			claim_status: ["not in", ["Closed", "Cancelled"]],
 			company: PosState.active_company || PosState.company || "",
 		};
-		// TC_041: Claims list must show only VAS-linked plan records.
+		// TC_041: Claims board must show only VAS-linked plan records.
 		// coverage_type values are snake_case on CH Warranty Claim.
 		const f = this._claim_filter || "vas";
 		const VAS_TYPES = ["vas_plan", "anniversary_warranty", "repair_warranty"];
@@ -1476,32 +1518,75 @@ export class ClaimsWorkspace {
 			fields: ["name", "claim_date", "claim_status", "serial_no", "customer_name",
 				"customer", "item_name", "coverage_type"],
 			order_by: "modified desc",
-			limit_page_length: 15,
+			limit_page_length: 60,
 		}).then((claims) => {
-			if (!claims || !claims.length) {
-				pipe.html(`<div class="text-muted text-center" style="padding:12px">${__("No pending claims")}</div>`);
-				return;
-			}
-			pipe.html(claims.map(c => {
-				const sc = this._status_color(c.claim_status);
-				const cov = this._coverage_style(c.coverage_type);
-				return `
-				<div class="ch-claim-track" data-claim="${c.name}"
-					style="display:flex;align-items:center;gap:6px;padding:8px 6px;border-bottom:1px solid #f3f4f6;
-					font-size:12px;cursor:pointer;border-radius:4px;transition:background 0.15s"
-					onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
-					<span class="badge" style="background:${sc.bg};color:${sc.fg};font-size:10px;min-width:70px;text-align:center;padding:2px 4px">
-						${c.claim_status}</span>
-					<span style="flex:1"><b>${c.customer_name || c.customer || ""}</b>
-						<span class="text-muted">— ${c.item_name || c.serial_no}</span></span>
-					<span class="text-muted" style="font-size:11px">${c.claim_date}</span>
-					<span class="badge" style="background:${cov.bg};color:${cov.fg};font-size:10px;padding:1px 5px">${c.coverage_type || "N/A"}</span>
-					<i class="fa fa-chevron-right" style="color:#d1d5db"></i>
-				</div>`;
-			}).join(""));
+			this._claims_cache = claims || [];
+			this._render_claim_board(panel);
 		}).catch(() => {
 			pipe.html(`<div class="text-muted text-center" style="padding:12px">${__("Error loading claims")}</div>`);
 		});
+	}
+
+	// Renders the tab strip (with live counts) and the rows for the active tab
+	// from the cached VAS claim set — no extra round-trips when switching tabs.
+	_render_claim_board(panel) {
+		const claims = this._claims_cache || [];
+		const groups = this._claim_status_groups();
+		const order = ["action", "progress", "completed", "exceptions"];
+
+		// Bucket claims by lifecycle group for accurate per-tab counts.
+		const buckets = { action: [], progress: [], completed: [], exceptions: [] };
+		claims.forEach((c) => {
+			buckets[this._claim_tab_for_status(c.claim_status)].push(c);
+		});
+
+		if (order.indexOf(this._claim_tab) === -1) {
+			this._claim_tab = "action";
+		}
+
+		const tabs = panel.find(".ch-claim-tabs");
+		tabs.html(order.map((key) => {
+			const g = groups[key];
+			const count = buckets[key].length;
+			const active = key === this._claim_tab;
+			return `
+				<div class="ch-claim-tab" data-tab="${key}"
+					style="display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:pointer;white-space:nowrap;
+					font-size:12px;font-weight:600;border-bottom:2px solid ${active ? g.color : "transparent"};
+					color:${active ? g.color : "#6b7280"};transition:all 0.15s">
+					<i class="fa ${g.icon}"></i> ${g.label}
+					<span style="background:${active ? g.color : "#e5e7eb"};color:${active ? "#fff" : "#6b7280"};
+						font-size:10px;border-radius:10px;padding:1px 7px;min-width:18px;text-align:center">${count}</span>
+				</div>`;
+		}).join(""));
+
+		const pipe = panel.find(".ch-claim-pipeline");
+		const rows = buckets[this._claim_tab] || [];
+		if (!rows.length) {
+			const g = groups[this._claim_tab];
+			pipe.html(`<div class="text-muted text-center" style="padding:20px">
+				<i class="fa ${g.icon}" style="font-size:22px;color:#d1d5db;display:block;margin-bottom:6px"></i>
+				${__("No claims in")} <b>${g.label}</b></div>`);
+			return;
+		}
+
+		pipe.html(rows.map((c) => {
+			const sc = this._status_color(c.claim_status);
+			const cov = this._coverage_style(c.coverage_type);
+			return `
+			<div class="ch-claim-track" data-claim="${c.name}"
+				style="display:flex;align-items:center;gap:6px;padding:8px 6px;border-bottom:1px solid #f3f4f6;
+				font-size:12px;cursor:pointer;border-radius:4px;transition:background 0.15s"
+				onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
+				<span class="badge" style="background:${sc.bg};color:${sc.fg};font-size:10px;min-width:70px;text-align:center;padding:2px 4px">
+					${c.claim_status}</span>
+				<span style="flex:1"><b>${c.customer_name || c.customer || ""}</b>
+					<span class="text-muted">— ${c.item_name || c.serial_no}</span></span>
+				<span class="text-muted" style="font-size:11px">${c.claim_date || ""}</span>
+				<span class="badge" style="background:${cov.bg};color:${cov.fg};font-size:10px;padding:1px 5px">${this._coverage_label(c.coverage_type)}</span>
+				<i class="fa fa-chevron-right" style="color:#d1d5db"></i>
+			</div>`;
+		}).join(""));
 	}
 
 	// ── VAS Plans Activity ──────────────────────────────────────────
