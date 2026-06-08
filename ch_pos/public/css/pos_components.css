@@ -2668,6 +2668,16 @@
   color: #fff;
   box-shadow: 0 3px 10px rgba(29, 78, 216, 0.22);
 }
+@keyframes ch-saletype-pulse {
+  0%   { border-color: var(--pos-border-light, #e5e7eb); background: var(--pos-surface-sunken, #f8fafc); }
+  25%  { border-color: #ef4444; background: #fef2f2; }
+  75%  { border-color: #ef4444; background: #fef2f2; }
+  100% { border-color: var(--pos-border-light, #e5e7eb); background: var(--pos-surface-sunken, #f8fafc); }
+}
+.ch-saletype-required-pulse {
+  animation: ch-saletype-pulse 0.6s ease-in-out 2;
+  border-radius: 6px;
+}
 
 /* ═══════════════════════════════════════════════════════════════
    Buyback Workspace — Stage-aware Flow Styles

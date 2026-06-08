@@ -168,6 +168,15 @@ export class CartService {
 
 		EventBus.on("cart:hold", () => this.hold_invoice());
 		EventBus.on("cart:pay", () => {
+			// Sale Type is mandatory before payment
+			if (!PosState.sale_type) {
+				frappe.show_alert({ message: __("Please select a Sale Type before proceeding to payment"), indicator: "red" });
+				// Pulse the sale type section to draw attention
+				const $st = $(".ch-pos-cart-saletype");
+				$st.addClass("ch-saletype-required-pulse");
+				setTimeout(() => $st.removeClass("ch-saletype-required-pulse"), 2000);
+				return;
+			}
 			// Last-chance customer sync — Link control may not have fired change
 			EventBus.emit("cart:pre_pay_sync");
 			EventBus.emit("payment:open");

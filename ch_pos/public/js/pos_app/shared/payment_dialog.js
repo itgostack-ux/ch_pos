@@ -2523,6 +2523,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// POS-19 fix: Set submitting flag immediately to prevent double-submit race
 		this._submitting = true;
 
+		// Sale type is mandatory before payment can proceed
+		if (!PosState.sale_type) {
+			frappe.show_alert({ message: __("Select a Sale Type (CS / FS / FREE / PB / SS) before confirming payment"), indicator: "red" });
+			this._submitting = false;
+			return;
+		}
+
 		const grand   = this._is_free_sale ? 0 : this._calc_grand_total();
 		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
 		const advance = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
