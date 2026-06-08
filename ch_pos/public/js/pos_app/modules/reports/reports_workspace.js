@@ -180,7 +180,7 @@ export class ReportsWorkspace {
 						<div class="ch-rpt-section">
 							<div class="ch-rpt-section-head">
 								<span><i class="fa fa-truck"></i> ${__("Stock Transfers")}</span>
-								<a class="ch-rpt-view-all" href="/desk/stock-entry?stock_entry_type=Material+Transfer&from_warehouse=${wh}" target="_blank">${__("View All")} →</a>
+								<a class="ch-rpt-view-all" href="/app/stock-entry?stock_entry_type=Material+Transfer&from_warehouse=${wh}" target="_blank">${__("View All")} →</a>
 							</div>
 							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<div class="ch-rpt-st-list"></div>
@@ -394,7 +394,7 @@ export class ReportsWorkspace {
 							: frappe.utils.escape_html(primary))
 						: `${item_count} ${__("items")}`;
 					st_list.append(`
-						<div class="ch-rpt-doc-row" data-href="/desk/stock-entry/${encodeURIComponent(se.name)}">
+						<div class="ch-rpt-doc-row" data-href="/app/stock-entry/${encodeURIComponent(se.name)}">
 							<div>
 								<div class="ch-rpt-doc-id">${frappe.utils.escape_html(se.name)}</div>
 								<div class="ch-rpt-doc-meta">
