@@ -1769,7 +1769,7 @@
 /* ── KPI Cards ──────────────────────────── */
 .ch-rpt-kpi-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   gap: 10px;
   margin-bottom: 16px;
 }
@@ -1781,6 +1781,7 @@
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
   overflow: hidden;
+  min-height: 64px;
   transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
 .ch-rpt-kpi:hover {
@@ -1799,37 +1800,45 @@
 .ch-rpt-kpi-body {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 10px 12px;
   flex: 1;
   min-width: 0;
 }
 .ch-rpt-kpi-icon {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: 14px;
   flex-shrink: 0;
 }
 .ch-rpt-kpi-info {
   min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 .ch-rpt-kpi-value {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 800;
   color: var(--text-color, #111827);
-  line-height: 1.1;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ch-rpt-kpi-label {
   font-size: 10px;
   font-weight: 700;
   color: var(--text-muted, #6b7280);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-top: 1px;
+  letter-spacing: 0.4px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Section cards ──────────────────────── */
@@ -1863,6 +1872,41 @@
 .ch-rpt-section-body--flush {
   padding: 0;
 }
+/* Responsive KPI rows — narrower panels (< 900px) */
+@media (max-width: 900px) {
+  .ch-rpt-kpi-row {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 8px;
+  }
+  .ch-rpt-kpi-body {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+  .ch-rpt-kpi-icon {
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+  .ch-rpt-kpi-value {
+    font-size: 16px;
+  }
+  .ch-rpt-two-col {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .ch-rpt-kpi-row {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+  .ch-rpt-kpi-value {
+    font-size: 14px;
+  }
+  .ch-rpt-kpi-icon {
+    display: none;
+  }
+}
+
 .ch-rpt-two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;

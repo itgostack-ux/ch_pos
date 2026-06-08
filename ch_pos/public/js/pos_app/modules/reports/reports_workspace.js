@@ -47,13 +47,14 @@ export class ReportsWorkspace {
 		const kpiCard = (k, def) => {
 			const clickable = k.link ? " ch-rpt-kpi--link" : "";
 			const href = k.link ? ` data-href="${frappe.utils.escape_html(k.link)}"` : "";
-			return `<div class="ch-rpt-kpi${clickable}"${href}>
+			const labelEsc = frappe.utils.escape_html(k.label);
+			return `<div class="ch-rpt-kpi${clickable}"${href} title="${labelEsc}">
 				<div class="ch-rpt-kpi-accent" style="background:${k.color}"></div>
 				<div class="ch-rpt-kpi-body">
 					<div class="ch-rpt-kpi-icon" style="background:${k.bg};color:${k.color}"><i class="fa ${k.icon}"></i></div>
 					<div class="ch-rpt-kpi-info">
 						<div class="ch-rpt-kpi-value ch-rpt-${k.cls}">${def || "0"}</div>
-						<div class="ch-rpt-kpi-label">${k.label}</div>
+						<div class="ch-rpt-kpi-label" title="${labelEsc}">${k.label}</div>
 					</div>
 				</div>
 			</div>`;
