@@ -1769,7 +1769,7 @@
 /* ── KPI Cards ──────────────────────────── */
 .ch-rpt-kpi-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
   gap: 14px;
   margin-bottom: 20px;
 }
@@ -1878,13 +1878,13 @@
 /* Responsive KPI rows */
 @media (max-width: 1100px) {
   .ch-rpt-kpi-row {
-    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 12px;
   }
 }
 @media (max-width: 900px) {
   .ch-rpt-kpi-row {
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
     gap: 10px;
   }
   .ch-rpt-kpi-body {
