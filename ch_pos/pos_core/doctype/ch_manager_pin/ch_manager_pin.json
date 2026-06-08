@@ -9,7 +9,6 @@
   "employee_name",
   "column_break_info",
   "pin_hash",
-  "store",
   "is_active",
   "role_section",
   "can_approve_opening",
@@ -47,13 +46,6 @@
    "label": "Manager PIN",
    "reqd": 1,
     "description": "4-6 digit PIN for quick in-store approvals. Saved PIN is masked for security; verify by using manager approval flows."
-  },
-  {
-   "fieldname": "store",
-   "fieldtype": "Link",
-   "label": "Store",
-   "options": "CH Store",
-   "description": "Leave blank for all stores"
   },
   {
    "default": 1,
@@ -129,6 +121,6 @@
  "sort_field": "creation",
  "sort_order": "DESC",
  "track_changes": 1,
- "search_fields": "user,store",
+ "search_fields": "user",
  "title_field": "user"
 }

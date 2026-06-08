@@ -30,12 +30,9 @@ def verify_manager_pin(pin, store=None, permission=None):
     if not pin or not pin.strip().isdigit():
         return {"valid": False, "message": _("Invalid PIN format")}
 
+    # TC_007: Manager PINs are no longer scoped per store; the `store` argument
+    # is accepted for backward compatibility but is not used as a filter.
     filters = {"is_active": 1}
-    if store:
-        # Match PINs assigned to this specific store OR global PINs (empty store)
-        filters["store"] = ("in", [store, "", None])
-    else:
-        pass  # No store filter — match all active PINs
 
     managers = frappe.get_all(
         "CH Manager PIN",

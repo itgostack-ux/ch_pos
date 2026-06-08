@@ -1325,7 +1325,7 @@ def create_pos_invoice(pos_profile, customer, items,
             _ic = _chk.get("item_code")
             if not _ic:
                 continue
-            _msp = frappe.db.get_value("CH Item Price", {"item_code": _ic, "status": "Active"}, "min_selling_rate")
+            _msp = frappe.db.get_value("CH Item Price", {"item_code": _ic, "status": "Active"}, "selling_price")
             if not _msp:
                 continue
             _rate = flt(_chk.get("rate", 0))
