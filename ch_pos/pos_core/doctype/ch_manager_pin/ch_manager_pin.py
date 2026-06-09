@@ -1,4 +1,4 @@
-"""CH Manager PIN — quick PIN authentication for in-store approvals."""
+"""CH POS Password — quick PIN authentication for in-store approvals."""
 
 import hashlib
 
@@ -8,11 +8,11 @@ from frappe.model.document import Document
 from frappe.utils.password import get_decrypted_password
 
 
-class CHManagerPIN(Document):
+class CHPOSPassword(Document):
     def validate(self):
         pin = self.get_password("pin_hash") or ""
         if not pin.isdigit() or len(pin) < 4 or len(pin) > 6:
-            frappe.throw(_("PIN must be 4-6 digits"), title=_("Ch Manager Pin Error"))
+            frappe.throw(_("PIN must be 4-6 digits"), title=_("CH POS Password Error"))
 
 
 def verify_manager_pin(pin, store=None, permission=None):
@@ -35,19 +35,19 @@ def verify_manager_pin(pin, store=None, permission=None):
     filters = {"is_active": 1}
 
     managers = frappe.get_all(
-        "CH Manager PIN",
+        "CH POS Password",
         filters=filters,
         fields=["name", "user", "employee_name", "pin_hash"],
     )
 
     for mgr in managers:
         stored_pin = get_decrypted_password(
-            "CH Manager PIN", mgr.name, "pin_hash"
+            "CH POS Password", mgr.name, "pin_hash"
         )
         if stored_pin == pin:
             # Check specific permission if requested
             if permission:
-                has_perm = frappe.db.get_value("CH Manager PIN", mgr.name, permission)
+                has_perm = frappe.db.get_value("CH POS Password", mgr.name, permission)
                 if not has_perm:
                     return {
                         "valid": False,

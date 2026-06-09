@@ -10,18 +10,18 @@ USER = "Administrator"
 
 def run():
     existing = frappe.db.get_value(
-        "CH Manager PIN",
+        "CH POS Password",
         {"user": USER, "store": STORE},
         "name",
     )
 
-    # CH Manager PIN is effectively one-record-per-user in this setup
+    # CH POS Password is effectively one-record-per-user in this setup
     # (name is user like "Administrator"). Reuse that record if present.
     if not existing:
-        existing = frappe.db.get_value("CH Manager PIN", {"user": USER}, "name")
+        existing = frappe.db.get_value("CH POS Password", {"user": USER}, "name")
 
     if existing:
-        doc = frappe.get_doc("CH Manager PIN", existing)
+        doc = frappe.get_doc("CH POS Password", existing)
         doc.employee_name = doc.employee_name or "Test Manager"
         # Keep global so same PIN works across QA stores in dev.
         doc.store = ""
@@ -32,13 +32,13 @@ def run():
         doc.pin_hash = PIN_VALUE
         doc.save(ignore_permissions=True)
         frappe.db.commit()
-        print(f"Updated CH Manager PIN: {doc.name} (global store PIN)")
+        print(f"Updated CH POS Password: {doc.name} (global store PIN)")
         return
 
     # Create a store-specific manager PIN for QA-VEL
     doc = frappe.get_doc(
         {
-            "doctype": "CH Manager PIN",
+            "doctype": "CH POS Password",
             "user": USER,
             "employee_name": "Test Manager",
             "store": STORE,
@@ -51,4 +51,4 @@ def run():
     )
     doc.insert(ignore_permissions=True)
     frappe.db.commit()
-    print(f"Created CH Manager PIN: {doc.name} for {STORE}")
+    print(f"Created CH POS Password: {doc.name} for {STORE}")

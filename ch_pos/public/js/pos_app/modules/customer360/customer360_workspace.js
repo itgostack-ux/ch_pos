@@ -127,6 +127,9 @@ export class Customer360Workspace {
 								${d.email_id ? `<span>· ${frappe.utils.escape_html(d.email_id)}</span>` : ""}
 							</div>
 							${d.previous_phones ? `<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:2px"><i class="fa fa-history"></i> Previous: ${frappe.utils.escape_html(d.previous_phones.split("\\n")[0])}</div>` : ""}
+							${d.pan ? `<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:2px"><i class="fa fa-id-card-o"></i> PAN: <b>${frappe.utils.escape_html(d.pan)}</b></div>` : ""}
+							${d.bill_to_address ? `<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:2px"><i class="fa fa-map-marker"></i> Bill-To: ${frappe.utils.escape_html(d.bill_to_address)}</div>` : ""}
+							${d.ship_to_address ? `<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:2px"><i class="fa fa-truck"></i> Ship-To: ${frappe.utils.escape_html(d.ship_to_address)}</div>` : ""}
 						</div>
 						<button class="btn btn-sm btn-default ch-c360-edit-btn" style="align-self:flex-start;border-radius:var(--pos-radius);font-weight:600">
 							<i class="fa fa-pencil"></i> ${__("Edit")}
@@ -299,6 +302,14 @@ export class Customer360Workspace {
 					default: d.whatsapp_number || "",
 				},
 				{
+					fieldname: "pan_number",
+					fieldtype: "Data",
+					label: __("PAN Number"),
+					default: d.pan || "",
+					placeholder: "ABCDE1234F",
+					description: __("10-character PAN (AAAAA9999A)"),
+				},
+				{
 					fieldname: "info_section",
 					fieldtype: "Section Break",
 				},
@@ -312,6 +323,11 @@ export class Customer360Workspace {
 			],
 			primary_action_label: __("Save"),
 			primary_action: (values) => {
+				const pan_raw = (values.pan_number || "").toUpperCase().replace(/\s/g, "");
+				if (pan_raw && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan_raw)) {
+					frappe.show_alert({ message: __("PAN must be in format AAAAA9999A"), indicator: "red" });
+					return;
+				}
 				frappe.call({
 					method: "ch_pos.api.pos_api.update_customer_details",
 					args: {
@@ -321,6 +337,7 @@ export class Customer360Workspace {
 						email_id: values.email_id || "",
 						alternate_phone: values.alternate_phone || "",
 						whatsapp_number: values.whatsapp_number || "",
+						pan_number: pan_raw || "",
 					},
 					freeze: true,
 					freeze_message: __("Updating customer..."),
@@ -328,8 +345,8 @@ export class Customer360Workspace {
 						if (r.message && r.message.ok) {
 							dlg.hide();
 							frappe.show_alert({ message: __("Customer details updated"), indicator: "green" });
-							// Refresh the 360 view with updated data
 							Object.assign(d, r.message);
+							if (pan_raw) d.pan = pan_raw;
 							this._render_360(panel, d);
 						}
 					},

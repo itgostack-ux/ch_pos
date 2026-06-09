@@ -10,6 +10,13 @@
 (function () {
 	"use strict";
 
+	// ── PAN validation ──────────────────────────────────────────────────────
+	const _PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+	function validate_pan(val) {
+		if (!val) return true; // optional field
+		return _PAN_RE.test(val.toUpperCase().replace(/\s/g, ""));
+	}
+
 	// ── Phone validation (inline, no ES-module dependency) ──────────────────
 	function validate_india_phone(val) {
 		const clean = (val || "").replace(/[\s\-().]/g, "");
@@ -41,6 +48,8 @@
 	window.ch_open_new_customer_dialog = function (options) {
 		const opts = options || {};
 		const company = opts.company || (typeof frappe !== "undefined" && frappe.defaults && frappe.defaults.get_default("company")) || "";
+		const prefill_name = (opts.prefill_name || "").trim();
+		const prefill_mobile = (opts.prefill_mobile || "").trim();
 
 		let otp_verified_number = "";
 		let last_auto_synced_mobile = "";
@@ -227,8 +236,8 @@
 			title: __("New Customer"),
 			fields: [
 				// ── Basic Info ──
-				{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"), reqd: 1 },
-				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), reqd: 1,
+				{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"), reqd: 1, default: prefill_name },
+				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"), reqd: 1, default: prefill_mobile,
 				  onchange: () => sync_whatsapp_from_mobile() },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "email_id", fieldtype: "Data", label: __("Email"), options: "Email" },
@@ -269,6 +278,8 @@
 				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "gstin", fieldtype: "Data", label: __("GSTIN") },
+				{ fieldname: "pan_number", fieldtype: "Data", label: __("PAN Number"),
+				  placeholder: "ABCDE1234F", description: __("10-character PAN (AAAAA9999A)") },
 
 				// ── Billing / Shipping ──
 				{ fieldtype: "Section Break", label: __("Shipping") },
@@ -296,6 +307,11 @@
 				const whatsapp = input_value("whatsapp_number");
 				if (!whatsapp || !assert_india_phone(input_el("whatsapp_number"), whatsapp)) return;
 				if (!validate_email_input()) return;
+				const pan_raw = input_value("pan_number").toUpperCase().replace(/\s/g, "");
+				if (pan_raw && !validate_pan(pan_raw)) {
+					frappe.show_alert({ message: __("PAN must be in format AAAAA9999A (5 letters, 4 digits, 1 letter)"), indicator: "red" });
+					return;
+				}
 				const email = input_value("email_id");
 
 				const existing_by_mobile = phone ? await check_existing_customer(phone) : { exists: false };
@@ -350,6 +366,7 @@
 					pincode: values.pincode || "",
 					area: values.area || "",
 					gstin: values.gstin || "",
+					pan_number: pan_raw || "",
 					same_as_billing: values.same_as_billing ? 1 : 0,
 					shipping_address_line1: values.shipping_address_line1 || "",
 					shipping_city: values.shipping_city || "",
@@ -365,6 +382,14 @@
 
 		d.doc = d.doc || {};
 		d.show();
+		if (prefill_name) {
+			d.set_value("customer_name", prefill_name);
+		}
+		if (prefill_mobile) {
+			d.set_value("mobile_no", prefill_mobile);
+			d.set_value("whatsapp_number", prefill_mobile);
+			last_auto_synced_mobile = prefill_mobile;
+		}
 		d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
 
 		// Status div below mobile_no

@@ -286,9 +286,22 @@ export class CartPanel {
 				</div>
 			`).show();
 			banner.find(".ch-pos-unlink-token").on("click", () => {
-				PosState.kiosk_token = null;
-				PosState.kiosk_token_status = null;
-				this._update_token_banner();
+				const token_name = PosState.kiosk_token;
+				const pos_profile = PosState.pos_profile;
+				const done = () => {
+					PosState.kiosk_token = null;
+					PosState.kiosk_token_status = null;
+					this._update_token_banner();
+				};
+				if (!token_name || !pos_profile) {
+					done();
+					return;
+				}
+				frappe.xcall("ch_pos.api.token_api.release_pos_billing", {
+					token_name,
+					pos_profile,
+					revert_current: 1,
+				}).then(done).catch(done);
 			});
 		} else {
 			banner.hide().empty();

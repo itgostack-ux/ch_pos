@@ -1,0 +1,1 @@
+from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import CHPOSPassword, verify_manager_pin

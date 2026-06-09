@@ -186,17 +186,17 @@ def _get_ctx():
 
 
 def _get_or_create_manager_pin(store=None):
-    """Ensure a CH Manager PIN exists for Administrator and return the PIN."""
+    """Ensure a CH POS Password exists for Administrator and return the PIN."""
     from frappe.utils.password import get_decrypted_password
 
     pin_name = frappe.db.get_value(
-        "CH Manager PIN", {"user": "Administrator", "is_active": 1}, "name"
+        "CH POS Password", {"user": "Administrator", "is_active": 1}, "name"
     )
     if pin_name:
         actual_pin = get_decrypted_password(
-            "CH Manager PIN", pin_name, "pin_hash"
+            "CH POS Password", pin_name, "pin_hash"
         )
-        doc = frappe.get_doc("CH Manager PIN", pin_name)
+        doc = frappe.get_doc("CH POS Password", pin_name)
         # Ensure store matches so verify_pin can find it
         if store and doc.store != store:
             doc.store = store
@@ -207,7 +207,7 @@ def _get_or_create_manager_pin(store=None):
 
     # Create one with known PIN
     doc = frappe.get_doc({
-        "doctype": "CH Manager PIN",
+        "doctype": "CH POS Password",
         "user": "Administrator",
         "employee_name": "Admin",
         "pin_hash": "1234",

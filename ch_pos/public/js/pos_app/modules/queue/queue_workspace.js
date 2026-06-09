@@ -137,6 +137,7 @@ export class QueueWorkspace {
 		// Update stats bar
 		const stats = this._panel.find(".ch-queue-stats");
 		const waiting = (tokens || []).filter((t) => t.status === "Waiting").length;
+		const hold = (tokens || []).filter((t) => t.status === "Hold").length;
 		const engaged = (tokens || []).filter((t) => t.status === "Engaged" || t.status === "In Progress").length;
 
 		if (!tokens || !tokens.length) {
@@ -154,6 +155,7 @@ export class QueueWorkspace {
 		}
 
 		let stats_html = `<span class="ch-queue-count-text">${tokens.length} ${__("token(s)")}</span>`;
+		if (hold > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${hold} ${__("on hold")}</span>`;
 		if (waiting > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${waiting} ${__("waiting")}</span>`;
 		if (engaged > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--active">${engaged} ${__("active")}</span>`;
 		stats.html(stats_html);
@@ -185,6 +187,7 @@ export class QueueWorkspace {
 		const is_svc = _is_service();
 		const statusMap = {
 			Waiting:       { cls: "waiting",  icon: "fa-clock-o",     label: __("Waiting") },
+			Hold:          { cls: "waiting",  icon: "fa-pause-circle", label: __("Hold") },
 			Engaged:       { cls: "engaged",  icon: "fa-handshake-o", label: __("Engaged") },
 			"In Progress": { cls: "progress", icon: "fa-cogs",        label: __("In Progress") },
 		};
@@ -267,45 +270,88 @@ export class QueueWorkspace {
 		const _proceed = () => {
 			// Store token reference in state — will be passed to Sales Invoice
 			PosState.kiosk_token = token.name;
-			PosState.kiosk_token_status = token.status || null;
+			PosState.kiosk_token_status = "In Progress";
 
 			// Auto-set customer from token data
 			this._resolve_customer(token).then((customer) => {
 				if (customer) {
 					PosState.customer = customer;
 					EventBus.emit("customer:set", customer);
+					this._open_sell_mode(token);
+					return;
 				}
 
-				// Switch to sell mode
-				PosState.active_mode = "sell";
-				EventBus.emit("mode:set", "sell");
-				EventBus.emit("mode:switch", "sell");
+				// New customer path: enforce verified phone before billing.
+				if (token.customer_phone && window.ch_open_new_customer_dialog) {
+					window.ch_open_new_customer_dialog({
+						company: PosState.company,
+						prefill_name: token.customer_name || "",
+						prefill_mobile: token.customer_phone || "",
+						on_success: (name) => {
+							if (name) {
+								PosState.customer = name;
+								EventBus.emit("customer:set", name);
+							}
+							this._open_sell_mode(token);
+						},
+						on_use_existing: (customer) => {
+							if (customer) {
+								PosState.customer = customer;
+								EventBus.emit("customer:set", customer);
+							}
+							this._open_sell_mode(token);
+						},
+					});
+					return;
+				}
 
-				frappe.show_alert({
-					message: __("Billing started for token {0} — {1}", [
-						token.token_display || token.name,
-						token.customer_name || __("Walk-in"),
-					]),
-					indicator: "blue",
-				}, 5);
+				// No phone captured → proceed as walk-in.
+				const fallback = PosState.default_customer || null;
+				if (fallback) {
+					PosState.customer = fallback;
+					EventBus.emit("customer:set", fallback);
+				}
+				this._open_sell_mode(token);
 			});
 		};
 
-		if (token.status === "Waiting") {
-			// Engage first
-			frappe.xcall("ch_pos.api.token_api.engage_token", {
-				token_name: token.name,
+		frappe.xcall("ch_pos.api.token_api.start_pos_billing", {
+			token_name: token.name,
+			pos_profile: PosState.pos_profile,
 				sales_executive: PosState.sales_executive || "",
-			}).then(() => _proceed()).catch((err) => {
+		}).then((result) => {
+			if (result && result.action === "held") {
+				frappe.show_alert({
+					message: __("Billing is already active for {0}. {1} has been placed on Hold.", [
+						(result.active_token && (result.active_token.token_display || result.active_token.name)) || __("another token"),
+						token.token_display || token.name,
+					]),
+					indicator: "orange",
+				}, 6);
+				this._loadTokens();
+				return;
+			}
+			_proceed();
+		}).catch((err) => {
 				frappe.show_alert({
 					message: err.message || __("Failed to engage token"),
 					indicator: "red",
 				});
 			});
-		} else {
-			// Already Engaged — just proceed
-			_proceed();
-		}
+	}
+
+	_open_sell_mode(token) {
+		PosState.active_mode = "sell";
+		EventBus.emit("mode:set", "sell");
+		EventBus.emit("mode:switch", "sell");
+
+		frappe.show_alert({
+			message: __("Billing started for token {0} — {1}", [
+				token.token_display || token.name,
+				token.customer_name || __("Walk-in"),
+			]),
+			indicator: "blue",
+		}, 5);
 	}
 
 	/**
@@ -321,8 +367,8 @@ export class QueueWorkspace {
 		if (token.customer_phone) {
 			return frappe.xcall("ch_pos.api.token_api.find_customer_by_phone", {
 				phone: token.customer_phone,
-			}).then((name) => name || PosState.default_customer || null)
-			  .catch(() => PosState.default_customer || null);
+			}).then((name) => name || null)
+			  .catch(() => null);
 		}
 		// 3. Fall back to POS Profile's default customer (Walk-in Customer)
 		return Promise.resolve(PosState.default_customer || null);

@@ -16,6 +16,7 @@ const MODE_SECTIONS = [
 		label: __("Sales"),
 		modes: [
 			{ key: "sell",    icon: "fa-shopping-bag", label: __("Sell") },
+			{ key: "queue",   icon: "fa-ticket",       label: __("Queue") },
 			{ key: "returns", icon: "fa-undo",         label: __("Returns") },
 			{ key: "prebook", icon: "fa-bookmark",     label: __("Pre-Book / Proforma") },
 			{ key: "pickup",  icon: "fa-cube",         label: __("Pickup / Bill") },
@@ -26,7 +27,6 @@ const MODE_SECTIONS = [
 		modes: [
 			{ key: "buyback", icon: "fa-exchange",  label: __("Buyback") },
 			{ key: "repair",  icon: "fa-wrench",    label: __("Repair") },
-			{ key: "queue",   icon: "fa-ticket",    label: __("Queue") },
 			{ key: "service", icon: "fa-cogs",      label: __("Service") },
 			{ key: "claims",  icon: "fa-shield",    label: __("Claims") },
 			{ key: "exceptions", icon: "fa-exclamation-triangle", label: __("Exceptions") },

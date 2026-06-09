@@ -108,7 +108,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Waiting\nEngaged\nIn Progress\nCompleted\nCancelled\nConverted\nDropped\nExpired",
+    "options": "Waiting\nHold\nEngaged\nIn Progress\nCompleted\nCancelled\nConverted\nDropped\nExpired",
    "read_only": 1
   },
   {

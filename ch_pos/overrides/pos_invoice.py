@@ -507,6 +507,11 @@ def update_kiosk_token_status(doc, method=None):
             "converted_invoice": doc.name,
             "exit_at": now_datetime(),
         })
+        try:
+            from ch_pos.api.token_api import release_pos_billing
+            release_pos_billing(token_name=token, pos_profile=doc.pos_profile, revert_current=0)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Failed to release held queue tokens after invoice {doc.name}")
 
 
 def _auto_create_token_for_invoice(doc):
@@ -565,6 +570,11 @@ def revert_kiosk_token_status(doc, method=None):
             "status": "Expired",
             "converted_invoice": None,
         })
+        try:
+            from ch_pos.api.token_api import release_pos_billing
+            release_pos_billing(token_name=token, pos_profile=doc.pos_profile, revert_current=0)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Failed to release held queue tokens after cancel of invoice {doc.name}")
 
 
 # ── Coupon usage counter (Pricing Rule integration) ─────────────────

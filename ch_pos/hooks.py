@@ -41,7 +41,7 @@ override_whitelisted_methods = {
 # Client scripts
 doctype_js = {
     "Sales Invoice": "custom/pos_invoice.js",
-    "CH Manager PIN": "pos_core/doctype/ch_manager_pin/ch_manager_pin.js",
+    "CH POS Password": "pos_core/doctype/ch_manager_pin/ch_manager_pin.js",
 }
 
 # App-level JS (extends POS UI)
@@ -95,6 +95,9 @@ scheduler_events = {
         "ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session.auto_close_stale_sessions",
     ],
     "cron": {
+        "*/10 * * * *": [
+            "ch_pos.api.token_api.recover_stale_pos_billing",
+        ],
         # Close all open POS sessions at 6:00 AM every day.
         # Stores open at 10:00 AM, so cashiers are forced to start a fresh session.
         "0 6 * * *": [

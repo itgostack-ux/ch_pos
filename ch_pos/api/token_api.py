@@ -8,7 +8,7 @@ import re
 import frappe
 from frappe import _
 from frappe.rate_limiter import rate_limit
-from frappe.utils import now_datetime, get_datetime
+from frappe.utils import now_datetime, get_datetime, cint, add_to_date
 
 from buyback.utils import normalize_indian_phone, validate_indian_phone
 
@@ -172,6 +172,51 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
         return candidates[0]
 
     return None
+
+
+def _with_pos_profile_lock(pos_profile: str, callback):
+    lock_key = f"pos_billing_lock_{pos_profile}"
+    locked = frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key,))[0][0]
+    if not locked:
+        frappe.throw(_("Another billing request is being processed. Please try again."), title=_("Billing Busy"))
+    try:
+        return callback()
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
+
+
+def _active_billing_token(pos_profile: str, exclude_token: str = "") -> dict | None:
+    filters = {
+        "pos_profile": pos_profile,
+        "status": "In Progress",
+        "docstatus": 1,
+    }
+    if exclude_token:
+        filters["name"] = ["!=", exclude_token]
+    rows = frappe.get_all(
+        "POS Kiosk Token",
+        filters=filters,
+        fields=["name", "token_display", "customer_name", "status"],
+        order_by="modified desc",
+        limit_page_length=1,
+    )
+    return rows[0] if rows else None
+
+
+def _release_held_tokens(pos_profile: str) -> list[str]:
+    hold_names = frappe.get_all(
+        "POS Kiosk Token",
+        filters={
+            "pos_profile": pos_profile,
+            "status": "Hold",
+            "docstatus": 1,
+        },
+        pluck="name",
+    )
+    if hold_names:
+        for name in hold_names:
+            frappe.db.set_value("POS Kiosk Token", name, "status", "Waiting", update_modified=False)
+    return hold_names
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +604,134 @@ def engage_token(token_name: str, sales_executive: str = "") -> dict:
 
 
 @frappe.whitelist()
+def start_pos_billing(token_name: str, pos_profile: str, sales_executive: str = "") -> dict:
+    """Claim the exclusive active billing slot for this POS profile.
+
+    If another token is already being billed, the requested token is parked in
+    Hold and must wait until the active billing completes or is released.
+    """
+    _ensure_can_operate_token()
+
+    def _claim_slot():
+        doc = frappe.get_doc("POS Kiosk Token", token_name)
+        if doc.pos_profile != pos_profile:
+            frappe.throw(_("Token does not belong to POS Profile {0}").format(pos_profile), title=_("API Error"))
+        if doc.status in ("Completed", "Cancelled", "Converted", "Dropped", "Expired"):
+            frappe.throw(_("Cannot bill a {0} token").format(doc.status), title=_("API Error"))
+
+        active = _active_billing_token(pos_profile, exclude_token=token_name)
+        if active:
+            if doc.status != "Hold":
+                frappe.db.set_value("POS Kiosk Token", token_name, "status", "Hold")
+            return {
+                "status": "ok",
+                "action": "held",
+                "token_status": "Hold",
+                "active_token": active,
+            }
+
+        updates = {
+            "status": "In Progress",
+        }
+        if not doc.engaged_at:
+            updates["engaged_at"] = now_datetime()
+        if sales_executive:
+            updates["sales_executive"] = sales_executive
+        elif not doc.technician:
+            updates["technician"] = frappe.session.user
+        frappe.db.set_value("POS Kiosk Token", token_name, updates)
+        return {
+            "status": "ok",
+            "action": "started",
+            "token_status": "In Progress",
+        }
+
+    return _with_pos_profile_lock(pos_profile, _claim_slot)
+
+
+@frappe.whitelist()
+def release_pos_billing(token_name: str = "", pos_profile: str = "", revert_current: int = 0) -> dict:
+    """Release the active billing slot and return held customers to Waiting."""
+    _ensure_can_operate_token()
+
+    if token_name and not pos_profile:
+        pos_profile = frappe.db.get_value("POS Kiosk Token", token_name, "pos_profile")
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required to release billing"), title=_("API Error"))
+
+    def _release():
+        released_current = None
+        if token_name and cint(revert_current):
+            current_status = frappe.db.get_value("POS Kiosk Token", token_name, "status")
+            if current_status == "In Progress":
+                frappe.db.set_value("POS Kiosk Token", token_name, "status", "Waiting")
+                released_current = token_name
+
+        hold_names = _release_held_tokens(pos_profile)
+        return {
+            "status": "ok",
+            "released_current": released_current,
+            "released_holds": hold_names,
+        }
+
+    return _with_pos_profile_lock(pos_profile, _release)
+
+
+def recover_stale_pos_billing(timeout_minutes: int | None = None) -> dict:
+    """Recover abandoned retail billing tokens and release any held queue.
+
+    Since the POS billing session is browser-local, abandoned carts can leave a
+    token stuck in ``In Progress``. This scheduled recovery uses document
+    inactivity (``modified`` timestamp) as the stale signal.
+    """
+    timeout = cint(timeout_minutes or frappe.conf.get("ch_pos_stale_billing_timeout_minutes") or 45)
+    timeout = max(timeout, 5)
+    cutoff = add_to_date(now_datetime(), minutes=-timeout)
+
+    stale = frappe.get_all(
+        "POS Kiosk Token",
+        filters={
+            "status": "In Progress",
+            "docstatus": 1,
+            "modified": ("<", cutoff),
+        },
+        fields=["name", "pos_profile"],
+        order_by="modified asc",
+    )
+
+    recovered: list[str] = []
+    released_holds: list[str] = []
+
+    for row in stale:
+        pos_profile = row.get("pos_profile")
+        token_name = row.get("name")
+        if not pos_profile or not token_name:
+            continue
+
+        def _recover_current():
+            current_status = frappe.db.get_value("POS Kiosk Token", token_name, "status")
+            if current_status != "In Progress":
+                return
+            frappe.db.set_value("POS Kiosk Token", token_name, "status", "Waiting")
+            recovered.append(token_name)
+            released_holds.extend(_release_held_tokens(pos_profile))
+
+        try:
+            _with_pos_profile_lock(pos_profile, _recover_current)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Failed stale POS billing recovery for {token_name}")
+
+    if recovered or released_holds:
+        frappe.db.commit()
+
+    return {
+        "timeout_minutes": timeout,
+        "recovered_tokens": recovered,
+        "released_holds": released_holds,
+    }
+
+
+@frappe.whitelist()
 def quick_walkin(
     pos_profile: str,
     visit_purpose: str = "Sales",
@@ -828,10 +1001,26 @@ def find_customer_by_phone(phone: str) -> dict:
     if not phone or not phone.strip():
         return None
     phone = normalize_indian_phone(phone.strip())
+    tail10 = (phone or "")[-10:]
     # Try mobile_no on Customer directly
     name = frappe.db.get_value("Customer", {"mobile_no": phone}, "name")
     if name:
         return name
+    # Try mobile variants (country code / separators) using last 10 digits
+    if tail10 and len(tail10) == 10:
+        by_mobile_tail = frappe.db.sql(
+            """
+            SELECT name
+            FROM `tabCustomer`
+            WHERE RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(IFNULL(mobile_no, ''), '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), 10) = %s
+               OR RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(IFNULL(ch_alternate_phone, ''), '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), 10) = %s
+            LIMIT 1
+            """,
+            (tail10, tail10),
+            as_dict=True,
+        )
+        if by_mobile_tail:
+            return by_mobile_tail[0].name
     # Try Dynamic Link on Contact
     contact = frappe.db.sql(
         """SELECT dl.link_name
@@ -844,6 +1033,19 @@ def find_customer_by_phone(phone: str) -> dict:
     )
     if contact:
         return contact[0].link_name
+    if tail10 and len(tail10) == 10:
+        contact_tail = frappe.db.sql(
+            """SELECT dl.link_name
+               FROM `tabContact Phone` cp
+               JOIN `tabDynamic Link` dl ON dl.parent = cp.parent AND dl.parenttype = 'Contact'
+               WHERE dl.link_doctype = 'Customer'
+                 AND RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(IFNULL(cp.phone, ''), '+', ''), '-', ''), ' ', ''), '(', ''), ')', ''), 10) = %s
+               LIMIT 1""",
+            (tail10,),
+            as_dict=True,
+        )
+        if contact_tail:
+            return contact_tail[0].link_name
     return None
 
 
@@ -1162,9 +1364,9 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                   technician, creation
            FROM `tabPOS Kiosk Token`
            WHERE pos_profile = %s
-             AND status IN ('Waiting', 'Engaged', 'In Progress')
+                         AND status IN ('Waiting', 'Hold', 'Engaged', 'In Progress')
              AND DATE(creation) = %s
-           ORDER BY FIELD(status, 'Waiting', 'Engaged', 'In Progress'), creation ASC""",
+                     ORDER BY FIELD(status, 'In Progress', 'Hold', 'Waiting', 'Engaged'), creation ASC""",
         (pos_profile, today),
         as_dict=True,
     )

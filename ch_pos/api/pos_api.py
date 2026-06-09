@@ -5451,7 +5451,31 @@ def customer_360(identifier, company=None) -> dict:
         "alternate_phone": cust_doc.get("ch_alternate_phone") or "",
         "whatsapp_number": cust_doc.get("ch_whatsapp_number") or "",
         "previous_phones": cust_doc.get("ch_previous_phones") or "",
+        "pan": cust_doc.get("ch_pan_number") or cust_doc.get("pan") or "",
     }
+
+    # Bill-To and Ship-To addresses via Dynamic Link
+    _addr_rows = frappe.db.sql("""
+        SELECT a.name, a.address_line1, a.address_line2, a.city, a.state, a.pincode,
+               a.is_primary_address, a.is_shipping_address, a.address_type
+        FROM `tabAddress` a
+        JOIN `tabDynamic Link` dl ON dl.parent = a.name
+        WHERE dl.link_doctype = 'Customer' AND dl.link_name = %(customer)s
+        ORDER BY a.is_primary_address DESC, a.is_shipping_address DESC
+        LIMIT 10
+    """, {"customer": customer}, as_dict=True)
+
+    def _fmt_addr(row):
+        parts = [row.address_line1, row.address_line2, row.city, row.state, row.pincode]
+        return ", ".join(p for p in parts if p)
+
+    bill_to = next((r for r in _addr_rows if r.is_primary_address), None) \
+              or next((r for r in _addr_rows if r.address_type == "Billing"), None)
+    ship_to = next((r for r in _addr_rows if r.is_shipping_address), None) \
+              or next((r for r in _addr_rows if r.address_type == "Shipping"), None)
+
+    out["bill_to_address"] = _fmt_addr(bill_to) if bill_to else ""
+    out["ship_to_address"] = _fmt_addr(ship_to) if ship_to else ""
 
     # Invoices
     out["invoices"] = frappe.db.sql("""
@@ -7840,7 +7864,7 @@ def calculate_attach_rate_bonus(company=None, payout_month=None):
 @frappe.whitelist()
 def update_customer_details(customer, mobile_no=None, email_id=None,
                            customer_name=None, alternate_phone=None,
-                           whatsapp_number=None) -> dict:
+                           whatsapp_number=None, pan_number=None) -> dict:
     """Update customer details from POS Customer 360 view.
 
     Only updates fields that are explicitly passed (non-None).
@@ -7883,6 +7907,13 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
             cust.ch_whatsapp_number = whatsapp_number
             changed = True
 
+    if pan_number is not None:
+        pan_clean = pan_number.strip().upper()
+        if pan_clean != (cust.get("ch_pan_number") or ""):
+            cust.ch_pan_number = pan_clean
+            cust.pan = pan_clean
+            changed = True
+
     if not changed:
         return {"ok": True, "message": "No changes detected"}
 
@@ -7900,6 +7931,7 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
         "alternate_phone": cust.get("ch_alternate_phone") or "",
         "whatsapp_number": cust.get("ch_whatsapp_number") or "",
         "previous_phones": cust.get("ch_previous_phones") or "",
+        "pan": cust.get("ch_pan_number") or cust.get("pan") or "",
     }
 
 
@@ -7994,6 +8026,7 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
                           alternate_phone="", whatsapp_number="",
                           address_line1="", address_line2="", city="",
                           state="", pincode="", area="", gstin="",
+                          pan_number="",
                           same_as_billing=1,
                           shipping_address_line1="", shipping_city="",
                           shipping_state="", shipping_pincode="") -> dict:
@@ -8055,9 +8088,13 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         cust.ch_whatsapp_number = whatsapp_number.strip()
     cust.flags.ignore_permissions = True
     cust.flags.ignore_mandatory = True
-    # Store GSTIN directly on Customer master for instant lookup
+    # Store GSTIN + PAN directly on Customer master for instant lookup
     if gstin:
         cust.custom_gstin = gstin.strip().upper()
+    if pan_number:
+        pan_clean = pan_number.strip().upper()
+        cust.pan = pan_clean
+        cust.ch_pan_number = pan_clean
     cust.save()
 
     # Add contact details if provided

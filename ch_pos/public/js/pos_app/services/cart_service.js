@@ -21,6 +21,15 @@ export class CartService {
 		this._start_exception_status_poll();
 	}
 
+	_release_kiosk_billing(revertCurrent = true) {
+		if (!PosState.kiosk_token || !PosState.pos_profile) return Promise.resolve();
+		return frappe.xcall("ch_pos.api.token_api.release_pos_billing", {
+			token_name: PosState.kiosk_token,
+			pos_profile: PosState.pos_profile,
+			revert_current: revertCurrent ? 1 : 0,
+		}).catch(() => null);
+	}
+
 	// POS-10 fix: Auto-persist active cart state to localStorage on every change
 	_persist_active_cart() {
 		try {
@@ -98,10 +107,12 @@ export class CartService {
 
 		EventBus.on("company:switched", () => {
 			if (PosState.cart.length) {
-				PosState.reset_transaction();
-				localStorage.removeItem("ch_pos_active_cart");
-				EventBus.emit("cart:updated");
-				frappe.show_alert({ message: __("Cart cleared — company changed"), indicator: "orange" });
+				this._release_kiosk_billing(true).finally(() => {
+					PosState.reset_transaction();
+					localStorage.removeItem("ch_pos_active_cart");
+					EventBus.emit("cart:updated");
+					frappe.show_alert({ message: __("Cart cleared — company changed"), indicator: "orange" });
+				});
 			}
 		});
 
@@ -162,7 +173,9 @@ export class CartService {
 		EventBus.on("cart:cancel", () => {
 			if (!PosState.cart.length) return;
 			frappe.confirm(__("Clear all items from cart?"), () => {
-				PosState.reset_transaction();
+				this._release_kiosk_billing(true).finally(() => {
+					PosState.reset_transaction();
+				});
 			});
 		});
 
@@ -1596,8 +1609,10 @@ export class CartService {
 				localStorage.setItem(key, JSON.stringify(data));
 				dlg.hide();
 				frappe.show_alert({ message: __("Invoice held: {0}", [data.note]), indicator: "blue" });
-				PosState.reset_transaction();
-				EventBus.emit("held_bills:updated");
+				this._release_kiosk_billing(true).finally(() => {
+					PosState.reset_transaction();
+					EventBus.emit("held_bills:updated");
+				});
 			},
 			secondary_action_label: __("Cancel"),
 			secondary_action: () => dlg.hide(),

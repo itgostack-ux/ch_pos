@@ -5,7 +5,7 @@ All endpoints are whitelisted and called from the POS UI.
 They integrate with:
 - CH POS Session (session lifecycle)
 - CH Business Date (store business date)
-- CH Manager PIN (quick approval)
+- CH POS Password (quick approval)
 - CH Cash Drop (safe transfers)
 - ERPNext POS Opening Entry (GL linkage)
 """

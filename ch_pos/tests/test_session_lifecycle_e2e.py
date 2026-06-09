@@ -140,23 +140,23 @@ def _ensure_manager_pin(store):
 
     # Check if any existing PIN with 1234 works for this store
     filters = {"is_active": 1, "store": ("in", [store, "", None])}
-    pins = frappe.get_all("CH Manager PIN", filters=filters, fields=["name", "user", "employee_name"])
+    pins = frappe.get_all("CH POS Password", filters=filters, fields=["name", "user", "employee_name"])
     for p in pins:
         try:
-            stored_pin = get_decrypted_password("CH Manager PIN", p.name, "pin_hash")
+            stored_pin = get_decrypted_password("CH POS Password", p.name, "pin_hash")
             if stored_pin == "1234":
                 return {"name": p.employee_name, "user": p.user}
         except Exception:
             continue
 
     # Check if there's a PIN with 1234 on another store — make it global
-    all_pins = frappe.get_all("CH Manager PIN", filters={"is_active": 1}, fields=["name", "user", "store", "employee_name"])
+    all_pins = frappe.get_all("CH POS Password", filters={"is_active": 1}, fields=["name", "user", "store", "employee_name"])
     for p in all_pins:
         try:
-            stored_pin = get_decrypted_password("CH Manager PIN", p.name, "pin_hash")
+            stored_pin = get_decrypted_password("CH POS Password", p.name, "pin_hash")
             if stored_pin == "1234" and p.store and p.store != store:
                 # Clear store to make it global and enable all permissions
-                doc = frappe.get_doc("CH Manager PIN", p.name)
+                doc = frappe.get_doc("CH POS Password", p.name)
                 doc.store = ""
                 doc.can_approve_opening = 1
                 doc.can_approve_closing = 1
@@ -170,7 +170,7 @@ def _ensure_manager_pin(store):
 
     # Create a new global PIN
     pin_doc = frappe.get_doc({
-        "doctype": "CH Manager PIN",
+        "doctype": "CH POS Password",
         "user": "Administrator",
         "employee_name": "E2E Test Manager",
         "pin_hash": "1234",

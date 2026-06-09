@@ -135,10 +135,10 @@ def _ensure_manager_pin(store):
     from frappe.utils.password import get_decrypted_password
 
     filters = {"is_active": 1, "store": ("in", [store, "", None])}
-    pins = frappe.get_all("CH Manager PIN", filters=filters, fields=["name", "user", "employee_name"])
+    pins = frappe.get_all("CH POS Password", filters=filters, fields=["name", "user", "employee_name"])
     for p in pins:
         try:
-            stored_pin = get_decrypted_password("CH Manager PIN", p.name, "pin_hash")
+            stored_pin = get_decrypted_password("CH POS Password", p.name, "pin_hash")
             if stored_pin == "1234":
                 return {"name": p.employee_name, "user": p.user}
         except Exception:
@@ -146,7 +146,7 @@ def _ensure_manager_pin(store):
 
     # Create a global PIN
     pin_doc = frappe.get_doc({
-        "doctype": "CH Manager PIN",
+        "doctype": "CH POS Password",
         "user": "Administrator",
         "employee_name": "Switch Cashier Test Manager",
         "pin_hash": "1234",
