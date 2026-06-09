@@ -773,9 +773,16 @@ def create_pos_invoice(pos_profile, customer, items,
     # only when `inv.loyalty_program` is populated. Customer-level enrolment
     # alone is not enough — the value must be on the invoice itself.
     if customer and customer != "Walk-in Customer":
-        cust_loyalty = frappe.db.get_value("Customer", customer, "loyalty_program")
-        if cust_loyalty:
-            inv.loyalty_program = cust_loyalty
+        # Use the active company's loyalty program so ERPNext applies the correct
+        # earning rate (collection_factor) for this store. Falls back to the
+        # customer's assigned program if the company has no dedicated program.
+        company_loyalty = frappe.db.get_value(
+            "Loyalty Program",
+            {"company": profile.company, "auto_opt_in": 1},
+            "name",
+        ) or frappe.db.get_value("Customer", customer, "loyalty_program")
+        if company_loyalty:
+            inv.loyalty_program = company_loyalty
 
     # B2B/B2C — GSTIN provided at billing time overrides saved GSTIN
     if customer_gstin:
@@ -1458,6 +1465,10 @@ def create_pos_invoice(pos_profile, customer, items,
         inv.custom_voucher_amount = flt(voucher_amount)
 
     # Loyalty points redemption
+    # Market-standard caps: min order ₹500, max 50% of invoice value redeemable.
+    _LOYALTY_MIN_ORDER = 500
+    _LOYALTY_MAX_PCT   = 0.50
+
     if cint(redeem_loyalty_points):
         requested_points = cint(loyalty_points)
         if requested_points > 0 and customer and customer != "Walk-in Customer":
@@ -1467,6 +1478,24 @@ def create_pos_invoice(pos_profile, customer, items,
                 frappe.throw(
                     frappe._("Insufficient loyalty points. Requested: {0}, Available: {1}").format(
                         requested_points, available_points),
+                    title=frappe._("Loyalty Points"),
+                )
+
+            # Minimum order value guard
+            if flt(inv.grand_total) < _LOYALTY_MIN_ORDER:
+                frappe.throw(
+                    frappe._("Loyalty points can only be redeemed on orders of ₹{0} or more.").format(
+                        _LOYALTY_MIN_ORDER),
+                    title=frappe._("Loyalty Points"),
+                )
+
+            # Maximum redemption cap (50% of invoice total)
+            max_redeemable_amount = flt(inv.grand_total) * _LOYALTY_MAX_PCT
+            if flt(loyalty_amount) > max_redeemable_amount:
+                frappe.throw(
+                    frappe._("Loyalty redemption cannot exceed {0}% of the invoice value (max ₹{1}).").format(
+                        int(_LOYALTY_MAX_PCT * 100),
+                        frappe.utils.fmt_money(max_redeemable_amount)),
                     title=frappe._("Loyalty Points"),
                 )
 
@@ -5265,29 +5294,11 @@ def _resolve_pos_city_state(city, state):
 
 @frappe.whitelist()
 def get_customer_loyalty(customer, company=None) -> dict:
-    """Get loyalty program details and current points for a customer."""
+    """Get loyalty balance for a customer using the active company's redemption rate."""
+    from ch_item_master.ch_customer_master.loyalty import get_ch_loyalty_info
     if not company:
         company = frappe.defaults.get_user_default("Company")
-
-    loyalty_program = frappe.db.get_value("Customer", customer, "loyalty_program")
-    if not loyalty_program:
-        return {"loyalty_program": None, "points": 0, "conversion_factor": 0, "currency_value": 0}
-
-    from erpnext.accounts.doctype.loyalty_program.loyalty_program import (
-        get_loyalty_program_details_with_points,
-    )
-
-    details = get_loyalty_program_details_with_points(customer, loyalty_program, company=company)
-    conversion_factor = flt(details.get("conversion_factor"))
-    points = cint(details.get("loyalty_points"))
-
-    return {
-        "loyalty_program": loyalty_program,
-        "points": points,
-        "conversion_factor": conversion_factor,
-        "currency_value": flt(points * conversion_factor),
-        "tier_name": details.get("tier_name", ""),
-    }
+    return get_ch_loyalty_info(customer, company=company)
 
 
 @frappe.whitelist()
@@ -5591,26 +5602,12 @@ def customer_360(identifier, company=None) -> dict:
         ORDER BY creation DESC LIMIT 20
     """, {"customer": customer}, as_dict=True)
 
-    # Loyalty
-    loyalty_program = cust_doc.loyalty_program
-    if loyalty_program and company:
-        try:
-            from erpnext.accounts.doctype.loyalty_program.loyalty_program import (
-                get_loyalty_program_details_with_points,
-            )
-            details = get_loyalty_program_details_with_points(customer, loyalty_program, company=company)
-            points = cint(details.get("loyalty_points"))
-            cf = flt(details.get("conversion_factor"))
-            out["loyalty"] = {
-                "program": loyalty_program,
-                "points": points,
-                "conversion_factor": cf,
-                "currency_value": flt(points * cf),
-                "tier_name": details.get("tier_name", ""),
-            }
-        except Exception:
-            out["loyalty"] = None
-    else:
+    # Loyalty — cross-company balance, company-specific redemption rate
+    try:
+        from ch_item_master.ch_customer_master.loyalty import get_ch_loyalty_info
+        info = get_ch_loyalty_info(customer, company=company)
+        out["loyalty"] = info if info.get("loyalty_program") else None
+    except Exception:
         out["loyalty"] = None
 
     return out
@@ -6959,25 +6956,14 @@ def get_customer_pos_info(customer, company=None) -> dict:
             WHERE party_type = 'Customer' AND party = %s AND company = %s
         """, (customer, company))[0][0] or 0)
 
-    # Loyalty
+    # Loyalty — cross-company balance, company-specific redemption rate
     loyalty = None
-    if cust.loyalty_program and company:
-        try:
-            from erpnext.accounts.doctype.loyalty_program.loyalty_program import (
-                get_loyalty_program_details_with_points,
-            )
-            details = get_loyalty_program_details_with_points(customer, cust.loyalty_program, company=company)
-            points = cint(details.get("loyalty_points"))
-            cf = flt(details.get("conversion_factor"))
-            loyalty = {
-                "program": cust.loyalty_program,
-                "points": points,
-                "conversion_factor": cf,
-                "currency_value": flt(points * cf),
-                "tier_name": details.get("tier_name", ""),
-            }
-        except Exception:
-            pass
+    try:
+        from ch_item_master.ch_customer_master.loyalty import get_ch_loyalty_info
+        info = get_ch_loyalty_info(customer, company=company)
+        loyalty = info if info.get("loyalty_program") else None
+    except Exception:
+        pass
 
     return {
         "customer": customer,

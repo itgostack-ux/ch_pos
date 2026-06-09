@@ -338,8 +338,11 @@ export class PaymentDialog {
 	_build_overlay_html() {
 		const total = this._calc_grand_total();
 		const loyalty_pts = flt(PosState.loyalty_points) || 0;
-		const has_loyalty = loyalty_pts > 0 && PosState.loyalty_program;
-		const max_loyalty = has_loyalty ? flt(loyalty_pts * (PosState.conversion_factor || 0)) : 0;
+		const _LOYALTY_MIN_ORDER = 500;
+		const _LOYALTY_MAX_PCT   = 0.50;
+		const has_loyalty = loyalty_pts > 0 && PosState.loyalty_program && total >= _LOYALTY_MIN_ORDER;
+		const max_loyalty_from_pts = has_loyalty ? flt(loyalty_pts * (PosState.conversion_factor || 0)) : 0;
+		const max_loyalty = Math.min(max_loyalty_from_pts, total * _LOYALTY_MAX_PCT);
 		const is_walkin = !PosState.customer || PosState.customer === "Walk-in Customer";
 
 		const mop_btns = (PosState.payment_modes || []).map(p => `
@@ -352,14 +355,14 @@ export class PaymentDialog {
 			<div class="ch-pay-loyalty-row">
 				<label class="ch-pay-loyalty-toggle">
 					<input type="checkbox" id="ch-pay-loyalty-chk">
-					<span>${__("Loyalty")} (${format_number(loyalty_pts)} pts ≈ ₹${format_number(max_loyalty)})</span>
+					<span>${__("Loyalty")} (${format_number(loyalty_pts)} pts ≈ ₹${format_number(max_loyalty_from_pts)})</span>
 				</label>
 				<div class="ch-pay-loyalty-input" id="ch-pay-loyalty-input" style="display:none">
 					<div class="input-group input-group-sm">
 						<span class="input-group-addon">₹</span>
 						<input type="number" class="form-control" id="ch-pay-loyalty-amt"
-							value="${Math.min(max_loyalty, total).toFixed(2)}" min="0" max="${max_loyalty}" step="0.01">
-						<span class="input-group-addon" id="ch-pay-loyalty-max">${__("max")} ₹${format_number(Math.min(max_loyalty, total))}</span>
+							value="${max_loyalty.toFixed(2)}" min="0" max="${max_loyalty}" step="0.01">
+						<span class="input-group-addon" id="ch-pay-loyalty-max">${__("max")} ₹${format_number(max_loyalty)} (${Math.round(_LOYALTY_MAX_PCT * 100)}%)</span>
 					</div>
 				</div>
 			</div>` : "";
@@ -1118,7 +1121,7 @@ placeholder="${__("Enter code...")}">
 		});
 		ov.on("input", "#ch-pay-loyalty-amt", e => {
 			const max = flt(PosState.loyalty_points) * flt(PosState.conversion_factor);
-			const max_usable = Math.min(max, this._calc_grand_total());
+			const max_usable = Math.min(max, this._calc_grand_total() * 0.50);
 			this._loyalty_amount = Math.min(flt($(e.currentTarget).val()) || 0, max_usable);
 			// Finance mode: don't auto-adjust down payment rows — just recalc Finance row
 			if (!this._is_finance_sale_type(PosState.sale_type)) {

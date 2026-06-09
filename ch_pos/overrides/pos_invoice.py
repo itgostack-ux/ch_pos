@@ -138,6 +138,15 @@ class CustomPOSInvoice(SalesInvoice):
             self.loyalty_program = _saved_lp
             self.db_set("loyalty_program", _saved_lp)
 
+        # Rolling expiry: each purchase resets the loyalty expiry clock so
+        # active buyers never lose points mid-cycle (market-standard behaviour).
+        if not self.is_return and self.customer and self.loyalty_program:
+            try:
+                from ch_item_master.ch_customer_master.loyalty import reset_loyalty_expiry_on_purchase
+                reset_loyalty_expiry_on_purchase(self.customer, str(self.posting_date))
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), "reset_loyalty_expiry_on_purchase failed")
+
     def _validate_bundle_pricing(self):
         """POS-17 fix: Validate that bundle/free items still have active pricing at submit time.
         Prevents stale bundle deals from being invoiced after pricing changes.
@@ -168,6 +177,9 @@ class CustomPOSInvoice(SalesInvoice):
                           "Pricing may be outdated.").format(item.item_code),
                         indicator="orange",
                     )
+
+    def before_cancel(self):
+        _enforce_cancel_policy(self)
 
     def on_cancel(self):
         # Cache serial numbers BEFORE standard on_cancel delinks serial bundles.
@@ -239,6 +251,60 @@ class CustomPOSInvoice(SalesInvoice):
                     continue
             adjusted.append(gl)
         return adjusted
+
+
+# ── Cancel policy ────────────────────────────────────────────────
+
+
+def _enforce_cancel_policy(doc):
+    """Block cancellation of POS Sales Invoices outside the same open billing session.
+
+    Policy (matches SAP/Oracle/Tally market standard):
+    - Administrator is never blocked (emergency override).
+    - Same-day invoice AND POS session still Open → allowed.
+    - Invoice from a previous day → blocked. Use Sales Return.
+    - Same-day invoice but session already Closed (EOD done) → blocked. Use Sales Return.
+
+    Non-POS (ERP-direct) Sales Invoices are not blocked here; they fall
+    under the standard ERPNext accounting period lock.
+    """
+    if frappe.flags.get("ignore_cancel_lock"):
+        return
+    if frappe.session.user == "Administrator":
+        return
+    if not cint(doc.get("is_pos")):
+        return
+
+    from frappe.utils import getdate, today as _today
+
+    # Block if the invoice belongs to a previous day
+    if doc.posting_date and getdate(doc.posting_date) < getdate(_today()):
+        frappe.throw(
+            frappe._(
+                "Sales Invoice {0} is dated {1} and cannot be cancelled. "
+                "The billing date has passed — please create a Sales Return instead."
+            ).format(frappe.bold(doc.name), doc.posting_date),
+            title=frappe._("Cancellation Not Allowed"),
+        )
+
+    # Block if today's POS session is already closed (EOD processed)
+    if doc.pos_profile:
+        try:
+            from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+            active = get_active_session(doc.pos_profile)
+            if not active or active.get("status") != "Open":
+                frappe.throw(
+                    frappe._(
+                        "The POS session for {0} is closed. "
+                        "Sales Invoice {1} cannot be cancelled after End of Day — "
+                        "please create a Sales Return instead."
+                    ).format(frappe.bold(doc.pos_profile), frappe.bold(doc.name)),
+                    title=frappe._("Cancellation Not Allowed"),
+                )
+        except frappe.ValidationError:
+            raise
+        except Exception:
+            pass  # session check failure must not block cancel silently — let it proceed
 
 
 # ── doc_event handlers (called via hooks.py) ─────────────────────
