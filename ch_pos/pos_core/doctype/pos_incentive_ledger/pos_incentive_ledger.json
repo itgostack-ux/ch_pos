@@ -31,6 +31,12 @@
   "column_break_inc",
   "incentive_amount",
   "status",
+    "section_approval",
+    "approved_by",
+    "approved_on",
+    "column_break_approval",
+    "paid_by",
+    "paid_on",
   "section_payout",
   "payout_month",
   "payout_reference"
@@ -205,6 +211,41 @@
    "in_standard_filter": 1,
    "search_index": 1
   },
+    {
+     "fieldname": "section_approval",
+     "fieldtype": "Section Break",
+     "label": "Approval"
+    },
+    {
+     "fieldname": "approved_by",
+     "fieldtype": "Link",
+     "label": "Approved By",
+     "options": "User",
+     "read_only": 1
+    },
+    {
+     "fieldname": "approved_on",
+     "fieldtype": "Datetime",
+     "label": "Approved On",
+     "read_only": 1
+    },
+    {
+     "fieldname": "column_break_approval",
+     "fieldtype": "Column Break"
+    },
+    {
+     "fieldname": "paid_by",
+     "fieldtype": "Link",
+     "label": "Paid By",
+     "options": "User",
+     "read_only": 1
+    },
+    {
+     "fieldname": "paid_on",
+     "fieldtype": "Datetime",
+     "label": "Paid On",
+     "read_only": 1
+    },
   {
    "fieldname": "section_payout",
    "fieldtype": "Section Break",
@@ -253,6 +294,23 @@
    "role": "Stock Manager",
    "write": 1
   },
+    {
+     "read": 1,
+     "report": 1,
+     "role": "Accounts User"
+    },
+    {
+     "read": 1,
+     "report": 1,
+     "role": "POS Manager",
+     "write": 1
+    },
+    {
+     "read": 1,
+     "report": 1,
+     "role": "Accounts Manager",
+     "write": 1
+    },
   {
    "read": 1,
    "role": "Sales User"

@@ -17,6 +17,11 @@
   {"role": "Accounts Manager"},
   {"role": "Accounts User"},
   {"role": "POS Manager"},
-  {"role": "POS User"}
+    {"role": "POS User"},
+    {"role": "CH Store Executive"},
+    {"role": "CH Area Sales Manager"},
+    {"role": "CH Zonal Sales Manager"},
+    {"role": "CH Category Head"},
+    {"role": "CH National Head"}
  ]
 }

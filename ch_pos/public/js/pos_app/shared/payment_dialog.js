@@ -3415,6 +3415,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			company: PosState.company,
 		}).then(result => {
 			this._free_sale_approval_name = result.approval_name;
+			this._required_managers = result.managers || [];
 			this._overlay.find("#ch-pay-free-request-btn").hide();
 			this._overlay.find("#ch-pay-free-reason").prop("readonly", true);
 

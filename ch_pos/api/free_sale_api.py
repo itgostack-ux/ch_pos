@@ -84,7 +84,15 @@ def get_category_managers_for_cart(items) -> list:
     for cm in cat_managers:
         cm["manager_name"] = frappe.db.get_value("User", cm["manager"], "full_name") or cm["manager"]
 
-    return cat_managers
+    # Deduplicate by manager — same person managing multiple categories needs only one approval
+    seen_managers = set()
+    unique_managers = []
+    for cm in cat_managers:
+        if cm["manager"] not in seen_managers:
+            seen_managers.add(cm["manager"])
+            unique_managers.append(cm)
+
+    return unique_managers
 
 
 @frappe.whitelist()
