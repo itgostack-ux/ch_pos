@@ -852,6 +852,46 @@ def create_pos_invoice(pos_profile, customer, items,
 
     # Track warranty items to create CH Sold Plans after submit
     warranty_items = []
+    _plan_service_item_cache = {}
+    _plan_type_cache = {}
+
+    def _get_plan_service_item(plan_name):
+        if not plan_name:
+            return ""
+        if plan_name not in _plan_service_item_cache:
+            _plan_service_item_cache[plan_name] = (
+                frappe.db.get_value("CH Warranty Plan", plan_name, "service_item") or ""
+            )
+        return _plan_service_item_cache[plan_name]
+
+    def _get_plan_type(plan_name):
+        if not plan_name:
+            return ""
+        if plan_name not in _plan_type_cache:
+            _plan_type_cache[plan_name] = (
+                frappe.db.get_value("CH Warranty Plan", plan_name, "plan_type") or ""
+            )
+        return _plan_type_cache[plan_name]
+
+    def _is_plan_row(cart_item):
+        """Detect plan rows even when client flags are missing."""
+        if cint(cart_item.get("is_warranty")) or cint(cart_item.get("is_vas")):
+            return True
+
+        plan_name = cart_item.get("warranty_plan")
+        if not plan_name:
+            return False
+
+        service_item = _get_plan_service_item(plan_name)
+        if service_item and cart_item.get("item_code") == service_item:
+            return True
+
+        # Fallback for custom clients: plan row usually points to a device row.
+        for_item_code = cart_item.get("for_item_code")
+        if for_item_code and for_item_code != cart_item.get("item_code"):
+            return True
+
+        return False
 
     for item in items:
         # IMEIs may arrive as JSON numbers (e.g. 35600220100003) — coerce to str
@@ -904,11 +944,16 @@ def create_pos_invoice(pos_profile, customer, items,
             "discount_percentage": flt(item.get("discount_percentage", 0)),
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
+        item_is_plan = _is_plan_row(item)
+        item_plan_type = _get_plan_type(item.get("warranty_plan")) if item.get("warranty_plan") else ""
+        item_is_vas = cint(item.get("is_vas", 0)) or cint(
+            item_plan_type in ("Value Added Service", "Protection Plan")
+        )
         if item_exception_original > 0 and item_exception_final >= 0:
             row["discount_amount"] = flt(max(0, item_exception_original - item_exception_final))
             row["discount_percentage"] = flt(row["discount_amount"] / item_exception_original * 100) if item_exception_original > 0 else 0
-        # Set warranty_plan on warranty/VAS invoice items only (not device items)
-        if item.get("warranty_plan") and (item.get("is_warranty") or item.get("is_vas")):
+        # Reflect selected warranty/VAS plan on invoice rows (Own/Extended/VAS).
+        if item.get("warranty_plan") and item_is_plan:
             row["custom_warranty_plan"] = item.get("warranty_plan")
 
         # Manager approval fields for exception tracking
@@ -987,13 +1032,13 @@ def create_pos_invoice(pos_profile, customer, items,
             inv.ignore_pricing_rule = 1
 
         # Collect warranty/VAS info for post-submit processing
-        if (item.get("is_warranty") or item.get("is_vas")) and item.get("warranty_plan"):
+        if item_is_plan and item.get("warranty_plan"):
             warranty_items.append({
                 "warranty_plan": item.get("warranty_plan"),
                 "for_item_code": item.get("for_item_code"),
                 "serial_no": item.get("serial_no") or item.get("for_serial_no"),
                 "price": flt(item.get("rate")),
-                "is_vas": cint(item.get("is_vas", 0)),
+                "is_vas": item_is_vas,
             })
 
     # Payment — supports split payments (new) and single mode (legacy)
