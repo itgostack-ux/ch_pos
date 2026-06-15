@@ -764,9 +764,15 @@ def create_pos_invoice(pos_profile, customer, items,
             inv.company_gstin = _co_gstin
 
     # Tax Category — required by india_compliance GST validation.
-    # Pull from customer record; fall back to "In-State" for all POS retail sales.
-    cust_tax_cat = frappe.db.get_value("Customer", customer, "tax_category") if customer else None
-    inv.tax_category = cust_tax_cat or "In-State"
+    # Item-level GST migration: the customer master is no longer the source
+    # of truth for tax category. Resolve from company GSTIN state vs customer
+    # billing address state via the central resolver, defaulting to In-State
+    # for walk-ins (sale happens at the company's outlet).
+    from ch_erp15.ch_erp15.custom.sales_invoice import get_gst_template_for_customer
+    _resolved = get_gst_template_for_customer(customer or "", profile.company) or {}
+    inv.tax_category = _resolved.get("tax_category") or "In-State"
+    if _resolved.get("template") and not inv.get("taxes_and_charges"):
+        inv.taxes_and_charges = _resolved["template"]
 
     # Loyalty Program — propagate from customer so ERPNext awards points on submit.
     # ERPNext's `make_loyalty_point_entry()` runs in Sales Invoice on_submit
@@ -9888,10 +9894,16 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
             f"Pickup: serial/batch bundle hydration failed for SO {sales_order}",
         )
 
-    # Tax Category — fall back to In-State if customer doesn't have one
-    cust_tax_cat = frappe.db.get_value("Customer", inv.customer, "tax_category") if inv.customer else None
+    # Tax Category — derived from company vs customer billing-address state.
+    # Customer master tax category is no longer consulted (item-level GST
+    # migration). Pickup invoices that already carry tax_category from the
+    # source SO retain their value.
     if not inv.get("tax_category"):
-        inv.tax_category = cust_tax_cat or "In-State"
+        from ch_erp15.ch_erp15.custom.sales_invoice import get_gst_template_for_customer
+        _resolved = get_gst_template_for_customer(inv.customer or "", inv.company) or {}
+        inv.tax_category = _resolved.get("tax_category") or "In-State"
+        if _resolved.get("template") and not inv.get("taxes_and_charges"):
+            inv.taxes_and_charges = _resolved["template"]
 
     if client_request_id and inv.meta.has_field("custom_client_request_id"):
         inv.custom_client_request_id = str(client_request_id)[:140]
