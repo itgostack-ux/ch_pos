@@ -227,53 +227,158 @@ export class ClaimsWorkspace {
 		});
 	}
 
-	// ── Customer Dashboard ──────────────────────────────────────────
 
-	_render_dashboard(panel, data) {
-		const { customer, customer_name, customer_phone, devices, summary } = data;
-		const unlinked_plans = data.unlinked_plans || [];
-		panel.find(".ch-claim-form-area").hide();
 
-		let html = `
-			<!-- Customer Header -->
-			<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
-				<div class="section-header" style="display:flex;justify-content:space-between;align-items:center">
-					<span><i class="fa fa-user"></i> ${__("Customer")}</span>
-					<div style="display:flex;gap:8px">
-						<span class="badge" style="background:#dbeafe;color:#1e40af;padding:3px 8px;font-size:11px">
-							${summary.total_devices} ${__("device(s)")}
-						</span>
-						<span class="badge" style="background:${summary.active_plans > 0 ? '#dcfce7' : '#fef2f2'};
-							color:${summary.active_plans > 0 ? '#166534' : '#991b1b'};padding:3px 8px;font-size:11px">
-							${summary.active_plans} ${__("active plan(s)")}
-						</span>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Customer Dashboard — VAS-only filter
+// ─────────────────────────────────────────────────────────────────────────
+
+_render_dashboard(panel, data) {
+	const {
+		customer, customer_name, customer_phone, devices = [],
+	} = data;
+	const unlinked_plans = data.unlinked_plans || [];
+	panel.find(".ch-claim-form-area").hide();
+
+	// ── Filter: only devices with at least one VAS plan attached ──
+	// Accepts both snake_case API keys and human-readable labels.
+	const VAS_PLAN_TYPES = new Set([
+		"vas_plan", "anniversary_warranty", "repair_warranty",
+		"VAS Plan", "Protection Plan", "Anniversary Warranty", "Repair Warranty",
+	]);
+
+	const has_vas_plan = (dev) => {
+		const plans = dev.plans || [];
+		if (!plans.length) return false;
+		return plans.some((p) => {
+			if (VAS_PLAN_TYPES.has(p.plan_type)) return true;
+			if (VAS_PLAN_TYPES.has(p.coverage_type)) return true;
+			const t = (p.plan_type || p.coverage_type || "").toString().toLowerCase();
+			return /vas|protection|anniversary|repair\s*warranty/i.test(t);
+		});
+	};
+
+	const vas_devices = devices.filter(has_vas_plan);
+
+	// ── Recompute summary against the filtered set ──
+	const filtered_summary = {
+		total_devices: vas_devices.length,
+		active_plans: vas_devices.reduce((sum, d) => {
+			return sum + (d.plans || []).filter(p => p.display_status === "active").length;
+		}, 0),
+	};
+
+	let html = `
+		<!-- Customer Header -->
+		<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
+			<div class="section-header"
+				style="display:flex;justify-content:space-between;align-items:center">
+				<span><i class="fa fa-user"></i> ${__("Customer")}</span>
+				<div style="display:flex;gap:8px">
+					<span class="badge"
+						style="background:#dbeafe;color:#1e40af;padding:3px 8px;font-size:11px">
+						${filtered_summary.total_devices} ${__("VAS device(s)")}
+					</span>
+					<span class="badge"
+						style="background:${filtered_summary.active_plans > 0 ? "#dcfce7" : "#fef2f2"};
+						color:${filtered_summary.active_plans > 0 ? "#166534" : "#991b1b"};
+						padding:3px 8px;font-size:11px">
+						${filtered_summary.active_plans} ${__("active plan(s)")}
+					</span>
+					${devices.length > vas_devices.length ? `
+					<span class="badge"
+						style="background:#f3f4f6;color:#6b7280;padding:3px 8px;font-size:11px"
+						title="${__("Devices without a VAS plan are hidden")}">
+						${devices.length - vas_devices.length} ${__("hidden")}
+					</span>` : ""}
+				</div>
+			</div>
+			<div class="section-body">
+				<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px">
+					<div>
+						<span class="text-muted">${__("Name")}:</span>
+						<b>${frappe.utils.escape_html(customer_name || customer)}</b>
+					</div>
+					<div>
+						<span class="text-muted">${__("Phone")}:</span>
+						${frappe.utils.escape_html(customer_phone || "N/A")}
+					</div>
+					<div>
+						<span class="text-muted">${__("ID")}:</span>
+						<code style="font-size:11px">${frappe.utils.escape_html(customer)}</code>
 					</div>
 				</div>
-				<div class="section-body">
-					<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px">
-						<div><span class="text-muted">${__("Name")}:</span> <b>${customer_name || customer}</b></div>
-						<div><span class="text-muted">${__("Phone")}:</span> ${customer_phone || "N/A"}</div>
-						<div><span class="text-muted">${__("ID")}:</span> <code style="font-size:11px">${customer}</code></div>
-					</div>
+			</div>
+		</div>`;
+
+	// ── Devices section ──
+	if (!vas_devices.length && !unlinked_plans.length) {
+		html += `
+			<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
+				<div class="section-body text-center" style="padding:24px;color:var(--pos-muted)">
+					<i class="fa fa-shield fa-2x" style="color:#d1d5db"></i>
+					<p style="margin-top:8px;margin-bottom:4px">
+						<b>${__("No VAS plans found for this customer")}</b>
+					</p>
+					<p style="font-size:12px;color:#9ca3af">
+						${devices.length
+							? __("Customer has {0} device(s) but none have a VAS / Protection plan attached.", [devices.length])
+							: __("No devices on file.")}
+					</p>
 				</div>
 			</div>`;
-
-		// Devices
-		if (!devices.length && !unlinked_plans.length) {
-			html += `<div class="text-muted text-center" style="padding:16px">${__("No devices found")}</div>`;
-		} else {
-			devices.forEach((dev, idx) => {
-				html += this._render_device_card(dev, idx);
-			});
-		}
-
-		// Unlinked plans (not attached to any device)
-		if (unlinked_plans.length) {
-			html += this._render_unlinked_plans(unlinked_plans);
-		}
-
-		panel.find(".ch-claim-dashboard").html(html).show();
+	} else {
+		// Pass the ORIGINAL index so _show_claim_form can resolve via
+		// this._dashboard.devices[idx] without any refactor.
+		vas_devices.forEach((dev) => {
+			const original_idx = devices.indexOf(dev);
+			html += this._render_device_card(dev, original_idx);
+		});
 	}
+
+	// Unlinked plans (purchased but not tied to a device)
+	if (unlinked_plans.length) {
+		html += this._render_unlinked_plans(unlinked_plans);
+	}
+
+	panel.find(".ch-claim-dashboard").html(html).show();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 	_render_device_card(dev, idx) {
 		const plans = dev.plans || [];
