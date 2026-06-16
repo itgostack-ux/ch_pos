@@ -33,13 +33,18 @@ export class CartService {
 	// POS-10 fix: Auto-persist active cart state to localStorage on every change
 	_persist_active_cart() {
 		try {
-			if (!PosState.cart || !PosState.cart.length) {
+			const has_cart    = PosState.cart && PosState.cart.length > 0;
+			const has_exchange = flt(PosState.exchange_amount) > 0 || flt(PosState.product_exchange_credit) > 0;
+
+			// Clear storage only when there is nothing worth saving
+			if (!has_cart && !has_exchange) {
 				localStorage.removeItem("ch_pos_active_cart");
 				return;
 			}
+
 			const data = {
 				customer: PosState.customer,
-				cart: JSON.parse(JSON.stringify(PosState.cart)),
+				cart: JSON.parse(JSON.stringify(PosState.cart || [])),
 				additional_discount_pct: PosState.additional_discount_pct,
 				additional_discount_amt: PosState.additional_discount_amt,
 				coupon_code: PosState.coupon_code,
@@ -48,6 +53,9 @@ export class CartService {
 				voucher_amount: PosState.voucher_amount,
 				exchange_assessment: PosState.exchange_assessment,
 				exchange_amount: PosState.exchange_amount,
+				exchange_order: PosState.exchange_order,
+				product_exchange_credit: PosState.product_exchange_credit,
+				product_exchange_invoice: PosState.product_exchange_invoice,
 				sale_type: PosState.sale_type,
 				is_credit_sale: PosState.is_credit_sale || false,
 				is_free_sale: PosState.is_free_sale || false,
@@ -75,28 +83,42 @@ export class CartService {
 					return;
 				}
 			}
-			if (data.cart && data.cart.length) {
+
+			const has_cart     = data.cart && data.cart.length > 0;
+			const has_exchange = flt(data.exchange_amount) > 0 || flt(data.product_exchange_credit) > 0;
+
+			if (!has_cart && !has_exchange) return;
+
+			if (has_cart) {
 				PosState.cart = data.cart;
-				if (data.customer) PosState.customer = data.customer;
-				if (data.additional_discount_pct) PosState.additional_discount_pct = data.additional_discount_pct;
-				if (data.additional_discount_amt) PosState.additional_discount_amt = data.additional_discount_amt;
-				if (data.coupon_code) PosState.coupon_code = data.coupon_code;
-				if (data.coupon_discount) PosState.coupon_discount = data.coupon_discount;
-				if (data.voucher_code) PosState.voucher_code = data.voucher_code;
-				if (data.voucher_amount) PosState.voucher_amount = data.voucher_amount;
-				if (data.exchange_assessment) PosState.exchange_assessment = data.exchange_assessment;
-				if (data.exchange_amount) PosState.exchange_amount = data.exchange_amount;
-				if (data.sale_type) PosState.sale_type = data.sale_type;
-				PosState.is_credit_sale = data.is_credit_sale || false;
-				PosState.is_free_sale = data.is_free_sale || false;
-				PosState.exception_request = data.exception_request || null;
-				PosState.exception_request_data = data.exception_request_data || null;
-				if (PosState.exception_request_data) {
-					this._apply_exception_pricing_to_cart(PosState.exception_request_data);
-				}
-				EventBus.emit("cart:updated");
-				frappe.show_alert({ message: __("Previous cart restored"), indicator: "blue" });
 			}
+			if (data.customer) PosState.customer = data.customer;
+			if (data.additional_discount_pct) PosState.additional_discount_pct = data.additional_discount_pct;
+			if (data.additional_discount_amt) PosState.additional_discount_amt = data.additional_discount_amt;
+			if (data.coupon_code) PosState.coupon_code = data.coupon_code;
+			if (data.coupon_discount) PosState.coupon_discount = data.coupon_discount;
+			if (data.voucher_code) PosState.voucher_code = data.voucher_code;
+			if (data.voucher_amount) PosState.voucher_amount = data.voucher_amount;
+			if (data.exchange_assessment) PosState.exchange_assessment = data.exchange_assessment;
+			if (data.exchange_amount) PosState.exchange_amount = flt(data.exchange_amount);
+			if (data.exchange_order) PosState.exchange_order = data.exchange_order;
+			if (data.product_exchange_credit) PosState.product_exchange_credit = flt(data.product_exchange_credit);
+			if (data.product_exchange_invoice) PosState.product_exchange_invoice = data.product_exchange_invoice;
+			if (data.sale_type) PosState.sale_type = data.sale_type;
+			PosState.is_credit_sale = data.is_credit_sale || false;
+			PosState.is_free_sale = data.is_free_sale || false;
+			PosState.exception_request = data.exception_request || null;
+			PosState.exception_request_data = data.exception_request_data || null;
+			if (PosState.exception_request_data) {
+				this._apply_exception_pricing_to_cart(PosState.exception_request_data);
+			}
+
+			EventBus.emit("cart:updated");
+
+			const msg = has_exchange && !has_cart
+				? __("Exchange credit ₹{0} restored", [format_number(flt(data.exchange_amount) + flt(data.product_exchange_credit))])
+				: __("Previous cart restored");
+			frappe.show_alert({ message: msg, indicator: "blue" });
 		} catch (e) {
 			localStorage.removeItem("ch_pos_active_cart");
 		}
