@@ -8386,7 +8386,7 @@ def mark_reprint_done(reprint_name) -> dict:
 # Buyback POS Full-Flow APIs
 # ═══════════════════════════════════════════════════════════════════════════
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 def get_pos_buyback_detail(assessment_name) -> dict:
     """Return full buyback detail for POS: assessment + linked order + diagnostics.
 

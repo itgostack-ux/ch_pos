@@ -51,7 +51,12 @@ const STAGE_LABELS = [
 ];
 
 function _api_error_message(e, fallback) {
-	let msg = (e && (e.message || e.exc_type || e.exc)) || "";
+	let msg = "";
+	if (typeof e === "string") {
+		msg = e;
+	} else {
+		msg = (e && (e.message || e.exc_type || e.exc)) || "";
+	}
 	if (!msg && e && e._server_messages) {
 		try {
 			const raw = JSON.parse(e._server_messages);
@@ -74,6 +79,29 @@ function _api_error_message(e, fallback) {
 	}
 
 	return msg;
+}
+
+function _render_detail_error(detail, message, retry) {
+	detail.html(`
+		<div style="padding:36px 24px;text-align:center;color:#475569">
+			<div style="width:44px;height:44px;border-radius:50%;background:#fee2e2;color:#b91c1c;display:inline-flex;align-items:center;justify-content:center;margin-bottom:14px">
+				<i class="fa fa-exclamation-triangle"></i>
+			</div>
+			<div style="font-weight:700;color:#111827;margin-bottom:6px">${__("Unable to load buyback details")}</div>
+			<div style="font-size:13px;line-height:1.5;max-width:420px;margin:0 auto 16px">
+				${frappe.utils.escape_html(message)}
+			</div>
+			<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+				<button class="btn btn-sm btn-primary ch-bb-retry-detail">
+					<i class="fa fa-refresh"></i> ${__("Retry")}
+				</button>
+				<button class="btn btn-sm btn-outline-secondary ch-bb-reload-page">
+					<i class="fa fa-sign-in"></i> ${__("Reload POS")}
+				</button>
+			</div>
+		</div>`);
+	detail.find(".ch-bb-retry-detail").on("click", retry);
+	detail.find(".ch-bb-reload-page").on("click", () => window.location.reload());
 }
 
 export class BuybackWorkspace {
@@ -263,10 +291,19 @@ export class BuybackWorkspace {
 		detail.html(`<div style="padding:40px;text-align:center">
 			<i class="fa fa-spinner fa-spin fa-2x" style="opacity:0.3"></i>
 		</div>`);
-		frappe.xcall("ch_pos.api.pos_api.get_pos_buyback_detail", { assessment_name: name })
+		frappe.xcall(
+			"ch_pos.api.pos_api.get_pos_buyback_detail",
+			{ assessment_name: name },
+			undefined,
+			{ silent: true }
+		)
 			.then(data => {
 				this._current_data = data;
 				this._render_detail(detail, data);
+			})
+			.catch(e => {
+				const message = _api_error_message(e, __("Failed to load buyback details."));
+				_render_detail_error(detail, message, () => this._load_detail(panel, name));
 			});
 	}
 

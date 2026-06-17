@@ -1002,6 +1002,10 @@ def find_customer_by_phone(phone: str) -> dict:
         return None
     phone = normalize_indian_phone(phone.strip())
     tail10 = (phone or "")[-10:]
+    # Reject clearly invalid numbers: must be 10 digits starting with 6-9 (Indian mobile).
+    # This prevents test/dummy numbers like 0000000000 from matching test-data contacts.
+    if not tail10 or len(tail10) != 10 or tail10[0] not in "6789":
+        return None
     # Try mobile_no on Customer directly
     name = frappe.db.get_value("Customer", {"mobile_no": phone}, "name")
     if name:
