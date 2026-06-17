@@ -208,9 +208,7 @@ export class PrebookWorkspace {
 								<i class="fa fa-exclamation-triangle"></i> ${__("Proforma saved as draft — submit manually before printing.")}
 							</span>`
 						}
-						<a class="btn btn-default btn-sm" target="_blank" href="/app/quotation/${encodeURIComponent(qtn.name)}">
-							<i class="fa fa-external-link"></i> ${__("Open in Desk")}
-						</a>
+						
 					</div>
 				</div>`,
 		});
