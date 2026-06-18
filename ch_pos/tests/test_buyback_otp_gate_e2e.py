@@ -25,6 +25,13 @@ def _pick_assessment() -> str:
           AND COALESCE(i.disabled, 0) = 0
           AND COALESCE(i.has_serial_no, 0) = 0
           AND COALESCE(i.has_batch_no, 0) = 0
+          AND NOT EXISTS (
+              SELECT 1
+              FROM `tabBuyback Order` o
+              WHERE o.buyback_assessment = a.name
+                AND o.docstatus != 2
+                AND o.status IN ('Paid', 'Closed')
+          )
         ORDER BY a.modified DESC
         LIMIT 1
         """,
@@ -40,6 +47,13 @@ def _pick_assessment() -> str:
             WHERE a.docstatus < 2
               AND COALESCE(i.ch_lifecycle_status, 'Active') = 'Active'
               AND COALESCE(i.disabled, 0) = 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM `tabBuyback Order` o
+                  WHERE o.buyback_assessment = a.name
+                    AND o.docstatus != 2
+                    AND o.status IN ('Paid', 'Closed')
+              )
             ORDER BY a.modified DESC
             LIMIT 1
             """,

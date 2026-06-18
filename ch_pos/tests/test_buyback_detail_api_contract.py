@@ -49,6 +49,25 @@ def run():
         detail = method(assessment_name)
         assert detail.get("name") == assessment_name, "Detail response assessment mismatch"
         assert "order" in detail, "Detail response should include order key"
+        if detail.get("order"):
+            order = detail["order"]
+            required_fields = {
+                "customer_approval_method",
+                "approval_date",
+                "approval_remarks",
+                "settlement_type",
+                "customer_payout_mode",
+                "customer_payout_updated_at",
+                "customer_payout_updated_by",
+                "customer_id_type",
+                "customer_id_number",
+                "kyc_verified",
+                "mobile_no",
+                "item_name",
+                "imei_serial",
+            }
+            missing = sorted(required_fields.difference(order))
+            assert not missing, f"POS buyback detail missing reflected fields: {missing}"
 
     print(
         {

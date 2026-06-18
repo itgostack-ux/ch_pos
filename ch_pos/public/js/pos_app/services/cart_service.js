@@ -1319,6 +1319,9 @@ export class CartService {
 			const brand_badge = p.brand
 				? `<span class="badge badge-light" style="font-size:10px">${frappe.utils.escape_html(p.brand)}</span>`
 				: "";
+			const external_badge = p.allows_external_device
+				? `<span class="badge badge-success" style="font-size:10px">${__("External IMEI")}</span>`
+				: "";
 			const blocked_html = blocked
 				? `<div class="text-danger" style="font-size:11px;margin-top:4px"><i class="fa fa-ban"></i> ${frappe.utils.escape_html(p.blocked_reason)}</div>`
 				: "";
@@ -1329,7 +1332,7 @@ export class CartService {
 						<div style="display:flex;justify-content:space-between;align-items:center">
 							<div>
 								<b>${frappe.utils.escape_html(p.plan_name)}</b>
-								<span style="margin-left:6px">${type_badge} ${brand_badge}</span>
+								<span style="margin-left:6px">${type_badge} ${brand_badge} ${external_badge}</span>
 							</div>
 							<span style="font-weight:700;color:var(--primary)">₹${format_number(p.price)}</span>
 						</div>
@@ -1395,21 +1398,18 @@ export class CartService {
 					for_serial_no = imei;
 					for_item_code = null; // external device — no item in cart
 
-					// Validate category for manual IMEI if plan has category restriction
-					if (plan.applicable_categories && plan.applicable_categories.length) {
-						frappe.xcall(
-							"ch_item_master.ch_item_master.warranty_api.validate_vas_category",
-							{ serial_no: imei, warranty_plan: plan.name }
-						).then((res) => {
-							if (!res.valid) {
-								frappe.show_alert({ message: res.message, indicator: "red" });
-								return;
-							}
-							if (res.item_code) for_item_code = res.item_code;
-							this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
-						});
-						return; // async — don't fall through
-					}
+					frappe.xcall(
+						"ch_item_master.ch_item_master.warranty_api.validate_vas_category",
+						{ serial_no: imei, warranty_plan: plan.name }
+					).then((res) => {
+						if (!res.valid) {
+							frappe.show_alert({ message: res.message, indicator: "red" });
+							return;
+						}
+						if (res.item_code) for_item_code = res.item_code;
+						this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
+					});
+					return; // async — don't fall through
 				} else {
 					const for_raw = values.for_item || "";
 					for_item_code = for_raw.split(" (")[0] || null;

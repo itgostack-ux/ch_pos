@@ -908,8 +908,22 @@ def create_pos_invoice(pos_profile, customer, items,
             if _sn_val is not None and not isinstance(_sn_val, str):
                 item[_sn_key] = str(_sn_val)
         item_serial = (item.get("serial_no") or item.get("for_serial_no") or "").strip()
-        item_exception_original = flt(item.get("exception_original_rate") or item.get("price_list_rate") or item.get("mrp") or item.get("rate"))
-        item_exception_final = flt(item.get("exception_final_rate") or item.get("rate"))
+        item_qty = flt(item.get("qty", 1)) or 1
+        uploaded_rate = flt(item.get("rate") or item.get("price"))
+        uploaded_amount = flt(item.get("amount"))
+
+        # Upload payloads can provide amount-only or price-only rows.
+        # Preserve user-uploaded commercial values instead of defaulting to zero.
+        if not uploaded_rate and item_qty and uploaded_amount:
+            uploaded_rate = flt(uploaded_amount / item_qty)
+
+        item_exception_original = flt(
+            item.get("exception_original_rate")
+            or item.get("price_list_rate")
+            or item.get("mrp")
+            or uploaded_rate
+        )
+        item_exception_final = flt(item.get("exception_final_rate") or uploaded_rate)
         if exception_request_doc and item.get("item_code") == exception_request_doc.item_code:
             serial_match = not exception_request_doc.serial_no or item_serial == (exception_request_doc.serial_no or "").strip()
             phone_match = True
@@ -942,7 +956,7 @@ def create_pos_invoice(pos_profile, customer, items,
 
         row = {
             "item_code": item.get("item_code"),
-            "qty": flt(item.get("qty", 1)),
+            "qty": item_qty,
             "rate": item_exception_final,
             "price_list_rate": item_exception_original,
             "uom": item.get("uom", "Nos"),
@@ -950,6 +964,11 @@ def create_pos_invoice(pos_profile, customer, items,
             "discount_percentage": flt(item.get("discount_percentage", 0)),
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
+
+        # If amount was explicitly uploaded, align rate so ERPNext recalculation
+        # keeps the uploaded amount instead of drifting to zero.
+        if uploaded_amount and item_qty:
+            row["rate"] = flt(uploaded_amount / item_qty)
         item_is_plan = _is_plan_row(item)
         item_plan_type = _get_plan_type(item.get("warranty_plan")) if item.get("warranty_plan") else ""
         item_is_vas = cint(item.get("is_vas", 0)) or cint(
@@ -1841,6 +1860,13 @@ def create_pos_invoice(pos_profile, customer, items,
         )
     ]
 
+    plan_service_items = {
+        _get_plan_service_item(wi.get("warranty_plan"))
+        for wi in warranty_items
+        if wi.get("warranty_plan")
+    }
+    plan_service_items.discard("")
+
     def _infer_device_serial(wi):
         """Infer the linked device serial/IMEI from invoice rows when missing."""
         if wi.get("serial_no"):
@@ -1865,6 +1891,97 @@ def create_pos_invoice(pos_profile, customer, items,
 
         return wi.get("serial_no")
 
+    def _resolve_item_from_imei(serial_no):
+        serial_no = (serial_no or "").strip()
+        if not serial_no:
+            return ""
+
+        item_code = frappe.db.get_value("Serial No", serial_no, "item_code")
+        if item_code:
+            return item_code
+
+        return (
+            frappe.db.get_value("CH Serial Lifecycle", {"serial_no": serial_no}, "item_code")
+            or frappe.db.get_value("CH Serial Lifecycle", {"imei_number": serial_no}, "item_code")
+            or frappe.db.get_value("CH Serial Lifecycle", {"imei_number_2": serial_no}, "item_code")
+            or ""
+        )
+
+    def _find_device_price(invoice_name, item_code=None, serial_no=None):
+        if not invoice_name:
+            return 0
+
+        rows = frappe.get_all(
+            "Sales Invoice Item",
+            filters={"parent": invoice_name, "parenttype": "Sales Invoice"},
+            fields=["item_code", "rate", "serial_no", "idx"],
+            order_by="idx asc",
+        )
+        serial_no = (serial_no or "").strip()
+
+        if serial_no:
+            for row in rows:
+                if serial_no in (row.get("serial_no") or ""):
+                    return flt(row.get("rate"))
+
+        if item_code:
+            for row in rows:
+                if row.get("item_code") == item_code:
+                    return flt(row.get("rate"))
+
+        for row in rows:
+            row_item = row.get("item_code")
+            if row_item in plan_service_items:
+                continue
+            if cint(frappe.db.get_value("Item", row_item, "is_stock_item")):
+                return flt(row.get("rate"))
+
+        return 0
+
+    def _prepare_active_plan_link(wi):
+        plan_doc = frappe.get_cached_doc("CH Warranty Plan", wi.get("warranty_plan"))
+        serial_no = (wi.get("serial_no") or "").strip()
+
+        if not wi.get("for_item_code") and serial_no:
+            resolved_item = _resolve_item_from_imei(serial_no)
+            if resolved_item:
+                wi["for_item_code"] = resolved_item
+
+        if wi.get("for_item_code"):
+            wi["_plan_doc"] = plan_doc
+            return
+
+        if not cint(plan_doc.get("allow_external_device")):
+            frappe.throw(
+                frappe._("Plan {0} cannot be sold for customer-provided IMEI {1}. "
+                         "Select a device from the bill/inventory, or enable external IMEI on the plan.").format(
+                    wi.get("warranty_plan"), serial_no or frappe._("not provided")
+                ),
+                title=frappe._("External IMEI Not Allowed"),
+            )
+
+        if not plan_doc.get("external_device_item"):
+            frappe.throw(
+                frappe._("Plan {0} allows external IMEI but has no External Device Item configured.").format(
+                    wi.get("warranty_plan")
+                ),
+                title=frappe._("External Device Setup Missing"),
+            )
+
+        if cint(plan_doc.purchase_window_hours or 0) > 0 and not original_invoice:
+            frappe.throw(
+                frappe._("Plan {0} has a {1}-hour purchase window. "
+                         "For a customer-provided IMEI, link the original invoice or use a plan with no purchase window.").format(
+                    wi.get("warranty_plan"), cint(plan_doc.purchase_window_hours)
+                ),
+                title=frappe._("Purchase Window Proof Required"),
+            )
+
+        wi["for_item_code"] = plan_doc.external_device_item
+        wi["is_external_device"] = 1
+        wi["external_device_source"] = "POS Customer-Provided IMEI"
+        wi["_plan_doc"] = plan_doc
+
     for wi in warranty_items:
         # Auto-infer for_item_code: if not sent and exactly one device in cart, use it
         if not wi.get("for_item_code") and len(device_items_on_inv) == 1:
@@ -1873,6 +1990,8 @@ def create_pos_invoice(pos_profile, customer, items,
         inferred_serial = _infer_device_serial(wi)
         if inferred_serial:
             wi["serial_no"] = inferred_serial
+
+        _prepare_active_plan_link(wi)
 
         # INT-3 fix: Throw error instead of silently skipping active VAS plan creation
         if not wi.get("for_item_code"):
@@ -1885,14 +2004,20 @@ def create_pos_invoice(pos_profile, customer, items,
             )
 
         # Look up device purchase price from the same invoice
-        device_price = 0
-        for inv_item in inv.items:
-            if inv_item.item_code == wi["for_item_code"]:
-                device_price = flt(inv_item.rate)
-                break
+        device_price = _find_device_price(
+            inv.name,
+            item_code=wi["for_item_code"],
+            serial_no=wi.get("serial_no"),
+        )
+        if not device_price and original_invoice:
+            device_price = _find_device_price(
+                original_invoice,
+                item_code=None if wi.get("is_external_device") else wi["for_item_code"],
+                serial_no=wi.get("serial_no"),
+            )
 
         try:
-            sp = _create_sold_plan(
+            sp = _create_active_plan(
                 warranty_plan=wi["warranty_plan"],
                 customer=customer,
                 item_code=wi["for_item_code"],
@@ -1901,6 +2026,9 @@ def create_pos_invoice(pos_profile, customer, items,
                 plan_price=wi["price"],
                 serial_no=wi.get("serial_no"),
                 device_purchase_price=device_price,
+                is_external_device=wi.get("is_external_device"),
+                external_device_source=wi.get("external_device_source"),
+                original_invoice=original_invoice,
             )
             if sp:
                 sold_plans.append(sp.name)
@@ -1910,6 +2038,7 @@ def create_pos_invoice(pos_profile, customer, items,
                 frappe.get_traceback(),
                 f"Active VAS Plans creation failed for {inv.name} / {wi.get('warranty_plan')}"
             )
+            raise
 
     # ── VAS Voucher Generation ────────────────────────────────────────────────
     # Read voucher rules from CH VAS Settings (configurable face value, validity,
@@ -2035,6 +2164,7 @@ def create_pos_invoice(pos_profile, customer, items,
         "name": inv.name,
         "grand_total": inv.grand_total,
         "sold_plans": sold_plans,
+        "active_plans": sold_plans,
         "incentive_earned": incentive_total,
         "incentive_warning": incentive_warning,
         "voucher_redeemed": voucher_redeemed,
@@ -2085,8 +2215,9 @@ def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
         frappe.log_error(frappe.get_traceback(), f"Voucher email failed for {invoice_name}")
 
 
-def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price,
-                      serial_no=None, device_purchase_price=0):
+def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price,
+                        serial_no=None, device_purchase_price=0, is_external_device=0,
+                        external_device_source=None, original_invoice=None):
     """Create an Active VAS Plans record (shown as Active VAS Plans in UI) when a warranty is sold via POS.
 
     Uses the standard Frappe document lifecycle (insert → submit) so that
@@ -2110,6 +2241,9 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
             "creation",
             order_by="creation desc",
         )
+        if not device_sold_at and original_invoice:
+            device_sold_at = frappe.db.get_value("Sales Invoice", original_invoice, "creation")
+
         if device_sold_at:
             from frappe.utils import time_diff_in_hours, now_datetime as _now
             hours_since = time_diff_in_hours(_now(), device_sold_at)
@@ -2120,6 +2254,14 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
                         purchase_window, hours_since),
                     title=_("Purchase Window Expired"),
                 )
+        elif cint(is_external_device):
+            frappe.throw(
+                _("This plan must be purchased within {0} hours of device sale. "
+                  "Customer-provided IMEI {1} has no verifiable original sale.").format(
+                    purchase_window, serial_no or ""
+                ),
+                title=_("Purchase Window Proof Required"),
+            )
 
     today = nowdate()
     sp = frappe.new_doc("Active VAS Plans")
@@ -2138,6 +2280,10 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
     sp.claims_per_year = plan_doc.claims_per_year or 0
     sp.device_purchase_price = flt(device_purchase_price)
     sp.max_coverage_value = flt(device_purchase_price) if flt(device_purchase_price) > 0 else 0
+    sp.is_external_device = cint(is_external_device)
+    sp.external_device_source = external_device_source or ""
+    if cint(is_external_device):
+        sp.remarks = _("Customer-provided IMEI sold via POS. Not attached to GoGizmo device inventory.")
     sp.sold_by = frappe.session.user
     sp.insert(ignore_permissions=True)
     sp.submit()
@@ -7135,6 +7281,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         fields=[
             "name", "plan_name", "plan_type", "service_item",
             "duration_months", "price", "coverage_description", "brand",
+            "fulfillment_type", "allow_external_device", "external_device_item",
         ],
     )
 
@@ -7149,11 +7296,19 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
 
         # Device dependency: Protection Plans always require a device
         requires_device = plan.plan_type == "Protection Plan"
+        allows_external_device = cint(plan.get("allow_external_device")) and bool(
+            plan.get("external_device_item")
+        )
         plan["requires_device"] = requires_device
+        plan["allows_external_device"] = bool(allows_external_device)
 
-        if requires_device and not has_device:
+        if requires_device and not has_device and not allows_external_device:
             plan["blocked"] = True
             plan["blocked_reason"] = frappe._("Requires a device in cart")
+        elif requires_device and not has_device and allows_external_device:
+            plan["blocked"] = False
+            plan["blocked_reason"] = ""
+            plan["external_imei_supported"] = True
         else:
             plan["blocked"] = False
             plan["blocked_reason"] = ""
@@ -7173,7 +7328,10 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
                         plan["blocked_reason"] = frappe._("Not applicable for {0}").format(
                             ", ".join(device_categories)
                         )
-                # If no device in cart, plan stays unblocked — manual IMEI will be validated later
+                if not device_categories and not allows_external_device:
+                    plan["blocked"] = True
+                    plan["blocked_reason"] = frappe._("Requires an eligible device in cart")
+                # External-allowed plans stay unblocked; manual IMEI is validated before billing.
 
         applicable.append(plan)
 
@@ -8412,6 +8570,14 @@ def get_pos_buyback_detail(assessment_name) -> dict:
         order = {
             "name": o.name,
             "status": o.status,
+            "customer": o.customer or "",
+            "customer_name": o.customer_name or "",
+            "mobile_no": o.mobile_no or "",
+            "item": o.item or "",
+            "item_name": o.item_name or "",
+            "brand": o.brand or "",
+            "imei_serial": o.imei_serial or "",
+            "condition_grade": o.condition_grade or "",
             "final_price": flt(o.final_price),
             "base_price": flt(o.base_price),
             "settlement_type": o.settlement_type or "",
@@ -8425,8 +8591,25 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "customer_payout_notes": o.customer_payout_notes or "",
             "customer_payout_updated_at": str(o.customer_payout_updated_at) if o.customer_payout_updated_at else "",
             "customer_payout_updated_by": o.customer_payout_updated_by or "",
+            "customer_id_type": getattr(o, "customer_id_type", "") or "",
+            "customer_id_number": getattr(o, "customer_id_number", "") or "",
+            "customer_id_front": getattr(o, "customer_id_front", "") or "",
+            "customer_id_back": getattr(o, "customer_id_back", "") or "",
+            "customer_photo": getattr(o, "customer_photo", "") or "",
+            "kyc_verified": cint(getattr(o, "kyc_verified", 0)),
+            "kyc_verified_by": getattr(o, "kyc_verified_by", "") or "",
+            "kyc_verified_at": (
+                str(getattr(o, "kyc_verified_at", "")) if getattr(o, "kyc_verified_at", None) else ""
+            ),
             "customer_approved": cint(o.customer_approved),
+            "customer_approved_at": (
+                str(getattr(o, "customer_approved_at", "")) if getattr(o, "customer_approved_at", None) else ""
+            ),
+            "customer_approval_method": getattr(o, "customer_approval_method", "") or "",
             "otp_verified": cint(o.otp_verified),
+            "otp_verified_at": (
+                str(getattr(o, "otp_verified_at", "")) if getattr(o, "otp_verified_at", None) else ""
+            ),
             "imei_validation_status": o.imei_validation_status or "Pending",
             "imei_validation_screenshot": o.imei_validation_screenshot or "",
             "imei_validation_checked_by": o.imei_validation_checked_by or "",
@@ -8445,6 +8628,8 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "payment_status": o.payment_status or "",
             "requires_approval": cint(o.requires_approval),
             "approved_by": o.approved_by or "",
+            "approval_date": str(o.approval_date) if o.approval_date else "",
+            "approval_remarks": o.approval_remarks or "",
             "approval_token": o.approval_token or "",
             "approval_url": (
                 f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
@@ -9097,6 +9282,10 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     """
     frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", order_name)
+    payout_mode = (payment_method or "Cash").strip()
+    if payout_mode not in ("Cash", "UPI", "Bank Transfer"):
+        frappe.throw(frappe._("Invalid buyback payout method: {0}").format(payout_mode))
+    payment_method = _resolve_buyback_payment_mode(payout_mode)
 
     # Idempotency: already settled
     if doc.status in ("Paid", "Closed"):
@@ -9105,6 +9294,7 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
             "status": doc.status,
             "final_price": flt(doc.final_price),
             "payment_method": payment_method,
+            "payout_mode": payout_mode,
         }
 
     if not doc.customer_approved:
@@ -9121,6 +9311,9 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
 
     from frappe.utils import now_datetime
     doc.settlement_type = "Buyback"
+    doc.customer_payout_mode = payout_mode
+    doc.customer_payout_updated_at = now_datetime()
+    doc.customer_payout_updated_by = frappe.session.user or "Administrator"
 
     # Avoid duplicate payments. The order may already have payment rows from
     # another flow (customer-portal payout capture, manual entry, prior call
@@ -9173,7 +9366,43 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
         "status": doc.status,
         "final_price": flt(doc.final_price),
         "payment_method": payment_method,
+        "payout_mode": payout_mode,
     }
+
+
+def _resolve_buyback_payment_mode(payout_mode: str) -> str:
+    """Map POS payout choices to an actual ERPNext Mode of Payment.
+
+    Buyback Order stores customer-facing payout choices as Cash / UPI /
+    Bank Transfer, but the payment child table links to Mode of Payment
+    master data. Do not require every site to create a Mode of Payment
+    named exactly "UPI"; use sensible configured fallbacks instead.
+    """
+    payout_mode = (payout_mode or "Cash").strip()
+    exact = payout_mode if frappe.db.exists("Mode of Payment", payout_mode) else ""
+    if exact:
+        return exact
+
+    candidates = {
+        "Cash": ["Cash"],
+        "UPI": ["UPI", "Wallet", "Wire Transfer", "Bank Draft", "Cheque"],
+        "Bank Transfer": ["Bank Transfer", "Wire Transfer", "Bank Draft", "Cheque"],
+    }.get(payout_mode, [])
+
+    for candidate in candidates:
+        if frappe.db.exists("Mode of Payment", candidate):
+            return candidate
+
+    wanted_type = "Cash" if payout_mode == "Cash" else "Bank"
+    fallback = frappe.db.get_value("Mode of Payment", {"type": wanted_type}, "name", order_by="name asc")
+    if fallback:
+        return fallback
+
+    frappe.throw(
+        frappe._("No Mode of Payment is configured for buyback payout mode {0}.").format(
+            frappe.bold(payout_mode)
+        )
+    )
 
 
 @frappe.whitelist()

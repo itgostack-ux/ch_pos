@@ -1,7 +1,7 @@
 {
  "app": "ch_pos",
  "charts": [],
- "content": "[{\"id\": \"sc_open_pos\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Open POS\", \"col\": 4}}, {\"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Store Hub\", \"col\": 4}}, {\"id\": \"hdr_quick\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Quick Actions</b></span>\", \"col\": 12}}, {\"id\": \"sc_tokens\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Kiosk Tokens\", \"col\": 3}}, {\"id\": \"sc_guided\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Guided Sessions\", \"col\": 3}}, {\"id\": \"sc_comparisons\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Comparisons\", \"col\": 3}}, {\"id\": \"sc_repair\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Repair Intake\", \"col\": 3}}, {\"id\": \"sc_session_log\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Session Logs\", \"col\": 3}}, {\"id\": \"sc_incentive\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Incentive Ledger\", \"col\": 3}}, {\"id\": \"spacer_1\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_docs\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Documents</b></span>\", \"col\": 12}}, {\"id\": \"card_kiosk\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Kiosk\", \"col\": 4}}, {\"id\": \"card_ai\", \"type\": \"card\", \"data\": {\"card_name\": \"AI & Comparison\", \"col\": 4}}, {\"id\": \"card_repair\", \"type\": \"card\", \"data\": {\"card_name\": \"Repair\", \"col\": 4}}, {\"id\": \"card_buyback\", \"type\": \"card\", \"data\": {\"card_name\": \"Buyback\", \"col\": 4}}, {\"id\": \"spacer_2\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_reports\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Reports</b></span>\", \"col\": 12}}, {\"id\": \"card_reports\", \"type\": \"card\", \"data\": {\"card_name\": \"Store Reports\", \"col\": 6}}, {\"id\": \"spacer_3\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_config\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Configuration</b></span>\", \"col\": 12}}, {\"id\": \"card_config\", \"type\": \"card\", \"data\": {\"card_name\": \"Configuration\", \"col\": 4}}, {\"id\": \"card_session\", \"type\": \"card\", \"data\": {\"card_name\": \"Session & Settlement\", \"col\": 4}}, {\"id\": \"card_masters\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Masters\", \"col\": 4}}, {\"id\": \"card_pos_reports\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Reports\", \"col\": 6}}]",
+ "content": "[{\"id\": \"sc_open_pos\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Open POS\", \"col\": 4}}, {\"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Store Hub\", \"col\": 4}}, {\"id\": \"hdr_quick\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Quick Actions</b></span>\", \"col\": 12}}, {\"id\": \"sc_tokens\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Kiosk Tokens\", \"col\": 3}}, {\"id\": \"sc_guided\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Guided Sessions\", \"col\": 3}}, {\"id\": \"sc_comparisons\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Comparisons\", \"col\": 3}}, {\"id\": \"sc_repair\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Repair Intake\", \"col\": 3}}, {\"id\": \"sc_session_log\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Session Logs\", \"col\": 3}}, {\"id\": \"sc_incentive\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Incentive Ledger\", \"col\": 3}}, {\"id\": \"spacer_1\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_docs\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Documents</b></span>\", \"col\": 12}}, {\"id\": \"card_kiosk\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Kiosk\", \"col\": 4}}, {\"id\": \"card_ai\", \"type\": \"card\", \"data\": {\"card_name\": \"AI & Comparison\", \"col\": 4}}, {\"id\": \"card_repair\", \"type\": \"card\", \"data\": {\"card_name\": \"Repair\", \"col\": 4}}, {\"id\": \"card_buyback\", \"type\": \"card\", \"data\": {\"card_name\": \"Buyback\", \"col\": 4}}, {\"id\": \"spacer_2\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_reports\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Reports</b></span>\", \"col\": 12}}, {\"id\": \"card_reports\", \"type\": \"card\", \"data\": {\"card_name\": \"Store Reports\", \"col\": 6}}, {\"id\": \"spacer_3\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hdr_config\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Configuration</b></span>\", \"col\": 12}}, {\"id\": \"card_config\", \"type\": \"card\", \"data\": {\"card_name\": \"Configuration\", \"col\": 4}}, {\"id\": \"card_session\", \"type\": \"card\", \"data\": {\"card_name\": \"Session & Settlement\", \"col\": 4}}, {\"id\": \"card_masters\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Masters\", \"col\": 4}}, {\"id\": \"card_logs_audit\", \"type\": \"card\", \"data\": {\"card_name\": \"Logs & Audit\", \"col\": 4}}, {\"id\": \"card_pos_reports\", \"type\": \"card\", \"data\": {\"card_name\": \"POS Reports\", \"col\": 6}}]",
  "creation": "2026-03-08 10:00:00",
  "custom_blocks": [],
  "docstatus": 0,
@@ -10,6 +10,7 @@
  "hide_custom": 0,
  "icon": "selling",
  "idx": 0,
+ "indicator_color": "blue",
  "is_hidden": 0,
  "label": "POS",
  "links": [
@@ -290,6 +291,16 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "POS EDC Transaction",
+   "link_count": 0,
+   "link_to": "POS EDC Transaction",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "CH Cash Drop",
    "link_count": 0,
    "link_to": "CH Cash Drop",
@@ -320,6 +331,16 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "POS Reprint Queue",
+   "link_count": 0,
+   "link_to": "POS Reprint Queue",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "POS Masters",
    "link_count": 5,
    "link_type": "DocType",
@@ -329,9 +350,9 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-    "label": "CH POS Password",
+   "label": "CH POS Password",
    "link_count": 0,
-    "link_to": "CH POS Password",
+   "link_to": "CH POS Password",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -372,6 +393,55 @@
    "label": "CH POS Control Settings",
    "link_count": 0,
    "link_to": "CH POS Control Settings",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Store Discount Budget",
+   "link_count": 0,
+   "link_to": "CH Store Discount Budget",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Logs & Audit",
+   "link_count": 3,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Attach Log",
+   "link_count": 0,
+   "link_to": "CH Attach Log",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Attach Rule",
+   "link_count": 0,
+   "link_to": "CH Attach Rule",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "CH Business Audit Log",
+   "link_count": 0,
+   "link_to": "CH Business Audit Log",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -536,7 +606,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-04-29 01:56:52.674083",
+ "modified": "2026-06-18 17:33:25.514084",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "POS",
@@ -600,6 +670,5 @@
   }
  ],
  "title": "POS",
- "type": "Workspace",
- "indicator_color": "blue"
+ "type": "Workspace"
 }
