@@ -1087,16 +1087,73 @@ export class BuybackWorkspace {
 			</div>`;
 	}
 
+	_esc(v) {
+		return frappe.utils.escape_html(v == null ? "" : String(v));
+	}
+
+	_selected(actual, expected) {
+		return actual === expected ? "selected" : "";
+	}
+
+	_html_order_summary(order) {
+		if (!order) return "";
+		const rows = [];
+		if (order.customer_approval_method) rows.push([__("Approval"), order.customer_approval_method]);
+		if (order.approval_date) rows.push([__("Approved At"), order.approval_date]);
+		if (order.approval_remarks) rows.push([__("Approval Notes"), order.approval_remarks]);
+		if (order.settlement_type) rows.push([__("Settlement"), order.settlement_type]);
+		if (order.customer_payout_mode) rows.push([__("Payout Mode"), order.customer_payout_mode]);
+		if (order.customer_payout_mode === "Cash" && order.customer_cash_receiver_name) {
+			rows.push([__("Cash Receiver"), order.customer_cash_receiver_name]);
+		}
+		if (order.customer_payout_mode === "UPI" && order.customer_upi_id) {
+			rows.push([__("UPI ID"), order.customer_upi_id]);
+		}
+		if (order.customer_payout_mode === "Bank Transfer") {
+			if (order.customer_bank_account_holder) rows.push([__("Account Holder"), order.customer_bank_account_holder]);
+			if (order.customer_bank_account_number) {
+				const acct = String(order.customer_bank_account_number);
+				rows.push([__("Account"), acct.length > 4 ? `**** ${acct.slice(-4)}` : acct]);
+			}
+			if (order.customer_bank_ifsc) rows.push([__("IFSC"), order.customer_bank_ifsc]);
+			if (order.customer_bank_name) rows.push([__("Bank"), order.customer_bank_name]);
+		}
+		if (order.customer_payout_updated_at) rows.push([__("Payout Updated"), order.customer_payout_updated_at]);
+		if (order.customer_payout_updated_by) rows.push([__("Updated By"), order.customer_payout_updated_by]);
+		if (order.kyc_verified) rows.push([__("KYC"), order.kyc_verified_at ? __("Verified at {0}", [order.kyc_verified_at]) : __("Verified")]);
+		if (!rows.length) return "";
+
+		return `<div class="ch-bb-info-note" style="margin-top:12px;background:#f8fafc;border-color:#cbd5e1;color:#334155">
+			<div style="font-weight:700;margin-bottom:8px">
+				<i class="fa fa-info-circle"></i> ${__("Saved Customer Selection")}
+			</div>
+			<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;font-size:12px;line-height:1.35">
+				${rows.map(([label, value]) => `
+					<div>
+						<div style="color:#64748b;font-weight:600">${this._esc(label)}</div>
+						<div style="font-weight:700;color:#0f172a;word-break:break-word">${this._esc(value)}</div>
+					</div>
+				`).join("")}
+			</div>
+		</div>`;
+	}
+
 	_html_settle(data) {
 		const order = data.order;
 		const price = order ? order.final_price : (data.quoted_price || data.estimated_price);
+		const saved_settlement = order && order.settlement_type ? order.settlement_type : "";
+		const summary = this._html_order_summary(order);
 		return `
 			<div class="ch-bb-valuation-banner" style="background:#f0f9ff;border-color:#0ea5e9">
 				<div class="ch-bb-val-label" style="color:#0284c7">
 					${__("Customer Approved ✓ — Choose Settlement")}
 				</div>
 				<div class="ch-bb-val-amount" style="color:#0284c7">₹${format_number(price)}</div>
+				${saved_settlement
+					? `<div class="ch-bb-val-sub">${__("Customer selected")} <b>${this._esc(saved_settlement)}</b></div>`
+					: ""}
 			</div>
+			${summary}
 			<div class="ch-bb-section-label" style="margin-top:14px">
 				${__("How does the customer want to receive value?")}
 			</div>
