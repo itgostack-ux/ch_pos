@@ -8437,6 +8437,8 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "ownership_proof_type": o.ownership_proof_type or "",
             "ownership_proof_document": o.ownership_proof_document or "",
             "ownership_proof_remarks": o.ownership_proof_remarks or "",
+            "account_lock_cleared": cint(o.account_lock_cleared),
+            "account_lock_check_notes": o.account_lock_check_notes or "",
             "require_ownership_proof_above": flt(
                 frappe.db.get_single_value("Buyback Settings", "require_ownership_proof_above")
             ),
@@ -8575,10 +8577,18 @@ def get_pos_buyback_detail(assessment_name) -> dict:
 
 
 @frappe.whitelist()
-def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, inspector_notes=None) -> dict:
+def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, inspector_notes=None,
+                            account_lock_cleared=0, account_lock_check_notes="") -> dict:
     """Create a Buyback Order from a Buyback Assessment in POS.
 
     Idempotent — returns existing order if one already exists for this assessment.
+
+    `account_lock_cleared`/`account_lock_check_notes` matter for the WALK-IN
+    path (no Buyback Inspection record — see `_html_assess`'s walk-in form in
+    buyback_workspace.js): that's the only POS touchpoint where staff can
+    confirm FRP/iCloud lock clearance before BuybackOrder's gate requires it.
+    When an Inspection IS linked, its own (already-required) value is carried
+    forward instead and these params are ignored.
     """
     frappe.has_permission("Buyback Order", "create", throw=True)
     # Return existing order if already created
@@ -8600,6 +8610,7 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
 
     order = frappe.new_doc("Buyback Order")
     order.buyback_assessment = assessment_name
+    order.buyback_inspection = assessment.buyback_inspection or ""
     order.customer = assessment.customer or ""
     order.customer_name = assessment.customer_name or ""
     order.mobile_no = assessment.mobile_no or ""
@@ -8625,6 +8636,22 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
         order.imei_validation_checked_by = assessment.imei_validation_checked_by
         order.imei_validation_checked_at = assessment.imei_validation_checked_at
         order.imei_validation_remarks = assessment.imei_validation_remarks
+
+    # Lock clearance: prefer a linked (completed) Inspection's value — it's
+    # already mandatory there — otherwise fall back to what walk-in staff
+    # confirmed directly on this call.
+    inspection_lock = None
+    if assessment.buyback_inspection:
+        inspection_lock = frappe.db.get_value(
+            "Buyback Inspection", assessment.buyback_inspection,
+            ["account_lock_cleared", "account_lock_check_notes"], as_dict=True,
+        )
+    if inspection_lock and inspection_lock.account_lock_cleared:
+        order.account_lock_cleared = inspection_lock.account_lock_cleared
+        order.account_lock_check_notes = inspection_lock.account_lock_check_notes
+    elif cint(account_lock_cleared):
+        order.account_lock_cleared = 1
+        order.account_lock_check_notes = account_lock_check_notes or ""
 
     order.flags.ignore_permissions = True
     try:
@@ -9342,6 +9369,12 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
             order.imei_validation_checked_by = assessment.imei_validation_checked_by
             order.imei_validation_checked_at = assessment.imei_validation_checked_at
             order.imei_validation_remarks = assessment.imei_validation_remarks
+
+        # Carry forward the lock-clearance just confirmed to complete this inspection
+        # (complete_inspection() already required it — see buyback_inspection.py).
+        if ins.account_lock_cleared:
+            order.account_lock_cleared = ins.account_lock_cleared
+            order.account_lock_check_notes = ins.account_lock_check_notes
 
         order.flags.ignore_permissions = True
         try:

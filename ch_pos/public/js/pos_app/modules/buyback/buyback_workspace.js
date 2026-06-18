@@ -536,6 +536,18 @@ export class BuybackWorkspace {
 						value="${data.quoted_price || data.estimated_price}" min="0" step="1"
 						style="font-size:20px;font-weight:700;text-align:right;padding:10px;border-radius:var(--pos-radius,8px)">
 				</div>
+				<div style="margin-bottom:14px;padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--pos-radius,8px);background:var(--subtle-fg)">
+					<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-weight:600;margin-bottom:6px">
+						<input type="checkbox" class="ch-bb-walkin-lock-cleared" style="margin-top:3px;width:16px;height:16px">
+						<span>${__("FRP / iCloud Lock Cleared (Factory Reset Confirmed)")}</span>
+					</label>
+					<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">
+						${__("Walk-in skips a separate inspection step — confirm this here before creating the order.")}
+					</div>
+					<textarea class="form-control form-control-sm ch-bb-walkin-lock-notes" rows="1"
+						style="border-radius:6px;font-size:12px"
+						placeholder="${__("e.g. customer signed out in-store")}"></textarea>
+				</div>
 				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-create-walkin-order"
 					data-name="${data.name}"
 					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
@@ -1257,12 +1269,20 @@ export class BuybackWorkspace {
 				frappe.show_alert({ message: __("Enter a valid buyback price"), indicator: "orange" });
 				return;
 			}
+			const lock_cleared = el.find(".ch-bb-walkin-lock-cleared").is(":checked");
+			if (!lock_cleared) {
+				frappe.show_alert({ message: __("Confirm FRP / iCloud Lock Cleared before creating the order"), indicator: "orange" });
+				return;
+			}
+			const lock_notes = el.find(".ch-bb-walkin-lock-notes").val() || "";
 			btn.prop("disabled", true)
 				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating Order...")}`);
 			frappe.xcall("ch_pos.api.pos_api.pos_start_buyback_order", {
 				assessment_name: data.name,
 				pos_profile: PosState.pos_profile || "",
 				final_price: price,
+				account_lock_cleared: 1,
+				account_lock_check_notes: lock_notes,
 			}).then(() => {
 				frappe.show_alert({ message: __("Order created"), indicator: "green" });
 				this._reload();
@@ -1965,6 +1985,17 @@ export class BuybackWorkspace {
 				if (!state.kyc_id_type || !state.kyc_id_number) {
 					frappe.show_alert({ message: __("ID Type and ID Number are required"), indicator: "orange" }); return false;
 				}
+				if (ownership_proof_required) {
+					if (!state.ownership_proof_type) {
+						frappe.show_alert({ message: __("Ownership/purchase proof type is required for this amount"), indicator: "orange" }); return false;
+					}
+					if (state.ownership_proof_type === "Not Available" && !(state.ownership_proof_remarks || "").trim()) {
+						frappe.show_alert({ message: __("Please explain why ownership proof is not available"), indicator: "orange" }); return false;
+					}
+					if (state.ownership_proof_type !== "Not Available" && !uploads.ownership_proof_document) {
+						frappe.show_alert({ message: __("Please upload the ownership proof document"), indicator: "orange" }); return false;
+					}
+				}
 			}
 			return true;
 		}
@@ -1982,6 +2013,17 @@ export class BuybackWorkspace {
 					frappe.show_alert({ message: __("Bank account details are required"), indicator: "orange" }); return;
 				}
 				if (!state.customer_confirm) { frappe.show_alert({ message: __("Customer must confirm the details are correct"), indicator: "orange" }); return; }
+			}
+			if (ownership_proof_required) {
+				if (!state.ownership_proof_type) {
+					frappe.show_alert({ message: __("Ownership/purchase proof type is required for this amount"), indicator: "orange" }); return;
+				}
+				if (state.ownership_proof_type === "Not Available" && !(state.ownership_proof_remarks || "").trim()) {
+					frappe.show_alert({ message: __("Please explain why ownership proof is not available"), indicator: "orange" }); return;
+				}
+				if (state.ownership_proof_type !== "Not Available" && !uploads.ownership_proof_document) {
+					frappe.show_alert({ message: __("Please upload the ownership proof document"), indicator: "orange" }); return;
+				}
 			}
 
 			$body.find(".ch-wz-submit").prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Verifying...")}`);
@@ -2012,6 +2054,9 @@ export class BuybackWorkspace {
 				bank_account_number: state.bank_account_number || null,
 				bank_ifsc: state.bank_ifsc || null,
 				bank_name: state.bank_name || null,
+				ownership_proof_type: state.ownership_proof_type || null,
+				ownership_proof_document: uploads.ownership_proof_document || null,
+				ownership_proof_remarks: state.ownership_proof_remarks || null,
 			}).then(() => {
 				dlg.hide();
 				frappe.show_alert({ message: __("Customer approved ✓"), indicator: "green" });
