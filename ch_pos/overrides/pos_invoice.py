@@ -98,6 +98,8 @@ class CustomPOSInvoice(SalesInvoice):
     # make_customer_gl_entry and make_tax_gl_entries for return invoices.
     update_outstanding_for_self = 0
     def validate(self):
+        _hydrate_imported_sales_invoice_defaults(self)
+
         # When loyalty points are redeemed, paid_amount must include loyalty_amount
         # so ERPNext's validate_full_payment (paid_amount >= invoice_total) passes.
         # ERPNext's set_paid_amount() only sums payment rows, not loyalty — we fix that here.
@@ -692,6 +694,141 @@ def decrement_coupon_usage(doc, method=None):
 
 
 # ── Margin Scheme GST (selling side) ────────────────────────────
+
+
+def _is_data_import_context(doc) -> bool:
+    return bool(
+        getattr(frappe.flags, "in_import", False)
+        or getattr(frappe.flags, "in_data_import", False)
+        or getattr(getattr(doc, "flags", None), "in_import", False)
+    )
+
+
+def _hydrate_imported_sales_invoice_defaults(doc):
+    """Fill server-side defaults that Data Import does not fetch from the form UI."""
+    if not _is_data_import_context(doc):
+        return
+
+    _hydrate_imported_item_prices(doc)
+    _hydrate_imported_tax_rows(doc)
+
+
+def _hydrate_imported_item_prices(doc):
+    if not doc.get("items"):
+        return
+
+    _ensure_import_price_list_defaults(doc)
+
+    from erpnext.stock.get_item_details import get_item_details
+    from erpnext.stock.get_item_details import ItemDetailsCtx
+
+    parent_dict = {}
+    for fieldname in doc.meta.get_valid_columns():
+        parent_dict[fieldname] = doc.get(fieldname)
+
+    parent_dict.update({
+        "document_type": "Sales Invoice Item",
+        "price_list": doc.get("selling_price_list"),
+    })
+
+    for item in doc.get("items"):
+        if not item.get("item_code"):
+            continue
+        if cint(item.get("is_free_item")) or cint(item.get("custom_is_free_bundle_item")):
+            continue
+
+        ctx = ItemDetailsCtx(parent_dict.copy())
+        ctx.update(item.as_dict())
+        ctx.update(
+            {
+                "doctype": doc.doctype,
+                "name": doc.name,
+                "child_doctype": item.doctype,
+                "child_docname": item.name,
+                "ignore_pricing_rule": doc.get("ignore_pricing_rule") or 0,
+            }
+        )
+        if not ctx.transaction_date:
+            ctx.transaction_date = ctx.posting_date
+
+        details = get_item_details(ctx, doc, for_validate=True, overwrite_warehouse=False)
+        _apply_import_item_details(doc, item, details)
+
+
+def _ensure_import_price_list_defaults(doc):
+    if not doc.get("selling_price_list"):
+        doc.selling_price_list = (
+            frappe.db.get_single_value("Selling Settings", "selling_price_list")
+            or frappe.db.get_value("Price List", {"selling": 1, "enabled": 1}, "name")
+        )
+
+    if doc.get("selling_price_list") and not doc.get("price_list_currency"):
+        doc.price_list_currency = frappe.db.get_value(
+            "Price List", doc.selling_price_list, "currency", cache=True
+        )
+
+    if not flt(doc.get("plc_conversion_rate")):
+        doc.plc_conversion_rate = 1
+    if not flt(doc.get("conversion_rate")):
+        doc.conversion_rate = 1
+
+
+def _apply_import_item_details(doc, item, details):
+    for fieldname in (
+        "item_name",
+        "description",
+        "uom",
+        "stock_uom",
+        "conversion_factor",
+        "income_account",
+        "cost_center",
+        "warehouse",
+        "item_tax_template",
+    ):
+        value = details.get(fieldname)
+        if value is not None and item.meta.get_field(fieldname) and not item.get(fieldname):
+            item.set(fieldname, value)
+
+    price_list_rate = flt(item.get("price_list_rate")) or flt(details.get("price_list_rate"))
+    rate = flt(item.get("rate")) or flt(details.get("rate")) or price_list_rate
+    qty = flt(item.get("qty"))
+
+    if price_list_rate and item.meta.get_field("price_list_rate") and not flt(item.get("price_list_rate")):
+        item.price_list_rate = price_list_rate
+    if rate and item.meta.get_field("rate") and not flt(item.get("rate")):
+        item.rate = rate
+
+    if rate and qty and item.meta.get_field("amount") and not flt(item.get("amount")):
+        item.amount = qty * rate
+
+    conversion_rate = flt(doc.get("conversion_rate")) or 1
+    if rate and item.meta.get_field("base_rate") and not flt(item.get("base_rate")):
+        item.base_rate = rate * conversion_rate
+    if price_list_rate and item.meta.get_field("base_price_list_rate") and not flt(item.get("base_price_list_rate")):
+        item.base_price_list_rate = price_list_rate * conversion_rate
+    if flt(item.get("amount")) and item.meta.get_field("base_amount") and not flt(item.get("base_amount")):
+        item.base_amount = flt(item.amount) * conversion_rate
+
+    if rate and item.meta.get_field("net_rate") and not flt(item.get("net_rate")):
+        item.net_rate = rate
+    if flt(item.get("amount")) and item.meta.get_field("net_amount") and not flt(item.get("net_amount")):
+        item.net_amount = flt(item.amount)
+    if rate and item.meta.get_field("base_net_rate") and not flt(item.get("base_net_rate")):
+        item.base_net_rate = rate * conversion_rate
+    if flt(item.get("amount")) and item.meta.get_field("base_net_amount") and not flt(item.get("base_net_amount")):
+        item.base_net_amount = flt(item.amount) * conversion_rate
+
+
+def _hydrate_imported_tax_rows(doc):
+    if not doc.meta.get_field("taxes") or doc.get("taxes"):
+        return
+
+    if doc.get("taxes_and_charges"):
+        tax_master_doctype = doc.meta.get_field("taxes_and_charges").options
+        doc.append_taxes_from_master(tax_master_doctype)
+        return
+
+    doc.set_taxes()
 
 
 def _is_margin_scheme_item(item):
