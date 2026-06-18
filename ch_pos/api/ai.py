@@ -399,7 +399,7 @@ def _match_warranty_plans(item, device_price, cart_codes):
 	if item.item_group:
 		sold_data = frappe.db.sql("""
 			SELECT sp.warranty_plan, COUNT(*) as cnt
-			FROM `tabCH Sold Plan` sp
+			FROM `tabActive VAS Plans` sp
 			JOIN tabItem i ON i.name = sp.item_code
 			WHERE i.item_group = %(group)s
 			GROUP BY sp.warranty_plan

@@ -577,7 +577,7 @@ def test_14_customer_warranty_dashboard():
             _skip(FLOW, "14 customer warranty dashboard", "ch_item_master not installed")
             return
 
-        # Find a customer with at least one Sold Plan or Serial No
+        # Find a customer with at least one Active VAS Plan or Serial No
         customer = frappe.db.get_value(
             "Customer", {"customer_name": "Claims E2E Test Customer"}, "name"
         )

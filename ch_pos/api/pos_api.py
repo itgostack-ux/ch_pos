@@ -856,7 +856,7 @@ def create_pos_invoice(pos_profile, customer, items,
                 warranty_claim, wc.processing_fee_invoice))
         inv.custom_warranty_claim = warranty_claim
 
-    # Track warranty items to create CH Sold Plans after submit
+    # Track warranty items to create Active VAS Plans after submit
     warranty_items = []
     _plan_service_item_cache = {}
     _plan_type_cache = {}
@@ -1824,7 +1824,7 @@ def create_pos_invoice(pos_profile, customer, items,
         rv = redeem_voucher(voucher_code, flt(voucher_amount), pos_invoice=inv.name)
         voucher_redeemed = flt(rv.get("redeemed_amount", 0))
 
-    # Create CH Sold Plan records for warranty items
+    # Create Active VAS Plans records for warranty items
     sold_plans = []
 
     # Build a map of device items on this invoice (non-warranty rows) so we can
@@ -1874,14 +1874,14 @@ def create_pos_invoice(pos_profile, customer, items,
         if inferred_serial:
             wi["serial_no"] = inferred_serial
 
-        # INT-3 fix: Throw error instead of silently skipping sold plan creation
+        # INT-3 fix: Throw error instead of silently skipping active VAS plan creation
         if not wi.get("for_item_code"):
             frappe.throw(
                 frappe._("Cannot create warranty plan record: the device item (for_item_code) "
                          "could not be determined for warranty plan {0} on invoice {1}. "
                          "Please ensure each warranty/VAS item is linked to a device.").format(
                     wi.get("warranty_plan"), inv.name),
-                title=frappe._("Sold Plan Creation Failed"),
+                title=frappe._("Active VAS Plans Creation Failed"),
             )
 
         # Look up device purchase price from the same invoice
@@ -1908,13 +1908,13 @@ def create_pos_invoice(pos_profile, customer, items,
         except Exception:
             frappe.log_error(
                 frappe.get_traceback(),
-                f"Sold Plan creation failed for {inv.name} / {wi.get('warranty_plan')}"
+                f"Active VAS Plans creation failed for {inv.name} / {wi.get('warranty_plan')}"
             )
 
     # ── VAS Voucher Generation ────────────────────────────────────────────────
     # Read voucher rules from CH VAS Settings (configurable face value, validity,
     # item-group restriction, etc.)  Each VAS item generates
-    # floor(price ÷ face_value) single-use vouchers linked back to the sold plan.
+    # floor(price ÷ face_value) single-use vouchers linked back to the active VAS plan.
     generated_vouchers = []
     try:
         from ch_item_master.ch_item_master.voucher_api import issue_voucher
@@ -2087,10 +2087,10 @@ def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
 
 def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price,
                       serial_no=None, device_purchase_price=0):
-    """Create a CH Sold Plan when a warranty is sold via POS.
+    """Create an Active VAS Plans record (shown as Active VAS Plans in UI) when a warranty is sold via POS.
 
     Uses the standard Frappe document lifecycle (insert → submit) so that
-    the CH Sold Plan controller's validate/on_submit hooks run properly.
+    the Active VAS Plans controller's validate/on_submit hooks run properly.
     Enforces purchase_window_hours from the plan master.
     """
     plan_doc = frappe.get_cached_doc("CH Warranty Plan", warranty_plan)
@@ -2122,7 +2122,7 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
                 )
 
     today = nowdate()
-    sp = frappe.new_doc("CH Sold Plan")
+    sp = frappe.new_doc("Active VAS Plans")
     sp.warranty_plan = warranty_plan
     sp.customer = customer
     sp.item_code = item_code
@@ -2142,7 +2142,7 @@ def _create_sold_plan(warranty_plan, customer, item_code, company, sales_invoice
     sp.insert(ignore_permissions=True)
     sp.submit()
 
-    # Link sold plan back to CH Customer Device
+    # Link active VAS plan back to CH Customer Device
     if serial_no:
         cd_name = frappe.db.get_value("CH Customer Device", {"serial_no": serial_no})
         if cd_name:
@@ -2203,7 +2203,7 @@ def find_previous_device_invoice(phone, imei) -> dict:
     device (by IMEI/serial) to the customer matching the given phone number.
 
     Used by:
-      - VAS-after-sale flow: bind the Sold Plan back to the original device
+      - VAS-after-sale flow: bind the Active VAS Plan back to the original device
         invoice instead of the current VAS invoice.
       - Late free-gift flow: link a free-sale invoice to the device invoice
         so accounts can audit why the gift was issued.
@@ -2874,7 +2874,7 @@ def get_invoice_items_for_return(invoice_name) -> dict:
 
     Each row also includes coverage-binding metadata so the POS UI can show the
     cashier which VAS / Extended Warranty rows will be auto-refunded when a
-    device is returned. Linkage is derived from `tabCH Sold Plan` -- see
+    device is returned. Linkage is derived from `tabActive VAS Plans` -- see
     :func:`_get_linked_plans_for_invoice`.
     """
     inv = frappe.get_doc("Sales Invoice", invoice_name)
@@ -2952,11 +2952,11 @@ def get_invoice_items_for_return(invoice_name) -> dict:
 def _get_linked_plans_for_invoice(inv) -> dict:
     """Return { device_si_row_name: [ {sold_plan, service_item, vas_si_row, ...}, ... ] }.
 
-    Looks up CH Sold Plan rows born from this invoice, then maps each plan's
+    Looks up Active VAS Plans rows born from this invoice, then maps each plan's
     service item back to the SI row that originally sold it. This is the
     source of truth for "Extended Warranty / VAS X is bound to device row Y".
     """
-    if not frappe.db.exists("DocType", "CH Sold Plan"):
+    if not frappe.db.exists("DocType", "Active VAS Plans"):
         return {}
 
     try:
@@ -2964,7 +2964,7 @@ def _get_linked_plans_for_invoice(inv) -> dict:
             SELECT sp.name AS sold_plan, sp.item_code AS device_item_code,
                    sp.warranty_plan, sp.plan_type, sp.serial_no,
                    wp.service_item, wp.plan_name AS plan_label
-            FROM `tabCH Sold Plan` sp
+            FROM `tabActive VAS Plans` sp
             LEFT JOIN `tabCH Warranty Plan` wp ON wp.name = sp.warranty_plan
             WHERE sp.sales_invoice = %s
               AND sp.docstatus = 1
@@ -3073,7 +3073,7 @@ def _auto_include_bound_vas_rows(orig, return_items):
 
 
 def _collect_plans_to_cancel(orig, return_items) -> list:
-    """Return a de-duped list of CH Sold Plan names whose origin items are part
+    """Return a de-duped list of Active VAS Plans names whose origin items are part
     of this return -- either because the device is being returned, or because
     the cashier explicitly returned the VAS row itself.
     """
@@ -3109,7 +3109,7 @@ def _collect_plans_to_cancel(orig, return_items) -> list:
 
 
 def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
-    """Cancel each CH Sold Plan name. Cancellation triggers the doctype's own
+    """Cancel each Active VAS Plans name. Cancellation triggers the doctype's own
     ``on_cancel`` which sets status='Cancelled', clears the Serial Lifecycle
     warranty fields, and writes a 'Plan Cancelled' entry to CH VAS Ledger.
 
@@ -3119,7 +3119,7 @@ def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
     cancelled = []
     for plan_name in plan_names or []:
         try:
-            plan = frappe.get_doc("CH Sold Plan", plan_name)
+            plan = frappe.get_doc("Active VAS Plans", plan_name)
             if plan.docstatus == 1 and plan.status not in ("Cancelled", "Void"):
                 plan.flags.ignore_permissions = True
                 if hasattr(plan, "remarks"):
@@ -3130,7 +3130,7 @@ def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
         except Exception:
             frappe.log_error(
                 frappe.get_traceback(),
-                f"Auto-cancel of CH Sold Plan {plan_name} failed (return: {return_invoice_name})",
+                f"Auto-cancel of Active VAS Plans {plan_name} failed (return: {return_invoice_name})",
             )
     return cancelled
 
@@ -3326,7 +3326,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     # devices being returned (parity with Apple Care, Samsung Care+ behavior).
     # If the cashier returns a device, the protection plans sold against that
     # device on the same invoice are automatically refunded and their
-    # corresponding CH Sold Plan rows are cancelled below (after submit).
+    # corresponding Active VAS Plans rows are cancelled below (after submit).
     return_items, _auto_added_plans = _auto_include_bound_vas_rows(orig, return_items)
     # Plans we'll cancel after the return is submitted. We collect them upfront
     # so we know which to void even if the cashier explicitly added the VAS row
@@ -3587,10 +3587,10 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Return audit log failed")
 
-    # Cancel any CH Sold Plan rows whose protected device or service item was
+    # Cancel any Active VAS Plans rows whose protected device or service item was
     # part of this return. Failures here are logged but do not roll back the
     # return -- the credit note is already submitted; plan cancellation can be
-    # retried by the warranty manager from CH Sold Plan list.
+    # retried by the warranty manager from Active VAS Plans list.
     cancelled_plans = _cancel_linked_sold_plans(_plans_to_cancel, ret.name)
     phase4_side_effects = _apply_phase4_return_side_effects(ret)
 
@@ -5582,11 +5582,11 @@ def customer_360(identifier, company=None) -> dict:
         ORDER BY creation DESC LIMIT 20
     """, {"customer": customer, "mobile": mobile}, as_dict=True)
 
-    # Active warranties / VAS (CH Sold Plan)
+    # Active warranties / VAS (Active VAS Plans)
     out["warranties"] = frappe.db.sql("""
         SELECT name, plan_title, warranty_plan, plan_type, item_code, item_name,
                start_date, end_date, status, sales_invoice
-        FROM `tabCH Sold Plan`
+        FROM `tabActive VAS Plans`
         WHERE customer = %(customer)s AND docstatus = 1
         ORDER BY end_date DESC LIMIT 30
     """, {"customer": customer}, as_dict=True)
@@ -8427,6 +8427,19 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "customer_payout_updated_by": o.customer_payout_updated_by or "",
             "customer_approved": cint(o.customer_approved),
             "otp_verified": cint(o.otp_verified),
+            "imei_validation_status": o.imei_validation_status or "Pending",
+            "imei_validation_screenshot": o.imei_validation_screenshot or "",
+            "imei_validation_checked_by": o.imei_validation_checked_by or "",
+            "imei_validation_checked_at": (
+                str(o.imei_validation_checked_at) if o.imei_validation_checked_at else ""
+            ),
+            "imei_validation_remarks": o.imei_validation_remarks or "",
+            "ownership_proof_type": o.ownership_proof_type or "",
+            "ownership_proof_document": o.ownership_proof_document or "",
+            "ownership_proof_remarks": o.ownership_proof_remarks or "",
+            "require_ownership_proof_above": flt(
+                frappe.db.get_single_value("Buyback Settings", "require_ownership_proof_above")
+            ),
             "payment_status": o.payment_status or "",
             "requires_approval": cint(o.requires_approval),
             "approved_by": o.approved_by or "",
@@ -8540,6 +8553,13 @@ def get_pos_buyback_detail(assessment_name) -> dict:
         "item_name": a.item_name or "",
         "brand": a.brand or "",
         "imei_serial": a.imei_serial or "",
+        "imei_validation_status": a.imei_validation_status or "Pending",
+        "imei_validation_screenshot": a.imei_validation_screenshot or "",
+        "imei_validation_checked_by": a.imei_validation_checked_by or "",
+        "imei_validation_checked_at": (
+            str(a.imei_validation_checked_at) if a.imei_validation_checked_at else ""
+        ),
+        "imei_validation_remarks": a.imei_validation_remarks or "",
         "device_age_months": a.device_age_months or "",
         "warranty_status": a.warranty_status or "",
         "estimated_grade": a.estimated_grade or "",
@@ -8596,6 +8616,15 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
     order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
     if inspector_notes:
         order.remarks = str(inspector_notes)[:500]
+
+    # Carry forward a clean Sanchar Saathi check already done at intake so
+    # staff don't have to repeat it before customer approval/KYC/OTP.
+    if assessment.imei_validation_status == "Verified Clean":
+        order.imei_validation_status = assessment.imei_validation_status
+        order.imei_validation_screenshot = assessment.imei_validation_screenshot
+        order.imei_validation_checked_by = assessment.imei_validation_checked_by
+        order.imei_validation_checked_at = assessment.imei_validation_checked_at
+        order.imei_validation_remarks = assessment.imei_validation_remarks
 
     order.flags.ignore_permissions = True
     try:
@@ -8685,6 +8714,35 @@ def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
 
 
 @frappe.whitelist()
+def pos_submit_assessment_imei_validation(assessment_name: str, status: str, screenshot: str | None = None,
+                                           remarks: str | None = None) -> dict:
+    """POS-side wrapper for the Sanchar Saathi IMEI check at intake (Buyback Assessment).
+
+    Optional but recommended before inspection starts — checking the device
+    isn't reported lost/stolen BEFORE an inspector spends time grading it.
+    `create_inspection`/`pos_create_inspection` hard-block on this.
+    """
+    doc = frappe.get_doc("Buyback Assessment", assessment_name)
+    return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
+
+
+@frappe.whitelist()
+def pos_submit_imei_validation(order_name: str, status: str, screenshot: str | None = None,
+                                remarks: str | None = None) -> dict:
+    """POS-side wrapper for the Sanchar Saathi IMEI validation step.
+
+    Store staff manually check the device IMEI on ceir.sancharsaathi.gov.in
+    (no public API exists) and upload a screenshot of the result via this
+    endpoint. Until status="Verified Clean" is recorded, the order is
+    blocked from customer approval, KYC, and OTP — the POS frontend should
+    gate those screens based on `imei_validation_status` from
+    `get_pos_buyback_detail()`.
+    """
+    doc = frappe.get_doc("Buyback Order", order_name)
+    return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
+
+
+@frappe.whitelist()
 def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
     """Skip OTP for in-store customer approval.
 
@@ -8705,7 +8763,9 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
                                  settlement_type=None, payout_mode=None,
                                  upi_id=None, bank_account_holder=None,
                                  bank_account_number=None, bank_ifsc=None,
-                                 bank_name=None) -> dict:
+                                 bank_name=None,
+                                 ownership_proof_type=None, ownership_proof_document=None,
+                                 ownership_proof_remarks=None) -> dict:
     """Record customer approval of the final buyback price.
 
     method: "In-Store Signature" | "OTP" | "Token Link"
@@ -8846,6 +8906,22 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
             doc.kyc_verified = 1
             doc.kyc_verified_by = safe_actor
             doc.kyc_verified_at = frappe.utils.now_datetime()
+
+    if ownership_proof_type:
+        if is_submitted:
+            update_after_submit["ownership_proof_type"] = ownership_proof_type
+        else:
+            doc.ownership_proof_type = ownership_proof_type
+    if ownership_proof_document:
+        if is_submitted:
+            update_after_submit["ownership_proof_document"] = ownership_proof_document
+        else:
+            doc.ownership_proof_document = ownership_proof_document
+    if ownership_proof_remarks:
+        if is_submitted:
+            update_after_submit["ownership_proof_remarks"] = ownership_proof_remarks
+        else:
+            doc.ownership_proof_remarks = ownership_proof_remarks
 
     if is_submitted and update_after_submit:
         doc.db_set(update_after_submit, update_modified=True)
@@ -9179,6 +9255,8 @@ def pos_create_inspection(assessment_name) -> dict:
         "post_inspection_grade": ins.post_inspection_grade or "",
         "price_override_reason": ins.price_override_reason or "",
         "remarks": ins.remarks or "",
+        "account_lock_cleared": cint(ins.account_lock_cleared),
+        "account_lock_check_notes": ins.account_lock_check_notes or "",
         "inspector": ins.inspector or "",
         "responses": ins_responses,
         "diagnostics": ins_diagnostics,
@@ -9188,7 +9266,8 @@ def pos_create_inspection(assessment_name) -> dict:
 
 @frappe.whitelist()
 def pos_complete_inspection(inspection_name, condition_grade, final_price,
-                            price_override_reason="", remarks="") -> dict:
+                            price_override_reason="", remarks="",
+                            account_lock_cleared=0, account_lock_check_notes="") -> dict:
     """Complete the inline POS inspection and create a Buyback Order.
 
     Idempotent — if an order already exists for the assessment it is returned
@@ -9201,6 +9280,13 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
     if ins_status == "Draft":
         from buyback.api import start_inspection
         start_inspection(inspection_name)
+
+    # Persist the FRP/iCloud lock-clearance checkbox before completing —
+    # BuybackInspection.complete_inspection() hard-blocks without it.
+    frappe.db.set_value("Buyback Inspection", inspection_name, {
+        "account_lock_cleared": cint(account_lock_cleared),
+        "account_lock_check_notes": account_lock_check_notes or "",
+    })
 
     result = complete_inspection(
         inspection_name=inspection_name,
@@ -9248,6 +9334,14 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
         if remarks:
             order.remarks = str(remarks)[:500]
+
+        # Carry forward a clean Sanchar Saathi check already done at intake.
+        if assessment.imei_validation_status == "Verified Clean":
+            order.imei_validation_status = assessment.imei_validation_status
+            order.imei_validation_screenshot = assessment.imei_validation_screenshot
+            order.imei_validation_checked_by = assessment.imei_validation_checked_by
+            order.imei_validation_checked_at = assessment.imei_validation_checked_at
+            order.imei_validation_remarks = assessment.imei_validation_remarks
 
         order.flags.ignore_permissions = True
         try:

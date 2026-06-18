@@ -401,6 +401,56 @@ export class BuybackWorkspace {
 		this._bind_stage_actions(el, data, stage);
 	}
 
+	// ─────────────────────────────── IMEI / Sanchar Saathi check card (reused at ASSESS stage) ──
+	_html_imei_check_card(data, scope) {
+		const imei = data.imei_serial || "—";
+		return `
+			<div class="ch-bb-imei-card" style="margin-top:16px;border:1px solid var(--border-color);border-radius:var(--pos-radius,8px);padding:14px;background:var(--subtle-fg)">
+				<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:700">
+					<i class="fa fa-shield" style="color:var(--blue-600,#1565c0)"></i>
+					${__("IMEI / Sanchar Saathi Check")}
+				</div>
+				<div class="ch-bb-info-note" style="margin-bottom:10px">
+					<i class="fa fa-info-circle"></i>
+					${__("Recommended before inspection: check this IMEI on the government registry before spending time grading the device.")}
+				</div>
+				<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
+					${__("Visit")} <a href="https://ceir.sancharsaathi.gov.in" target="_blank" rel="noopener">ceir.sancharsaathi.gov.in</a>
+					${__("or SMS")} <strong>"KYM ${frappe.utils.escape_html(imei)}"</strong> ${__("to")} <strong>14422</strong> —
+					${__("IMEI")}: <strong>${frappe.utils.escape_html(imei)}</strong>
+				</div>
+				<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+					<div>
+						<label class="ch-bb-field-label">${__("Validation Result")}</label>
+						<select class="form-control form-control-sm ch-bb-imei-status" style="border-radius:6px">
+							<option value="">${__("-- Select --")}</option>
+							<option value="Verified Clean">${__("Verified Clean")}</option>
+							<option value="Blacklisted">${__("Blacklisted")}</option>
+							<option value="Duplicate IMEI">${__("Duplicate IMEI")}</option>
+							<option value="Already In Use">${__("Already In Use")}</option>
+							<option value="Could Not Verify">${__("Could Not Verify")}</option>
+						</select>
+					</div>
+					<div>
+						<label class="ch-bb-field-label">${__("Screenshot")}</label>
+						<div class="ch-bb-imei-file-drop" style="border:1px dashed var(--gray-300);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;text-align:center;min-height:31px;display:flex;align-items:center;justify-content:center">
+							<input type="file" accept="image/*" style="display:none">
+							<span class="ch-bb-imei-file-label">${__("Click to upload")}</span>
+						</div>
+					</div>
+				</div>
+				<div style="margin-bottom:10px">
+					<label class="ch-bb-field-label">${__("Remarks")} <span style="font-weight:400">(${__("required if 'Could Not Verify'")})</span></label>
+					<textarea class="form-control form-control-sm ch-bb-imei-remarks" rows="2" style="border-radius:6px"></textarea>
+				</div>
+				<button class="btn btn-primary btn-sm ch-bb-act ch-bb-save-imei-check"
+					data-scope="${scope}" data-name="${frappe.utils.escape_html(data.name)}"
+					style="width:100%;border-radius:6px;font-weight:600">
+					<i class="fa fa-check"></i> ${__("Save & Continue")}
+				</button>
+			</div>`;
+	}
+
 	// ─────────────────────────────── stage: ASSESS ──
 	_html_assess(data) {
 		const has_diag = data.diagnostics && data.diagnostics.length > 0;
@@ -426,6 +476,26 @@ export class BuybackWorkspace {
 		const is_mobile_app = (data.source || "") === "Mobile App";
 		const can_start = status === "Submitted" || status === "Quote Generated";
 		const inspection_in_progress = status === "Inspection Created" && !!data.buyback_inspection;
+
+		// IMEI / Sanchar Saathi check — recommended before inspection starts so
+		// staff don't waste time grading a device that's nationally blacklisted.
+		// create_inspection() hard-blocks on this server-side; this panel is what
+		// lets staff actually clear it from the ASSESS stage.
+		const imei_clean = data.imei_validation_status === "Verified Clean";
+		if (can_start && !imei_clean) {
+			return `
+				<div class="ch-bb-valuation-banner">
+					<div class="ch-bb-val-label">${__("Assessed Value")}</div>
+					<div class="ch-bb-val-amount">₹${format_number(data.quoted_price || data.estimated_price)}</div>
+					<div class="ch-bb-val-sub">
+						${__("Grade")} ${frappe.utils.escape_html(data.estimated_grade || "—")} ·
+						${frappe.utils.escape_html(data.warranty_status || "—")}
+					</div>
+				</div>
+				${diag_html}
+				${this._html_imei_check_card(data, "assessment")}
+			`;
+		}
 
 		if (status === "Draft") {
 			action_btn = `
@@ -681,6 +751,20 @@ export class BuybackWorkspace {
 					<textarea class="form-control ch-bb-ins-remarks" rows="2"
 						style="border-radius:var(--pos-radius,8px)"
 						placeholder="${__("Additional observations...")}">${frappe.utils.escape_html(ins.remarks || "")}</textarea>
+				</div>
+
+				<div style="margin-bottom:14px;padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--pos-radius,8px);background:var(--subtle-fg)">
+					<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-weight:600;margin-bottom:6px">
+						<input type="checkbox" class="ch-bb-ins-lock-cleared" style="margin-top:3px;width:16px;height:16px"
+							${ins.account_lock_cleared ? "checked" : ""}>
+						<span>${__("FRP / iCloud Lock Cleared (Factory Reset Confirmed)")}</span>
+					</label>
+					<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">
+						${__("A device still signed into the previous owner's Google/Apple account cannot be resold even with a clean IMEI and good grade.")}
+					</div>
+					<textarea class="form-control form-control-sm ch-bb-ins-lock-notes" rows="1"
+						style="border-radius:6px;font-size:12px"
+						placeholder="${__("e.g. customer signed out in-store")}">${frappe.utils.escape_html(ins.account_lock_check_notes || "")}</textarea>
 				</div>
 
 				<div class="ch-ins-actions">
@@ -978,6 +1062,78 @@ export class BuybackWorkspace {
 		// (jQuery .off with comma-separated selectors doesn't work for delegated events)
 		el.off(".bbstage");
 
+		// ── IMEI / Sanchar Saathi check card (ASSESS stage) ─────────
+		let imei_card_upload_url = null;
+		el.find(".ch-bb-imei-file-drop").each(function () {
+			const $drop = $(this);
+			const $input = $drop.find('input[type="file"]');
+			$drop.on("click.bbstage", () => $input.trigger("click"));
+			$input.on("change.bbstage", function () {
+				if (!this.files.length) return;
+				const file = this.files[0];
+				$drop.find(".ch-bb-imei-file-label").html(`<i class="fa fa-spinner fa-spin"></i> ${__("Uploading...")}`);
+				const fd = new FormData();
+				fd.append("file", file, file.name);
+				fd.append("doctype", "Buyback Assessment");
+				fd.append("docname", data.name);
+				fd.append("fieldname", "imei_validation_screenshot");
+				fd.append("is_private", 1);
+				$.ajax({
+					url: "/api/method/upload_file", type: "POST", data: fd,
+					processData: false, contentType: false,
+					headers: { "X-Frappe-CSRF-Token": frappe.csrf_token },
+				}).done((r) => {
+					imei_card_upload_url = r.message.file_url;
+					$drop.find(".ch-bb-imei-file-label").html(`<i class="fa fa-check-circle" style="color:var(--green-600)"></i> ${frappe.utils.escape_html(file.name)}`);
+				}).fail(() => {
+					$drop.find(".ch-bb-imei-file-label").html(`<span style="color:var(--red-500)">${__("Upload failed")}</span>`);
+					imei_card_upload_url = null;
+				});
+			});
+		});
+
+		el.on("click.bbstage", ".ch-bb-save-imei-check", (e) => {
+			const btn = $(e.currentTarget);
+			const status = el.find(".ch-bb-imei-status").val();
+			const remarks = el.find(".ch-bb-imei-remarks").val() || "";
+			if (!status) {
+				frappe.show_alert({ message: __("Please select the validation result"), indicator: "orange" });
+				return;
+			}
+			const needs_screenshot = status !== "Could Not Verify";
+			if (needs_screenshot && !imei_card_upload_url) {
+				frappe.show_alert({ message: __("Please upload the Sanchar Saathi screenshot"), indicator: "orange" });
+				return;
+			}
+			if (status === "Could Not Verify" && !remarks.trim()) {
+				frappe.show_alert({ message: __("Please explain why it could not be verified"), indicator: "orange" });
+				return;
+			}
+			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Saving...")}`);
+			frappe.xcall("buyback.api.submit_assessment_imei_validation", {
+				assessment_name: btn.data("name"),
+				status,
+				screenshot: imei_card_upload_url || null,
+				remarks: remarks || null,
+			}).then((res) => {
+				if (res.blocked && res.status === "Cancelled") {
+					frappe.msgprint({ title: __("Assessment Cancelled"), message: res.message, indicator: "red" });
+					this._reload();
+					return;
+				}
+				if (res.blocked) {
+					btn.prop("disabled", false).html(`<i class="fa fa-check"></i> ${__("Save & Continue")}`);
+					frappe.show_alert({ message: res.message || __("Could not verify — please retry."), indicator: "orange" });
+					return;
+				}
+				frappe.show_alert({ message: __("IMEI verified clean."), indicator: "green" });
+				this._reload();
+			}).catch((err) => {
+				btn.prop("disabled", false).html(`<i class="fa fa-check"></i> ${__("Save & Continue")}`);
+				frappe.show_alert({ message: _api_error_message(err, __("Failed to save IMEI validation")), indicator: "red" });
+			});
+		});
+
 		// ── ASSESS: Submit assessment from POS ─────────
 		el.on("click.bbstage", ".ch-bb-submit-assessment", (e) => {
 			const btn = $(e.currentTarget);
@@ -1041,6 +1197,12 @@ export class BuybackWorkspace {
 			}
 			const override_reason = el.find(".ch-bb-ins-override-reason").val() || "";
 			const remarks = el.find(".ch-bb-ins-remarks").val() || "";
+			const lock_cleared = el.find(".ch-bb-ins-lock-cleared").is(":checked");
+			if (!lock_cleared) {
+				frappe.show_alert({ message: __("Confirm FRP / iCloud Lock Cleared before completing inspection"), indicator: "orange" });
+				return;
+			}
+			const lock_notes = el.find(".ch-bb-ins-lock-notes").val() || "";
 
 			const btn = $(e.currentTarget);
 			btn.prop("disabled", true)
@@ -1052,6 +1214,8 @@ export class BuybackWorkspace {
 				final_price: price,
 				price_override_reason: override_reason,
 				remarks,
+				account_lock_cleared: 1,
+				account_lock_check_notes: lock_notes,
 			}).then(() => {
 				frappe.show_alert({ message: __("Inspection complete — Order created"), indicator: "green" });
 				this._reload();
@@ -1318,18 +1482,22 @@ export class BuybackWorkspace {
 		// Tracks a successful backend OTP verification performed from this dialog.
 		let otp_verified_in_session = otp_already_verified;
 
-		const STEPS = otp_already_verified
-			? [
-				{ key: "kyc", label: __("KYC & Photos") },
-				{ key: "settlement", label: __("Settlement") },
-			]
-			: [
-				{ key: "otp", label: __("OTP") },
-				{ key: "kyc", label: __("KYC & Photos") },
-				{ key: "settlement", label: __("Settlement") },
-			];
+		// IMEI / Sanchar Saathi check must be Verified Clean before this wizard
+		// can reach OTP/KYC — the backend hard-blocks send_otp/customer_approve
+		// otherwise (BuybackOrder._validate_imei_check_before_kyc). Skip the step
+		// entirely once it's already been recorded clean.
+		const imei_already_clean = order.imei_validation_status === "Verified Clean";
+
+		const STEPS = [
+			...(imei_already_clean ? [] : [{ key: "imei", label: __("IMEI Check") }]),
+			...(otp_already_verified ? [] : [{ key: "otp", label: __("OTP") }]),
+			{ key: "kyc", label: __("KYC & Photos") },
+			{ key: "settlement", label: __("Settlement") },
+		];
 		let step = 0;
 		const state = {
+			imei_status: order.imei_validation_status === "Verified Clean" ? "Verified Clean" : "",
+			imei_remarks: order.imei_validation_remarks || "",
 			otp_code: "", kyc_id_type: order.customer_id_type || "", kyc_id_number: order.customer_id_number || "",
 			settlement_type: order.settlement_type || "", payout_mode: order.customer_payout_mode || "",
 			upi_id: order.customer_upi_id || "",
@@ -1337,10 +1505,23 @@ export class BuybackWorkspace {
 			bank_account_number: order.customer_bank_account_number || "",
 			bank_ifsc: order.customer_bank_ifsc || "", bank_name: order.customer_bank_name || "",
 			customer_confirm: false,
+			ownership_proof_type: order.ownership_proof_type || "",
+			ownership_proof_remarks: order.ownership_proof_remarks || "",
 		};
 
+		// KYC proves who the seller is, not that they own this device —
+		// require a purchase/ownership proof above this threshold (0 = never required).
+		const ownership_proof_required = (
+			flt(order.require_ownership_proof_above) > 0
+			&& flt(order.final_price) > flt(order.require_ownership_proof_above)
+		);
+
 		/* ── File upload state ── */
-		const uploads = { customer_id_front: null, customer_id_back: null, customer_photo: null };
+		const uploads = {
+			customer_id_front: null, customer_id_back: null, customer_photo: null,
+			imei_screenshot: order.imei_validation_screenshot || null,
+			ownership_proof_document: order.ownership_proof_document || null,
+		};
 
 		const dlg = new frappe.ui.Dialog({
 			title: __("Customer Approval — In-Store Verification"),
@@ -1398,6 +1579,33 @@ export class BuybackWorkspace {
 		}
 
 		/* ── Step content builders ── */
+		function _step_imei() {
+			const imei = order.serial_no || order.imei_serial || "—";
+			return `<div class="ch-wz-card">
+				<div class="ch-wz-hint">
+					<i class="fa fa-shield"></i>
+					${__("Before continuing, check this device's IMEI on the government Sanchar Saathi (CEIR) registry to confirm it hasn't been reported lost or stolen. There is no automatic check — please do this manually.")}
+				</div>
+				<div class="ch-wz-desc" style="margin-bottom:14px;line-height:1.6">
+					<strong>${__("How to check")}:</strong>
+					<ol style="margin:6px 0 0 18px;padding:0">
+						<li>${__("Visit")} <a href="https://ceir.sancharsaathi.gov.in" target="_blank" rel="noopener">ceir.sancharsaathi.gov.in</a> (${__("Know Your Mobile")}) ${__("or SMS")} <strong>"KYM ${frappe.utils.escape_html(imei)}"</strong> ${__("to")} <strong>14422</strong></li>
+						<li>${__("Look up IMEI")}: <strong>${frappe.utils.escape_html(imei)}</strong></li>
+						<li>${__("Take a screenshot of the result and upload it below")}</li>
+					</ol>
+				</div>
+				${_input("imei_status", __("Validation Result"), "select", {
+					reqd: true,
+					options: ["", "Verified Clean", "Blacklisted", "Duplicate IMEI", "Already In Use", "Could Not Verify"],
+				})}
+				${_file_input("imei_screenshot", __("Sanchar Saathi Screenshot"), __("Screenshot of the IMEI lookup result page"))}
+				<div class="ch-wz-field" data-field="imei_remarks">
+					<label class="ch-wz-label">${__("Remarks")} <span style="font-weight:400;color:var(--text-muted)">(${__("required if 'Could Not Verify'")})</span></label>
+					<textarea class="ch-wz-input" data-name="imei_remarks" rows="2" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:13px">${_esc(state.imei_remarks)}</textarea>
+				</div>
+			</div>`;
+		}
+
 		function _step_otp() {
 			// Render mode depends on resume state. When OTP was already sent
 			// (status = Awaiting OTP), do NOT show another "Send OTP" button —
@@ -1438,6 +1646,28 @@ export class BuybackWorkspace {
 					${_file_input("customer_id_front", __("ID Proof — Front"), __("Front side of ID card"))}
 					${_file_input("customer_id_back", __("ID Proof — Back"), __("Back side of ID card"))}
 					${_file_input("customer_photo", __("Customer Photo"), __("Selfie for identity verification"))}
+				</div>
+				<div class="ch-wz-divider"></div>
+				<div class="ch-wz-section-title">
+					${__("Ownership / Purchase Proof")}
+					${ownership_proof_required
+						? `<span style="color:var(--red-500);font-size:11px;font-weight:600">${__("Required — above ₹{0}", [format_number(order.require_ownership_proof_above)])}</span>`
+						: `<span style="color:var(--text-muted);font-size:11px;font-weight:400">(${__("optional")})</span>`}
+				</div>
+				<div class="ch-wz-hint" style="margin-bottom:14px">
+					<i class="fa fa-info-circle"></i>
+					${__("ID proof shows who the seller is, not that they own this device. Attach an invoice/box-bill, or note why one isn't available.")}
+				</div>
+				<div class="ch-wz-row">
+					${_input("ownership_proof_type", __("Proof Type"), "select", {
+						reqd: ownership_proof_required,
+						options: ["", "Purchase Invoice", "Original Box / Bill", "Insurance Document", "Not Available"],
+					})}
+					${_file_input("ownership_proof_document", __("Proof Document"), __("Invoice / box-bill / insurance doc"))}
+				</div>
+				<div class="ch-wz-field" data-field="ownership_proof_remarks" style="display:${state.ownership_proof_type === "Not Available" ? "block" : "none"}">
+					<label class="ch-wz-label">${__("Reason proof isn't available")}</label>
+					<textarea class="ch-wz-input" data-name="ownership_proof_remarks" rows="2" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:13px">${_esc(state.ownership_proof_remarks)}</textarea>
 				</div>
 			</div>`;
 		}
@@ -1483,7 +1713,7 @@ export class BuybackWorkspace {
 		function _render() {
 			// Resolve step builder by key so the OTP step can be omitted when
 			// the order is already past OTP Verified (single-flow resume).
-			const builders = { otp: _step_otp, kyc: _step_kyc, settlement: _step_settlement };
+			const builders = { imei: _step_imei, otp: _step_otp, kyc: _step_kyc, settlement: _step_settlement };
 			const step_fn = builders[STEPS[step].key];
 			$body.html(`
 				<style>
@@ -1574,6 +1804,49 @@ export class BuybackWorkspace {
 			$body.find(".ch-wz-next").on("click", function () {
 				_sync_state();
 				const key = STEPS[step].key;
+				if (key === "imei") {
+					if (!state.imei_status) {
+						frappe.show_alert({ message: __("Please select the validation result"), indicator: "orange" }); return;
+					}
+					const needs_screenshot = state.imei_status !== "Could Not Verify";
+					if (needs_screenshot && !uploads.imei_screenshot) {
+						frappe.show_alert({ message: __("Please upload the Sanchar Saathi screenshot"), indicator: "orange" }); return;
+					}
+					if (state.imei_status === "Could Not Verify" && !(state.imei_remarks || "").trim()) {
+						frappe.show_alert({ message: __("Please explain why it could not be verified"), indicator: "orange" }); return;
+					}
+					const btn = $(this);
+					btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Saving...")}`);
+					frappe.xcall("ch_pos.api.pos_api.pos_submit_imei_validation", {
+						order_name: order.name,
+						status: state.imei_status,
+						screenshot: uploads.imei_screenshot || null,
+						remarks: state.imei_remarks || null,
+					}).then((res) => {
+						if (res.blocked && res.order_status === "Rejected") {
+							frappe.msgprint({
+								title: __("Order Rejected"),
+								message: res.message,
+								indicator: "red",
+							});
+							dlg.hide();
+							self._reload();
+							return;
+						}
+						if (res.blocked) {
+							btn.prop("disabled", false).html(`${__("Next")} <i class="fa fa-arrow-right"></i>`);
+							frappe.show_alert({ message: res.message || __("Could not verify — please retry."), indicator: "orange" });
+							return;
+						}
+						frappe.show_alert({ message: __("IMEI verified clean."), indicator: "green" });
+						step++;
+						_render();
+					}).catch((e) => {
+						btn.prop("disabled", false).html(`${__("Next")} <i class="fa fa-arrow-right"></i>`);
+						frappe.show_alert({ message: _api_error_message(e, __("Failed to save IMEI validation")), indicator: "red" });
+					});
+					return;
+				}
 				if (key === "otp") {
 					if (!_validate()) return;
 					const btn = $(this);
@@ -1612,6 +1885,11 @@ export class BuybackWorkspace {
 				$body.find(".ch-wz-payout-upi").toggle(state.payout_mode === "UPI");
 				$body.find(".ch-wz-payout-bank").toggle(state.payout_mode === "Bank Transfer");
 				$body.find(".ch-wz-payout-confirm").toggle(!!state.payout_mode);
+			});
+			/* ownership_proof_type toggle */
+			$body.find('[data-name="ownership_proof_type"]').on("change", function () {
+				state.ownership_proof_type = $(this).val();
+				$body.find('[data-field="ownership_proof_remarks"]').toggle(state.ownership_proof_type === "Not Available");
 			});
 
 			/* Send OTP */

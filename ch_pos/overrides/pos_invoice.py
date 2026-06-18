@@ -359,7 +359,7 @@ def create_customer_device_records(doc, method=None):
                     device_kwargs["purchase_invoice"] = doc.name
 
             # Attach warranty info if selected (don't set active_warranty_plan —
-            # that's a Link to CH Sold Plan which is created separately)
+            # that's a Link to Active VAS Plans which is created separately)
             if item.get("custom_warranty_plan"):
                 plan = frappe.get_cached_doc("CH Warranty Plan", item.custom_warranty_plan)
                 device_kwargs.update({
@@ -790,8 +790,15 @@ def _apply_import_item_details(doc, item, details):
             item.set(fieldname, value)
 
     price_list_rate = flt(item.get("price_list_rate")) or flt(details.get("price_list_rate"))
+    imported_amount = flt(item.get("amount"))
     rate = flt(item.get("rate")) or flt(details.get("rate")) or price_list_rate
     qty = flt(item.get("qty"))
+
+    # Data Import frequently provides amount-only rows (rate column left blank).
+    # ERPNext recalculates amount from rate during validation, so infer rate from
+    # the imported amount to avoid resetting the line to zero.
+    if not rate and qty and imported_amount:
+        rate = flt(imported_amount / qty, item.precision("rate"))
 
     if price_list_rate and item.meta.get_field("price_list_rate") and not flt(item.get("price_list_rate")):
         item.price_list_rate = price_list_rate

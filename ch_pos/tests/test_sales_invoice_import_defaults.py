@@ -89,6 +89,17 @@ def test_import_preserves_explicit_rate_and_calculates_amount_and_taxes():
     assert flt(doc.grand_total) > flt(doc.net_total)
 
 
+def test_import_derives_rate_from_amount_when_rate_missing():
+    doc = _make_import_invoice(rate=None, amount=246)
+    from ch_pos.overrides.pos_invoice import _apply_import_item_details
+
+    item = doc.items[0]
+    _apply_import_item_details(doc, item, {})
+
+    assert flt(item.rate) == 123
+    assert flt(item.amount) == 246
+
+
 def test_import_insert_path_populates_defaults():
     doc = _make_import_invoice()
     try:
@@ -108,5 +119,6 @@ def test_import_insert_path_populates_defaults():
 def run():
     test_import_fetches_item_price_amount_and_taxes()
     test_import_preserves_explicit_rate_and_calculates_amount_and_taxes()
+    test_import_derives_rate_from_amount_when_rate_missing()
     test_import_insert_path_populates_defaults()
-    return {"status": "ok", "tests": 3}
+    return {"status": "ok", "tests": 4}

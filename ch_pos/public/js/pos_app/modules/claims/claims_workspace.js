@@ -95,7 +95,7 @@ export class ClaimsWorkspace {
 					</div>
 				</div>
 
-				<!-- VAS Activity (sold plans + redemptions) -->
+				<!-- VAS Activity (active VAS plans + redemptions) -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
 						<span><i class="fa fa-shield"></i> ${__("VAS Plans Activity")}</span>
@@ -1724,7 +1724,7 @@ _render_dashboard(panel, data) {
 				</div>`;
 
 			const plans_html = plans.length ? `
-				<div style="font-weight:600;font-size:11px;color:#6b7280;margin:6px 0 4px">${__("Sold Plans")}</div>
+				<div style="font-weight:600;font-size:11px;color:#6b7280;margin:6px 0 4px">${__("Active VAS Plans")}</div>
 				<div style="max-height:220px;overflow:auto">
 					${plans.map(p => {
 						const status_cls = ((p.status || "").toLowerCase().includes("active")) ? "success"
@@ -1764,7 +1764,7 @@ _render_dashboard(panel, data) {
 
 			box.find(".ch-vas-plan-row").on("click", function () {
 				const name = $(this).data("name");
-				if (name) frappe.set_route("Form", "CH Sold Plan", name);
+				if (name) frappe.set_route("Form", "Active VAS Plans", name);
 			});
 		}).catch(() => {
 			box.html(`<div class="text-muted text-center" style="padding:12px">${__("Error loading VAS activity")}</div>`);

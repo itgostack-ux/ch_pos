@@ -188,7 +188,7 @@ export class Customer360Workspace {
 		]);
 
 		html += section_table(__("Warranty & AMC Plans"), "shield", d.warranties, [
-			{ label: __("Plan"), render: (r) => `<a class="ch-c360-link" data-doctype="CH Sold Plan" data-name="${r.name}">${frappe.utils.escape_html(r.plan_name || r.name)}</a>` },
+			{ label: __("Plan"), render: (r) => `<a class="ch-c360-link" data-doctype="Active VAS Plans" data-name="${r.name}">${frappe.utils.escape_html(r.plan_name || r.name)}</a>` },
 			{ label: __("Type"), render: (r) => frappe.utils.escape_html(r.plan_type || "") },
 			{ label: __("Item"), render: (r) => frappe.utils.escape_html(r.item_name || "") },
 			{ label: __("Valid To"), render: (r) => r.end_date ? frappe.datetime.str_to_user(r.end_date) : "—" },
