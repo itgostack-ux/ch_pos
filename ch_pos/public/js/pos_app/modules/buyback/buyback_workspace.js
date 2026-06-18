@@ -1390,8 +1390,6 @@ export class BuybackWorkspace {
 				remarks,
 				account_lock_cleared: 1,
 				account_lock_check_notes: lock_notes,
-				inspection_name, condition_grade: grade, final_price: price,
-				price_override_reason: override_reason, remarks,
 
 			}).then(() => {
 				frappe.show_alert({ message: __("Inspection complete — Order created"), indicator: "green" });
@@ -1919,8 +1917,6 @@ export class BuybackWorkspace {
 		const state = {
 			imei_status: order.imei_validation_status === "Verified Clean" ? "Verified Clean" : "",
 			imei_remarks: order.imei_validation_remarks || "",
-			otp_code: "", kyc_id_type: order.customer_id_type || "", kyc_id_number: order.customer_id_number || "",
-			settlement_type: order.settlement_type || "", payout_mode: order.customer_payout_mode || "",
 			otp_code: "",
 			kyc_id_type: order.customer_id_type || data.kyc_id_type || "",
 			kyc_id_number: order.customer_id_number || data.kyc_id_number || "",
@@ -1945,14 +1941,11 @@ export class BuybackWorkspace {
 
 		/* ── File upload state ── */
 		const uploads = {
-			customer_id_front: null, customer_id_back: null, customer_photo: null,
-			imei_screenshot: order.imei_validation_screenshot || null,
-			ownership_proof_document: order.ownership_proof_document || null,
-		};
-		const uploads = {
 			customer_id_front: data.customer_id_front || null,
 			customer_id_back: data.customer_id_back || null,
 			customer_photo: data.customer_photo || null,
+			imei_screenshot: order.imei_validation_screenshot || null,
+			ownership_proof_document: order.ownership_proof_document || null,
 		};
 
 		const dlg = new frappe.ui.Dialog({
@@ -2145,7 +2138,6 @@ export class BuybackWorkspace {
 			// Resolve step builder by key so the OTP step can be omitted when
 			// the order is already past OTP Verified (single-flow resume).
 			const builders = { imei: _step_imei, otp: _step_otp, kyc: _step_kyc, settlement: _step_settlement };
-			const builders = { otp: _step_otp, kyc: _step_kyc, settlement: _step_settlement };
 			const step_fn = builders[STEPS[step].key];
 			$body.html(`
 				<style>
