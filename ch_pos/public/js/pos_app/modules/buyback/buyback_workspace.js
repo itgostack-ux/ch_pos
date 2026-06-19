@@ -1384,7 +1384,21 @@ export class BuybackWorkspace {
 			}
 			const override_reason = el.find(".ch-bb-ins-override-reason").val() || "";
 			const remarks = el.find(".ch-bb-ins-remarks").val() || "";
-			const lock_cleared = el.find(".ch-bb-ins-lock-cleared").is(":checked");
+			const $lock_cb = el.find(".ch-bb-ins-lock-cleared");
+			if (!$lock_cb.length) {
+				// Defensive: the FRP/iCloud confirmation control is mandatory for
+				// inspection completion. If it has been removed from the rendered
+				// stage UI by an upstream change, fail loudly instead of silently
+				// blocking the user with a generic "unchecked" message.
+				console.error("[buyback] FRP/iCloud lock control (.ch-bb-ins-lock-cleared) missing from inspection stage UI");
+				frappe.msgprint({
+					title: __("UI configuration error"),
+					indicator: "red",
+					message: __("FRP / iCloud Lock confirmation control is missing from this stage. Please reload the POS and contact IT if it persists."),
+				});
+				return;
+			}
+			const lock_cleared = $lock_cb.is(":checked");
 			if (!lock_cleared) {
 				frappe.show_alert({ message: __("Confirm FRP / iCloud Lock Cleared before completing inspection"), indicator: "orange" });
 				return;
@@ -1470,7 +1484,22 @@ export class BuybackWorkspace {
 				frappe.show_alert({ message: __("Enter a valid buyback price"), indicator: "orange" });
 				return;
 			}
-			const lock_cleared = el.find(".ch-bb-walkin-lock-cleared").is(":checked");
+			const $lock_cb = el.find(".ch-bb-walkin-lock-cleared");
+			if (!$lock_cb.length) {
+				// Defensive: walk-in skips a separate Buyback Inspection record,
+				// so this control is the ONLY place lock-clearance can be captured
+				// before the server-side gate (BuybackOrder._validate_lock_clearance_before_kyc).
+				// If a UI regression removes it, surface a clear error instead of
+				// blocking the cashier with the generic "unchecked" message.
+				console.error("[buyback] FRP/iCloud lock control (.ch-bb-walkin-lock-cleared) missing from walk-in stage UI");
+				frappe.msgprint({
+					title: __("UI configuration error"),
+					indicator: "red",
+					message: __("FRP / iCloud Lock confirmation control is missing from this stage. Please reload the POS and contact IT if it persists."),
+				});
+				return;
+			}
+			const lock_cleared = $lock_cb.is(":checked");
 			if (!lock_cleared) {
 				frappe.show_alert({ message: __("Confirm FRP / iCloud Lock Cleared before creating the order"), indicator: "orange" });
 				return;
@@ -1478,7 +1507,6 @@ export class BuybackWorkspace {
 			const lock_notes = el.find(".ch-bb-walkin-lock-notes").val() || "";
 			btn.prop("disabled", true)
 				.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating Order...")}`);
-			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating Order...")}`);
 			frappe.xcall("ch_pos.api.pos_api.pos_start_buyback_order", {
 				assessment_name: data.name,
 				pos_profile: PosState.pos_profile || "",
