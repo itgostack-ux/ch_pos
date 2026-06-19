@@ -660,6 +660,18 @@ export class BuybackWorkspace {
 							value="${data.quoted_price || data.estimated_price}" min="0" step="1"
 							style="font-size:20px;font-weight:700;text-align:right;padding:10px;border-radius:var(--pos-radius,8px)">
 					</div>
+					<div style="margin-bottom:14px;padding:10px 12px;border:1px solid var(--border-color);border-radius:var(--pos-radius,8px);background:var(--subtle-fg)">
+						<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-weight:600;margin-bottom:6px">
+							<input type="checkbox" class="ch-bb-walkin-lock-cleared" style="margin-top:3px;width:16px;height:16px">
+							<span>${__("FRP / iCloud Lock Cleared (Factory Reset Confirmed)")}</span>
+						</label>
+						<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">
+							${__("Walk-in skips a separate inspection step — confirm this here before creating the order.")}
+						</div>
+						<textarea class="form-control form-control-sm ch-bb-walkin-lock-notes" rows="1"
+							style="border-radius:6px;font-size:12px"
+							placeholder="${__("e.g. customer signed out in-store")}"></textarea>
+					</div>
 					<button class="btn btn-primary btn-lg ch-bb-act ch-bb-create-walkin-order"
 						data-name="${data.name}"
 						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px">
