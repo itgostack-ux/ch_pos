@@ -422,6 +422,202 @@ def close_session(session_name, closing_cash, denominations=None,
 
 
 @frappe.whitelist()
+def admin_reopen_session(session_name, reason) -> dict:
+    """Administrator-only: re-open a Closed POS session for corrections.
+
+    Use when a session was closed prematurely / by mistake and the store
+    needs to resume billing on the same business date without creating a
+    fresh opening entry.
+
+    Hard-locked to ``Administrator`` (not even System Manager) because this
+    reverses a terminal state, voids the linked CH POS Settlement, and may
+    roll back the store's business date. All of those are accounting-sensitive.
+
+    Effects (mirrors the existing ``reopen_settlement`` pattern for the
+    Pending-Close case, extended to handle the Closed terminal state):
+      * CH POS Session: status Closed → Open, close-side fields cleared so a
+        re-close re-computes them from scratch. db_set bypasses the
+        ``_VALID_TRANSITIONS`` state machine (Closed is terminal).
+      * Linked CH POS Settlement (submitted): cancelled so a fresh settlement
+        can be raised at re-close.
+      * Linked POS Opening Entry: ``pos_closing_entry`` cleared and status
+        flipped back to ``Open`` so ERPNext's ``check_opening_entry`` resumes
+        offering this entry to the cashier.
+      * CH Business Date: if it had advanced past this session's business_date
+        (auto-advance after EOD), it is rolled back to the session's date so
+        new invoices post on the correct day.
+      * CH Business Date: if its status was ``Closed``, it is demoted to
+        ``Closing Pending`` (the same state ``_update_business_date_status_after_close``
+        would have used if other sessions had still been active).
+      * CH Business Audit Log entry with full before/after snapshot.
+
+    Args:
+      session_name: CH POS Session name (must be in status ``Closed``).
+      reason: Non-empty audit reason — required.
+    """
+    # ── Hard gate: Administrator only ───────────────────────────
+    if frappe.session.user != "Administrator":
+        frappe.throw(
+            _("Only the Administrator can re-open a Closed POS session."),
+            frappe.PermissionError,
+            title=_("Permission Denied"),
+        )
+
+    if not reason or not str(reason).strip():
+        frappe.throw(_("Reason is mandatory to re-open a Closed session."),
+                     title=_("Reopen Session"))
+    reason = str(reason).strip()
+
+    session = frappe.get_doc("CH POS Session", session_name)
+    if session.status != "Closed":
+        frappe.throw(
+            _("Session {0} is in status '{1}', not 'Closed'. "
+              "For Pending Close sessions use Reopen Settlement.").format(
+                session_name, session.status
+            ),
+            title=_("Reopen Session"),
+        )
+
+    # Serialise against concurrent close/reopen activity on the same session.
+    lock_key = f"sess_admin_reopen_{frappe.scrub(session_name)}"
+    if not frappe.db.sql("SELECT GET_LOCK(%s, 15)", (lock_key,))[0][0]:
+        frappe.throw(_("Session {0} is busy. Please retry.").format(session_name),
+                     title=_("Session Busy"))
+
+    try:
+        # Re-read after lock to avoid TOCTOU.
+        fresh_status = frappe.db.get_value("CH POS Session", session_name, "status")
+        if fresh_status != "Closed":
+            frappe.throw(_("Session {0} is no longer Closed (now: {1}).").format(
+                session_name, fresh_status))
+
+        before_snapshot = {
+            "status": "Closed",
+            "shift_end": str(session.shift_end) if session.shift_end else None,
+            "closing_cash_actual": flt(session.closing_cash_actual),
+            "cash_variance": flt(session.cash_variance),
+            "closing_approved_by": session.closing_approved_by,
+        }
+
+        # 1. Cancel the linked submitted settlement (if any) so a fresh
+        #    settlement is required at re-close. Cancel does not invoke
+        #    validate(), so the "session already closed" guard does not fire.
+        settlement_name = frappe.db.get_value(
+            "CH POS Settlement",
+            {"session": session_name, "docstatus": 1},
+            "name",
+        )
+        if settlement_name:
+            settlement = frappe.get_doc("CH POS Settlement", settlement_name)
+            settlement.flags.ignore_permissions = True
+            settlement.cancel()
+
+        # 2. Reverse the session record. db_set bypasses _VALID_TRANSITIONS,
+        #    which is necessary because Closed is a terminal state by design.
+        frappe.db.set_value("CH POS Session", session_name, {
+            "status": "Open",
+            "shift_end": None,
+            "closing_cash_actual": 0,
+            "closing_cash_expected": 0,
+            "cash_variance": 0,
+            "variance_reason": "",
+            "closing_approved_by": None,
+            "closing_approved_at": None,
+            "duration_minutes": 0,
+        }, update_modified=True)
+
+        # 3. Reverse the linked POS Opening Entry so ERPNext's check_opening_entry
+        #    resumes offering it to the cashier on next launch.
+        if getattr(session, "pos_opening_entry", None):
+            frappe.db.set_value(
+                "POS Opening Entry",
+                session.pos_opening_entry,
+                {"pos_closing_entry": None, "status": "Open"},
+                update_modified=True,
+            )
+
+        # 4. Rewind business date if auto-advance had moved it forward.
+        bd_name = frappe.db.get_value(
+            "CH Business Date",
+            {"store": session.store, "is_active": 1},
+        )
+        bd_rollback = None
+        bd_status_change = None
+        if bd_name:
+            current_bd, current_bd_status = frappe.db.get_value(
+                "CH Business Date", bd_name, ["business_date", "status"]
+            )
+            session_bd = getdate(session.business_date)
+            if current_bd and getdate(current_bd) > session_bd:
+                # Roll the store date back to the session's date so new
+                # invoices post on the correct day.
+                from ch_pos.pos_core.doctype.ch_business_date.ch_business_date import (
+                    advance_business_date,
+                )
+                advance_business_date(
+                    store=session.store,
+                    new_date=session_bd,
+                    reason="Admin reopen of session {0}: {1}".format(session_name, reason),
+                    manager_user=frappe.session.user,
+                )
+                bd_rollback = {"from": str(current_bd), "to": str(session_bd)}
+            elif current_bd_status == "Closed":
+                # Same business date — just demote the status because the
+                # store has an active session again.
+                frappe.db.set_value("CH Business Date", bd_name, {
+                    "status": "Closing Pending",
+                    "closed_on": None,
+                    "closed_by": None,
+                }, update_modified=True)
+                bd_status_change = "Closed → Closing Pending"
+
+        # 5. Commit so the audit log row sees the reopened state.
+        frappe.db.commit()
+
+        # 6. Audit log (best-effort).
+        try:
+            from ch_pos.audit import log_business_event
+            log_business_event(
+                event_type="Other",
+                ref_doctype="CH POS Session",
+                ref_name=session_name,
+                before=before_snapshot,
+                after={
+                    "status": "Open",
+                    "cancelled_settlement": settlement_name,
+                    "business_date_rollback": bd_rollback,
+                    "business_date_status_change": bd_status_change,
+                },
+                remarks=(
+                    "Session reopened by Administrator. "
+                    "Reason: {0}".format(reason)
+                ),
+                # NOTE: `store` field on CH Business Audit Log is a Link to
+                # Warehouse, not CH Store, so we deliberately omit it here
+                # (matches the existing `_log_close_event` pattern).
+                company=session.get("company"),
+                user=frappe.session.user,
+            )
+        except Exception:
+            pass
+    finally:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
+
+    return {
+        "session_name": session_name,
+        "session_status": "Open",
+        "cancelled_settlement": settlement_name,
+        "business_date_rollback": bd_rollback,
+        "business_date_status_change": bd_status_change,
+        "reopened_by": frappe.session.user,
+        "message": _(
+            "Session {0} re-opened. Settlement {1} cancelled. "
+            "Complete a fresh settlement before closing again."
+        ).format(session_name, settlement_name or _("(none)")),
+    }
+
+
+@frappe.whitelist()
 def switch_user(session_name, new_user, pwd=None) -> dict:
     """Switch cashier — new cashier must authenticate with their credentials."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
