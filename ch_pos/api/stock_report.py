@@ -6,6 +6,8 @@ market-standard "last verified" (date last cycle-counted) and which items are
 due for a count. Backed by the shared core in ch_erp15 CH Cycle Count.
 """
 
+import json
+
 import frappe
 from frappe import _
 from frappe.utils import flt
@@ -66,4 +68,53 @@ def start_store_cycle_count(pos_profile, class_filter=None, only_due=1) -> dict:
     for line in get_count_lines(warehouse, class_filter=class_filter, only_due=only_due):
         cc.append("items", line)
     cc.insert(ignore_permissions=True)
-    return {"cycle_count": cc.name, "items": len(cc.items), "warehouse": warehouse}
+
+    return {
+        "cycle_count": cc.name,
+        "items": len(cc.items),
+        "warehouse": warehouse,
+        "blind_count": int(cc.blind_count or 0),
+        "lines": [
+            {
+                "item_code": d.item_code,
+                "item_name": d.item_name,
+                "is_serialized": int(d.is_serialized or 0),
+                "system_qty": flt(d.system_qty),
+            }
+            for d in cc.items
+        ],
+    }
+
+
+@frappe.whitelist()
+def submit_pos_count(cycle_count, counts) -> dict:
+    """Apply counts entered in POS to a Draft/Counting CH Cycle Count and submit.
+
+    `counts` = [{item_code, counted_qty, scanned_serials}]. Submitting runs the
+    full variance → verify / matrix-approval flow in the controller.
+    """
+    if isinstance(counts, str):
+        counts = json.loads(counts)
+    cc = frappe.get_doc("CH Cycle Count", cycle_count)
+    cc.check_permission("submit")
+    if cc.docstatus != 0:
+        frappe.throw(_("Cycle count {0} is already submitted.").format(cc.name))
+
+    by_item = {c.get("item_code"): c for c in (counts or [])}
+    for row in cc.items:
+        c = by_item.get(row.item_code)
+        if not c:
+            continue
+        if row.is_serialized:
+            row.scanned_serials = c.get("scanned_serials") or ""
+        else:
+            row.counted_qty = flt(c.get("counted_qty"))
+    cc.save(ignore_permissions=True)
+    cc.submit()
+    cc.reload()
+    return {
+        "name": cc.name,
+        "status": cc.status,
+        "total_variance_value": flt(cc.total_variance_value),
+        "variance_exception": cc.variance_exception,
+    }

@@ -10205,17 +10205,35 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
         return []
 
     so_names = [r.name for r in rows]
+    soi_meta = frappe.get_meta("Sales Order Item")
+    has_custom_serial_col = soi_meta.has_field("custom_serial_no")
+    serial_select = ", soi.custom_serial_no AS reserved_serials" if has_custom_serial_col else ""
     items = frappe.db.sql(
-        """SELECT parent, item_code, item_name, qty, delivered_qty, billed_amt,
-                  rate, amount, warehouse, delivery_date
-             FROM `tabSales Order Item`
-            WHERE parent IN %(p)s
-            ORDER BY idx""",
+        f"""SELECT soi.parent, soi.item_code, soi.item_name, soi.qty,
+                   soi.delivered_qty, soi.billed_amt, soi.rate, soi.amount,
+                   soi.warehouse, soi.delivery_date
+                   {serial_select}
+             FROM `tabSales Order Item` soi
+            WHERE soi.parent IN %(p)s
+            ORDER BY soi.idx""",
         {"p": tuple(so_names)}, as_dict=True,
     )
+
+    def _split_serials(raw):
+        if not raw:
+            return []
+        return [s.strip() for s in str(raw).replace("\r", "").split("\n") if s.strip()]
+
     items_by_parent = {}
+    serials_by_parent = {}
     for it in items:
         items_by_parent.setdefault(it.parent, []).append(it)
+        serials = _split_serials(it.get("reserved_serials"))
+        if serials:
+            it["reserved_serials"] = serials
+            serials_by_parent.setdefault(it.parent, []).extend(serials)
+        else:
+            it["reserved_serials"] = []
 
     today = getdate(nowdate())
     out = []
@@ -10223,6 +10241,7 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
         bal = flt(r.grand_total) - flt(r.advance_paid)
         dd = getdate(r.delivery_date) if r.delivery_date else None
         days = (dd - today).days if dd else None
+        reserved = serials_by_parent.get(r.name, [])
         out.append({
             "name": r.name,
             "customer": r.customer,
@@ -10243,6 +10262,315 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
             "contact_mobile": r.contact_mobile,
             "contact_email": r.contact_email,
             "items": items_by_parent.get(r.name, []),
+            "reserved_serials": reserved,
+            "reserved_serial_count": len(reserved),
+        })
+    return out
+
+
+@frappe.whitelist()
+def list_reserved_serials(pos_profile, search=None, limit=300):
+    """Return a flat list of IMEIs/serials currently reserved on open
+    pre-bookings for this POS profile.
+
+    Each row carries enough context (item, customer, SO, due date) for the
+    cashier to verify physical pickup against the reservation — mirrors the
+    Reserved Items view in SAP Retail / Oracle Xstore / Tally Shoper POS.
+    """
+    frappe.has_permission("Sales Order", "read", throw=True)
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required"))
+
+    soi_meta = frappe.get_meta("Sales Order Item")
+    if not soi_meta.has_field("custom_serial_no"):
+        return []
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    company = profile.company
+    limit = min(max(cint(limit) or 300, 1), 1000)
+
+    conditions = [
+        "so.docstatus = 1",
+        "so.company = %(company)s",
+        "so.per_billed < 100",
+        "so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')",
+        "COALESCE(so.reserve_stock, 0) = 1",
+        "IFNULL(soi.custom_serial_no, '') != ''",
+    ]
+    params = {"company": company}
+    if search:
+        conditions.append(
+            "(soi.custom_serial_no LIKE %(q)s OR so.customer LIKE %(q)s "
+            "OR so.customer_name LIKE %(q)s OR soi.item_code LIKE %(q)s "
+            "OR soi.item_name LIKE %(q)s OR so.name LIKE %(q)s)"
+        )
+        params["q"] = f"%{search}%"
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT so.name AS sales_order, so.customer, so.customer_name,
+               so.transaction_date, so.delivery_date, so.per_billed,
+               soi.item_code, soi.item_name, soi.qty, soi.warehouse,
+               soi.custom_serial_no AS serial_blob
+          FROM `tabSales Order` so
+          JOIN `tabSales Order Item` soi ON soi.parent = so.name
+         WHERE {' AND '.join(conditions)}
+         ORDER BY so.delivery_date ASC, so.name ASC
+         LIMIT {limit}
+        """,
+        params, as_dict=True,
+    )
+
+    today = getdate(nowdate())
+    out = []
+    for r in rows:
+        for serial in [s.strip() for s in str(r.serial_blob or "").replace("\r", "").split("\n") if s.strip()]:
+            dd = getdate(r.delivery_date) if r.delivery_date else None
+            out.append({
+                "serial_no": serial,
+                "item_code": r.item_code,
+                "item_name": r.item_name,
+                "warehouse": r.warehouse,
+                "qty": flt(r.qty),
+                "sales_order": r.sales_order,
+                "customer": r.customer,
+                "customer_name": r.customer_name or r.customer,
+                "transaction_date": str(r.transaction_date) if r.transaction_date else None,
+                "delivery_date": str(r.delivery_date) if r.delivery_date else None,
+                "is_overdue": bool(dd and dd < today),
+                "per_billed": flt(r.per_billed),
+            })
+    return out
+
+
+@frappe.whitelist()
+def get_prebook_pickup_kpis(pos_profile, days=7):
+    """KPI snapshot for the cashier-facing Pre-Book and Pickup workspaces.
+
+    Returns counters store staff need to answer questions like:
+      - How many proformas did we raise today / this week?
+      - How many are still open vs converted / expired / lost?
+      - How many pre-bookings are still pending pickup, overdue, billed today?
+      - How many IMEIs/serials are currently reserved?
+
+    Mirrors the cashier dashboards in SAP Retail, Oracle Xstore Office and
+    GoFrugal POS, kept lightweight so it can be refreshed on every tab open.
+    """
+    frappe.has_permission("Quotation", "read", throw=True)
+    frappe.has_permission("Sales Order", "read", throw=True)
+
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required"))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    company = profile.company
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 90))
+    today = nowdate()
+    window_start = frappe.utils.add_days(today, -days)
+
+    # ── Proforma (Quotation) ─────────────────────────────────────────
+    qtn_today = frappe.db.sql(
+        """SELECT COUNT(*) AS n, COALESCE(SUM(grand_total), 0) AS v
+             FROM `tabQuotation`
+            WHERE company = %(company)s AND docstatus = 1
+              AND transaction_date = %(today)s""",
+        {"company": company, "today": today}, as_dict=True,
+    )[0]
+    qtn_window = frappe.db.sql(
+        """SELECT status, COUNT(*) AS n, COALESCE(SUM(grand_total), 0) AS v
+             FROM `tabQuotation`
+            WHERE company = %(company)s AND docstatus = 1
+              AND transaction_date >= %(start)s
+         GROUP BY status""",
+        {"company": company, "start": window_start}, as_dict=True,
+    )
+    qtn_status = {row.status: {"count": cint(row.n), "value": flt(row.v)} for row in qtn_window}
+
+    # ── Pre-Booking (Sales Order) ────────────────────────────────────
+    so_open = frappe.db.sql(
+        """SELECT COUNT(*) AS n, COALESCE(SUM(grand_total - advance_paid), 0) AS v
+             FROM `tabSales Order`
+            WHERE company = %(company)s AND docstatus = 1
+              AND per_billed < 100
+              AND status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')""",
+        {"company": company}, as_dict=True,
+    )[0]
+    so_overdue = frappe.db.sql(
+        """SELECT COUNT(*) AS n
+             FROM `tabSales Order`
+            WHERE company = %(company)s AND docstatus = 1
+              AND per_billed < 100
+              AND status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
+              AND delivery_date < %(today)s""",
+        {"company": company, "today": today}, as_dict=True,
+    )[0]
+    so_billed_today = frappe.db.sql(
+        """SELECT COUNT(DISTINCT si.name) AS n,
+                  COALESCE(SUM(si.grand_total), 0) AS v
+             FROM `tabSales Invoice` si
+             JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
+            WHERE si.company = %(company)s AND si.docstatus = 1
+              AND si.posting_date = %(today)s
+              AND IFNULL(sii.sales_order, '') != ''""",
+        {"company": company, "today": today}, as_dict=True,
+    )[0]
+
+    # ── Reserved Serials ─────────────────────────────────────────────
+    reserved_count = 0
+    soi_meta = frappe.get_meta("Sales Order Item")
+    if soi_meta.has_field("custom_serial_no"):
+        reserved_rows = frappe.db.sql(
+            """SELECT IFNULL(soi.custom_serial_no, '') AS serial_blob
+                 FROM `tabSales Order` so
+                 JOIN `tabSales Order Item` soi ON soi.parent = so.name
+                WHERE so.company = %(company)s AND so.docstatus = 1
+                  AND so.per_billed < 100
+                  AND so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
+                  AND COALESCE(so.reserve_stock, 0) = 1
+                  AND IFNULL(soi.custom_serial_no, '') != ''""",
+            {"company": company}, as_dict=True,
+        )
+        for r in reserved_rows:
+            reserved_count += sum(
+                1 for s in str(r.serial_blob or "").replace("\r", "").split("\n") if s.strip()
+            )
+
+    return {
+        "company": company,
+        "window_days": days,
+        "today": today,
+        "proforma": {
+            "today_count": cint(qtn_today.n),
+            "today_value": flt(qtn_today.v),
+            "by_status": qtn_status,
+            "open_count": cint(qtn_status.get("Open", {}).get("count", 0)),
+            "open_value": flt(qtn_status.get("Open", {}).get("value", 0)),
+            "ordered_count": cint(qtn_status.get("Ordered", {}).get("count", 0)),
+            "lost_count": cint(qtn_status.get("Lost", {}).get("count", 0)),
+            "expired_count": cint(qtn_status.get("Expired", {}).get("count", 0)),
+        },
+        "prebook": {
+            "open_count": cint(so_open.n),
+            "open_balance": flt(so_open.v),
+            "overdue_count": cint(so_overdue.n),
+            "billed_today_count": cint(so_billed_today.n),
+            "billed_today_value": flt(so_billed_today.v),
+        },
+        "reserved_serials": reserved_count,
+    }
+
+
+@frappe.whitelist()
+def list_my_proformas(pos_profile, status=None, search=None,
+                      days=30, only_mine=1, limit=100):
+    """List Proforma Quotations raised from POS, so store staff can see
+    open / converted / lost / expired counts at a glance.
+
+    Statuses follow ERPNext Quotation: Open, Ordered, Lost, Expired.
+    By default only the current user's quotations are returned so each
+    cashier sees what they personally raised — matching cashier-centric
+    dashboards in retail POS suites.
+    """
+    frappe.has_permission("Quotation", "read", throw=True)
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required"))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    company = profile.company
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 30
+    days = max(1, min(days, 365))
+    limit = min(max(cint(limit) or 100, 1), 500)
+
+    conditions = [
+        "q.docstatus = 1",
+        "q.company = %(company)s",
+        "q.transaction_date >= %(start)s",
+    ]
+    params = {
+        "company": company,
+        "start": frappe.utils.add_days(nowdate(), -days),
+    }
+
+    if status and status != "All":
+        conditions.append("q.status = %(status)s")
+        params["status"] = status
+    if cint(only_mine):
+        conditions.append("q.owner = %(me)s")
+        params["me"] = frappe.session.user
+    if search:
+        conditions.append(
+            "(q.name LIKE %(q)s OR q.party_name LIKE %(q)s "
+            "OR q.customer_name LIKE %(q)s)"
+        )
+        params["q"] = f"%{search}%"
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT q.name, q.party_name, q.customer_name, q.transaction_date,
+               q.valid_till, q.grand_total, q.status, q.owner,
+               q.contact_mobile, q.contact_email
+          FROM `tabQuotation` q
+         WHERE {' AND '.join(conditions)}
+         ORDER BY q.transaction_date DESC, q.creation DESC
+         LIMIT {limit}
+        """,
+        params, as_dict=True,
+    )
+    if not rows:
+        return []
+
+    qtn_names = [r.name for r in rows]
+    items = frappe.db.sql(
+        """SELECT parent, item_code, item_name, qty, rate, amount
+             FROM `tabQuotation Item`
+            WHERE parent IN %(p)s
+            ORDER BY idx""",
+        {"p": tuple(qtn_names)}, as_dict=True,
+    )
+    items_by_parent = {}
+    for it in items:
+        items_by_parent.setdefault(it.parent, []).append(it)
+
+    today = getdate(nowdate())
+    out = []
+    for r in rows:
+        vt = getdate(r.valid_till) if r.valid_till else None
+        days_left = (vt - today).days if vt else None
+        advance = 0.0
+        try:
+            advance = flt(frappe.db.get_value(
+                "Quotation", r.name, "custom_advance_received"
+            ) or 0)
+        except Exception:
+            advance = 0.0
+        out.append({
+            "name": r.name,
+            "customer": r.party_name,
+            "customer_name": r.customer_name or r.party_name,
+            "transaction_date": str(r.transaction_date) if r.transaction_date else None,
+            "valid_till": str(r.valid_till) if r.valid_till else None,
+            "days_left": days_left,
+            "is_expiring_soon": bool(days_left is not None and 0 <= days_left <= 3),
+            "is_expired": bool(vt and vt < today and r.status == "Open"),
+            "grand_total": flt(r.grand_total),
+            "advance_received": advance,
+            "balance_due": max(flt(r.grand_total) - advance, 0),
+            "status": r.status,
+            "owner": r.owner,
+            "contact_mobile": r.contact_mobile,
+            "contact_email": r.contact_email,
+            "items": items_by_parent.get(r.name, []),
+            "print_format": "Proforma Invoice",
+            "print_url": "/printview?doctype=Quotation"
+                         f"&name={frappe.utils.escape_html(r.name)}"
+                         f"&format=Proforma+Invoice&no_letterhead=0",
         })
     return out
 

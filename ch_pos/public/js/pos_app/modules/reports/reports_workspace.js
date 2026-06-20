@@ -529,19 +529,109 @@ export class ReportsWorkspace {
 						frappe.msgprint(__("Could not start the count."));
 						return;
 					}
-					frappe.msgprint({
-						title: __("Cycle Count Started"),
-						message: `
-							<p>${__("Created")} <b>${frappe.utils.escape_html(res.cycle_count)}</b>
-							${__("with")} <b>${res.items}</b> ${__("item(s)")} ${__("for")}
-							${frappe.utils.escape_html(res.warehouse)}.</p>
-							<p>${__("Open it to enter counted quantities / scan IMEIs, then submit.")}</p>
-							<p><a class="btn btn-sm btn-primary" target="_blank"
-								href="/app/ch-cycle-count/${encodeURIComponent(res.cycle_count)}">
-								${__("Open Count Sheet")}</a></p>`,
-					});
+					if (!res.items) {
+						frappe.msgprint(__("No items to count for the chosen filters."));
+						return;
+					}
+					this._open_count_sheet(res);
 				}).catch((e) => frappe.msgprint(__("Could not start count: {0}", [e.message || e])));
 			},
+		});
+		d.show();
+	}
+
+	_open_count_sheet(res) {
+		const lines = res.lines || [];
+		const blind = !!res.blind_count;
+		const scanned = {}; // item_code -> [serials]
+
+		const body = lines.map((l) => {
+			const name = frappe.utils.escape_html(l.item_name || l.item_code);
+			if (l.is_serialized) {
+				return `<tr>
+					<td>${name}<div class="text-muted" style="font-size:0.75rem">${__("Serialized — scan each IMEI")}</div></td>
+					<td>
+						<input type="text" class="form-control input-sm cc-scan" data-item="${frappe.utils.escape_html(l.item_code)}"
+							placeholder="${__("Scan IMEI, press Enter")}">
+						<div class="cc-serials" data-item="${frappe.utils.escape_html(l.item_code)}" style="margin-top:4px"></div>
+					</td></tr>`;
+			}
+			const hint = blind ? "" : `<div class="text-muted" style="font-size:0.75rem">${__("system")}: ${l.system_qty}</div>`;
+			return `<tr>
+				<td>${name}${hint}</td>
+				<td><input type="number" min="0" class="form-control input-sm cc-qty"
+					data-item="${frappe.utils.escape_html(l.item_code)}" placeholder="0"></td></tr>`;
+		}).join("");
+
+		const d = new frappe.ui.Dialog({
+			title: __("Count Sheet — {0}", [res.cycle_count]),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "sheet" }],
+			primary_action_label: __("Submit Count"),
+			primary_action: () => {
+				const qty_map = {};
+				d.$wrapper.find(".cc-qty").each(function () {
+					qty_map[$(this).data("item")] = flt($(this).val());
+				});
+				const counts = lines.map((l) =>
+					l.is_serialized
+						? { item_code: l.item_code, scanned_serials: (scanned[l.item_code] || []).join("\n") }
+						: { item_code: l.item_code, counted_qty: qty_map[l.item_code] || 0 }
+				);
+				frappe.xcall("ch_pos.api.stock_report.submit_pos_count", {
+					cycle_count: res.cycle_count,
+					counts: JSON.stringify(counts),
+				}).then((r) => {
+					d.hide();
+					const verified = r.status === "Completed - Verified";
+					frappe.msgprint({
+						title: verified ? __("Count Verified ✔") : __("Variance Sent for Approval"),
+						indicator: verified ? "green" : "orange",
+						message: verified
+							? __("All counts match — {0} verified, last-verified updated.", [r.name])
+							: __("Variance of {0} on {1} routed for approval (exception {2}). Reconciliation posts after approval.",
+								[frappe.format(r.total_variance_value, { fieldtype: "Currency" }), r.name, r.variance_exception || "—"]),
+					});
+				}).catch((e) => frappe.msgprint(__("Submit failed: {0}", [e.message || e])));
+			},
+		});
+
+		d.fields_dict.sheet.$wrapper.html(`
+			<div class="text-muted" style="margin-bottom:8px">
+				${__("Warehouse")}: <b>${frappe.utils.escape_html(res.warehouse)}</b> · ${res.items} ${__("item(s)")}
+				${blind ? `· <span style="color:#d97706">${__("Blind count")}</span>` : ""}
+			</div>
+			<div style="max-height:420px;overflow:auto">
+			<table class="table table-bordered" style="font-size:0.85rem">
+				<thead><tr><th>${__("Item")}</th><th style="width:45%">${__("Counted")}</th></tr></thead>
+				<tbody>${body}</tbody>
+			</table></div>`);
+
+		const render_chips = () => {
+			d.$wrapper.find(".cc-serials").each(function () {
+				const code = $(this).data("item");
+				const list = scanned[code] || [];
+				$(this).html(list.map((s, i) =>
+					`<span class="badge" style="background:#e0e7ff;color:#3730a3;margin:2px;cursor:pointer"
+						data-code="${frappe.utils.escape_html(code)}" data-idx="${i}">${frappe.utils.escape_html(s)} ✕</span>`
+				).join(""));
+			});
+		};
+		d.$wrapper.find(".cc-scan").on("keydown", function (e) {
+			if (e.key !== "Enter") return;
+			e.preventDefault();
+			const code = $(this).data("item");
+			const val = ($(this).val() || "").trim();
+			if (!val) return;
+			scanned[code] = scanned[code] || [];
+			if (!scanned[code].includes(val)) scanned[code].push(val);
+			$(this).val("");
+			render_chips();
+		});
+		d.$wrapper.on("click", ".cc-serials .badge", function () {
+			const code = $(this).data("code");
+			scanned[code].splice($(this).data("idx"), 1);
+			render_chips();
 		});
 		d.show();
 	}
