@@ -31,16 +31,23 @@ export class PrebookWorkspace {
 
 	render(panel) {
 		this._panel = panel;
+		// Guard: if reopening from a tab that was removed, fall back to Create.
+		if (this._active_tab === "prebookings") this._active_tab = "create";
 		panel.html(`
 			<div class="ch-pos-mode-panel">
-				<div class="ch-mode-header">
-					<h4>
-						<span class="mode-icon" style="background:#e0f2fe;color:#0369a1">
-							<i class="fa fa-bookmark"></i>
-						</span>
-						${__("Pre-Book / Proforma")}
-					</h4>
-					<span class="ch-mode-hint">${__("Issue a Proforma Invoice (Quotation) or reserve stock as a Pre-Booking (Sales Order).")}</span>
+				<div class="ch-mode-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+					<div>
+						<h4>
+							<span class="mode-icon" style="background:#e0f2fe;color:#0369a1">
+								<i class="fa fa-bookmark"></i>
+							</span>
+							${__("Pre-Book / Proforma")}
+						</h4>
+						<span class="ch-mode-hint">${__("Quote and reserve future sales \u2014 Proforma Invoice (Quotation) or Pre-Booking (Sales Order) with stock reservation and advance.")}</span>
+					</div>
+					<button class="btn btn-default btn-sm ch-pb-go-pickup" title="${__("Pickup / Bill is where pre-bookings are billed at handover.")}">
+						<i class="fa fa-cube"></i> ${__("Go to Pickup / Bill")}
+					</button>
 				</div>
 
 				<div class="ch-pb-kpi-strip" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:var(--pos-space-md);"></div>
@@ -53,9 +60,6 @@ export class PrebookWorkspace {
 							</div>
 							<div class="ch-pb-tab" data-tab="proformas" style="padding:10px 16px;cursor:pointer;border-bottom:2px solid transparent;">
 								<i class="fa fa-file-text-o"></i> ${__("My Proformas")}
-							</div>
-							<div class="ch-pb-tab" data-tab="prebookings" style="padding:10px 16px;cursor:pointer;border-bottom:2px solid transparent;">
-								<i class="fa fa-bookmark"></i> ${__("My Pre-Bookings")}
 							</div>
 						</div>
 					</div>
@@ -74,6 +78,9 @@ export class PrebookWorkspace {
 		panel.on("click", ".ch-pb-tab", (e) => {
 			const tab = $(e.currentTarget).data("tab");
 			if (tab) this._switch_tab(tab);
+		});
+		panel.on("click", ".ch-pb-go-pickup", () => {
+			EventBus.emit("mode:switch", "pickup");
 		});
 		// "Create" subview events
 		panel.on("click", ".ch-prebook-proforma", () => {

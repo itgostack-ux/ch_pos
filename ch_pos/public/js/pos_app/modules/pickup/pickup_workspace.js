@@ -41,14 +41,19 @@ export class PickupWorkspace {
 		this._panel = panel;
 		panel.html(`
 			<div class="ch-pos-mode-panel">
-				<div class="ch-mode-header">
-					<h4>
-						<span class="mode-icon" style="background:#ecfdf5;color:#047857">
-							<i class="fa fa-cube"></i>
-						</span>
-						${__("Pickup / Bill")}
-					</h4>
-					<span class="ch-mode-hint">${__("Customer is here to pick up a pre-booking? Find it below and bill it in one click.")}</span>
+				<div class="ch-mode-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+					<div>
+						<h4>
+							<span class="mode-icon" style="background:#ecfdf5;color:#047857">
+								<i class="fa fa-cube"></i>
+							</span>
+							${__("Pickup / Bill")}
+						</h4>
+						<span class="ch-mode-hint">${__("Hand over goods and bill open pre-bookings \u2014 verify reserved IMEI, collect balance, generate Tax Invoice.")}</span>
+					</div>
+					<button class="btn btn-default btn-sm ch-pu-go-prebook" title="${__("Create new Proforma or Pre-Booking.")}">
+						<i class="fa fa-bookmark"></i> ${__("New Pre-Book / Proforma")}
+					</button>
 				</div>
 
 				<div class="ch-pu-kpi-strip" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:var(--pos-space-md);"></div>
@@ -113,6 +118,9 @@ export class PickupWorkspace {
 		panel.on("click", ".ch-pu-tab", (e) => {
 			const tab = $(e.currentTarget).data("tab");
 			if (tab) this._switch_tab(tab);
+		});
+		panel.on("click", ".ch-pu-go-prebook", () => {
+			EventBus.emit("mode:switch", "prebook");
 		});
 		panel.on("input", ".ch-pickup-search", (e) => {
 			this._filter.search = e.target.value.trim();
