@@ -1293,6 +1293,12 @@ export class CartService {
 	}
 
 	_render_vas_selector(plans, selected_device = null) {
+		// ── Coverage Subject model (Oracle Service Contracts / SAP IBase /
+		// MS Dynamics Customer Asset parity). Two mutually-exclusive modes:
+		//   • "in_store"  → covered device is on this bill or in our inventory
+		//   • "customer"  → covered device is customer-owned (external IMEI),
+		//                   captured ONLY on the Active VAS Plan, never on
+		//                   the invoice's stock serial_no field.
 		const device_items = PosState.cart.filter((c) => !c.is_warranty && !c.is_vas);
 		const selected_device_value = selected_device
 			? selected_device.item_code + (selected_device.serial_no ? ` (${selected_device.serial_no})` : "")
@@ -1306,9 +1312,10 @@ export class CartService {
 		const prioritized_device_options = selected_device_value
 			? [selected_device_value, ...device_options.filter((value) => value !== selected_device_value)]
 			: device_options;
-		const for_item_options = prioritized_device_options.length
-			? [...prioritized_device_options, "── Enter IMEI manually ──"]
-			: ["", "── Enter IMEI manually ──"];
+		const has_in_store_options = prioritized_device_options.length > 0;
+
+		// Default mode: prefer in-store if cart has devices, else customer-owned.
+		const default_mode = has_in_store_options ? "in_store" : "customer";
 
 		// Build plan cards HTML
 		const plan_cards = plans.map((p) => {
@@ -1320,12 +1327,12 @@ export class CartService {
 				? `<span class="badge badge-light" style="font-size:10px">${frappe.utils.escape_html(p.brand)}</span>`
 				: "";
 			const external_badge = p.allows_external_device
-				? `<span class="badge badge-success" style="font-size:10px">${__("External IMEI")}</span>`
-				: "";
+				? `<span class="badge badge-success" style="font-size:10px" title="${__("This plan can cover a customer-provided IMEI (device not bought from us)")}">${__("Customer Device OK")}</span>`
+				: `<span class="badge badge-secondary" style="font-size:10px" title="${__("This plan only covers devices sold by us")}">${__("In-Store Only")}</span>`;
 			const blocked_html = blocked
 				? `<div class="text-danger" style="font-size:11px;margin-top:4px"><i class="fa fa-ban"></i> ${frappe.utils.escape_html(p.blocked_reason)}</div>`
 				: "";
-			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}">
+			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}" data-allows-external="${p.allows_external_device ? 1 : 0}" data-requires-device="${p.requires_device ? 1 : 0}">
 				<div class="ch-vas-card-body">
 					<div class="ch-vas-card-check"><i class="fa fa-check"></i></div>
 					<div style="flex:1;min-width:0">
@@ -1343,9 +1350,23 @@ export class CartService {
 			</div>`;
 		}).join("");
 
+		// Coverage-subject banner — kept above the plan cards so the cashier
+		// understands "what device does this plan cover?" before picking a plan.
+		const subject_help_html = `
+			<div class="ch-vas-help" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:10px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;color:#334155">
+				<div style="font-weight:600;margin-bottom:4px"><i class="fa fa-info-circle"></i> ${__("Coverage Subject")}</div>
+				<div>${__("Choose whether this plan covers a device on this bill (or from our inventory) or a device the customer already owns (e.g. an iPhone bought from Apple).")}</div>
+				<div style="margin-top:4px"><b>${__("Customer-provided IMEI is stored on the VAS plan only — it is never written as an inventory serial on this invoice.")}</b></div>
+			</div>`;
+
 		const dialog = new frappe.ui.Dialog({
 			title: __("Add Value Added Service"),
 			fields: [
+				{
+					fieldname: "subject_help",
+					fieldtype: "HTML",
+					options: subject_help_html,
+				},
 				{
 					fieldname: "plans_html",
 					fieldtype: "HTML",
@@ -1357,21 +1378,51 @@ export class CartService {
 					hidden: 1,
 				},
 				{
-					fieldname: "for_item",
-					fieldtype: "Select",
-					label: __("Apply to Device"),
-					default: selected_device_value,
-					options: for_item_options.join("\n"),
-					description: __("Select a device from the cart, or enter IMEI for external / previously sold device"),
+					fieldname: "section_subject",
+					fieldtype: "Section Break",
+					label: __("Coverage Subject"),
 				},
 				{
-					fieldname: "manual_imei",
+					fieldname: "coverage_mode",
+					fieldtype: "Select",
+					label: __("Device Source"),
+					reqd: 1,
+					default: default_mode,
+					// Raw values — friendly labels are applied via apply_mode_labels()
+					// below so the cashier sees descriptive option text.
+					options: "in_store\ncustomer",
+				},
+				{
+					fieldname: "coverage_mode_hint",
+					fieldtype: "HTML",
+					options: `<div id="ch-vas-mode-hint" class="text-muted" style="font-size:11px;margin-top:-6px;margin-bottom:4px"></div>`,
+				},
+				{
+					fieldname: "for_item",
+					fieldtype: "Select",
+					label: __("In-Store Device"),
+					default: selected_device_value,
+					options: prioritized_device_options.join("\n"),
+					depends_on: "eval:doc.coverage_mode === 'in_store'",
+					mandatory_depends_on: "eval:doc.coverage_mode === 'in_store'",
+					description: __("Pick the device on this bill that this plan should cover."),
+				},
+				{
+					fieldname: "in_store_imei",
 					fieldtype: "Data",
-					label: __("IMEI / Serial Number"),
+					label: __("IMEI of Selected Device"),
 					default: default_manual_imei,
-					depends_on: "eval:doc.for_item === '── Enter IMEI manually ──' || (doc.for_item && !doc.for_item.includes('('))",
-					mandatory_depends_on: "eval:doc.for_item === '── Enter IMEI manually ──' || (doc.for_item && !doc.for_item.includes('('))",
-					description: __("Enter IMEI or serial number for the device"),
+					depends_on: "eval:doc.coverage_mode === 'in_store' && doc.for_item && !doc.for_item.includes('(')",
+					mandatory_depends_on: "eval:doc.coverage_mode === 'in_store' && doc.for_item && !doc.for_item.includes('(')",
+					description: __("This device has no IMEI in the cart yet — enter it to bind the plan."),
+				},
+				{
+					fieldname: "customer_imei",
+					fieldtype: "Data",
+					label: __("Customer Device IMEI"),
+					depends_on: "eval:doc.coverage_mode === 'customer'",
+					mandatory_depends_on: "eval:doc.coverage_mode === 'customer'",
+					description: __("15-digit IMEI of the customer's own phone (e.g. shown under Settings → About). Stored only on the Active VAS Plan as external coverage — NOT on this invoice."),
 				},
 			],
 			size: "large",
@@ -1385,82 +1436,133 @@ export class CartService {
 				const plan = plans.find((p) => p.name === sel);
 				if (!plan || plan.blocked) return;
 
-				const is_manual = values.for_item === "── Enter IMEI manually ──";
+				const mode = values.coverage_mode || default_mode;
+
+				// Guardrail: plan that does not allow external device cannot be
+				// added in customer-IMEI mode.
+				if (mode === "customer" && !plan.allows_external_device) {
+					frappe.msgprint({
+						title: __("Plan Not Eligible for Customer Device"),
+						message: __("Plan {0} can only cover devices sold by us. Pick a different plan or add the device to this bill.", [frappe.utils.escape_html(plan.plan_name)]),
+						indicator: "red",
+					});
+					return;
+				}
+
 				let for_item_code = null;
 				let for_serial_no = "";
 
-				if (is_manual) {
-					const imei = (values.manual_imei || "").trim();
-					if (!imei) {
-						frappe.show_alert({ message: __("Enter IMEI / Serial Number"), indicator: "orange" });
+				if (mode === "customer") {
+					const imei = (values.customer_imei || "").trim();
+					if (!/^\d{14,17}$/.test(imei)) {
+						frappe.show_alert({ message: __("Customer Device IMEI must be 14–17 digits"), indicator: "red" });
 						return;
 					}
 					for_serial_no = imei;
-					for_item_code = null; // external device — no item in cart
+					for_item_code = null; // external device — server resolves from plan.external_device_item
 
+					// Server-side cross-check: validates plan eligibility and resolves
+					// external_device_item when this IMEI is not in our inventory.
 					frappe.xcall(
 						"ch_item_master.ch_item_master.warranty_api.validate_vas_category",
 						{ serial_no: imei, warranty_plan: plan.name }
 					).then((res) => {
 						if (!res.valid) {
-							frappe.show_alert({ message: res.message, indicator: "red" });
+							frappe.msgprint({
+								title: __("Coverage Not Allowed"),
+								message: res.message,
+								indicator: "red",
+							});
 							return;
 						}
 						if (res.item_code) for_item_code = res.item_code;
 						this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
 					});
 					return; // async — don't fall through
-				} else {
-					const for_raw = values.for_item || "";
-					for_item_code = for_raw.split(" (")[0] || null;
-					const serial_match = for_raw.match(/\(([^)]+)\)/);
-					for_serial_no = serial_match ? serial_match[1] : "";
+				}
 
-					// Device in cart has no serial — use manual IMEI input
-					if (!for_serial_no) {
-						const imei = (values.manual_imei || "").trim();
-						if (!imei) {
-							frappe.show_alert({ message: __("Enter IMEI / Serial Number for this device"), indicator: "orange" });
-							return;
-						}
-						for_serial_no = imei;
+				// mode === "in_store"
+				const for_raw = values.for_item || "";
+				for_item_code = for_raw.split(" (")[0] || null;
+				const serial_match = for_raw.match(/\(([^)]+)\)/);
+				for_serial_no = serial_match ? serial_match[1] : "";
+
+				if (!for_serial_no) {
+					const imei = (values.in_store_imei || "").trim();
+					if (!imei) {
+						frappe.show_alert({ message: __("Enter IMEI for the selected in-store device"), indicator: "orange" });
+						return;
 					}
+					for_serial_no = imei;
 				}
 
 				this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
 			},
 		});
 
-		// Click to select plan card
+		// Plan card selection + auto-toggle coverage mode based on plan capability
 		dialog.$wrapper.on("click", ".ch-vas-card:not(.ch-vas-blocked)", function () {
 			dialog.$wrapper.find(".ch-vas-card").removeClass("ch-vas-selected");
 			$(this).addClass("ch-vas-selected");
-			dialog.set_value("selected_plan", $(this).data("plan"));
+			const plan_name = $(this).data("plan");
+			dialog.set_value("selected_plan", plan_name);
+
+			const allows_external = String($(this).data("allows-external")) === "1";
+			const requires_device = String($(this).data("requires-device")) === "1";
+			const current_mode = dialog.get_value("coverage_mode");
+
+			// Auto-flip mode when the plan can only be one or the other.
+			if (!allows_external && current_mode !== "in_store") {
+				dialog.set_value("coverage_mode", "in_store");
+			} else if (allows_external && !has_in_store_options && requires_device && current_mode !== "customer") {
+				dialog.set_value("coverage_mode", "customer");
+			}
+
+			// Update hint copy + lock the radio when only one mode is valid.
+			const hint = dialog.$wrapper.find("#ch-vas-mode-hint");
+			const mode_field = dialog.fields_dict.coverage_mode;
+			if (!allows_external) {
+				hint.text(__("This plan only covers devices sold by us — customer-provided IMEI is disabled."));
+				mode_field && mode_field.df && (mode_field.df.read_only = 1);
+			} else if (!has_in_store_options) {
+				hint.text(__("No device on this bill — this plan will cover a customer-provided IMEI."));
+				mode_field && mode_field.df && (mode_field.df.read_only = 1);
+			} else {
+				hint.text(__("This plan supports both in-store and customer-provided devices."));
+				mode_field && mode_field.df && (mode_field.df.read_only = 0);
+			}
+			mode_field && mode_field.refresh && mode_field.refresh();
 		});
 
 		dialog.show();
-		const applySelectedDevice = () => {
-			if (dialog.fields_dict.for_item) {
-				const select = dialog.fields_dict.for_item.$input && dialog.fields_dict.for_item.$input.get(0);
-				const fallback_value = select
-					? Array.from(select.options).map((option) => option.value).find((value) => value && value !== "── Enter IMEI manually ──")
-					: "";
-				const target_value = selected_device_value || fallback_value;
-				if (target_value) {
-					dialog.fields_dict.for_item.set_value(target_value);
-					if (select) {
-						select.value = target_value;
-						select.dispatchEvent(new Event("change", { bubbles: true }));
-					}
-					dialog.fields_dict.for_item.$input.trigger("change");
-				}
+
+		// Replace the bare value-only Select for coverage_mode with friendlier labels.
+		const apply_mode_labels = () => {
+			const select = dialog.fields_dict.coverage_mode
+				&& dialog.fields_dict.coverage_mode.$input
+				&& dialog.fields_dict.coverage_mode.$input.get(0);
+			if (!select) return;
+			const labels = {
+				in_store: __("In-Store Device (on this bill or from our inventory)"),
+				customer: __("Customer-Provided Device (IMEI from outside)"),
+			};
+			Array.from(select.options).forEach((opt) => {
+				if (labels[opt.value]) opt.text = labels[opt.value];
+			});
+		};
+		apply_mode_labels();
+
+		// Pre-select the auto-targeted device (if any) and apply hint copy.
+		const apply_selected_device = () => {
+			if (dialog.fields_dict.for_item && selected_device_value) {
+				dialog.set_value("for_item", selected_device_value);
 			}
-			if (default_manual_imei && dialog.fields_dict.manual_imei) {
-				dialog.fields_dict.manual_imei.set_value(default_manual_imei);
+			if (default_manual_imei && dialog.fields_dict.in_store_imei) {
+				dialog.set_value("in_store_imei", default_manual_imei);
 			}
 		};
-		applySelectedDevice();
-		setTimeout(applySelectedDevice, 100);
+		apply_selected_device();
+		setTimeout(apply_selected_device, 100);
 	}
 
 	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no) {

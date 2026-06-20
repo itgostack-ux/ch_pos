@@ -77,6 +77,14 @@ export class ReportsWorkspace {
 							title="${__("End-of-day store summary across all sessions")}">
 							<i class="fa fa-file-text"></i> ${__("Z Report")}
 						</button>
+						<button class="btn btn-sm btn-default ch-rpt-store-stock"
+							title="${__("On-hand stock for this store with last-verified cycle-count status")}">
+							<i class="fa fa-cubes"></i> ${__("Store Stock")}
+						</button>
+						<button class="btn btn-sm btn-default ch-rpt-start-count"
+							title="${__("Kick off a physical cycle count for this store")}">
+							<i class="fa fa-check-square-o"></i> ${__("Start Count")}
+						</button>
 						<button class="btn btn-sm btn-default ch-rpt-refresh">
 							<i class="fa fa-refresh"></i> ${__("Refresh")}
 						</button>
@@ -202,6 +210,8 @@ export class ReportsWorkspace {
 			this._load_data(panel);
 		});
 		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
+		panel.on("click", ".ch-rpt-store-stock", () => this._show_store_stock());
+		panel.on("click", ".ch-rpt-start-count", () => this._start_store_count());
 
 		// Store Insights — refresh + open referenced document
 		panel.on("click", ".ch-rpt-ai-refresh", () => this._load_ai_insights(panel, true));
@@ -483,6 +493,119 @@ export class ReportsWorkspace {
 				loading.html(`<div class="ch-rpt-empty" style="padding:16px;color:#dc2626"><i class="fa fa-exclamation-triangle"></i> ${__("Unable to load insights")}</div>`);
 			},
 		});
+	}
+
+	_start_store_count() {
+		if (!PosState.pos_profile) {
+			frappe.msgprint(__("No POS profile — cannot resolve this store's warehouse."));
+			return;
+		}
+		const d = new frappe.ui.Dialog({
+			title: __("Start Cycle Count"),
+			fields: [
+				{
+					fieldname: "class_filter",
+					label: __("Count Class"),
+					fieldtype: "Select",
+					options: "\nA\nB\nC",
+					description: __("Leave blank to count all classes."),
+				},
+				{
+					fieldname: "only_due",
+					label: __("Only items due for count"),
+					fieldtype: "Check",
+					default: 0,
+				},
+			],
+			primary_action_label: __("Start"),
+			primary_action: (values) => {
+				d.hide();
+				frappe.xcall("ch_pos.api.stock_report.start_store_cycle_count", {
+					pos_profile: PosState.pos_profile,
+					class_filter: values.class_filter || null,
+					only_due: values.only_due ? 1 : 0,
+				}).then((res) => {
+					if (!res || !res.cycle_count) {
+						frappe.msgprint(__("Could not start the count."));
+						return;
+					}
+					frappe.msgprint({
+						title: __("Cycle Count Started"),
+						message: `
+							<p>${__("Created")} <b>${frappe.utils.escape_html(res.cycle_count)}</b>
+							${__("with")} <b>${res.items}</b> ${__("item(s)")} ${__("for")}
+							${frappe.utils.escape_html(res.warehouse)}.</p>
+							<p>${__("Open it to enter counted quantities / scan IMEIs, then submit.")}</p>
+							<p><a class="btn btn-sm btn-primary" target="_blank"
+								href="/app/ch-cycle-count/${encodeURIComponent(res.cycle_count)}">
+								${__("Open Count Sheet")}</a></p>`,
+					});
+				}).catch((e) => frappe.msgprint(__("Could not start count: {0}", [e.message || e])));
+			},
+		});
+		d.show();
+	}
+
+	_show_store_stock() {
+		if (!PosState.pos_profile) {
+			frappe.msgprint(__("No POS profile — cannot resolve this store's warehouse."));
+			return;
+		}
+		frappe.xcall("ch_pos.api.stock_report.get_store_stock_report", {
+			pos_profile: PosState.pos_profile,
+		}).then((d) => {
+			const rows = (d.rows || []).map((r) => {
+				const due_badge = r.due
+					? `<span class="badge" style="background:#dc2626;color:#fff">${__("Due")}</span>`
+					: "";
+				const last = r.last_verified
+					? frappe.datetime.str_to_user(r.last_verified)
+					: `<span class="text-muted">${__("Never")}</span>`;
+				const since = (r.days_since_count || r.days_since_count === 0)
+					? `${r.days_since_count}d`
+					: "—";
+				return `<tr>
+					<td>${frappe.utils.escape_html(r.item_name || r.item_code)}</td>
+					<td class="text-right">${flt(r.on_hand_qty)}</td>
+					<td class="text-right">${frappe.format(r.stock_value || 0, { fieldtype: "Currency" })}</td>
+					<td class="text-center">${frappe.utils.escape_html(r.cycle_count_class || "—")}</td>
+					<td>${last}</td>
+					<td class="text-center">${since}</td>
+					<td class="text-center">${due_badge}</td>
+				</tr>`;
+			}).join("");
+
+			const s = d.summary || {};
+			frappe.msgprint({
+				title: __("Store Stock — {0}", [d.warehouse]),
+				wide: true,
+				message: `
+				<div style="font-size:0.9rem">
+					<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+						<div style="background:#eff6ff;border-radius:6px;padding:10px;text-align:center">
+							<div style="font-size:1.2rem;font-weight:600">${s.items || 0}</div>
+							<div class="text-muted">${__("Items")}</div></div>
+						<div style="background:#fef2f2;border-radius:6px;padding:10px;text-align:center">
+							<div style="font-size:1.2rem;font-weight:600;color:#dc2626">${s.due_for_count || 0}</div>
+							<div class="text-muted">${__("Due for Count")}</div></div>
+						<div style="background:#f0fdf4;border-radius:6px;padding:10px;text-align:center">
+							<div style="font-size:1.2rem;font-weight:600">${frappe.format(s.total_stock_value || 0, { fieldtype: "Currency" })}</div>
+							<div class="text-muted">${__("Stock Value")}</div></div>
+					</div>
+					<div style="max-height:380px;overflow:auto">
+					<table class="table table-bordered" style="font-size:0.82rem">
+						<thead><tr>
+							<th>${__("Item")}</th><th class="text-right">${__("On Hand")}</th>
+							<th class="text-right">${__("Value")}</th><th class="text-center">${__("Class")}</th>
+							<th>${__("Last Verified")}</th><th class="text-center">${__("Since")}</th>
+							<th class="text-center">${__("Due?")}</th>
+						</tr></thead>
+						<tbody>${rows || `<tr><td colspan="7" class="text-center text-muted">${__("No stock on hand")}</td></tr>`}</tbody>
+					</table>
+					</div>
+				</div>`,
+			});
+		}).catch((e) => frappe.msgprint(__("Could not load store stock: {0}", [e.message || e])));
 	}
 
 	_show_z_report() {

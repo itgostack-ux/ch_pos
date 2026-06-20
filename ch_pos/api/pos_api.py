@@ -790,9 +790,44 @@ def create_pos_invoice(pos_profile, customer, items,
         if company_loyalty:
             inv.loyalty_program = company_loyalty
 
-    # B2B/B2C — GSTIN provided at billing time overrides saved GSTIN
+    # ─── Per-invoice GSTIN override (market-standard parity) ────────────
+    # Doctrine: the invoice is self-contained for tax reporting. Customer
+    # master GSTIN is the DEFAULT only. The GSTIN entered at billing time
+    # is the source of truth for THIS invoice — mirroring:
+    #   • Oracle EBS AR: RA_CUSTOMER_TRX.tax_classification_code per trx
+    #   • SAP FI: BSEG.STCEG snapshots per document
+    #   • Dynamics 365 F&O: CustInvoiceJour.VATNum per invoice
+    # When per-invoice GSTIN is provided we set ALL three fields atomically:
+    #   1. custom_customer_gstin   — POS shadow field (reverse lookups)
+    #   2. billing_address_gstin   — India Compliance canonical field
+    #                                (GSTR-1, Sales Register, Tax Rate Wise
+    #                                Summary, Account Wise Summary all read
+    #                                this and ONLY this)
+    #   3. gst_category            — India Compliance category enum value
+    #                                ("Registered Regular" is the standard
+    #                                B2B value; "Unregistered" blocks GSTIN)
+    # When GSTIN is NOT provided we honour the customer master's saved
+    # gst_category (no carry-forward from a previous invoice).
     if customer_gstin:
-        inv.custom_customer_gstin = customer_gstin.strip().upper()
+        _gstin = customer_gstin.strip().upper()
+        inv.custom_customer_gstin = _gstin
+        inv.billing_address_gstin = _gstin
+        # Override even if customer master says Unregistered. Use Registered
+        # Regular as the default; downstream may flip to SEZ/Overseas etc.
+        # based on GSTIN regex if needed.
+        if (inv.gst_category or "Unregistered") in (
+            "Unregistered", "", None, "B2C", "B2C-Small", "B2C-Large"
+        ):
+            inv.gst_category = "Registered Regular"
+    else:
+        # No per-invoice GSTIN → fall back to Customer master default.
+        # Explicitly clear any stale values so prior cached invoice state
+        # cannot bleed through.
+        inv.custom_customer_gstin = None
+        # Do NOT touch billing_address_gstin — India Compliance derives it
+        # from customer_address on its own. Setting it to None here would
+        # be a no-op for Unregistered customers and harmful for B2B
+        # customers whose master DOES carry a GSTIN.
 
     # Kiosk token link (from queue panel billing)
     if kiosk_token:
@@ -903,7 +938,13 @@ def create_pos_invoice(pos_profile, customer, items,
         # IMEIs may arrive as JSON numbers (e.g. 35600220100003) — coerce to str
         # in-place so every downstream consumer (.strip(), child-table assignment,
         # warranty link, etc.) sees a string instead of an int.
-        for _sn_key in ("serial_no", "for_serial_no"):
+        # ``customer_imei`` is the forward-compat alias for ``for_serial_no``
+        # (market-standard naming — Oracle ``INSTANCE_NUMBER``, SAP IBase
+        # ``SERIAL_NUMBER``, MS Dynamics ``msdyn_customerasset.SerialNumber``).
+        # When both are sent the explicit ``customer_imei`` wins.
+        if item.get("customer_imei") is not None and not item.get("for_serial_no"):
+            item["for_serial_no"] = item.get("customer_imei")
+        for _sn_key in ("serial_no", "for_serial_no", "customer_imei"):
             _sn_val = item.get(_sn_key)
             if _sn_val is not None and not isinstance(_sn_val, str):
                 item[_sn_key] = str(_sn_val)
@@ -974,7 +1015,18 @@ def create_pos_invoice(pos_profile, customer, items,
         item_is_vas = cint(item.get("is_vas", 0)) or cint(
             item_plan_type in ("Value Added Service", "Protection Plan")
         )
-        if item_exception_original > 0 and item_exception_final >= 0:
+        # Exception-pricing branch: only override discount when an actual price
+        # delta exists. When ``item_exception_original`` is just the uploaded
+        # rate (no real exception in flight) and equals ``item_exception_final``,
+        # there is NO exception discount to apply — leave any caller-supplied
+        # ``discount_amount`` / ``discount_percentage`` (brand offer, scheme,
+        # cashier override) intact. Previously this branch unconditionally
+        # zeroed the discount, silently dropping brand-offer line discounts.
+        if (
+            item_exception_original > 0
+            and item_exception_final >= 0
+            and item_exception_original != item_exception_final
+        ):
             row["discount_amount"] = flt(max(0, item_exception_original - item_exception_final))
             row["discount_percentage"] = flt(row["discount_amount"] / item_exception_original * 100) if item_exception_original > 0 else 0
         # Reflect selected warranty/VAS plan on invoice rows (Own/Extended/VAS).
@@ -993,8 +1045,16 @@ def create_pos_invoice(pos_profile, customer, items,
             row["custom_exception_original_rate"] = item_exception_original
             row["custom_exception_final_rate"] = item_exception_final
 
-        # Pass serial_no so margin scheme can look up purchase cost
-        if item.get("serial_no"):
+        # Pass serial_no so margin scheme can look up purchase cost.
+        # IMPORTANT: plan rows (warranty / VAS service items) must NEVER bind
+        # an inventory serial — the IMEI captured on a plan row is the
+        # **covered device** identifier and belongs on the Active VAS Plan,
+        # not on the Sales Invoice Item.serial_no field (which would trigger
+        # ERPNext's SerialBatchCreation against tabSerial No and either fail
+        # or, worse, silently consume an inventory serial). This mirrors
+        # Oracle Service Contracts (contract line ≠ inventory issue) and
+        # SAP CRM Service Contract (contract item ≠ stock movement).
+        if item.get("serial_no") and not item_is_plan:
             row["serial_no"] = item.get("serial_no")
 
         # Auto-detect margin items from ch_item_type (Refurbished / Pre-Owned)
@@ -1056,14 +1116,35 @@ def create_pos_invoice(pos_profile, customer, items,
         if item_exception_original > 0 and item_exception_final != item_exception_original:
             inv.ignore_pricing_rule = 1
 
-        # Collect warranty/VAS info for post-submit processing
+        # Collect warranty/VAS info for post-submit processing.
+        # Precedence for the **covered device IMEI**:
+        #   1. for_serial_no  — explicit "covered device" key set by POS UI
+        #   2. customer_imei  — forward-compat alias (market-standard naming)
+        #   3. serial_no      — legacy fallback for older payloads only
+        # The explicit keys win so a cashier who accidentally typed the
+        # customer IMEI into the wrong field cannot poison the invoice's
+        # stock serial — the row.serial_no guard above already strips it
+        # from the invoice row, and here we ensure the Active VAS Plan
+        # captures the customer-provided IMEI instead.
         if item_is_plan and item.get("warranty_plan"):
+            # ``customer_imei`` is the unambiguous "this plan covers MY device"
+            # signal from the POS UI. When set, the cart row is for an
+            # EXTERNAL device and must NOT be auto-linked to any in-cart
+            # phone item (Oracle Service Contracts: a customer-asset line
+            # is distinct from a sales-order line; SAP IBase: external
+            # component vs internal component). Carry the explicit intent
+            # through so the auto-infer below cannot clobber it.
             warranty_items.append({
                 "warranty_plan": item.get("warranty_plan"),
                 "for_item_code": item.get("for_item_code"),
-                "serial_no": item.get("serial_no") or item.get("for_serial_no"),
+                "serial_no": (
+                    item.get("for_serial_no")
+                    or item.get("customer_imei")
+                    or item.get("serial_no")
+                ),
                 "price": flt(item.get("rate")),
                 "is_vas": item_is_vas,
+                "external_intent": 1 if item.get("customer_imei") else 0,
             })
 
     # Payment — supports split payments (new) and single mode (legacy)
@@ -1968,6 +2049,22 @@ def create_pos_invoice(pos_profile, customer, items,
                 title=frappe._("External Device Setup Missing"),
             )
 
+        # Market-standard parity: every service contract activation MUST
+        # capture the covered asset identifier. Oracle Service Contracts
+        # rejects an activation with no INSTANCE_NUMBER on the covered
+        # line; SAP CRM Service Contract requires an IBase component;
+        # MS Dynamics Field Service requires an Entitlement → Customer
+        # Asset link before a Work Order can be opened. Without an IMEI,
+        # downstream claims have no way to identify the covered device.
+        if not serial_no:
+            frappe.throw(
+                frappe._("Plan {0} is being sold for a customer-provided device but no Customer Device IMEI was captured. "
+                         "Re-open the VAS dialog and enter the IMEI under \"Customer-Provided Device\".").format(
+                    wi.get("warranty_plan")
+                ),
+                title=frappe._("Customer Device IMEI Required"),
+            )
+
         if cint(plan_doc.purchase_window_hours or 0) > 0 and not original_invoice:
             frappe.throw(
                 frappe._("Plan {0} has a {1}-hour purchase window. "
@@ -1983,13 +2080,23 @@ def create_pos_invoice(pos_profile, customer, items,
         wi["_plan_doc"] = plan_doc
 
     for wi in warranty_items:
-        # Auto-infer for_item_code: if not sent and exactly one device in cart, use it
-        if not wi.get("for_item_code") and len(device_items_on_inv) == 1:
+        # Auto-infer for_item_code: if not sent and exactly one device in cart, use it.
+        # EXCEPTION: when the cart row carried ``customer_imei`` (explicit
+        # external-device intent), do NOT bind to the in-cart phone — the
+        # customer is buying VAS for THEIR OWN device, not the new phone.
+        if (
+            not wi.get("for_item_code")
+            and len(device_items_on_inv) == 1
+            and not wi.get("external_intent")
+        ):
             wi["for_item_code"] = device_items_on_inv[0].item_code
 
-        inferred_serial = _infer_device_serial(wi)
-        if inferred_serial:
-            wi["serial_no"] = inferred_serial
+        # Same exception for serial inference — don't pull the in-cart phone
+        # IMEI onto an external-device plan.
+        if not wi.get("external_intent"):
+            inferred_serial = _infer_device_serial(wi)
+            if inferred_serial:
+                wi["serial_no"] = inferred_serial
 
         _prepare_active_plan_link(wi)
 
@@ -10304,12 +10411,15 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
 
 def _pickup_invoice_response(inv, status="ok"):
     from urllib.parse import quote
-    print_format = None
+    print_format = "Custom Sales Invoice"
     try:
-        profile = frappe.get_cached_doc("POS Profile", inv.pos_profile) if inv.pos_profile else None
-        print_format = (profile.print_format if profile else None) or "Standard"
+        # Keep pickup flow print behavior aligned with the main POS payment/share flow.
+        from ch_pos.api.share_api import _resolve_print_format
+
+        print_format = _resolve_print_format(inv.name) or print_format
     except Exception:
-        print_format = "Standard"
+        if getattr(inv, "custom_gofix_service_request", None):
+            print_format = "GoFix Service Invoice"
     return {
         "status": status,
         "name": inv.name,
