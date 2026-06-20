@@ -65,6 +65,25 @@
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
 
+		const toggle_send_otp_button = () => {
+			const customer_name = input_value("customer_name");
+			const mobile_no = input_value("mobile_no");
+			const whatsapp_number = input_value("whatsapp_number");
+			const state = input_value("state");
+			
+			const all_filled = customer_name && mobile_no && whatsapp_number && state;
+			const $btn = d.$wrapper.find(".ch-send-customer-otp");
+			const $status = d.fields_dict.otp_status?.$wrapper;
+			
+			if (all_filled) {
+				$btn.show();
+				if ($status) $status.show();
+			} else {
+				$btn.hide();
+				if ($status) $status.hide();
+			}
+		};
+
 		const dialog_alert = (message, indicator = "red") => {
 			const alert_class = indicator === "red" ? "danger" : indicator === "orange" ? "warning" : "info";
 			if (d?.set_alert) d.set_alert(frappe.utils.escape_html(message), alert_class);
@@ -173,6 +192,7 @@
 			requestAnimationFrame(() => paint_whatsapp_input(mobile));
 			setTimeout(() => paint_whatsapp_input(mobile), 25);
 			setTimeout(() => { syncing_whatsapp = false; }, 100);
+			setTimeout(() => toggle_send_otp_button(), 120);
 		};
 
 		const sync_whatsapp_from_mobile = () => {
@@ -256,7 +276,7 @@
 				{ fieldtype: "Column Break" },
 				{ fieldname: "otp_actions", fieldtype: "HTML", options: `
 					<div class="ch-customer-otp-actions" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding-top:2px">
-						<button type="button" class="btn btn-default btn-xs ch-send-customer-otp">${__("Send OTP")}</button>
+						<button type="button" class="btn btn-default btn-xs ch-send-customer-otp" style="display:none">${__("Send OTP")}</button>
 					</div>` },
 				{ fieldname: "otp_status", fieldtype: "HTML", options: "" },
 
@@ -382,6 +402,7 @@
 
 		d.doc = d.doc || {};
 		d.show();
+		setTimeout(toggle_send_otp_button, 100);
 		if (prefill_name) {
 			d.set_value("customer_name", prefill_name);
 		}
@@ -422,10 +443,12 @@
 
 		$body.on("input keyup paste change", '[data-fieldname="mobile_no"] input', () => {
 			sync_whatsapp_from_mobile();
+			toggle_send_otp_button();
 		});
 		$body.on("blur", '[data-fieldname="mobile_no"] input', () => {
 			whatsapp_manually_edited = false;
 			sync_whatsapp_from_mobile();
+			toggle_send_otp_button(); 
 		});
 		$body.on("input", '[data-fieldname="whatsapp_number"] input', () => {
 			if (syncing_whatsapp) return;
@@ -434,6 +457,7 @@
 			whatsapp_manually_edited = val !== last_auto_synced_mobile;
 			otp_verified_number = "";
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
+			toggle_send_otp_button();
 		});
 
 		$body.on("awesomplete-selectcomplete change blur", '[data-fieldname="city"] input', () => {
@@ -459,6 +483,14 @@
 		});
 
 		$body.on("change blur", '[data-fieldname="email_id"] input', validate_email_input);
+
+		$body.on("input keyup change", '[data-fieldname="customer_name"] input', () => {
+			toggle_send_otp_button();
+		});
+
+		$body.on("change awesomplete-selectcomplete blur", '[data-fieldname="state"] input', () => {
+			toggle_send_otp_button();
+		});
 
 		const send_otp_handler = async () => {
 			if (otp_request_in_flight) return;
