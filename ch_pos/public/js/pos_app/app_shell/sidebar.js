@@ -29,7 +29,7 @@ const MODE_SECTIONS = [
 			{ key: "repair",  icon: "fa-wrench",    label: __("Repair") },
 			{ key: "service", icon: "fa-cogs",      label: __("Service") },
 			{ key: "claims",  icon: "fa-shield",    label: __("Claims") },
-			{ key: "exceptions", icon: "fa-exclamation-triangle", label: __("Exceptions") },
+			{ key: "exceptions", icon: "fa-exclamation-triangle", label: __("Bill Exceptions") },
 		],
 	},
 	{
@@ -38,6 +38,7 @@ const MODE_SECTIONS = [
 			{ key: "material_request", icon: "fa-clipboard",    label: __("Request Stock") },
 			{ key: "stock_transfer",   icon: "fa-truck",        label: __("Transfers") },
 			{ key: "bin_manager",      icon: "fa-th-large",     label: __("Bin Manager") },
+			{ key: "stock_audit",      icon: "fa-balance-scale",label: __("Stock Audit") },
 		],
 	},
 	{
@@ -377,6 +378,6 @@ export class Sidebar {
 		return ["sell", "returns", "buyback", "repair"];
 	}
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "bin_manager", "guided", "model_compare", "claims", "exceptions", "queue"];
+		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
 	}
 }

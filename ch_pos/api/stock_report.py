@@ -118,3 +118,85 @@ def submit_pos_count(cycle_count, counts) -> dict:
         "total_variance_value": flt(cc.total_variance_value),
         "variance_exception": cc.variance_exception,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stock Audit history — backs the "Count History" and "Variance Requests"
+# tabs in the POS Stock Audit workspace.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@frappe.whitelist()
+def list_cycle_counts(pos_profile, limit=25) -> list:
+    """Return recent CH Cycle Count rows for this store's warehouse.
+
+    Used by the POS Stock Audit "Count History" tab so a store executive can
+    see the last counts performed at their warehouse, by whom, with the final
+    status (Verified / Variance / Pending Approval) and the resulting variance.
+    """
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required."))
+    warehouse = _resolve_warehouse(pos_profile)
+    try:
+        limit = int(limit or 25)
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 200))
+
+    rows = frappe.get_all(
+        "CH Cycle Count",
+        filters={"warehouse": warehouse, "docstatus": ("!=", 2)},
+        fields=[
+            "name", "count_date", "status", "counted_by",
+            "total_variance_qty", "total_variance_value",
+            "variance_exception", "stock_reconciliation",
+            "count_class_filter", "blind_count",
+            "creation", "modified",
+        ],
+        order_by="count_date desc, creation desc",
+        limit_page_length=limit,
+    )
+    return {
+        "warehouse": warehouse,
+        "rows": rows,
+    }
+
+
+@frappe.whitelist()
+def list_variance_requests(pos_profile, limit=25) -> dict:
+    """Return Stock Count Variance CH Exception Request rows for this store.
+
+    Mirrors the cashier `get_pending_exceptions` shape but for the cycle-count
+    family: includes Approved / Rejected / Expired / Auto-Approved so the
+    Stock Audit operator can audit the full variance approval history,
+    not just the open ones.
+    """
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required."))
+    warehouse = _resolve_warehouse(pos_profile)
+    try:
+        limit = int(limit or 25)
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 200))
+
+    rows = frappe.get_all(
+        "CH Exception Request",
+        filters={
+            "exception_type": "Stock Count Variance",
+            "store_warehouse": warehouse,
+            "docstatus": ("!=", 2),
+        },
+        fields=[
+            "name", "exception_type", "status",
+            "requested_by", "requested_by_name", "requested_reason",
+            "requested_value", "resolution_value",
+            "reference_doctype", "reference_name",
+            "raised_at", "resolved_at",
+        ],
+        order_by="raised_at desc",
+        limit_page_length=limit,
+    )
+    return {
+        "warehouse": warehouse,
+        "rows": rows,
+    }

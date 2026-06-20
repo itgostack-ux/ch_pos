@@ -77,13 +77,9 @@ export class ReportsWorkspace {
 							title="${__("End-of-day store summary across all sessions")}">
 							<i class="fa fa-file-text"></i> ${__("Z Report")}
 						</button>
-						<button class="btn btn-sm btn-default ch-rpt-store-stock"
-							title="${__("On-hand stock for this store with last-verified cycle-count status")}">
-							<i class="fa fa-cubes"></i> ${__("Store Stock")}
-						</button>
-						<button class="btn btn-sm btn-default ch-rpt-start-count"
-							title="${__("Kick off a physical cycle count for this store")}">
-							<i class="fa fa-check-square-o"></i> ${__("Start Count")}
+						<button class="btn btn-sm btn-default ch-rpt-stock-audit"
+							title="${__("Open the Stock Audit workspace \u2014 stock report, cycle count, count history, variance approvals.")}">
+							<i class="fa fa-balance-scale"></i> ${__("Stock Audit")}
 						</button>
 						<button class="btn btn-sm btn-default ch-rpt-refresh">
 							<i class="fa fa-refresh"></i> ${__("Refresh")}
@@ -210,8 +206,7 @@ export class ReportsWorkspace {
 			this._load_data(panel);
 		});
 		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
-		panel.on("click", ".ch-rpt-store-stock", () => this._show_store_stock());
-		panel.on("click", ".ch-rpt-start-count", () => this._start_store_count());
+		panel.on("click", ".ch-rpt-stock-audit", () => EventBus.emit("mode:switch", "stock_audit"));
 
 		// Store Insights — refresh + open referenced document
 		panel.on("click", ".ch-rpt-ai-refresh", () => this._load_ai_insights(panel, true));

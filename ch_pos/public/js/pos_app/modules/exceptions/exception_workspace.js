@@ -37,9 +37,9 @@ export class ExceptionWorkspace {
 						<span class="mode-icon" style="background:#fef3c7;color:#d97706">
 							<i class="fa fa-exclamation-triangle"></i>
 						</span>
-						${__("Exception Requests")}
+						${__("Bill Exceptions")}
 					</h4>
-					<span class="ch-mode-hint">${__("Request price overrides, extra discounts, or policy exceptions")}</span>
+					<span class="ch-mode-hint">${__("Cashier overrides at billing time \u2014 extra discount, free accessory, below-margin sale, return beyond policy. For stock count variances see Stock Audit.")}</span>
 				</div>
 
 				<!-- Raise New Exception -->
@@ -264,7 +264,12 @@ export class ExceptionWorkspace {
 	_load_exception_types(panel) {
 		frappe.xcall("frappe.client.get_list", {
 			doctype: "CH Exception Type",
-			filters: { enabled: 1 },
+			filters: {
+				enabled: 1,
+				// Stock Count Variance is auto-raised by the cycle-count submit
+				// flow, never picked by a cashier from this form.
+				name: ["not in", ["Stock Count Variance"]],
+			},
 			fields: ["name", "exception_type"],
 			order_by: "exception_type asc",
 			limit_page_length: 0,
@@ -414,6 +419,7 @@ export class ExceptionWorkspace {
 			{
 				company: PosState.company,
 				store_warehouse: PosState.warehouse,
+				scope: "bill",
 			}
 		).then((rows) => {
 			if (!rows || !rows.length) {
@@ -469,6 +475,9 @@ ExceptionWorkspace.prototype._is_appliable = function (r) {
 	const status = (r && r.status) || "";
 	if (status !== "Approved" && status !== "Auto-Approved") return false;
 	if (r.pos_invoice) return false; // already consumed
+	// Cycle-count variance approvals belong to Stock Audit, not the cart.
+	if (r.exception_type === "Stock Count Variance") return false;
+	if (r.reference_doctype === "CH Cycle Count") return false;
 	return true;
 };
 

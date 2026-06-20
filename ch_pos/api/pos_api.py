@@ -7007,9 +7007,16 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
         variant_count = len(variants)
         variant_rows = []  # per-variant breakdown for side-by-side comparison
 
-        variant_codes = [v.name for v in variants] if variants else [item.name]
+        # A template (has_variants=1) with no enabled variants is not sellable
+        # and has nothing to compare — skip it. This also filters out the
+        # half-configured / test template stubs (e.g. _Test, VAS-TPL) that
+        # otherwise clutter the comparison with ₹0 rows.
+        if variant_count == 0:
+            continue
+
+        variant_codes = [v.name for v in variants]
         # Map variant_code → variant doc (for stitching prices/stock back)
-        variant_lookup = {v.name: v for v in variants} if variants else {item.name: item}
+        variant_lookup = {v.name: v for v in variants}
 
         if variant_codes:
             # Get prices from CH Item Price (channel='POS') — the POS-aware
@@ -7540,11 +7547,11 @@ COMPANY_MODE_MAP = {
     "retail": [
         "sell", "returns", "buyback", "material_request", "stock_transfer",
         "guided", "model_compare", "claims", "exceptions", "queue", "prebook",
-        "pickup",
+        "pickup", "stock_audit",
     ] + _SHARED_MODES,
     "service": [
         "sell", "returns", "buyback", "repair", "queue", "service",
-        "guided", "exceptions", "prebook", "pickup",
+        "guided", "exceptions", "prebook", "pickup", "stock_audit",
     ] + _SHARED_MODES,
 }
 

@@ -44,6 +44,7 @@ import { GuidedWorkspace } from "./pos_app/modules/guided/guided_workspace.js";
 import { ModelCompareWorkspace } from "./pos_app/modules/model_compare/model_compare_workspace.js";
 import { ClaimsWorkspace } from "./pos_app/modules/claims/claims_workspace.js";
 import { ExceptionWorkspace } from "./pos_app/modules/exceptions/exception_workspace.js";
+import { StockAuditWorkspace } from "./pos_app/modules/stock_audit/stock_audit_workspace.js";
 import { QueueWorkspace } from "./pos_app/modules/queue/queue_workspace.js";
 
 // Shared
@@ -112,6 +113,7 @@ ch_pos.PosApp = class PosApp {
 		this.model_compare_workspace = new ModelCompareWorkspace();
 		this.claims_workspace = new ClaimsWorkspace();
 		this.exception_workspace = new ExceptionWorkspace();
+		this.stock_audit_workspace = new StockAuditWorkspace();
 		this.queue_workspace = new QueueWorkspace();
 	}
 
