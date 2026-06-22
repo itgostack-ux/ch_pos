@@ -611,6 +611,34 @@ export class CartService {
 		});
 	}
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 	/** Prompt for IMEI/serial selection from available stock, with manual scan fallback */
 	_prompt_serial_scan(item_data) {
 		const dlg = new frappe.ui.Dialog({
@@ -638,9 +666,6 @@ export class CartService {
 			primary_action_label: __("Add to Cart"),
 			primary_action: (values) => {
 				const serial = String(values.serial_no || "").trim();
-				// Check if one was selected from the picker
-				// jQuery .data() auto-converts all-digit strings to Numbers —
-				// use .attr() to keep IMEIs as strings.
 				const selected = dlg.$wrapper.find(".ch-imei-row.selected").attr("data-serial") || "";
 				const final_serial = selected || serial;
 				if (!final_serial) {
@@ -648,7 +673,6 @@ export class CartService {
 					return;
 				}
 
-				// Check if this serial is already in the cart
 				const dup = PosState.cart.find((c) => c.serial_no === final_serial);
 				if (dup) {
 					frappe.show_alert({ message: __("Serial {0} is already in the cart", [final_serial]), indicator: "orange" });
@@ -691,6 +715,81 @@ export class CartService {
 		});
 		dlg.show();
 
+		// Inject scoped CSS once for picker alignment + hover/selected styles
+		if (!document.getElementById("ch-imei-picker-styles")) {
+			const style = document.createElement("style");
+			style.id = "ch-imei-picker-styles";
+			style.textContent = `
+				.ch-imei-row {
+					display: grid;
+					grid-template-columns: 140px 1fr 160px;
+					align-items: center;
+					gap: 16px;
+					padding: 10px 14px;
+					border-bottom: 1px solid var(--pos-border-light, #e5e7eb);
+					cursor: pointer;
+					transition: background .15s ease;
+				}
+				.ch-imei-row:last-child { border-bottom: none; }
+				.ch-imei-row:hover { background: #f8fafc; }
+				.ch-imei-row.selected {
+					background: #eef2ff;
+					box-shadow: inset 3px 0 0 #6366f1;
+				}
+				.ch-imei-row.is-oldest {
+					background: #fffbeb;
+				}
+				.ch-imei-row.is-oldest:hover { background: #fef3c7; }
+				.ch-imei-serial {
+					font-family: 'SF Mono', Menlo, Consolas, monospace;
+					font-weight: 600;
+					font-size: 13px;
+					color: #1e293b;
+					white-space: nowrap;
+					overflow: hidden;
+					text-overflow: ellipsis;
+				}
+				.ch-imei-chips {
+					display: flex;
+					align-items: center;
+					justify-content: center;
+					gap: 6px;
+					flex-wrap: nowrap;
+				}
+				.ch-imei-meta {
+					display: flex;
+					align-items: center;
+					justify-content: flex-end;
+					gap: 8px;
+					font-size: 11px;
+					color: #64748b;
+					white-space: nowrap;
+				}
+				.ch-imei-chip {
+					font-size: 10px;
+					border-radius: 4px;
+					padding: 2px 6px;
+					line-height: 1.4;
+					white-space: nowrap;
+					font-weight: 500;
+					display: inline-flex;
+					align-items: center;
+				}
+				.ch-imei-chip-sellfirst {
+					background: #fff3cd;
+					color: #856404;
+					border: 1px solid #ffc107;
+					font-weight: 600;
+					animation: ch-sellfirst-pulse 2s ease-in-out infinite;
+				}
+				@keyframes ch-sellfirst-pulse {
+					0%, 100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.5); }
+					50% { box-shadow: 0 0 0 4px rgba(255, 193, 7, 0); }
+				}
+			`;
+			document.head.appendChild(style);
+		}
+
 		// Load available serials
 		frappe.xcall("ch_pos.api.search.get_available_serials", {
 			item_code: item_data.item_code,
@@ -709,32 +808,93 @@ export class CartService {
 			const cart_serials = new Set(PosState.cart.map(c => c.serial_no).filter(Boolean));
 			const available = serials.filter(s => !cart_serials.has(s.serial_no));
 
-			const rows = available.map((s, idx) => {
-				const warranty_info = s.warranty_expiry_date
-					? `<span class="text-muted" style="font-size:11px">WE: ${frappe.datetime.str_to_user(s.warranty_expiry_date)}</span>`
+			// ── Compute ageing days for each row ──
+			available.forEach((s) => {
+				if (s.inward_date) {
+					const days = Math.floor((Date.now() - new Date(s.inward_date).getTime()) / 86400000);
+					s._ageing_days = days >= 0 ? days : 0;
+				} else {
+					s._ageing_days = null;
+				}
+			});
+
+			// ── Determine which row gets "Sell First" ──
+			// Logic: the row with the HIGHEST ageing days (i.e. oldest by date).
+			// In case of tie, the first matching row in FIFO order wins (which is
+			// already the backend's sort: ORDER BY inward_date ASC, name ASC).
+			let sell_first_serial = null;
+			let max_days = -1;
+			available.forEach((s) => {
+				if (s._ageing_days !== null && s._ageing_days > max_days) {
+					max_days = s._ageing_days;
+					sell_first_serial = s.serial_no;
+				}
+			});
+			// Fallback to backend's is_oldest flag if no date info available at all
+			if (!sell_first_serial) {
+				const first_oldest = available.find((s) => s.is_oldest);
+				if (first_oldest) sell_first_serial = first_oldest.serial_no;
+			}
+
+			const rows = available.map((s) => {
+				const is_sell_first = s.serial_no === sell_first_serial;
+
+				// ── Chip order: [Sell First] → [IMEI/Barcode] → [Ageing Days] ──
+				// All chips are CENTERED in their column via .ch-imei-chips flex justify-content.
+
+				const sell_first_chip = is_sell_first
+					? `<span class="ch-imei-chip ch-imei-chip-sellfirst">⚡ ${__("Sell First")}</span>`
 					: "";
-				// FIFO badge: the first serial (oldest inward date) should be sold first
-				const fifo_badge = s.is_oldest
-					? `<span style="font-size:10px;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:4px;padding:1px 5px;margin-left:6px">${__("Sell First")}</span>`
-					: "";
-				// Kind chip: IMEI (real manufacturer ID) vs Barcode (system-generated)
+
 				const kind_chip = s.ch_is_imei
-					? `<span style="font-size:10px;background:#e0e7ff;color:#3730a3;border:1px solid #6366f1;border-radius:4px;padding:1px 5px;margin-left:6px">IMEI</span>`
-					: `<span style="font-size:10px;background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;border-radius:4px;padding:1px 5px;margin-left:6px">Barcode</span>`;
-				const inward_info = s.inward_date && idx > 0
-					? `<span class="text-muted" style="font-size:10px;margin-left:4px">In: ${frappe.datetime.str_to_user(s.inward_date)}</span>`
+					? `<span class="ch-imei-chip" style="background:#e0e7ff;color:#3730a3;border:1px solid #6366f1">IMEI</span>`
+					: `<span class="ch-imei-chip" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1">Barcode</span>`;
+
+				// Stock ageing chip — colour-graded
+				//   • Green  ≤30 days (fresh)
+				//   • Yellow 31-60 days (aging)
+				//   • Red    >60 days (stale)
+				const ageing_days = s._ageing_days;
+				let ageing_chip = "";
+				if (ageing_days !== null) {
+					const ageing_style = ageing_days > 60
+						? "background:#fee2e2;color:#991b1b;border:1px solid #ef4444"
+						: ageing_days > 30
+							? "background:#fef3c7;color:#92400e;border:1px solid #f59e0b"
+							: "background:#dcfce7;color:#166534;border:1px solid #22c55e";
+					const label = ageing_days === 0 ? __("Today") : `${ageing_days}d`;
+					ageing_chip = `<span class="ch-imei-chip" style="${ageing_style}" title="${__("Days in stock")}">${label}</span>`;
+				}
+
+				// ── Meta (right-aligned) ──
+				const inward_info = s.inward_date
+					? `<span>In: ${frappe.datetime.str_to_user(s.inward_date)}</span>`
 					: "";
-				return `<div class="ch-imei-row" data-serial="${frappe.utils.escape_html(s.serial_no)}">
-					<span class="ch-imei-serial">${frappe.utils.escape_html(s.serial_no)}</span>
-					${kind_chip}${fifo_badge}${inward_info}${warranty_info}
+				const warranty_info = s.warranty_expiry_date
+					? `<span>WE: ${frappe.datetime.str_to_user(s.warranty_expiry_date)}</span>`
+					: "";
+
+				const row_class = is_sell_first ? "ch-imei-row is-oldest" : "ch-imei-row";
+
+				return `<div class="${row_class}" data-serial="${frappe.utils.escape_html(s.serial_no)}">
+					<span class="ch-imei-serial" title="${frappe.utils.escape_html(s.serial_no)}">${frappe.utils.escape_html(s.serial_no)}</span>
+					<span class="ch-imei-chips">${sell_first_chip}${kind_chip}${ageing_chip}</span>
+					<span class="ch-imei-meta">${inward_info}${warranty_info}</span>
 				</div>`;
 			}).join("");
 
+			// Update count to reflect filtered (available) serials vs cart-occupied
+			const filtered_out = serials.length - available.length;
+			const count_text = filtered_out > 0
+				? __("{0} available ({1} already in cart)", [available.length, filtered_out])
+				: __("{0} available", [available.length]);
+
 			area.html(`
-				<div style="font-size:12px;color:var(--pos-text-muted);margin-bottom:6px">
-					${__("{0} available", [available.length])}
+				<div style="font-size:12px;color:var(--pos-text-muted, #64748b);margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;padding:0 2px">
+					<span style="font-weight:500">${count_text}</span>
+					<span style="font-size:11px;color:#94a3b8"><i class="fa fa-sort-amount-asc" style="margin-right:4px"></i>${__("Sorted by FIFO (oldest first)")}</span>
 				</div>
-				<div class="ch-imei-list" style="max-height:240px;overflow-y:auto;border:1px solid var(--pos-border-light, #e5e7eb);border-radius:var(--pos-radius, 8px)">
+				<div class="ch-imei-list" style="max-height:320px;overflow-y:auto;border:1px solid var(--pos-border-light, #e5e7eb);border-radius:var(--pos-radius, 8px);background:#fff">
 					${rows}
 				</div>
 			`);
@@ -743,11 +903,33 @@ export class CartService {
 			area.on("click", ".ch-imei-row", function () {
 				area.find(".ch-imei-row").removeClass("selected");
 				$(this).addClass("selected");
-				// .attr() preserves the string form of all-digit IMEIs.
 				dlg.set_value("serial_no", $(this).attr("data-serial") || "");
 			});
 		});
 	}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+
+
+
 
 	// ── Offer Application ───────────────────────────────
 	_apply_best_offer(cart_item) {

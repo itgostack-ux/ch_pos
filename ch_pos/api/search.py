@@ -491,46 +491,114 @@ def get_nearby_stock(item_code, pos_profile) -> dict:
     return result
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 @frappe.whitelist()
-def get_available_serials(item_code, warehouse) -> dict:
+def get_available_serials(item_code, warehouse) -> list:
     """Return list of available serial numbers for an item in a warehouse, FIFO ordered.
 
     Only serials in the Sellable bin are returned — items in Damaged, Disposed,
     Reserved, or Transfer bins are excluded from POS availability.
     (Serial with no CH Stock Bin record defaults to Sellable.)
+
+    Each row includes:
+      - serial_no            : the IMEI / serial number
+      - warranty_expiry_date : for the WE chip in UI
+      - inward_date          : FIRST inward date from SNBB; falls back to
+                               Serial No.creation when SNBB has no record.
+                               Drives the stock-ageing chip on the picker.
+      - ch_is_imei           : 1 = real manufacturer IMEI, 0 = system barcode
+      - ch_serial_kind       : "IMEI" or "Barcode" (resolved label for UI)
+      - bin_type             : Sellable / Damaged / Disposed / Reserved / Transfer
+      - is_oldest            : 1 only for the FIFO-oldest row (drives "Sell First" badge)
     """
-    # Primary: use SNBB inward dates for true FIFO order
-    # Bin filter: exclude serials where bin_type != Sellable
+    if not item_code or not warehouse:
+        return []
+
+    # Primary query: use Serial and Batch Bundle (SNBB) inward dates for true FIFO order.
+    # COALESCE fallback chain on inward_date guarantees NEVER-NULL value:
+    #   SNBB posting_datetime  →  Serial No.creation
+    # This fixes the bug where the FIFO-oldest serial showed no inward date in UI.
+    #
+    # Note: ERPNext v15+ removed `purchase_date` and `delivery_document_no` columns
+    # from `tabSerial No`. Sold/delivered serials are now identified by:
+    #   - sn.status != 'Active'   (status flips to "Delivered" on sale)
+    #   - warehouse IS NULL       (cleared when serial leaves inventory)
     rows = frappe.db.sql("""
         SELECT
             sn.name AS serial_no,
             sn.warranty_expiry_date,
             COALESCE(sn.ch_is_imei, 0) AS ch_is_imei,
-            COALESCE(NULLIF(sn.ch_serial_kind,''),
-                     CASE WHEN COALESCE(sn.ch_is_imei,0)=1 THEN 'IMEI' ELSE 'Barcode' END
+            COALESCE(NULLIF(sn.ch_serial_kind, ''),
+                     CASE WHEN COALESCE(sn.ch_is_imei, 0) = 1 THEN 'IMEI' ELSE 'Barcode' END
             ) AS ch_serial_kind,
-            MIN(DATE(sbb.posting_datetime)) AS inward_date,
+            COALESCE(
+                MIN(DATE(sbb.posting_datetime)),
+                DATE(sn.creation)
+            ) AS inward_date,
             COALESCE(sb.bin_type, 'Sellable') AS bin_type
         FROM `tabSerial No` sn
-        LEFT JOIN `tabSerial and Batch Entry` sbe ON sbe.serial_no = sn.name
+        LEFT JOIN `tabSerial and Batch Entry` sbe
+            ON sbe.serial_no = sn.name
         LEFT JOIN `tabSerial and Batch Bundle` sbb
             ON sbe.parent = sbb.name
             AND sbb.type_of_transaction = 'Inward'
             AND sbb.docstatus = 1
-        LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
+        LEFT JOIN `tabCH Stock Bin` sb
+            ON sb.serial_no = sn.name
         WHERE sn.item_code = %(item_code)s
           AND sn.warehouse = %(warehouse)s
           AND sn.status = 'Active'
           AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
-        GROUP BY sn.name, sn.warranty_expiry_date, sn.ch_is_imei, sn.ch_serial_kind, sb.bin_type
+        GROUP BY
+            sn.name,
+            sn.warranty_expiry_date,
+            sn.ch_is_imei,
+            sn.ch_serial_kind,
+            sn.creation,
+            sb.bin_type
         ORDER BY inward_date ASC, sn.name ASC
     """, {"item_code": item_code, "warehouse": warehouse}, as_dict=True)
 
-    # Tag the first (oldest) serial so the UI can show a "Sell First" badge
+    # Tag the first (oldest) serial so the UI can show the yellow "Sell First" badge.
+    # Also normalize inward_date to ISO string for the JS Date() constructor.
     for i, r in enumerate(rows):
         r["is_oldest"] = 1 if i == 0 else 0
+        if r.get("inward_date"):
+            r["inward_date"] = str(r["inward_date"])
+
     return rows
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
 
 @frappe.whitelist()
 def load_kiosk_token(token, pos_profile=None) -> dict:
