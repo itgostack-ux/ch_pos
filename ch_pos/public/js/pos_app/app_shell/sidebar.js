@@ -201,6 +201,107 @@ export class Sidebar {
 		if (this.collapsed) this._apply_collapsed(true);
 	}
 
+	// _show_walkin_dialog() {
+	// 	const d = new frappe.ui.Dialog({
+	// 		title: __("Log Walk-in"),
+	// 		fields: [
+	// 			{
+	// 				label: __("Purpose"),
+	// 				fieldname: "visit_purpose",
+	// 				fieldtype: "Select",
+	// 				options: "Enquiry\nRepair\nSales\nBuyback\nOther",
+	// 				default: "Enquiry",
+	// 				reqd: 1,
+	// 			},
+	// 			{
+	// 				label: __("Customer Name"),
+	// 				fieldname: "customer_name",
+	// 				fieldtype: "Data",
+	// 				placeholder: __("Optional"),
+	// 			},
+	// 			{
+	// 				label: __("Phone"),
+	// 				fieldname: "customer_phone",
+	// 				fieldtype: "Data",
+	// 				placeholder: __("Optional"),
+	// 			},
+	// 			// Walk-in interest capture (TC follow-up): record what the
+	// 			// customer asked for so footfall reports can correlate
+	// 			// enquiries → conversions by brand/model/item.
+	// 			{
+	// 				fieldtype: "Section Break",
+	// 				label: __("What are they looking for?"),
+	// 				collapsible: 0,
+	// 			},
+	// 			{
+	// 				label: __("Brand"),
+	// 				fieldname: "device_brand",
+	// 				fieldtype: "Data",
+	// 				placeholder: __("e.g. Apple, Samsung, OnePlus"),
+	// 			},
+	// 			{
+	// 				fieldtype: "Column Break",
+	// 			},
+	// 			{
+	// 				label: __("Model"),
+	// 				fieldname: "device_model",
+	// 				fieldtype: "Data",
+	// 				placeholder: __("e.g. iPhone 15, Galaxy S24"),
+	// 			},
+	// 			{
+	// 				label: __("Item / Product Interest"),
+	// 				fieldname: "item_code",
+	// 				fieldtype: "Link",
+	// 				options: "Item",
+	// 				placeholder: __("Optional — pick a catalogue item"),
+	// 				get_query: () => ({
+	// 					filters: { disabled: 0 },
+	// 				}),
+	// 			},
+	// 			{
+	// 				label: __("Remarks"),
+	// 				fieldname: "remarks",
+	// 				fieldtype: "Small Text",
+	// 				placeholder: __("Optional — what did the customer need?"),
+	// 			},
+	// 		],
+	// 		primary_action_label: __("Log Walk-in"),
+	// 		primary_action: (values) => {
+	// 			if (values.customer_phone && !validate_india_phone(values.customer_phone)) {
+	// 				frappe.show_alert({ message: __("Enter a valid Indian phone number (10 digits starting with 6-9)"), indicator: "orange" });
+	// 				return;
+	// 			}
+	// 			d.hide();
+	// 			frappe.call({
+	// 				method: "ch_pos.api.token_api.log_counter_walkin",
+	// 				args: {
+	// 					pos_profile: PosState.pos_profile,
+	// 					visit_purpose: values.visit_purpose,
+	// 					customer_name: values.customer_name || "",
+	// 					customer_phone: values.customer_phone || "",
+	// 					remarks: values.remarks || "",
+	// 					device_brand: values.device_brand || "",
+	// 					device_model: values.device_model || "",
+	// 					item_code: values.item_code || "",
+	// 				},
+	// 				callback: (r) => {
+	// 					const res = r.message || {};
+	// 					if (res.status === "ok") {
+	// 						frappe.show_alert({
+	// 							message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
+	// 							indicator: "green",
+	// 						});
+	// 						EventBus.emit("walkin:logged", res);
+	// 					} else {
+	// 						frappe.show_alert({ message: __("Could not log walk-in"), indicator: "orange" });
+	// 					}
+	// 				},
+	// 			});
+	// 		},
+	// 	});
+	// 	d.show();
+	// }
+
 	_show_walkin_dialog() {
 		const d = new frappe.ui.Dialog({
 			title: __("Log Walk-in"),
@@ -223,11 +324,9 @@ export class Sidebar {
 					label: __("Phone"),
 					fieldname: "customer_phone",
 					fieldtype: "Data",
-					placeholder: __("Optional"),
+					placeholder: __("Optional — 10 digits starting with 6-9"),
+					description: __("Indian mobile number (optional)"),
 				},
-				// Walk-in interest capture (TC follow-up): record what the
-				// customer asked for so footfall reports can correlate
-				// enquiries → conversions by brand/model/item.
 				{
 					fieldtype: "Section Break",
 					label: __("What are they looking for?"),
@@ -239,9 +338,7 @@ export class Sidebar {
 					fieldtype: "Data",
 					placeholder: __("e.g. Apple, Samsung, OnePlus"),
 				},
-				{
-					fieldtype: "Column Break",
-				},
+				{ fieldtype: "Column Break" },
 				{
 					label: __("Model"),
 					fieldname: "device_model",
@@ -303,10 +400,16 @@ export class Sidebar {
 			],
 			primary_action_label: __("Log Walk-in"),
 			primary_action: (values) => {
+				// Final guard — live validation already prevents most bad input
 				if (values.customer_phone && !validate_india_phone(values.customer_phone)) {
-					frappe.show_alert({ message: __("Enter a valid Indian phone number (10 digits starting with 6-9)"), indicator: "orange" });
+					this._mark_phone_invalid(d, __("Enter a valid Indian phone number (10 digits starting with 6-9)"));
+					frappe.show_alert({
+						message: __("Please fix the phone number before continuing"),
+						indicator: "red",
+					});
 					return;
 				}
+
 				d.hide();
 				frappe.call({
 					method: "ch_pos.api.token_api.log_counter_walkin",
@@ -336,6 +439,88 @@ export class Sidebar {
 			},
 		});
 		d.show();
+
+		// Attach live phone validation after the dialog DOM is ready
+		this._attach_phone_live_validation(d, "customer_phone");
+	}
+
+	_attach_phone_live_validation(dialog, fieldname) {
+		const field = dialog.get_field(fieldname);
+		if (!field || !field.$input) return;
+
+		const $input = field.$input;
+
+		// Inline error element (created once)
+		const $err = $(`<div class="ch-phone-error" style="
+			color:#d9534f; font-size:12px; margin-top:4px; display:none;
+		"></div>`);
+		field.$wrapper.append($err);
+
+		$input.attr({
+			maxlength: 15, 
+			inputmode: "tel",
+			autocomplete: "tel",
+		});
+
+		const $primary = dialog.get_primary_btn();
+		const normalize = (raw) => {
+			if (!raw) return "";
+			let s = raw.toString().trim();
+
+			s = s.replace(/[\s\-().]/g, "");
+
+			if (/^\+91/.test(s))    s = s.slice(3);
+			else if (/^0091/.test(s)) s = s.slice(4);
+			else if (/^0\d{10}$/.test(s)) s = s.slice(1);
+
+			s = s.replace(/\D/g, "");
+			return s.slice(0, 10);
+		};
+
+		const INDIAN_MOBILE = /^[6-9]\d{9}$/;
+
+		const run_validation = () => {
+			const raw = $input.val() || "";
+			const cleaned = normalize(raw);
+
+			if (cleaned !== raw) {
+				$input.val(cleaned);
+			}
+
+			// field → empty is valid
+			if (!cleaned) {
+				$err.hide().text("");
+				$input.removeClass("ch-input-invalid").css("border-color", "");
+				$primary.prop("disabled", false);
+				return true;
+			}
+
+			if (cleaned.length < 10) {
+				$err.text(__("Enter a valid Indian phone number (10 digits starting with 6-9)")).show();
+				$input.addClass("ch-input-invalid").css("border-color", "#d9534f");
+				$primary.prop("disabled", true);
+				return false;
+			}
+
+			if (!INDIAN_MOBILE.test(cleaned)) {
+				$err.text(__("Enter a valid Indian phone number (10 digits starting with 6-9)")).show();
+				$input.addClass("ch-input-invalid").css("border-color", "#d9534f");
+				$primary.prop("disabled", true);
+				return false;
+			}
+
+			$err.hide().text("");
+			$input.removeClass("ch-input-invalid").css("border-color", "");
+			$primary.prop("disabled", false);
+			return true;
+		};
+
+		$input.on("input", run_validation);
+		$input.on("blur",  run_validation);
+		$input.on("paste", () => setTimeout(run_validation, 0));
+
+		field._validate_phone = run_validation;
+	
 	}
 
 	bind() {
