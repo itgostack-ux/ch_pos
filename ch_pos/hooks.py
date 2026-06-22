@@ -50,6 +50,7 @@ app_include_js = [
     "/assets/ch_pos/js/ch_customer_dialog.js",
     "/assets/ch_pos/js/bin_transfer_dialog.js",
     "/assets/ch_pos/js/ch_pin_ux.js",  # TC_018 — Manager PIN field UX
+    "/assets/ch_pos/js/session_logout_guard.js",  # Prevent logout with pending tokens
 ]
 
 # App-level CSS
@@ -59,6 +60,13 @@ app_include_css = [
     "/assets/ch_pos/css/pos_components.css",
     "/assets/ch_pos/css/stock_transfer.css",
 ]
+
+# Session events
+session_events = {
+    "on_session_end": [
+        "ch_pos.api.session_validation.validate_no_pending_tokens_on_logout",
+    ],
+}
 
 # Doc events
 doc_events = {
@@ -106,6 +114,11 @@ scheduler_events = {
         # Stores open at 10:00 AM, so cashiers are forced to start a fresh session.
         "0 6 * * *": [
             "ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session.auto_close_overnight_sessions",
+        ],
+        # Auto-close unhandled tokens at 11:55 PM (EOD).
+        # Ensures all tokens are billed (Converted) or rejected by end of business day.
+        "55 23 * * *": [
+            "ch_pos.api.session_validation.auto_close_pending_tokens_at_eod",
         ],
         # Calculate attach rate bonuses on the 1st of each month for the previous month
         "0 2 1 * *": [
