@@ -725,14 +725,14 @@ export class CartPanel {
 		let inline_actions = "";
 		if (item.serial_no && !item.is_warranty && !item.is_vas) {
 			const exception_action = item.exception_request
-				? `<button class="btn btn-xs cart-line-action ch-pos-line-remove-exception" data-idx="${idx}" title="${__("Remove Exception")}">
+				? `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-remove-exception" data-idx="${idx}" title="${__("Remove Exception")}">
 					<i class="fa fa-times-circle"></i>
 				</button>`
-				: `<button class="btn btn-xs cart-line-action ch-pos-line-exception" data-idx="${idx}" title="${__("Exception")}">
+				: `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-exception" data-idx="${idx}" title="${__("Exception")}">
 					<i class="fa fa-exclamation-triangle"></i>
 				</button>`;
 			inline_actions = `
-				<button class="btn btn-xs cart-line-action ch-pos-line-vas" data-idx="${idx}" title="${__("Add VAS")}">
+				<button class="btn btn-xs cart-line-action ch-pos-line-action-vas ch-pos-line-vas" data-idx="${idx}" title="${__("Add VAS")}">
 					<i class="fa fa-shield"></i>
 				</button>
 				${exception_action}`;

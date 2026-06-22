@@ -2049,7 +2049,11 @@ export class CartService {
 		EventBus.emit("held_bills:updated");
 
 		// Notify UI to refresh
-		if (PosState.customer) EventBus.emit("customer:changed", PosState.customer);
+		if (PosState.customer) {
+			// Ensure the Link control + downstream listeners both hydrate customer context.
+			EventBus.emit("customer:set", PosState.customer);
+			EventBus.emit("customer:changed", PosState.customer);
+		}
 		EventBus.emit("cart:updated");
 		frappe.show_alert({ message: __("Held bill restored: {0}", [bill.note || __("Bill")]), indicator: "green" });
 	}

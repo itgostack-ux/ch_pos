@@ -92,6 +92,23 @@ export class StockAuditWorkspace {
 			const dn = $(e.currentTarget).data("dn");
 			if (dt && dn) frappe.set_route("Form", dt, dn);
 		});
+		panel.on("click", ".ch-sa-print-doc", (e) => {
+			const dt = $(e.currentTarget).data("dt");
+			const dn = $(e.currentTarget).data("dn");
+			if (!dt || !dn) return;
+			const url = `/printview?doctype=${encodeURIComponent(dt)}&name=${encodeURIComponent(dn)}&format=Standard&no_letterhead=0`;
+			window.open(url, "_blank");
+		});
+		panel.on("click", ".ch-sa-print-stock", (e) => {
+			const payload = $(e.currentTarget).data("payload") || "";
+			if (!payload) return;
+			try {
+				const parsed = JSON.parse(payload);
+				this._print_stock_snapshot(parsed);
+			} catch (_) {
+				frappe.msgprint(__("Could not prepare stock print snapshot."));
+			}
+		});
 		panel.on("click", ".ch-sa-start-count", () => this._start_count());
 		panel.on("click", ".ch-sa-open-stock", () => this._switch_tab("stock"));
 	}
@@ -182,6 +199,12 @@ export class StockAuditWorkspace {
 		frappe.xcall("ch_pos.api.stock_report.get_store_stock_report", {
 			pos_profile: PosState.pos_profile,
 		}).then((d) => {
+			const payload = frappe.utils.escape_html(JSON.stringify({
+				warehouse: d.warehouse,
+				summary: d.summary || {},
+				rows: d.rows || [],
+				printed_on: frappe.datetime.now_datetime(),
+			}));
 			const rows = (d.rows || []).map((r) => {
 				const due_badge = r.due
 					? `<span class="badge" style="background:#dc2626;color:#fff">${__("Due")}</span>` : "";
@@ -203,9 +226,14 @@ export class StockAuditWorkspace {
 				<div class="ch-pos-section-card">
 					<div class="section-header" style="display:flex;justify-content:space-between;align-items:center">
 						<span><i class="fa fa-cubes"></i> ${__("Store Stock — {0}", [frappe.utils.escape_html(d.warehouse || "")])}</span>
-						<button class="btn btn-xs btn-primary ch-sa-start-count">
-							<i class="fa fa-check-square-o"></i> ${__("Start Cycle Count")}
-						</button>
+						<div style="display:flex;gap:6px;align-items:center">
+							<button class="btn btn-xs btn-default ch-sa-print-stock" data-payload='${payload}'>
+								<i class="fa fa-print"></i> ${__("Print Snapshot")}
+							</button>
+							<button class="btn btn-xs btn-primary ch-sa-start-count">
+								<i class="fa fa-check-square-o"></i> ${__("Start Cycle Count")}
+							</button>
+						</div>
 					</div>
 					<div class="section-body" style="padding:0;max-height:520px;overflow:auto">
 						<table class="table table-condensed table-hover" style="font-size:13px;margin:0">
@@ -301,6 +329,7 @@ export class StockAuditWorkspace {
 					<td class="text-right">${frappe.format(r.total_variance_value || 0, { fieldtype: "Currency" })}</td>
 					<td>${vexc}</td>
 					<td>${sr}</td>
+					<td class="text-center"><button class="btn btn-xs btn-default ch-sa-print-doc" data-dt="CH Cycle Count" data-dn="${frappe.utils.escape_html(r.name)}"><i class="fa fa-print"></i></button></td>
 				</tr>`;
 			}).join("");
 			container.html(`
@@ -315,8 +344,9 @@ export class StockAuditWorkspace {
 							<th class="text-right">${__("Var Value")}</th>
 							<th>${__("Variance Req.")}</th>
 							<th>${__("Stock Recon.")}</th>
+							<th class="text-center">${__("Print")}</th>
 						</tr></thead>
-						<tbody>${rows || `<tr><td colspan="8" class="text-center text-muted" style="padding:20px">${__("No cycle counts yet for this warehouse.")}</td></tr>`}</tbody>
+						<tbody>${rows || `<tr><td colspan="9" class="text-center text-muted" style="padding:20px">${__("No cycle counts yet for this warehouse.")}</td></tr>`}</tbody>
 					</table>
 				</div>`);
 		}).catch((e) => container.html(this._empty(__("Could not load cycle counts: {0}", [e.message || e]))));
@@ -364,6 +394,7 @@ export class StockAuditWorkspace {
 					<td><span class="badge badge-${status_cls}">${frappe.utils.escape_html(r.status || "")}</span></td>
 					<td>${r.raised_at ? frappe.datetime.prettyDate(r.raised_at) : "—"}</td>
 					<td>${r.resolved_at ? frappe.datetime.prettyDate(r.resolved_at) : "—"}</td>
+					<td class="text-center"><button class="btn btn-xs btn-default ch-sa-print-doc" data-dt="CH Exception Request" data-dn="${frappe.utils.escape_html(r.name)}"><i class="fa fa-print"></i></button></td>
 				</tr>`;
 			}).join("");
 			body.find(".ch-sa-variance").html(`
@@ -378,11 +409,73 @@ export class StockAuditWorkspace {
 							<th>${__("Status")}</th>
 							<th>${__("Raised")}</th>
 							<th>${__("Resolved")}</th>
+							<th class="text-center">${__("Print")}</th>
 						</tr></thead>
-						<tbody>${rows || `<tr><td colspan="8" class="text-center text-muted" style="padding:20px">${__("No variance approvals for this warehouse.")}</td></tr>`}</tbody>
+						<tbody>${rows || `<tr><td colspan="9" class="text-center text-muted" style="padding:20px">${__("No variance approvals for this warehouse.")}</td></tr>`}</tbody>
 					</table>
 				</div>`);
 		}).catch((e) => body.find(".ch-sa-variance").html(this._empty(__("Could not load variance log: {0}", [e.message || e]))));
+	}
+
+	_print_stock_snapshot(payload) {
+		const rows = payload.rows || [];
+		const warehouse = payload.warehouse || "";
+		const summary = payload.summary || {};
+		const printed_on = payload.printed_on || frappe.datetime.now_datetime();
+		const table_rows = rows.map((r) => `
+			<tr>
+				<td>${frappe.utils.escape_html(r.item_name || r.item_code || "")}</td>
+				<td style="text-align:right">${flt(r.on_hand_qty)}</td>
+				<td style="text-align:right">${frappe.format(r.stock_value || 0, { fieldtype: "Currency" })}</td>
+				<td style="text-align:center">${frappe.utils.escape_html(r.cycle_count_class || "-")}</td>
+				<td style="text-align:center">${r.due ? "Yes" : "No"}</td>
+			</tr>
+		`).join("");
+
+		const html = `
+			<html>
+			<head>
+				<title>${__("Stock Audit Snapshot")}</title>
+				<style>
+					body { font-family: Arial, sans-serif; padding: 18px; }
+					h2 { margin: 0 0 10px; }
+					.meta { margin-bottom: 12px; color: #4b5563; }
+					table { width: 100%; border-collapse: collapse; font-size: 12px; }
+					th, td { border: 1px solid #d1d5db; padding: 6px 8px; }
+					th { background: #f3f4f6; text-align: left; }
+				</style>
+			</head>
+			<body>
+				<h2>${__("Stock Audit Snapshot")}</h2>
+				<div class="meta">
+					<div><b>${__("Warehouse")}:</b> ${frappe.utils.escape_html(warehouse)}</div>
+					<div><b>${__("Printed On")}:</b> ${frappe.utils.escape_html(printed_on)}</div>
+					<div><b>${__("Items")}:</b> ${flt(summary.items || rows.length)} · <b>${__("Stock Value")}:</b> ${frappe.format(summary.total_stock_value || 0, { fieldtype: "Currency" })}</div>
+				</div>
+				<table>
+					<thead>
+						<tr>
+							<th>${__("Item")}</th>
+							<th>${__("On Hand")}</th>
+							<th>${__("Value")}</th>
+							<th>${__("Class")}</th>
+							<th>${__("Due")}</th>
+						</tr>
+					</thead>
+					<tbody>${table_rows || `<tr><td colspan="5" style="text-align:center">${__("No rows")}</td></tr>`}</tbody>
+				</table>
+				<script>window.print();</script>
+			</body>
+			</html>`;
+
+		const win = window.open("", "_blank");
+		if (!win) {
+			frappe.msgprint(__("Popup blocked. Please allow popups for print."));
+			return;
+		}
+		win.document.open();
+		win.document.write(html);
+		win.document.close();
 	}
 
 	// ── Cycle-count dialogs (lifted from Reports for module separation) ──

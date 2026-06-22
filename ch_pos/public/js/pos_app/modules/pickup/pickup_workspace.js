@@ -289,9 +289,17 @@ export class PickupWorkspace {
 		}
 
 		const rows = this._rows.map((r) => {
-			const item_summary = (r.items || []).slice(0, 3).map(
-				(it) => `${frappe.utils.escape_html(it.item_name || it.item_code)} \u00D7 ${flt(it.qty)}`
-			).join("<br>");
+			const item_summary = (r.items || []).slice(0, 3).map((it) => {
+				const title = `${frappe.utils.escape_html(it.item_name || it.item_code)} \u00D7 ${flt(it.qty)}`;
+				const item_reserved = (it.reserved_serials || []).map((s) => frappe.utils.escape_html(s));
+				const item_imei = item_reserved.length
+					? `<div class="small" style="margin-top:2px;color:#1d4ed8;">
+						<i class="fa fa-barcode"></i> ${item_reserved.slice(0, 2).map((s) => `<code>${s}</code>`).join(" ")}
+						${item_reserved.length > 2 ? `<span class="text-muted">+${item_reserved.length - 2}</span>` : ""}
+					</div>`
+					: "";
+				return `<div style="margin-bottom:4px;">${title}${item_imei}</div>`;
+			}).join("");
 			const extra = (r.items || []).length > 3
 				? `<div class="small text-muted">+${(r.items || []).length - 3} ${__("more")}</div>`
 				: "";
@@ -314,17 +322,30 @@ export class PickupWorkspace {
 				: "";
 
 			const reserved_serials = (r.reserved_serials || []);
+			const requires_imei_gate = cint(r.reserve_stock) === 1;
+			const imei_ready = !requires_imei_gate || reserved_serials.length > 0;
+			const readiness_badge = imei_ready
+				? `<span class="badge" style="background:#dcfce7;color:#166534;font-size:10px;margin-left:4px;">${__("Ready")}</span>`
+				: `<span class="badge" style="background:#fee2e2;color:#991b1b;font-size:10px;margin-left:4px;">${__("Not Ready")}</span>`;
 			const imei_badge = reserved_serials.length
 				? `<div class="small" style="margin-top:6px;color:#1d4ed8;">
 					<i class="fa fa-barcode"></i> ${reserved_serials.slice(0,3).map(s => `<code>${frappe.utils.escape_html(s)}</code>`).join(" ")}
 					${reserved_serials.length > 3 ? `<span class="text-muted">+${reserved_serials.length - 3}</span>` : ""}
 				</div>`
-				: "";
+				: (requires_imei_gate
+					? `<div class="small" style="margin-top:6px;color:#991b1b;">
+						<i class="fa fa-exclamation-triangle"></i> ${__("Reserved IMEI not tagged yet")}
+					</div>`
+					: "");
+			const bill_title = imei_ready
+				? __("Verify IMEI and create invoice")
+				: __("Cannot bill until reserved IMEI is available");
+			const row_state_class = imei_ready ? "ch-pickup-row-ready" : "ch-pickup-row-not-ready";
 
 			return `
-				<div class="ch-pickup-row" style="display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--pos-border);align-items:flex-start;">
+				<div class="ch-pickup-row ${row_state_class}" style="display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--pos-border);align-items:flex-start;">
 					<div style="flex:1.2;min-width:180px;">
-						<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name)}${reserve_badge}</div>
+						<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name)}${reserve_badge}${readiness_badge}</div>
 						<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div>
 						<div class="small ${due_class}" style="margin-top:4px;">
 							<i class="fa fa-calendar"></i> ${__("Due")}: ${due_label} ${due_badge}
@@ -344,7 +365,7 @@ export class PickupWorkspace {
 						<div style="margin-top:2px;"><b>${__("Balance")}: \u20B9${format_number(bal)}</b></div>
 					</div>
 					<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:140px;">
-						<button class="btn btn-success btn-sm ch-pickup-bill" data-name="${r.name}">
+						<button class="btn btn-success btn-sm ch-pickup-bill" data-name="${r.name}" title="${frappe.utils.escape_html(bill_title)}" ${imei_ready ? "" : "disabled"}>
 							<i class="fa fa-check"></i> ${__("Bill & Pickup")}
 						</button>
 						<button class="btn btn-default btn-xs ch-pickup-open" data-name="${r.name}">
@@ -450,6 +471,8 @@ export class PickupWorkspace {
 	_bill_flow(row) {
 		const balance = flt(row.balance_due);
 		const advance = flt(row.advance_paid);
+		const reserved = (row.reserved_serials || []).map((s) => String(s).trim()).filter(Boolean);
+		const scanned = [];
 
 		const dlg = new frappe.ui.Dialog({
 			title: __("Bill & Pickup — {0}", [row.customer_name]),
@@ -465,6 +488,25 @@ export class PickupWorkspace {
 							${advance > 0 ? `<div class="text-success"><b>${__("Advance already paid")}:</b> ₹${format_number(advance)}</div>` : ""}
 							<div><b>${__("Balance due now")}:</b> ₹${format_number(balance)}</div>
 						</div>`,
+				},
+				{
+					fieldtype: "HTML",
+					fieldname: "imei_scan",
+					options: reserved.length ? `
+						<div class="pk-imei-confirm" style="border:1px solid #f59e0b;background:#fffbeb;
+							border-radius:8px;padding:10px;margin-bottom:8px;">
+							<div style="font-weight:600;margin-bottom:6px;">
+								<i class="fa fa-barcode"></i> ${__("Confirm IMEI hand-over")} (${reserved.length})
+							</div>
+							<div class="small" style="color:#9a3412;margin-bottom:6px;">
+								<i class="fa fa-lock"></i> ${__("Create Invoice stays locked until all reserved IMEIs are scanned.")}
+							</div>
+							<input type="text" class="form-control input-sm pk-imei-input"
+								placeholder="${__("Scan reserved IMEI, press Enter")}">
+							<div class="pk-imei-chips" style="margin-top:6px;"></div>
+							<div class="pk-imei-req text-muted" style="font-size:0.78rem;margin-top:4px;"></div>
+							<div class="pk-imei-progress" style="font-size:0.78rem;margin-top:4px;font-weight:600;"></div>
+						</div>` : "",
 				},
 				{
 					fieldtype: "Link",
@@ -496,6 +538,17 @@ export class PickupWorkspace {
 			],
 			primary_action_label: __("Create Invoice"),
 			primary_action: (v) => {
+				if (reserved.length) {
+					const missing = reserved.filter((s) => !scanned.includes(s));
+					if (missing.length) {
+						frappe.msgprint({
+							title: __("IMEI Scan Required"),
+							indicator: "orange",
+							message: __("Scan all reserved IMEIs before billing: {0}", [missing.join(", ")]),
+						});
+						return;
+					}
+				}
 				const args = {
 					pos_profile: PosState.pos_profile,
 					sales_order: row.name,
@@ -503,6 +556,7 @@ export class PickupWorkspace {
 					paid_amount: flt(v.paid_amount || 0),
 					apply_advance: v.apply_advance ? 1 : 0,
 					client_request_id: frappe.utils.get_random(20),
+					scanned_serials: reserved.length ? JSON.stringify(scanned) : null,
 				};
 				frappe.call({
 					method: "ch_pos.api.pos_api.convert_prebooking_to_invoice",
@@ -519,6 +573,56 @@ export class PickupWorkspace {
 			},
 		});
 		dlg.show();
+
+		// ── IMEI scan-and-confirm wiring ───────────────────────────────
+		if (reserved.length) {
+			const $w = dlg.$wrapper;
+			const render = () => {
+				const missing = reserved.filter((s) => !scanned.includes(s));
+				const done = reserved.length - missing.length;
+				$w.find(".pk-imei-chips").html(
+					scanned.map((s, i) =>
+						`<span class="badge" data-idx="${i}" style="background:#e0e7ff;color:#3730a3;margin:2px;cursor:pointer">${frappe.utils.escape_html(s)} ✕</span>`
+					).join("")
+				);
+				$w.find(".pk-imei-req").html(
+					reserved.map((s) => {
+						const ok = scanned.includes(s);
+						return `<span style="margin-right:10px;color:${ok ? "#16a34a" : "#b91c1c"}">${ok ? "✔" : "○"} <code>${frappe.utils.escape_html(s)}</code></span>`;
+					}).join("")
+				);
+				$w.find(".pk-imei-progress").html(
+					missing.length
+						? `<span style="color:#b91c1c">${__("{0}/{1} IMEIs confirmed ", [done, reserved.length])}· ${__("{0} pending", [missing.length])}</span>`
+						: `<span style="color:#166534">${__("All reserved IMEIs confirmed")}</span>`
+				);
+				if (missing.length) {
+					dlg.disable_primary_action();
+				} else {
+					dlg.enable_primary_action();
+				}
+			};
+			$w.find(".pk-imei-input").on("keydown", function (e) {
+				if (e.key !== "Enter") return;
+				e.preventDefault();
+				const val = ($(this).val() || "").trim();
+				if (!val) return;
+				if (!reserved.includes(val)) {
+					frappe.show_alert({ message: __("IMEI {0} is not reserved on this pre-booking", [val]), indicator: "red" });
+					$(this).val("");
+					return;
+				}
+				if (!scanned.includes(val)) scanned.push(val);
+				$(this).val("");
+				render();
+			});
+			$w.on("click", ".pk-imei-chips .badge", function () {
+				scanned.splice($(this).data("idx"), 1);
+				render();
+			});
+			dlg.disable_primary_action();
+			render();
+		}
 	}
 
 	_show_success(inv, auto_print) {

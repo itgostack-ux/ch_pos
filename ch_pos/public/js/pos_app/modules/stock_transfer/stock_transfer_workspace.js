@@ -230,8 +230,9 @@ export class StockTransferWorkspace {
 		}
 
 		// Logistics person
-		const logistics_person = se.custom_logistics_person
-			? `<div style="font-size:11px;color:var(--pos-text-muted);margin-top:4px"><i class="fa fa-user"></i> ${frappe.utils.escape_html(se.custom_logistics_person)}</div>`
+		const logistics_person_name = se.custom_logistics_person_name || se.custom_logistics_person;
+		const logistics_person = logistics_person_name
+			? `<div style="font-size:11px;color:var(--pos-text-muted);margin-top:4px"><i class="fa fa-user"></i> ${frappe.utils.escape_html(logistics_person_name)}</div>`
 			: "";
 
 		return `
@@ -370,12 +371,16 @@ export class StockTransferWorkspace {
 		// Damaged / Disposed / Reserved / Transit. For "To Warehouse" also exclude
 		// the currently selected From Warehouse so staff can't pick the same one.
 		const _wh_excluded_keywords = ["Buyback", "Damaged", "Disposed", "Reserved", "Transit"];
+		this._transfer_allowed_to = this._transfer_allowed_to || [];
+		this._transfer_source_wh = PosState.warehouse || "";
 		const _wh_query = (extra = {}) => () => {
 			const filters = [
 				["Warehouse", "disabled", "=", 0],
 				["Warehouse", "is_group", "=", 0],
 				..._wh_excluded_keywords.map(k => ["Warehouse", "name", "not like", `%-${k}%`]),
 			];
+			if (extra.only) filters.push(["Warehouse", "name", "=", extra.only]);
+			if (extra.allowed && extra.allowed.length) filters.push(["Warehouse", "name", "in", extra.allowed]);
 			if (extra.exclude) filters.push(["Warehouse", "name", "!=", extra.exclude]);
 			return { filters, page_length: 50 };
 		};
@@ -384,18 +389,21 @@ export class StockTransferWorkspace {
 			df: {
 				fieldname: "from_wh", fieldtype: "Link", options: "Warehouse",
 				placeholder: __("Source warehouse"),
-				get_query: _wh_query(),
+				get_query: () => _wh_query({ only: this._transfer_source_wh || undefined })(),
 			},
 			parent: body.find(".ch-st-from-wh"),
 			render_input: true,
 		});
-		this.from_wh_field.set_value(PosState.warehouse || "");
+		this.from_wh_field.set_value(this._transfer_source_wh || "");
 
 		this.to_wh_field = frappe.ui.form.make_control({
 			df: {
 				fieldname: "to_wh", fieldtype: "Link", options: "Warehouse",
 				placeholder: __("Target warehouse"),
-				get_query: () => _wh_query({ exclude: this.from_wh_field && this.from_wh_field.get_value() })(),
+				get_query: () => _wh_query({
+					allowed: this._transfer_allowed_to,
+					exclude: this.from_wh_field && this.from_wh_field.get_value(),
+				})(),
 			},
 			parent: body.find(".ch-st-to-wh"),
 			render_input: true,
@@ -429,6 +437,32 @@ export class StockTransferWorkspace {
 		});
 		this.to_wh_field.$input.on("change", validate_wh);
 		validate_wh();
+
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_transfer_warehouse_scope",
+			args: { pos_profile: PosState.pos_profile },
+			callback: (r) => {
+				const scope = r.message || {};
+				const scoped_source = (scope.source_warehouse || "").trim();
+				const scoped_targets = (scope.target_warehouses || []).filter(Boolean);
+
+				if (scoped_source) {
+					this._transfer_source_wh = scoped_source;
+					this.from_wh_field.set_value(scoped_source);
+					this.from_wh_field.$input.prop("disabled", true);
+				}
+
+				this._transfer_allowed_to = scoped_targets;
+				this.to_wh_field.refresh();
+
+				if (scoped_targets.length) {
+					body.find(".ch-st-wh-alert-msg").text(
+						__("Target warehouses are scoped to your zone/network for this store")
+					);
+				}
+				validate_wh();
+			},
+		});
 
 		// Scanner: Enter = consume scan
 		body.on("keydown", ".ch-st-scan-input", (e) => {

@@ -2547,6 +2547,36 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 	// ───────────────────────────────────────── Invoice submit ──
 
+	_normalize_billing_gstin(gstin) {
+		return (gstin || "").trim().toUpperCase();
+	}
+
+	_validate_billing_gstin(gstin) {
+		const normalized = this._normalize_billing_gstin(gstin);
+		if (!normalized) {
+			return { valid: true, gstin: "" };
+		}
+
+		const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+		if (normalized.length !== 15) {
+			return {
+				valid: false,
+				gstin: normalized,
+				message: __("Invalid GSTIN. It must be exactly 15 characters."),
+			};
+		}
+
+		if (!GSTIN_RE.test(normalized)) {
+			return {
+				valid: false,
+				gstin: normalized,
+				message: __("Invalid GSTIN format. Please verify and try again."),
+			};
+		}
+
+		return { valid: true, gstin: normalized };
+	}
+
 	_submit_invoice() {
 		if (this._submitting) return;
 		// POS-19 fix: Set submitting flag immediately to prevent double-submit race
@@ -2558,6 +2588,14 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			this._submitting = false;
 			return;
 		}
+
+		const gstin_check = this._validate_billing_gstin(PosState.billing_gstin);
+		if (!gstin_check.valid) {
+			frappe.show_alert({ message: gstin_check.message, indicator: "red" });
+			this._submitting = false;
+			return;
+		}
+		PosState.billing_gstin = gstin_check.gstin;
 
 		const grand   = this._is_free_sale ? 0 : this._calc_grand_total();
 		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
@@ -2636,20 +2674,25 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		// Finance Sale type validations
 		if (!this._is_free_sale && this._is_finance_sale_type(PosState.sale_type)) {
-			if (!PosState.sale_sub_type) {
-				frappe.show_alert({ message: __("Select a Finance Partner"), indicator: "orange" });
-				this._submitting = false;
-				return;
-			}
-			if (!PosState.finance_tenure) {
-				frappe.show_alert({ message: __("Select EMI Tenure"), indicator: "orange" });
-				this._submitting = false;
-				return;
-			}
-			if (!PosState.sale_reference) {
-				frappe.show_alert({ message: __("Enter Approval / Loan ID"), indicator: "orange" });
-				this._submitting = false;
-				return;
+			const financed_amount = this._payments.reduce((sum, payment) => {
+				return sum + (this._mop_type(payment.mode) === "finance" ? flt(payment.amount) : 0);
+			}, 0);
+			if (financed_amount > 0.005) {
+				if (!PosState.sale_sub_type) {
+					frappe.show_alert({ message: __("Select a Finance Partner"), indicator: "orange" });
+					this._submitting = false;
+					return;
+				}
+				if (!PosState.finance_tenure) {
+					frappe.show_alert({ message: __("Select EMI Tenure"), indicator: "orange" });
+					this._submitting = false;
+					return;
+				}
+				if (!PosState.sale_reference) {
+					frappe.show_alert({ message: __("Enter Approval / Loan ID"), indicator: "orange" });
+					this._submitting = false;
+					return;
+				}
 			}
 		}
 
@@ -2758,7 +2801,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			guided_session:                 PosState.guided_session || null,
 			exception_request:              PosState.exception_request || null,
 			warranty_claim:                 PosState.warranty_claim || null,
-			customer_gstin:                 PosState.billing_gstin || "",
+			customer_gstin:                 gstin_check.gstin,
 		};
 
 		if (!navigator.onLine) {

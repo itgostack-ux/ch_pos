@@ -28,7 +28,7 @@ import { UpsellService } from "./pos_app/services/upsell_service.js";
 
 // Module workspaces
 import { SellWorkspace } from "./pos_app/modules/sell/sell_workspace.js";
-import { BuybackWorkspace } from "./pos_app/modules/buyback/buyback_workspace.js?v=20260618a";
+import { BuybackWorkspace } from "./pos_app/modules/buyback/buyback_workspace.js?v=20260622c";
 import { RepairWorkspace } from "./pos_app/modules/repair/repair_workspace.js";
 import { ServiceWorkspace } from "./pos_app/modules/service/service_workspace.js";
 import { ReturnsWorkspace } from "./pos_app/modules/returns/returns_workspace.js";

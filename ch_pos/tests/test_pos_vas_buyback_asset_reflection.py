@@ -25,10 +25,10 @@ def run():
     assert "cart_service.js?v=20260618a" in bundle, (
         "POS bundle must cache-bust CartService so VAS changes reach browsers"
     )
-    assert "buyback_workspace.js?v=20260618a" in bundle, (
+    assert "buyback_workspace.js?v=20260622c" in bundle, (
         "POS bundle must cache-bust BuybackWorkspace so approval/payout UI changes reach browsers"
     )
-    assert 'const SHELL_CACHE = "ch-pos-shell-v4";' in sw, (
+    assert 'const SHELL_CACHE = "ch-pos-shell-v7";' in sw, (
         "POS service worker cache version must be bumped when shell/module imports change"
     )
 

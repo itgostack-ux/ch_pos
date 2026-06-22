@@ -149,6 +149,10 @@ export class SessionControls {
 								<i class="fa fa-power-off"></i>
 								<span>${__("Close Session")}</span>
 							</button>
+							<button class="ch-session-menu-item ch-btn-logout">
+								<i class="fa fa-sign-out"></i>
+								<span>${__("Logout")}</span>
+							</button>
 						</div>` : ""}
 				</div>
 			</div>
@@ -219,6 +223,20 @@ export class SessionControls {
 			container.find(".ch-session-profile-shell").removeClass("open");
 			this._show_close_session();
 		});
+		container.find(".ch-btn-logout").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._logout_pos_user();
+		});
+	}
+
+	_logout_pos_user() {
+		frappe.confirm(
+			__("Logout from POS now?"),
+			() => {
+				// Use Frappe's built-in logout endpoint for a clean session end.
+				window.location.href = "/api/method/logout";
+			}
+		);
 	}
 
 	_show_switch_company() {

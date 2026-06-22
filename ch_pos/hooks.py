@@ -94,6 +94,10 @@ scheduler_events = {
         "ch_pos.pos_kiosk.doctype.pos_kiosk_token.pos_kiosk_token.expire_old_tokens",
         "ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session.auto_close_stale_sessions",
     ],
+    "daily": [
+        # Release IMEIs whose pre-booking validity has lapsed (back to sellable).
+        "ch_pos.api.pos_api.release_expired_prebook_reservations",
+    ],
     "cron": {
         "*/10 * * * *": [
             "ch_pos.api.token_api.recover_stale_pos_billing",

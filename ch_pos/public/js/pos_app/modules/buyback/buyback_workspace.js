@@ -21,9 +21,27 @@ const STAGE = {
 	APPROVE: "approve",
 	SETTLE: "settle",
 	DONE: "done",
+	// Terminal — Buyback Order auto-rejected (e.g. IMEI blacklisted on Sanchar
+	// Saathi → BuybackOrder.submit_imei_validation flips status to Rejected) or
+	// Buyback Assessment cancelled/expired. Must short-circuit BEFORE the older
+	// "Inspection Created" fallback below, otherwise a rejected order whose
+	// assessment was already at "Inspection Created" gets routed back to the
+	// INSPECT panel — which made the UI appear to "move to the inspection form"
+	// even after the order was closed.
+	CLOSED: "closed",
 };
 
 function _determine_stage(data) {
+	// Terminal states first — a rejected/cancelled order or a cancelled/expired
+	// assessment must NEVER fall through to INSPECT/ASSESS rendering, even if
+	// the upstream assessment.status is still "Inspection Created" and
+	// data.buyback_inspection is still populated from before the rejection.
+	if (data.order && ["Rejected", "Cancelled"].includes(data.order.status || "")) {
+		return STAGE.CLOSED;
+	}
+	if (!data.order && ["Cancelled", "Expired"].includes(data.status || "")) {
+		return STAGE.CLOSED;
+	}
 	if (data.order) {
 		const s = data.order.status || "";
 		if (["Paid", "Closed"].includes(s)) return STAGE.DONE;
@@ -85,6 +103,9 @@ function _build_progress_steps(data, stage) {
 
 function _active_progress_index(steps, stage) {
 	if (stage === STAGE.DONE) return steps.length;
+	// CLOSED is terminal-but-not-success — no step should be highlighted as
+	// "active" or "done"; the dedicated _html_closed panel carries the message.
+	if (stage === STAGE.CLOSED) return -1;
 	const idx = steps.findIndex(s => s.key === stage);
 	return idx >= 0 ? idx : 0;
 }
@@ -390,7 +411,8 @@ export class BuybackWorkspace {
 		</div>`;
 
 		let body_html = "";
-		if (stage === STAGE.DONE) body_html = this._html_done(data);
+		if (stage === STAGE.CLOSED) body_html = this._html_closed(data);
+		else if (stage === STAGE.DONE) body_html = this._html_done(data);
 		else if (stage === STAGE.SETTLE) body_html = this._html_settle(data);
 		else if (stage === STAGE.APPROVE) body_html = this._html_approve(data);
 		else if (stage === STAGE.INSPECT) {
@@ -460,6 +482,11 @@ export class BuybackWorkspace {
 			frappe.set_route("Form", "Buyback Assessment", $(this).data("name"));
 		});
 
+		el.find(".ch-bb-open-order-desk").on("click", function (e) {
+			e.preventDefault();
+			frappe.set_route("Form", "Buyback Order", $(this).data("name"));
+		});
+
 		this._bind_stage_actions(el, data, stage);
 	}
 
@@ -495,10 +522,10 @@ export class BuybackWorkspace {
 					</div>
 					<div>
 						<label class="ch-bb-field-label">${__("Screenshot")}</label>
-						<div class="ch-bb-imei-file-drop" style="border:1px dashed var(--gray-300);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;text-align:center;min-height:31px;display:flex;align-items:center;justify-content:center">
-							<input type="file" accept="image/*" style="display:none">
-							<span class="ch-bb-imei-file-label">${__("Click to upload")}</span>
-						</div>
+						<label class="ch-bb-imei-file-drop" style="border:1px dashed var(--gray-300);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;text-align:center;min-height:31px;display:flex;align-items:center;justify-content:center;position:relative;user-select:none">
+							<input type="file" accept="image/*" style="position:absolute;width:1px;height:1px;opacity:0">
+							<span class="ch-bb-imei-file-label" style="pointer-events:none">${__("Click to upload")}</span>
+						</label>
 					</div>
 				</div>
 				<div style="margin-bottom:10px">
@@ -1218,6 +1245,70 @@ export class BuybackWorkspace {
 			</div>`;
 	}
 
+	// ─────────────────────────────── stage: CLOSED (order rejected / assessment cancelled) ──
+	// Shown when the Buyback Order has been auto-rejected (e.g. Sanchar Saathi
+	// IMEI check returned Blacklisted / Duplicate IMEI / Already In Use, which
+	// triggers BuybackOrder.submit_imei_validation → status = "Rejected"), or
+	// when the Buyback Assessment itself was cancelled / expired. The previous
+	// behaviour had no terminal-state branch in _determine_stage, so a rejected
+	// order whose assessment was already "Inspection Created" was routed back
+	// to the INSPECT panel — the UI appeared to send staff into the inspection
+	// form even though the order was closed.
+	_html_closed(data) {
+		const order = data.order;
+		const is_order_terminal = !!order && ["Rejected", "Cancelled"].includes(order.status || "");
+		const terminal_status = is_order_terminal ? order.status : (data.status || "Cancelled");
+		const is_rejected = terminal_status === "Rejected";
+
+		// Build the human-readable reason — prefer the explicit approval/IMEI
+		// remarks; fall back to a generic "no reason recorded" line so the
+		// panel never looks empty.
+		const imei_status = (order && order.imei_validation_status) || data.imei_validation_status || "";
+		const imei_remarks = (order && order.imei_validation_remarks) || data.imei_validation_remarks || "";
+		const approval_remarks = (order && order.approval_remarks) || "";
+		const reason_parts = [];
+		if (approval_remarks) reason_parts.push(frappe.utils.escape_html(approval_remarks));
+		if (imei_status && imei_status !== "Pending" && imei_status !== "Verified Clean") {
+			reason_parts.push(__("Sanchar Saathi IMEI check") + ": <strong>" + frappe.utils.escape_html(imei_status) + "</strong>");
+		}
+		if (imei_remarks && !approval_remarks.includes(imei_remarks)) {
+			reason_parts.push(frappe.utils.escape_html(imei_remarks));
+		}
+		const reason_html = reason_parts.length
+			? reason_parts.map(r => `<li>${r}</li>`).join("")
+			: `<li>${__("No additional reason recorded.")}</li>`;
+
+		const title = is_rejected ? __("Buyback Order Rejected") : __("Buyback Closed");
+		const sub = is_rejected
+			? __("This order has been rejected and cannot proceed to inspection, KYC, OTP or settlement.")
+			: __("This buyback was cancelled. Start a new assessment if the customer wants to retry.");
+
+		const desk_link = order
+			? `<a href="#" class="ch-bb-open-order-desk text-muted" data-name="${frappe.utils.escape_html(order.name)}" style="font-size:12px"><i class="fa fa-external-link"></i> ${__("Open Buyback Order")}</a>`
+			: `<a href="#" class="ch-bb-open-desk text-muted" data-name="${frappe.utils.escape_html(data.name)}" style="font-size:12px"><i class="fa fa-external-link"></i> ${__("Open Assessment")}</a>`;
+
+		return `
+			<div class="ch-bb-valuation-banner" style="background:#fee2e2;border-color:#ef4444">
+				<div class="ch-bb-val-label" style="color:#7f1d1d">
+					<i class="fa fa-times-circle"></i> ${title}
+				</div>
+				<div class="ch-bb-val-amount" style="color:#7f1d1d;font-size:18px">
+					${frappe.utils.escape_html(terminal_status)}
+				</div>
+				<div class="ch-bb-val-sub" style="color:#7f1d1d">${sub}</div>
+			</div>
+			<div class="ch-bb-info-note" style="background:#fef2f2;border-color:#fecaca;color:#7f1d1d;margin-top:12px">
+				<div style="font-weight:700;margin-bottom:6px">
+					<i class="fa fa-info-circle"></i> ${__("Reason")}
+				</div>
+				<ul style="margin:0;padding-left:20px">${reason_html}</ul>
+			</div>
+			<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+				${desk_link}
+			</div>
+		`;
+	}
+
 	_html_done(data) {
 		const order = data.order;
 		const price = order ? order.final_price : 0;
@@ -1252,7 +1343,6 @@ export class BuybackWorkspace {
 		el.find(".ch-bb-imei-file-drop").each(function () {
 			const $drop = $(this);
 			const $input = $drop.find('input[type="file"]');
-			$drop.on("click.bbstage", () => $input.trigger("click"));
 			$input.on("change.bbstage", function () {
 				if (!this.files.length) return;
 				const file = this.files[0];
@@ -1777,6 +1867,7 @@ export class BuybackWorkspace {
 				.ch-kyc-preview img{max-width:100%;max-height:90px;border-radius:4px;margin-bottom:4px;object-fit:cover}
 				.ch-kyc-preview .file-name{font-size:11px;color:#15803d;font-weight:600;word-break:break-all}
 				.ch-kyc-preview .file-status{font-size:10px;color:#15803d;margin-top:2px}
+				.ch-kyc-label,.ch-kyc-default,.ch-kyc-preview{pointer-events:none;user-select:none}
 				.ch-kyc-remove{position:absolute;top:6px;right:6px;background:#fff;border:1px solid #e5e7eb;
 					border-radius:50%;width:22px;height:22px;display:none;align-items:center;justify-content:center;
 					cursor:pointer;color:#ef4444;font-size:11px;z-index:2}
@@ -1792,7 +1883,7 @@ export class BuybackWorkspace {
 						<div class="ch-kyc-text">${__("Click or drag image")}</div>
 					</div>
 					<div class="ch-kyc-preview">${_existing_preview(uploads.customer_id_front)}</div>
-					<input type="file" accept="image/*" style="display:none" />
+					<input type="file" accept="image/*" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:1" />
 				</div>
 				<div class="ch-kyc-box ${uploads.customer_id_back ? "has-file" : ""}" data-upload="customer_id_back">
 					<div class="ch-kyc-remove" title="${__("Remove")}"><i class="fa fa-times"></i></div>
@@ -1802,7 +1893,7 @@ export class BuybackWorkspace {
 						<div class="ch-kyc-text">${__("Optional")}</div>
 					</div>
 					<div class="ch-kyc-preview">${_existing_preview(uploads.customer_id_back)}</div>
-					<input type="file" accept="image/*" style="display:none" />
+					<input type="file" accept="image/*" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:1" />
 				</div>
 				<div class="ch-kyc-box ${uploads.customer_photo ? "has-file" : ""}" data-upload="customer_photo">
 					<div class="ch-kyc-remove" title="${__("Remove")}"><i class="fa fa-times"></i></div>
@@ -1812,7 +1903,7 @@ export class BuybackWorkspace {
 						<div class="ch-kyc-text">${__("Optional selfie")}</div>
 					</div>
 					<div class="ch-kyc-preview">${_existing_preview(uploads.customer_photo)}</div>
-					<input type="file" accept="image/*" style="display:none" />
+					<input type="file" accept="image/*" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:1" />
 				</div>
 			</div>
 		`);
@@ -1823,11 +1914,6 @@ export class BuybackWorkspace {
 			const $box = $(this);
 			const $input = $box.find('input[type="file"]');
 			const name = $box.data("upload");
-
-			$box.on("click", function (e) {
-				if ($(e.target).closest(".ch-kyc-remove").length) return;
-				$input.trigger("click");
-			});
 
 			$box.on("dragover", (e) => {
 				e.preventDefault();
@@ -1849,6 +1935,7 @@ export class BuybackWorkspace {
 			});
 
 			$box.find(".ch-kyc-remove").on("click", function (e) {
+				e.preventDefault();
 				e.stopPropagation();
 				uploads[name] = null;
 				$box.removeClass("has-file");
@@ -2037,12 +2124,12 @@ export class BuybackWorkspace {
 				: "";
 			return `<div class="ch-wz-file-box" data-upload="${name}">
 				<label class="ch-wz-label">${label}</label>
-				<div class="ch-wz-file-drop ${existing ? "has-file" : ""}">
+				<label class="ch-wz-file-drop ${existing ? "has-file" : ""}">
 					${!existing ? `<div class="ch-wz-file-icon"><i class="fa fa-cloud-upload"></i></div>
 					<div class="ch-wz-file-text">${__("Click or drag to upload")}</div>` : ""}
-					<input type="file" accept="image/*" style="display:none" />
+					<input class="ch-wz-file-input" type="file" accept="image/*" />
 					<div class="ch-wz-file-preview" ${existing ? "" : 'style="display:none"'}>${initial_html}</div>
-				</div>
+				</label>
 				${desc ? `<div class="ch-wz-desc">${desc}</div>` : ""}
 			</div>`;
 		}
@@ -2216,12 +2303,17 @@ export class BuybackWorkspace {
 					.ch-wz-check{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:500;color:var(--heading-color)}
 					.ch-wz-check input{width:18px;height:18px;accent-color:var(--primary)}
 					.ch-wz-file-box{margin-bottom:14px}
-					.ch-wz-file-drop{border:2px dashed var(--gray-300);border-radius:8px;padding:16px;text-align:center;cursor:pointer;transition:border-color .15s;position:relative;min-height:80px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+					.ch-wz-file-drop{border:2px dashed var(--gray-300);border-radius:8px;padding:16px;text-align:center;cursor:pointer;transition:border-color .15s;position:relative;min-height:80px;display:flex;flex-direction:column;align-items:center;justify-content:center;user-select:none}
 					.ch-wz-file-drop:hover{border-color:var(--primary)}
 					.ch-wz-file-drop.has-file{border-style:solid;border-color:var(--green-400);background:var(--green-50)}
+					/* Input must remain interactive (no pointer-events:none) so the native
+					   label→input association opens the OS file picker on click. The 1×1 px
+					   absolute positioning + opacity:0 keeps it invisible. */
+					.ch-wz-file-input{position:absolute;width:1px;height:1px;opacity:0}
 					.ch-wz-file-icon{font-size:22px;color:var(--gray-400);margin-bottom:4px}
 					.ch-wz-file-text{font-size:12px;color:var(--text-muted)}
 					.ch-wz-file-preview{font-size:12px;color:var(--green-700);font-weight:600;width:100%}
+					.ch-wz-file-icon,.ch-wz-file-text,.ch-wz-file-preview{pointer-events:none}
 					.ch-wz-file-preview i{margin-right:4px}
 					.ch-wz-nav{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;border-top:1px solid var(--border-color)}
 					.ch-wz-nav .btn{border-radius:6px;font-weight:600;padding:8px 20px;font-size:13px}
@@ -2361,10 +2453,15 @@ export class BuybackWorkspace {
 				const $drop = $(this);
 				const $input = $drop.find('input[type="file"]');
 				const name = $drop.closest("[data-upload]").data("upload");
-				$drop.on("click", () => $input.trigger("click"));
 				$drop.on("dragover", (e) => { e.preventDefault(); $drop.css("border-color", "var(--primary)"); });
 				$drop.on("dragleave drop", () => $drop.css("border-color", ""));
 				$drop.on("drop", (e) => { e.preventDefault(); if (e.originalEvent.dataTransfer.files.length) _handle_file(name, $drop, e.originalEvent.dataTransfer.files[0]); });
+				// Click handling is intentionally left to the browser's native
+				// <label>→<input> association. Do NOT add a synthetic click handler
+				// here — calling input.click() from inside a label click handler
+				// causes the synthesised click to bubble back up to the label,
+				// recurse, and the browser blocks the file picker because the
+				// activation can no longer be traced to a single user gesture.
 				$input.on("change", function () { if (this.files.length) _handle_file(name, $drop, this.files[0]); });
 			});
 		}

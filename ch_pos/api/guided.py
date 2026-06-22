@@ -28,6 +28,13 @@ _SPEC_TYPE_TO_QUESTION_TYPE = {
     "Property": "choice",
 }
 
+# A spec is only usable as a guided question when it offers a real, bounded
+# choice. Below 2 distinct values there is nothing to choose; above this cap the
+# data is unnormalised free text (e.g. Colour with 1000+ values) and a dropdown
+# of it is pure noise.
+MIN_SPEC_OPTIONS = 2
+MAX_SPEC_OPTIONS = 40
+
 
 @frappe.whitelist()
 def get_guided_questions(sub_category) -> list:
@@ -79,9 +86,10 @@ def get_guided_questions(sub_category) -> list:
         if not spec_name:
             continue
         options = _get_spec_options(sub_category, spec_name)
-        if not options:
-            # Skip specs that have no real values — a question with no
-            # answers is just noise.
+        # Skip specs that are unusable as a guided question: fewer than 2
+        # distinct values (nothing to choose) or an unbounded set of free-text
+        # values (e.g. Colour with 1000+ entries) that renders a junk dropdown.
+        if not options or not (MIN_SPEC_OPTIONS <= len(options) <= MAX_SPEC_OPTIONS):
             continue
         questions.append({
             "question": f"Preferred {spec_name}?",
@@ -136,7 +144,6 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
            WHERE i.ch_sub_category = %(sub_cat)s
              AND i.disabled = 0 AND i.is_sales_item = 1 AND i.has_variants = 0
              AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
-             AND (b.actual_qty > 0 OR %(wh)s IS NULL)
            ORDER BY i.item_name""",
         {"sub_cat": sub_category, "wh": warehouse},
         as_dict=True,
@@ -197,7 +204,12 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
                 }
             )
 
-    scored.sort(key=lambda x: x["match_score"], reverse=True)
+    # Best match first; among equal scores, in-stock items rank ahead so a store
+    # surfaces what it can sell now without ever returning an empty list.
+    scored.sort(
+        key=lambda x: (x["match_score"], 1 if flt(x["stock_qty"]) > 0 else 0),
+        reverse=True,
+    )
     top = scored[:limit]
 
     return top

@@ -4380,6 +4380,22 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
     if sn.status not in ("Active", "Inactive"):
         return {"valid": False, "reason": frappe._("Serial No {0} status is {1}").format(serial_no, sn.status)}
 
+    # ── Pre-booking reservation lock ────────────────────────────────────────
+    # A serial promised on an open, in-validity pre-booking (advance order)
+    # cannot be sold to anyone else — it must be billed through Pickup. This is
+    # the hard serial lock the qty-level reservation alone does not provide.
+    reserved_so = _get_open_reserved_sales_order_for_serial(serial_no, warehouse)
+    if reserved_so:
+        return {
+            "valid": False,
+            "reserved": True,
+            "reserved_so": reserved_so,
+            "reason": frappe._(
+                "IMEI {0} is reserved for pre-booking {1}. Bill it via Pickup, "
+                "or release the reservation before selling."
+            ).format(serial_no, reserved_so),
+        }
+
     # ── FIFO enforcement ────────────────────────────────────────────────────
     if not cint(allow_fifo_override):
         oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse)
@@ -6237,6 +6253,34 @@ def get_store_zone_info(pos_profile) -> dict:
 
 
 @frappe.whitelist()
+def get_transfer_warehouse_scope(pos_profile) -> dict:
+    """Return scoped transfer warehouses for a POS store.
+
+    Industry-safe default:
+    - Source warehouse is the POS Profile warehouse (current store)
+    - Target warehouses are nearby stores resolved with zone-first fallback
+    """
+    from ch_pos.api.search import _get_nearby_warehouses
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    source_warehouse = profile.warehouse
+    zone_info = get_store_zone_info(pos_profile) or {}
+
+    target_warehouses = []
+    for row in (_get_nearby_warehouses(pos_profile) or []):
+        wh = (row.get("warehouse") or "").strip()
+        if wh and wh != source_warehouse and wh not in target_warehouses:
+            target_warehouses.append(wh)
+
+    return {
+        "source_warehouse": source_warehouse,
+        "zone": zone_info.get("zone"),
+        "target_warehouses": target_warehouses,
+        "restricted": bool(target_warehouses),
+    }
+
+
+@frappe.whitelist()
 def get_pending_material_requests(pos_profile) -> list:
     """Get recent Material Requests for this POS store with unified tracking."""
     from ch_erp15.ch_erp15.store_request_api import get_store_material_requests
@@ -6342,6 +6386,7 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
                              se.remarks,
                se.custom_status, se.custom_logistics_status,
                se.custom_logistics_person,
+               COALESCE(drv.full_name, se.custom_logistics_person) AS custom_logistics_person_name,
                (SELECT COUNT(*) FROM `tabStock Entry Detail` sed
                                     WHERE sed.parent = se.name) AS item_count,
                              (SELECT COALESCE(i.item_name, sed.item_code)
@@ -6361,6 +6406,7 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
                                      0
                              ) AS additional_item_count
         FROM `tabStock Entry` se
+                LEFT JOIN `tabDriver` drv ON drv.name = se.custom_logistics_person
         WHERE se.stock_entry_type = 'Material Transfer'
           AND se.docstatus IN (0, 1)
           AND ({wh_filter})
@@ -6455,12 +6501,222 @@ def scan_for_stock_transfer(barcode, from_warehouse):
     }
 
 
+# Days past the requested delivery/pickup date that a pre-booking IMEI stays
+# reserved. After this grace window the reservation lapses and the device
+# returns to sellable stock (professional-ERP reservation-expiry behaviour).
+PREBOOK_HOLD_GRACE_DAYS = 2
+
+
+def _reserved_serials_on_so(so) -> set:
+    """All IMEIs reserved across a Sales Order's rows (custom_serial_no list)."""
+    reserved = set()
+    for it in so.items:
+        raw = it.get("custom_serial_no") or ""
+        for tok in str(raw).replace(",", "\n").splitlines():
+            tok = tok.strip()
+            if tok:
+                reserved.add(tok)
+    return reserved
+
+
+def _confirm_prebook_serials(so, scanned_serials) -> None:
+    """Require the reserved IMEIs to be physically scanned before billing.
+
+    Throws unless the scanned set exactly matches the reserved set — no missing
+    (device not present) and no extra (wrong device). No-op when the pre-booking
+    carries no reserved IMEIs (e.g. accessories).
+    """
+    reserved = _reserved_serials_on_so(so)
+    if not reserved:
+        return
+
+    if isinstance(scanned_serials, str):
+        scanned_serials = frappe.parse_json(scanned_serials) if scanned_serials.strip() else []
+    scanned = {str(s).strip() for s in (scanned_serials or []) if str(s).strip()}
+
+    if not scanned:
+        frappe.throw(
+            _("Scan the reserved IMEI(s) to confirm hand-over before billing: {0}").format(
+                ", ".join(sorted(reserved))
+            ),
+            title=_("IMEI Scan Required"),
+        )
+    missing = reserved - scanned
+    if missing:
+        frappe.throw(
+            _("These reserved IMEIs were not scanned — the device(s) must be present to bill: {0}").format(
+                ", ".join(sorted(missing))
+            ),
+            title=_("IMEI Mismatch"),
+        )
+    extra = scanned - reserved
+    if extra:
+        frappe.throw(
+            _("These scanned IMEIs are not part of this pre-booking: {0}").format(
+                ", ".join(sorted(extra))
+            ),
+            title=_("IMEI Mismatch"),
+        )
+
+
+def release_expired_prebook_reservations() -> int:
+    """Scheduler: free IMEIs whose pre-booking validity has lapsed.
+
+    For submitted, open, reserve-stock Sales Orders carrying IMEIs whose
+    delivery date passed more than PREBOOK_HOLD_GRACE_DAYS ago and that still
+    hold a live reservation, release the ERPNext stock reservation and log it.
+    The IMEI is already treated as sellable by the reservation check; this also
+    unwinds the qty reservation and leaves an audit trail.
+
+    The back-order Sales Order is left open and the advance is NOT auto
+    refunded/forfeited (a business decision). Instead, every expired
+    pre-booking that carries an advance is flagged to all management heads and
+    the full accounts team for a refund/forfeit call.
+    """
+    from frappe.utils import add_days, getdate
+
+    cutoff = add_days(getdate(), -PREBOOK_HOLD_GRACE_DAYS)
+    sos = frappe.get_all(
+        "Sales Order",
+        filters={
+            "docstatus": 1,
+            "status": ("not in", ["Closed", "Cancelled", "Completed", "On Hold"]),
+            "reserve_stock": 1,
+            "delivery_date": ("<", cutoff),
+            "per_billed": ("<", 100),
+        },
+        fields=["name", "delivery_date", "advance_paid", "customer", "customer_name", "grand_total"],
+        limit_page_length=200,
+    )
+    released = 0
+    with_advance = []
+    for so in sos:
+        has_serial = frappe.db.sql(
+            """SELECT 1 FROM `tabSales Order Item`
+               WHERE parent = %s AND IFNULL(custom_serial_no, '') != '' LIMIT 1""",
+            so.name,
+        )
+        if not has_serial:
+            continue
+        # Only act on orders still holding a live reservation — this makes the
+        # job self-limiting (no re-processing / re-alerting once released).
+        active_sre = frappe.db.exists("Stock Reservation Entry", {
+            "voucher_type": "Sales Order",
+            "voucher_no": so.name,
+            "status": ("not in", ["Delivered", "Cancelled"]),
+            "docstatus": 1,
+        })
+        if not active_sre:
+            continue
+        try:
+            from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
+                cancel_stock_reservation_entries,
+            )
+            cancel_stock_reservation_entries("Sales Order", so.name)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Prebook unreserve failed for {so.name}")
+        try:
+            frappe.get_doc({
+                "doctype": "Comment",
+                "comment_type": "Info",
+                "reference_doctype": "Sales Order",
+                "reference_name": so.name,
+                "content": _(
+                    "Reserved IMEI(s) released — pre-booking validity passed "
+                    "(delivery date {0} + {1} day grace). Device(s) returned to sellable stock."
+                ).format(so.delivery_date, PREBOOK_HOLD_GRACE_DAYS),
+            }).insert(ignore_permissions=True)
+        except Exception:
+            pass
+        if flt(so.advance_paid) > 0:
+            with_advance.append(so)
+        released += 1
+
+    if released:
+        frappe.db.commit()
+    if with_advance:
+        try:
+            _notify_expired_prebook_advances(with_advance)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Expired pre-booking advance alert failed")
+    return released
+
+
+def _notify_expired_prebook_advances(rows) -> None:
+    """Alert all management heads + the full accounts team that expired
+    pre-bookings carry an advance needing a refund/forfeit decision."""
+    recipients = set()
+
+    # Management heads (CEO/COO/CFO or CH Notification Settings digest_roles).
+    try:
+        from ch_erp15.ch_erp15.notification_router import management_digest_users
+        recipients.update(management_digest_users() or [])
+    except Exception:
+        pass
+
+    # Entire accounts team.
+    acct_users = frappe.get_all(
+        "Has Role",
+        filters={"role": ("in", ["Accounts Manager", "Accounts User"]), "parenttype": "User"},
+        pluck="parent",
+    )
+    for u in set(acct_users):
+        if u in ("Administrator", "Guest"):
+            continue
+        if not frappe.db.get_value("User", u, "enabled"):
+            continue
+        email = frappe.db.get_value("User", u, "email")
+        if email:
+            recipients.add(email)
+
+    if not recipients:
+        return
+
+    def _row(so):
+        url = frappe.utils.get_url(f"/app/sales-order/{so.name}")
+        return (
+            "<tr>"
+            f"<td style='border:1px solid #ddd;padding:6px'><a href='{url}'>{so.name}</a></td>"
+            f"<td style='border:1px solid #ddd;padding:6px'>{frappe.utils.escape_html(so.customer_name or so.customer or '')}</td>"
+            f"<td style='border:1px solid #ddd;padding:6px;text-align:right'>₹{flt(so.advance_paid):,.2f}</td>"
+            f"<td style='border:1px solid #ddd;padding:6px;text-align:right'>₹{flt(so.grand_total):,.2f}</td>"
+            f"<td style='border:1px solid #ddd;padding:6px'>{so.delivery_date}</td>"
+            "</tr>"
+        )
+
+    table = (
+        "<table style='border-collapse:collapse;width:100%;margin:10px 0'>"
+        "<tr style='background:#f5f5f5'>"
+        "<th style='border:1px solid #ddd;padding:6px;text-align:left'>Pre-booking (SO)</th>"
+        "<th style='border:1px solid #ddd;padding:6px;text-align:left'>Customer</th>"
+        "<th style='border:1px solid #ddd;padding:6px;text-align:right'>Advance Paid</th>"
+        "<th style='border:1px solid #ddd;padding:6px;text-align:right'>Order Value</th>"
+        "<th style='border:1px solid #ddd;padding:6px;text-align:left'>Delivery Date</th>"
+        "</tr>" + "".join(_row(so) for so in rows) + "</table>"
+    )
+    total_advance = sum(flt(so.advance_paid) for so in rows)
+    subject = _("Action needed: {0} expired pre-booking(s) with advance — refund/forfeit decision").format(len(rows))
+    message = _(
+        "<p>The following pre-bookings have lapsed (validity passed) and their reserved "
+        "device(s) were returned to sellable stock. Each still holds a customer "
+        "<b>advance</b> — please decide refund vs forfeit per policy.</p>"
+        "{0}"
+        "<p><b>Total advance held:</b> ₹{1:,.2f}</p>"
+    ).format(table, total_advance)
+
+    frappe.sendmail(recipients=sorted(recipients), subject=subject, message=message)
+
+
 def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | None = None) -> str | None:
     """Return an open reserve-stock Sales Order name if this serial is reserved.
 
     Reservation source of truth for pickup flow is Sales Order Item.custom_serial_no
     with Sales Order.reserve_stock=1. If a warehouse is provided, scope to that
     warehouse to avoid cross-store false positives.
+
+    Reservations whose validity has lapsed (delivery_date older than
+    PREBOOK_HOLD_GRACE_DAYS) are ignored — the IMEI is treated as released and
+    sellable again, even though the back-order Sales Order remains open.
     """
     serial_no = (serial_no or "").strip()
     if not serial_no:
@@ -6472,13 +6728,17 @@ def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | N
 
     warehouse_filter = ""
     params = {
-        "serial_token": f"%\\n{serial_no}\\n%",
+        "serial": serial_no,
+        "grace": PREBOOK_HOLD_GRACE_DAYS,
     }
 
     if warehouse:
         warehouse_filter = " AND (IFNULL(soi.warehouse, '') = %(warehouse)s OR IFNULL(so.set_warehouse, '') = %(warehouse)s)"
         params["warehouse"] = warehouse
 
+    # Match the exact IMEI as a whole token: custom_serial_no holds a single
+    # serial or a newline-joined list. Normalise newlines/CR/spaces to a
+    # comma-set and use FIND_IN_SET for an exact-token match.
     row = frappe.db.sql(
         f"""
         SELECT so.name
@@ -6487,7 +6747,12 @@ def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | N
          WHERE so.docstatus = 1
            AND so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
            AND COALESCE(so.reserve_stock, 0) = 1
-           AND CONCAT('\n', REPLACE(IFNULL(soi.custom_serial_no, ''), '\\r', ''), '\n') LIKE %(serial_token)s
+           AND (so.delivery_date IS NULL
+                OR so.delivery_date >= DATE_SUB(CURDATE(), INTERVAL %(grace)s DAY))
+           AND FIND_IN_SET(
+                 %(serial)s,
+                 REPLACE(REPLACE(REPLACE(IFNULL(soi.custom_serial_no, ''), '\r', ''), '\n', ','), ' ', '')
+               ) > 0
            {warehouse_filter}
          ORDER BY so.modified DESC
          LIMIT 1
@@ -10585,7 +10850,8 @@ def list_my_proformas(pos_profile, status=None, search=None,
 @frappe.whitelist()
 def convert_prebooking_to_invoice(pos_profile, sales_order,
                                   mode_of_payment=None, paid_amount=None,
-                                  apply_advance=1, client_request_id=None):
+                                  apply_advance=1, client_request_id=None,
+                                  scanned_serials=None):
     """Create & submit a POS Sales Invoice from a pre-booking (Sales Order).
 
     Uses ERPNext's standard `make_sales_invoice` mapper, then flips it to a
@@ -10631,6 +10897,12 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
             so.company, profile.company))
     if flt(so.per_billed) >= 100:
         frappe.throw(_("Sales Order {0} is already fully billed").format(sales_order))
+
+    # ── IMEI scan-confirmation (goods-issue verification) ──────────────────
+    # Every IMEI reserved on the pre-booking must be physically scanned at
+    # pickup before billing — confirming the exact device handed over matches
+    # what was reserved. Mirrors SAP/Oracle pick-confirm against reservation.
+    _confirm_prebook_serials(so, scanned_serials)
 
     # Reuse ERPNext's standard mapper — preserves taxes, advances, item mapping
     from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
