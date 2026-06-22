@@ -207,52 +207,33 @@ class CustomPOSInvoice(SalesInvoice):
         super().on_cancel()
 
     def get_gl_entries(self, warehouse_account=None):
-        gl_entries = super().get_gl_entries(warehouse_account)
-        if not cint(self.get("custom_is_margin_scheme")):
-            return gl_entries
-
-        # For mixed carts: reduce GST GL amounts by the margin-item GST saving
-        margin_gst = flt(self.get("custom_margin_gst"))
-        if margin_gst <= 0:
-            return gl_entries
-
-        # Calculate what GST SHOULD have been on margin items at full value
-        total_margin_amount = sum(
-            flt(item.amount) for item in self.items if cint(item.get("custom_is_margin_item"))
-        )
-        total_margin_taxable = sum(
-            flt(item.get("custom_taxable_value")) for item in self.items
-            if cint(item.get("custom_is_margin_item"))
-        )
-        # GST saving = GST that would have been charged on full amount minus actual margin GST
-        # After _apply_margin_scheme, taxes are "Actual" — use the rate stored
-        # before conversion (or derive from account head).
-        gst_saving = 0
-        for tax in self.taxes:
-            rate = flt(tax.rate)
-            if not rate:
-                continue
-            full_margin_gst = (total_margin_amount * rate) / 100
-            actual_margin_gst = (total_margin_taxable * rate) / 100
-            gst_saving += full_margin_gst - actual_margin_gst
-
-        if gst_saving <= 0:
-            return gl_entries
-
-        # Adjust GST GL entries downward by the saving amount
-        adjusted = []
-        for gl in gl_entries:
-            if "gst" in (gl.account or "").lower():
-                if flt(gl.debit) > 0:
-                    gl.debit = max(0, flt(gl.debit) - gst_saving / 2)
-                    gl.debit_in_account_currency = gl.debit
-                if flt(gl.credit) > 0:
-                    gl.credit = max(0, flt(gl.credit) - gst_saving / 2)
-                    gl.credit_in_account_currency = gl.credit
-                if flt(gl.debit) == 0 and flt(gl.credit) == 0:
-                    continue
-            adjusted.append(gl)
-        return adjusted
+        # Margin-scheme GST is already correct in the GL by the time we get
+        # here:  validate() → _apply_margin_scheme() rewrites each tax row's
+        # charge_type to "Actual" and stores the *margin-reduced* amount in
+        # tax_amount / tax_amount_after_discount_amount.  ERPNext's parent
+        # get_gl_entries() reads those final amounts and emits a balanced
+        # set of GL entries (Dr Debtor = Cr Sales + Cr Output GST).
+        #
+        # The previous override attempted to "reduce GST GL amounts by the
+        # margin-item GST saving" a second time here, which double-deducted
+        # the saving and produced the well-known "Debit and Credit not equal
+        # in Sales Invoice — Difference X" submit error.  See the formula in
+        # commit history; the math was:
+        #
+        #     gst_saving = Σ_tax_rows (full_amount × rate − margin_base × rate) / 100
+        #     each "gst" GL.credit -= gst_saving / 2
+        #
+        # For an in-state cart this subtracted gst_saving across 2 GL rows
+        # (CGST + SGST) → total deduction = gst_saving, leaving the GL short
+        # by exactly that amount on the credit side.  For an out-state cart
+        # it subtracted only gst_saving/2 from the single IGST row → still
+        # unbalanced, just by half.  In every case the saving had ALREADY
+        # been removed from the tax row by _apply_margin_scheme, so this
+        # second deduction was always wrong.
+        #
+        # Keep the override intact (in case future logic needs a hook here),
+        # but do not modify the entries.
+        return super().get_gl_entries(warehouse_account)
 
 
 # ── Cancel policy ────────────────────────────────────────────────
