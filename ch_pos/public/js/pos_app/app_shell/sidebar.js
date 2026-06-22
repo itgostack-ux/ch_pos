@@ -248,16 +248,52 @@ export class Sidebar {
 					fieldtype: "Data",
 					placeholder: __("e.g. iPhone 15, Galaxy S24"),
 				},
-				{
-					label: __("Item / Product Interest"),
-					fieldname: "item_code",
-					fieldtype: "Link",
-					options: "Item",
-					placeholder: __("Optional — pick a catalogue item"),
-					get_query: () => ({
-						filters: { disabled: 0 },
-					}),
-				},
+				// {
+				// 	label: __("Item / Product Interest"),
+				// 	fieldname: "item_code",
+				// 	fieldtype: "Link",
+				// 	options: "Item",
+				// 	placeholder: __("Optional — pick a catalogue item"),
+				// 	get_query: () => ({
+				// 		filters: { disabled: 0 },
+				// 	}),
+				// },
+
+
+		
+
+ {
+                label: __("Item / Product Interest"),
+                fieldname: "item_code",
+                fieldtype: "Link",
+                options: "Item",
+                placeholder: __("Optional — pick a catalogue item"),
+
+                get_query: () => ({
+                    query: "ch_pos.api.item_search.search_items_by_name",
+                }),
+
+                // After selection: real item_code is stored,
+                // but we replace the input's visible text with item_name
+                onchange: function () {
+                    const item_code = d.get_value("item_code");
+                    if (!item_code) return;
+
+                    frappe.db.get_value("Item", item_code, "item_name", (r) => {
+                        if (r && r.item_name) {
+                            const field = d.get_field("item_code");
+                            // Replace visible input text with item_name
+                            // (the underlying value remains item_code)
+                            if (field && field.$input) {
+                                field.$input.val(r.item_name);
+                            }
+                        }
+                    });
+                },
+            },
+
+
+				
 				{
 					label: __("Remarks"),
 					fieldname: "remarks",
