@@ -121,6 +121,9 @@ export class CartPanel {
 				<button class="btn btn-xs btn-default ch-pos-btn-reprint-cart" title="${__("Reprint today\'s invoices")}">
 					<i class="fa fa-print"></i> ${__("Reprint")}
 				</button>
+				<button class="btn btn-xs btn-default ch-pos-btn-sell-vas" title="${__("Sell a Value Added Service — incl. for a phone bought elsewhere (external IMEI)")}">
+					<i class="fa fa-shield"></i> ${__("Sell VAS")}
+				</button>
 			</div>
 			<div class="ch-pos-cart-actions">
 				<button class="btn btn-outline-danger ch-pos-btn-cancel">${__("Cancel")}</button>
@@ -469,6 +472,12 @@ export class CartPanel {
 		// Quick-link: held bills + reprint (in cart panel)
 		w.on("click", ".ch-pos-btn-held-bills", () => EventBus.emit("held_bills:open"));
 		w.on("click", ".ch-pos-btn-reprint-cart", () => EventBus.emit("reprint:open"));
+
+		// Quick-link: standalone VAS sale (no device line required). Opens the
+		// VAS dialog with no for_item so the cashier can sell a Value Added
+		// Service against a customer's own phone (external IMEI) — a device not
+		// purchased from us. Plans flagged allow_external_device drive this.
+		w.on("click", ".ch-pos-btn-sell-vas", () => EventBus.emit("vas:open", {}));
 
 		// Keep held-bills badge current whenever any held bill changes
 		EventBus.on("held_bills:updated", () => this._refresh_held_count(w));
