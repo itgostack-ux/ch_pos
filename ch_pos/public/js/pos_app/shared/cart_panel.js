@@ -506,7 +506,6 @@ export class CartPanel {
 	_open_edit_dialog(customer, doc) {
 		const me = this;
 
-		// Auto-fill from pincode (India Post API)
 		const autofillFromPincode = (dialog, pin, prefix = "") => {
 			if (!pin || !/^\d{6}$/.test(pin)) return;
 			const stateField = prefix ? `${prefix}_state` : "state";
@@ -521,24 +520,11 @@ export class CartPanel {
 					}
 					const po = data[0].PostOffice[0];
 					dialog.set_value(stateField, po.State);
-					
-					// Ensure CH City exists, then set city
-					frappe.db.exists("CH City", po.District).then((exists) => {
-						if (!exists) {
-							return frappe.db.insert({
-								doctype: "CH City",
-								city_name: po.District,
-								state: po.State,
-							});
-						}
-					}).then(() => {
-						dialog.set_value(cityField, po.District);
-					});
+					dialog.set_value(cityField, po.District);
 				})
 				.catch(() => {});
 		};
 
-		// Dialog
 		const d = new frappe.ui.Dialog({
 			title: __("Edit Customer"),
 			size: "large",
@@ -565,11 +551,62 @@ export class CartPanel {
 
 				{ fieldtype: "Section Break", label: __("Billing Address") },
 				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1"),
-				default: doc.address_line1 || "" },
+				reqd: 1, default: doc.address_line1 || "" },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2"),
 				default: doc.address_line2 || "" },
 
+				{ fieldtype: "Section Break" },
+				{
+					fieldname: "state",
+					fieldtype: "Autocomplete",
+					label: __("State"),
+					reqd: 1,
+					default: doc.state || "",
+					options: [],
+					onchange: async function () {
+						const newState = d.get_value("state");
+						if (!newState) return;
+						
+						// Reload city autocomplete with cities of this state
+						const cities = await frappe.db.get_list("CH City", {
+							filters: { state: newState },
+							fields: ["name"],
+							limit: 0,
+						});
+						const cityNames = cities.map(c => c.name);
+						if (d.fields_dict.city) {
+							d.fields_dict.city.set_data(cityNames);
+						}
+						
+						// Clear city if it doesn't belong to new state
+						const currentCity = d.get_value("city");
+						if (currentCity && !cityNames.includes(currentCity)) {
+							d.set_value("city", "");
+						}
+						
+					},
+				},
+				{ fieldtype: "Column Break" },
+				{
+					fieldname: "city",
+					fieldtype: "Autocomplete",
+					label: __("City"),
+					reqd: 1,
+					default: doc.city || "",
+					options: [],
+					onchange: async function () {
+						const cityVal = d.get_value("city");
+						if (!cityVal) return;
+						
+						// Auto-fill state from city's stored state
+						const r = await frappe.db.get_value("CH City", cityVal, "state");
+						const cityState = r?.message?.state;
+						if (cityState && !d.get_value("state")) {
+							d.set_value("state", cityState);
+						}
+					},
+				},
 				{ fieldtype: "Section Break" },
 				{
 					fieldname: "pincode",
@@ -586,54 +623,6 @@ export class CartPanel {
 				default: doc.gstin || "" },
 
 				{ fieldtype: "Section Break" },
-				{
-					fieldname: "state",
-					fieldtype: "Link",
-					options: "CH State",
-					label: __("State"),
-					reqd: 1,
-					default: doc.state || "",
-					get_query: () => ({ filters: { disabled: 0, country: "India" } }),
-					onchange: function () {
-						// If current city belongs to different state, clear it
-						const current_city = d.get_value("city");
-						if (current_city) {
-							frappe.db.get_value("CH City", current_city, "state").then((r) => {
-								const city_state = r?.message?.state;
-								if (city_state && city_state !== d.get_value("state")) {
-									d.set_value("city", "");
-								}
-							});
-						}
-					},
-				},
-				{ fieldtype: "Column Break" },
-				{
-					fieldname: "city",
-					fieldtype: "Link",
-					options: "CH City",
-					label: __("City"),
-					default: doc.city || "",
-					get_query: () => {
-						const filters = { disabled: 0 };
-						const selected_state = d.get_value("state");
-						if (selected_state) filters.state = selected_state;
-						return { filters };
-					},
-					onchange: function () {
-						// If city belongs to a state, auto-fill state if empty
-						const city_val = d.get_value("city");
-						if (!city_val) return;
-						frappe.db.get_value("CH City", city_val, "state").then((r) => {
-							const city_state = r?.message?.state;
-							if (city_state && !d.get_value("state")) {
-								d.set_value("state", city_state);
-							}
-						});
-					},
-				},
-
-				{ fieldtype: "Section Break" },
 				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality"),
 				default: doc.area || "" },
 				{ fieldtype: "Column Break" },
@@ -641,7 +630,6 @@ export class CartPanel {
 				default: doc.pan || "",
 				description: __("10-character PAN (AAAAA9999A)") },
 
-				// Shipping
 				{ fieldtype: "Section Break", label: __("Shipping") },
 				{
 					fieldname: "ship_to_same_as_billing",
@@ -673,47 +661,45 @@ export class CartPanel {
 				{ fieldtype: "Section Break" },
 				{
 					fieldname: "shipping_state",
-					fieldtype: "Link",
-					options: "CH State",
+					fieldtype: "Autocomplete",
 					label: __("Shipping State"),
 					default: doc.shipping_state || "",
+					options: [],
 					depends_on: "eval:!doc.ship_to_same_as_billing",
-					get_query: () => ({ filters: { disabled: 0, country: "India" } }),
-					onchange: function () {
-						const current_city = d.get_value("shipping_city");
-						if (current_city) {
-							frappe.db.get_value("CH City", current_city, "state").then((r) => {
-								const city_state = r?.message?.state;
-								if (city_state && city_state !== d.get_value("shipping_state")) {
-									d.set_value("shipping_city", "");
-								}
-							});
+					onchange: async function () {
+						const newState = d.get_value("shipping_state");
+						if (!newState) return;
+						const cities = await frappe.db.get_list("CH City", {
+							filters: { state: newState },
+							fields: ["name"],
+							limit: 0,
+						});
+						const cityNames = cities.map(c => c.name);
+						if (d.fields_dict.shipping_city) {
+							d.fields_dict.shipping_city.set_data(cityNames);
+						}
+						const currentCity = d.get_value("shipping_city");
+						if (currentCity && !cityNames.includes(currentCity)) {
+							d.set_value("shipping_city", "");
 						}
 					},
 				},
 				{ fieldtype: "Column Break" },
 				{
 					fieldname: "shipping_city",
-					fieldtype: "Link",
-					options: "CH City",
+					fieldtype: "Autocomplete",
 					label: __("Shipping City"),
 					default: doc.shipping_city || "",
+					options: [],
 					depends_on: "eval:!doc.ship_to_same_as_billing",
-					get_query: () => {
-						const filters = { disabled: 0 };
-						const selected_state = d.get_value("shipping_state");
-						if (selected_state) filters.state = selected_state;
-						return { filters };
-					},
-					onchange: function () {
-						const city_val = d.get_value("shipping_city");
-						if (!city_val) return;
-						frappe.db.get_value("CH City", city_val, "state").then((r) => {
-							const city_state = r?.message?.state;
-							if (city_state && !d.get_value("shipping_state")) {
-								d.set_value("shipping_state", city_state);
-							}
-						});
+					onchange: async function () {
+						const cityVal = d.get_value("shipping_city");
+						if (!cityVal) return;
+						const r = await frappe.db.get_value("CH City", cityVal, "state");
+						const cityState = r?.message?.state;
+						if (cityState && !d.get_value("shipping_state")) {
+							d.set_value("shipping_state", cityState);
+						}
 					},
 				},
 			],
@@ -732,24 +718,6 @@ export class CartPanel {
 					frappe.msgprint(__("Billing pincode must be 6 digits"));
 					return;
 				}
-				// Validate city/state combo before saving
-				if (values.city && values.state) {
-					const cityExists = await frappe.db.exists("CH City", values.city);
-					if (cityExists) {
-						const r = await frappe.db.get_value("CH City", values.city, "state");
-						const cityState = r?.message?.state;
-						if (cityState && cityState !== values.state) {
-							frappe.msgprint({
-								title: __("City / State Mismatch"),
-								message: __("City '{0}' belongs to '{1}'. Please update state or pick a city from '{2}'.", 
-									[values.city, cityState, values.state]),
-								indicator: "red",
-							});
-							return;
-						}
-					}
-				}
-				
 				if (!values.ship_to_same_as_billing && values.shipping_pincode 
 					&& values.shipping_pincode.trim() 
 					&& !/^\d{6}$/.test(values.shipping_pincode.trim())) {
@@ -764,11 +732,53 @@ export class CartPanel {
 				.then(() => {
 					frappe.show_alert({ message: __("Customer updated successfully"), indicator: "green" });
 					d.hide();
+					
+					// Clear all caches
 					PosState.customer_info = null;
-					me._commit_customer(customer);
+					
+					if (frappe.model && frappe.model.clear_doc) {
+						frappe.model.clear_doc("Customer", customer);
+					}
+					
+					// 🔥 NUCLEAR: Reset the customer Link field's awesomplete completely
+					if (me.customer_field) {
+						const $input = me.customer_field.$input;
+						if ($input) {
+							// Clear awesomplete cached suggestions
+							const aw = $input.data("awesomplete");
+							if (aw) {
+								aw._list = [];
+								aw.list = [];
+								if (aw.ul) aw.ul.innerHTML = "";
+							}
+							// Trigger awesomplete to refetch
+							$input.trigger("input");
+						}
+					}
+					
+					// 🔥 Clear Frappe's link search cache for Customer doctype
+					try {
+						// Clear any cached link queries
+						if (frappe.utils && frappe.utils.cached_link_queries) {
+							delete frappe.utils.cached_link_queries[`Customer:${customer}`];
+						}
+						if (frappe.boot && frappe.boot.link_title_doctypes) {
+							delete frappe.boot.link_title_doctypes["Customer"];
+						}
+						// Clear search index cache
+						if (frappe._link_search_cache) {
+							frappe._link_search_cache = {};
+						}
+					} catch (e) {
+						console.warn("Cache clear warn:", e);
+					}
+					
+					// Re-commit with fresh data
+					setTimeout(() => {
+						me._commit_customer(customer);
+					}, 300);
 				})
 				.catch((err) => {
-					console.error("Update error:", err);
 					const msg = err.message
 						|| (err._server_messages ? JSON.parse(err._server_messages)[0] : null)
 						|| __("Could not update customer");
@@ -779,57 +789,35 @@ export class CartPanel {
 
 		d.show();
 
-		setTimeout(async () => {
-			// Validate & set billing city
-			await validateAndSetCity(d, doc.city, doc.state, "city", "state");
-			// Validate & set shipping city
-			if (!doc.ship_to_same_as_billing) {
-				await validateAndSetCity(d, doc.shipping_city, doc.shipping_state, "shipping_city", "shipping_state");
-			}
-		}, 150);
+	setTimeout(async () => {
+		// Load all states for state field
+		const states = await frappe.db.get_list("CH State", { fields: ["name"], limit: 0 });
+		const stateNames = states.map(s => s.name);
+		if (d.fields_dict.state) d.fields_dict.state.set_data(stateNames);
+		if (d.fields_dict.shipping_state) d.fields_dict.shipping_state.set_data(stateNames);
 
-		// Helper: only sets city if it belongs to the given state
-		async function validateAndSetCity(dialog, cityVal, stateVal, cityField, stateField) {
-			if (!cityVal) return;
-			
-			// If state is empty, just set the city (no validation needed)
-			if (!stateVal) {
-				dialog.set_value(cityField, cityVal);
-				return;
-			}
-			
-			// Check if city actually belongs to the given state
-			try {
-				const cityExists = await frappe.db.exists("CH City", cityVal);
-				if (!cityExists) {
-					console.warn(`CH City "${cityVal}" doesn't exist — clearing field`);
-					return;
-				}
-				
-				const r = await frappe.db.get_value("CH City", cityVal, "state");
-				const cityActualState = r?.message?.state;
-				
-				if (!cityActualState) {
-					// CH City has no state — auto-heal it to match address state
-					await frappe.db.set_value("CH City", cityVal, "state", stateVal);
-					console.log(`Auto-healed CH City "${cityVal}" → state "${stateVal}"`);
-					dialog.set_value(cityField, cityVal);
-				} else if (cityActualState === stateVal) {
-					// ✅ Valid combo — set city
-					dialog.set_value(cityField, cityVal);
-				} else {
-					// ❌ MISMATCH: City belongs to a different state than the address
-					console.warn(`City "${cityVal}" belongs to "${cityActualState}" but address state is "${stateVal}"`);
-					frappe.show_alert({
-						message: __("City '{0}' doesn't match state '{1}' — please re-select city", [cityVal, stateVal]),
-						indicator: "orange",
-					});
-					// Leave city empty — user must pick a matching one
-				}
-			} catch (err) {
-				console.error("validateAndSetCity error:", err);
-			}
+		// Load cities FILTERED by billing state
+		if (doc.state) {
+			const cities = await frappe.db.get_list("CH City", {
+				filters: { state: doc.state },
+				fields: ["name"],
+				limit: 0,
+			});
+			const cityNames = cities.map(c => c.name);
+			if (d.fields_dict.city) d.fields_dict.city.set_data(cityNames);
 		}
+
+		// Load cities FILTERED by shipping state
+		if (doc.shipping_state) {
+			const cities = await frappe.db.get_list("CH City", {
+				filters: { state: doc.shipping_state },
+				fields: ["name"],
+				limit: 0,
+			});
+			const cityNames = cities.map(c => c.name);
+			if (d.fields_dict.shipping_city) d.fields_dict.shipping_city.set_data(cityNames);
+		}
+	}, 200);
 	}
 
 	bind() {

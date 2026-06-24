@@ -8608,10 +8608,6 @@ def update_customer_complete(customer, payload):
             cust.pan = pan_clean
             cust_changed = True
 
-    if cust_changed:
-        cust.flags.ignore_permissions = True
-        cust.save()
-
     # 2. BILLING ADDRESS (primary)
     billing_fields = ["address_line1", "address_line2", "city", "state", "pincode"]
     has_billing_data = any(payload.get(f) for f in billing_fields)
@@ -8632,8 +8628,33 @@ def update_customer_complete(customer, payload):
             },
             link_field="customer_primary_address",
         )
+        cust = frappe.get_doc("Customer", customer)
+        for src, dest in standard_map.items():
+            val = payload.get(src)
+            if val is not None:
+                val = val.strip() if isinstance(val, str) else val
+                if src == "gstin":
+                    val = val.upper() if val else ""
+                if val != (cust.get(dest) or ""):
+                    cust.set(dest, val)
+        for src, dest in custom_map.items():
+            val = payload.get(src)
+            if val is not None:
+                val = val.strip() if isinstance(val, str) else val
+                if val != (cust.get(dest) or ""):
+                    cust.set(dest, val)
+        if payload.get("pan") is not None:
+            pan_clean = (payload["pan"] or "").strip().upper()
+            if pan_clean != (cust.get("ch_pan_number") or ""):
+                cust.ch_pan_number = pan_clean
+                cust.pan = pan_clean
 
-    # 3. SHIPPING ADDRESS
+    # 3. NOW save Customer (address exists >>>>validation passes)
+    if cust_changed:
+        cust.flags.ignore_permissions = True
+        cust.save()
+
+    # 4. SHIPPING ADDRESS
     ship_same = payload.get("ship_to_same_as_billing")
     
     # If "same as billing" is checked → skip shipping save (or delete old shipping)
@@ -8658,7 +8679,7 @@ def update_customer_complete(customer, payload):
                     "state": payload.get("shipping_state"),
                     "pincode": payload.get("shipping_pincode"),
                 },
-                link_field=None,  # shipping isn't linked as "primary"
+                link_field=None,
             )
 
     # ... shipping address code above ...
@@ -8666,10 +8687,36 @@ def update_customer_complete(customer, payload):
     # ── Clear caches so next fetch returns fresh data ──
     frappe.clear_document_cache("Customer", customer)
     primary_addr = frappe.db.get_value("Customer", customer, "customer_primary_address")
+    # 🔥 Update Customer's primary_address display text (this is what search shows)
     if primary_addr:
-        frappe.clear_document_cache("Address", primary_addr)
+        addr_doc = frappe.db.get_value("Address", primary_addr, 
+            ["address_line1", "address_line2", "city", "state", "pincode", "country"], 
+            as_dict=True)
+        
+        if addr_doc:
+            # Build the display string like Frappe does
+            parts = [
+                addr_doc.address_line1,
+                addr_doc.address_line2,
+                addr_doc.city,
+                addr_doc.state,
+                addr_doc.pincode,
+                addr_doc.country
+            ]
+            display = "\n".join([p for p in parts if p])
+            
+            # Update Customer.primary_address with new display
+            frappe.db.sql("""
+                UPDATE `tabCustomer`
+                SET primary_address = %s,
+                    modified = NOW(),
+                    modified_by = %s
+                WHERE name = %s
+            """, (display, frappe.session.user, customer))
+            
 
     frappe.db.commit()
+    frappe.clear_document_cache("Customer", customer)
 
     return {
         "ok": True,
@@ -8679,134 +8726,167 @@ def update_customer_complete(customer, payload):
 
 def _upsert_address(customer, customer_name, address_type, is_primary, is_shipping, data, link_field=None):
     """
-    Find/create address. For billing → uses customer_primary_address as single source of truth.
-    For shipping → finds existing shipping address by type.
-    Auto-creates CH City record if missing, syncs CH City state.
+    Find/create address using DIRECT SQL to bypass all hooks/validations
+    that silently revert changes.
     """
-    addr = None
     addr_name = None
 
-    # ── BILLING: Use customer_primary_address field as source of truth ──
+    # Find existing address
     if address_type == "Billing":
         addr_name = frappe.db.get_value("Customer", customer, "customer_primary_address")
-        if addr_name and frappe.db.exists("Address", addr_name):
-            addr = frappe.get_doc("Address", addr_name)
+        if addr_name and not frappe.db.exists("Address", addr_name):
+            addr_name = None
 
-    # ── SHIPPING: Find existing shipping address by type ──
     elif address_type == "Shipping":
         existing = frappe.db.sql("""
-            SELECT addr.name
-            FROM `tabAddress` addr
+            SELECT addr.name FROM `tabAddress` addr
             INNER JOIN `tabDynamic Link` dl ON dl.parent = addr.name
-            WHERE dl.link_doctype = 'Customer'
-              AND dl.link_name = %s
-              AND dl.parenttype = 'Address'
-              AND addr.address_type = 'Shipping'
-            ORDER BY addr.modified DESC
-            LIMIT 1
+            WHERE dl.link_doctype = 'Customer' AND dl.link_name = %s
+              AND dl.parenttype = 'Address' AND addr.address_type = 'Shipping'
+            ORDER BY addr.modified DESC LIMIT 1
         """, customer, as_dict=True)
         if existing:
-            addr = frappe.get_doc("Address", existing[0].name)
-            addr_name = addr.name
+            addr_name = existing[0].name
 
-    # ── Create new if not found ──
-    if not addr:
+    # Get values to save
+    city = (data.get("city") or "").strip()
+    state = (data.get("state") or "").strip()
+    pincode = (data.get("pincode") or "").strip()
+    address_line1 = (data.get("address_line1") or "").strip() or "N/A"
+    address_line2 = (data.get("address_line2") or "").strip()
+
+
+
+    # Auto-create CH State if missing
+    if state and not frappe.db.exists("CH State", state):
+        try:
+            new_state = frappe.new_doc("CH State")
+            meta = frappe.get_meta("CH State")
+            if meta.has_field("state_name"):
+                new_state.state_name = state
+            elif meta.has_field("state"):
+                new_state.state = state
+            new_state.flags.ignore_permissions = True
+            new_state.insert(ignore_if_duplicate=True)
+            print(f"Created CH State: {state}")
+        except Exception as e:
+            print(f"CH State create failed: {e}")
+
+    # Auto-create CH City if missing
+    if city and not frappe.db.exists("CH City", city):
+        try:
+            new_city = frappe.new_doc("CH City")
+            meta = frappe.get_meta("CH City")
+            if meta.has_field("city_name"):
+                new_city.city_name = city
+            elif meta.has_field("city"):
+                new_city.city = city
+            if state and meta.has_field("state"):
+                new_city.state = state
+            new_city.flags.ignore_permissions = True
+            new_city.insert(ignore_if_duplicate=True)
+            print(f"Created CH City: {city}")
+        except Exception as e:
+            print(f"CH City create failed: {e}")
+
+    # Sync CH City state
+    if city and state and frappe.db.exists("CH City", city):
+        try:
+            current = frappe.db.get_value("CH City", city, "state")
+            if current != state:
+                frappe.db.set_value("CH City", city, "state", state, update_modified=False)
+        except Exception:
+            pass
+
+    # ── CASE 1: Address exists — UPDATE via direct SQL ──
+    if addr_name:
+        
+        try:
+            # Direct SQL UPDATE — bypasses ALL Frappe hooks/validations
+            frappe.db.sql("""
+                UPDATE `tabAddress`
+                SET city = %s,
+                    state = %s,
+                    pincode = %s,
+                    address_line1 = %s,
+                    address_line2 = %s,
+                    is_primary_address = %s,
+                    is_shipping_address = %s,
+                    modified = NOW()
+                WHERE name = %s
+            """, (city, state, pincode, address_line1, address_line2, 
+                  is_primary, is_shipping, addr_name))
+            
+            frappe.db.commit()
+            
+            # Verify
+            check = frappe.db.sql("""
+                SELECT city, state, pincode FROM `tabAddress` WHERE name = %s
+            """, addr_name, as_dict=True)
+            print(f"Verified DB now has: {check}\n")
+            
+        except Exception as e:
+            print(f"Direct SQL update failed: {e}")
+            raise
+
+    # ── CASE 2: New address — INSERT via Frappe ──
+    else:
         addr = frappe.new_doc("Address")
         addr.address_title = f"{customer_name}-{address_type}"
         addr.address_type = address_type
+        addr.address_line1 = address_line1
+        addr.address_line2 = address_line2
+        addr.city = city
+        addr.state = state
+        addr.pincode = pincode
+        addr.country = "India"
         addr.is_primary_address = is_primary
         addr.is_shipping_address = is_shipping
-        addr.country = "India"
         addr.append("links", {
             "link_doctype": "Customer",
             "link_name": customer,
         })
-
-    # ── Apply changes ──
-    if "address_line1" in data:
-        addr.address_line1 = (data.get("address_line1") or "").strip() or "N/A"
-    if "address_line2" in data:
-        addr.address_line2 = (data.get("address_line2") or "").strip()
-    if "city" in data:
-        addr.city = (data.get("city") or "").strip()
-    if "state" in data:
-        addr.state = (data.get("state") or "").strip()
-    if "pincode" in data:
-        addr.pincode = (data.get("pincode") or "").strip()
-    if not addr.country:
-        addr.country = "India"
-
-    addr.is_primary_address = is_primary
-    addr.is_shipping_address = is_shipping
-
-    # ── Auto-create CH City record if doesn't exist, sync state ──
-    if addr.city:
+        
+        addr.flags.ignore_permissions = True
         try:
-            if not frappe.db.exists("CH City", addr.city):
-                # Create new CH City
-                new_city = frappe.new_doc("CH City")
-                # Try common fieldnames
-                meta = frappe.get_meta("CH City")
-                if meta.has_field("city_name"):
-                    new_city.city_name = addr.city
-                elif meta.has_field("city"):
-                    new_city.city = addr.city
-                if addr.state and meta.has_field("state"):
-                    new_city.state = addr.state
-                new_city.flags.ignore_permissions = True
-                new_city.insert(ignore_if_duplicate=True)
-            elif addr.state:
-                # Update CH City's state to match
-                current_state = frappe.db.get_value("CH City", addr.city, "state")
-                if not current_state or current_state != addr.state:
-                    frappe.db.set_value(
-                        "CH City", addr.city, "state", addr.state,
-                        update_modified=False
-                    )
-        except Exception as e:
-            frappe.log_error(f"CH City sync failed: {e}", "update_customer_complete")
+            addr.insert()
+            addr_name = addr.name
+        except frappe.ValidationError as e:
+            err_msg = str(e)
+            if "Postal Code" in err_msg or "Postal" in err_msg:
+                addr = frappe.new_doc("Address")
+                addr.address_title = f"{customer_name}-{address_type}"
+                addr.address_type = address_type
+                addr.address_line1 = address_line1
+                addr.address_line2 = address_line2
+                addr.city = city
+                addr.state = state
+                addr.pincode = ""  # cleared
+                addr.country = "India"
+                addr.is_primary_address = is_primary
+                addr.is_shipping_address = is_shipping
+                addr.append("links", {
+                    "link_doctype": "Customer",
+                    "link_name": customer,
+                })
+                addr.flags.ignore_permissions = True
+                addr.insert()
+                addr_name = addr.name
+            else:
+                raise
 
-    # ── Auto-create CH State if doesn't exist ──
-    if addr.state:
-        try:
-            if not frappe.db.exists("CH State", addr.state):
-                new_state = frappe.new_doc("CH State")
-                meta = frappe.get_meta("CH State")
-                if meta.has_field("state_name"):
-                    new_state.state_name = addr.state
-                elif meta.has_field("state"):
-                    new_state.state = addr.state
-                new_state.flags.ignore_permissions = True
-                new_state.insert(ignore_if_duplicate=True)
-        except Exception as e:
-            frappe.log_error(f"CH State sync failed: {e}", "update_customer_complete")
-
-    # ── Save with retry on pincode validation failure ──
-    addr.flags.ignore_permissions = True
-    try:
-        addr.save()
-    except frappe.ValidationError as e:
-        err_msg = str(e)
-        if "Postal Code" in err_msg and "not associated" in err_msg:
-            frappe.db.rollback()
-            if addr_name:
-                addr = frappe.get_doc("Address", addr_name)
-            addr.pincode = ""
-            if "city" in data: addr.city = (data.get("city") or "").strip()
-            if "state" in data: addr.state = (data.get("state") or "").strip()
-            addr.flags.ignore_permissions = True
-            addr.save()
-        else:
-            frappe.throw(err_msg, title=_(f"{address_type} Address Validation Failed"))
-
-    # ── Always set as primary address for billing ──
-    if address_type == "Billing":
+    # Link as primary for billing
+    if address_type == "Billing" and addr_name:
         frappe.db.set_value(
-            "Customer", customer, "customer_primary_address", addr.name,
+            "Customer", customer, "customer_primary_address", addr_name,
             update_modified=False
         )
 
-    return addr.name
+    # Clear Address cache
+    if addr_name:
+        frappe.clear_document_cache("Address", addr_name)
+
+    return addr_name
 
 def _phone_suffix_10(phone_no):
     """Return normalized 10-digit Indian phone suffix, or empty string."""

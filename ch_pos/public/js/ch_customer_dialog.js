@@ -82,7 +82,7 @@
 				}
 			});
 		}
-		
+
 		const enforce_digits_only = (fieldname) => {
 			const $el = d.$wrapper.find(`[data-fieldname="${fieldname}"] input`);
 			
@@ -131,9 +131,12 @@
 			const mobile_no = input_value("mobile_no");
 			const whatsapp_number = input_value("whatsapp_number");
 			const state = input_value("state");
+			const address_line1 = input_value("address_line1");
 			const city = input_value("city");
 			
-			const all_filled = customer_name && mobile_no && whatsapp_number && state && city;
+			// All mandatory fields required before showing Send OTP button
+			const all_filled = customer_name && mobile_no && whatsapp_number && state && address_line1 && city;
+			
 			const $btn = d.$wrapper.find(".ch-send-customer-otp");
 			const $status = d.fields_dict.otp_status?.$wrapper;
 			
@@ -344,7 +347,7 @@
 
 				// ── Address ──
 				{ fieldtype: "Section Break", label: __("Address") },
-				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1") },
+				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1"),reqd: 1, },
 				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2") },
 				{ fieldtype: "Column Break" },
 
@@ -582,6 +585,9 @@
 			toggle_send_otp_button();
 		});
 
+		$body.on("input change blur", '[data-fieldname="address_line1"] input', () => {
+			toggle_send_otp_button();
+		});
 		$body.on("change awesomplete-selectcomplete blur", '[data-fieldname="state"] input', () => {
 			toggle_send_otp_button();
 		});
