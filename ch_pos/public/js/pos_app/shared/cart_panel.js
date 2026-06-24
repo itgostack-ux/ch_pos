@@ -932,11 +932,20 @@ export class CartPanel {
 			}
 		});
 
-		// Inline Exception button (line-level, serialized items)
+		// Inline Exception button (line-level).
+		// Allowed for serialized goods AND for non-serial lines such as
+		// VAS / Protection Plans (Item.is_vas) where the exception is a
+		// price override identified by item_code, not serial. Multi-exception
+		// per bill is allowed — each cart line may carry its own request.
 		w.on("click", ".ch-pos-line-exception", function () {
 			const idx = $(this).data("idx");
 			const item = PosState.cart[idx];
-			if (!item || !item.serial_no) return;
+			if (!item) return;
+			const item_code = item.item_code || item.item || item.code || item.name || "";
+			// Require either a serial (serialized goods) OR an item_code
+			// (VAS / accessories / plan rows). Without either we cannot
+			// anchor the exception to anything meaningful.
+			if (!item.serial_no && !item_code) return;
 			if (item.exception_request) {
 				frappe.show_alert({
 					message: __("Exception {0} already linked to this line. Remove it before creating a new one.", [item.exception_request]),
@@ -944,16 +953,7 @@ export class CartPanel {
 				});
 				return;
 			}
-			const existing = (PosState.cart || []).find((row) => !!row.exception_request);
-			if (existing) {
-				frappe.show_alert({
-					message: __("Only one active exception is allowed per cart. Remove existing exception first."),
-					indicator: "orange",
-				});
-				return;
-			}
 			const customer = PosState.customer || PosState.default_customer || "";
-			const item_code = item.item_code || item.item || item.code || item.name || "";
 
 			EventBus.emit("exception:open", {
 				source: "cart_line",
@@ -962,7 +962,7 @@ export class CartPanel {
 				item_name: item.item_name || "",
 				serial_no: item.serial_no || "",
 				customer,
-				lock_serial: true,
+				lock_serial: !!item.serial_no,
 				lock_customer: true,
 			});
 
@@ -1145,9 +1145,17 @@ export class CartPanel {
 			</div>`
 			: "";
 
-		// Inline action buttons for serialized items
+		// Inline action buttons.
+		// Exception button is allowed on:
+		//   • Serialized goods (price overrides anchored to IMEI)
+		//   • Non-serial sellable lines: VAS / Protection Plans, accessories
+		//     priced ad-hoc (anchored to item_code).
+		// Warranty rows (own-warranty fee lines) stay locked — pricing is
+		// derived from the device's plan, not exception-overridable here.
 		let inline_actions = "";
+		const _can_exception = !item.is_warranty && (item.serial_no || item.item_code);
 		if (item.serial_no && !item.is_warranty && !item.is_vas) {
+			// Serialized device: keep both VAS-attach and Exception buttons.
 			const exception_action = item.exception_request
 				? `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-remove-exception" data-idx="${idx}" title="${__("Remove Exception")}">
 					<i class="fa fa-times-circle"></i>
@@ -1160,6 +1168,16 @@ export class CartPanel {
 					<i class="fa fa-shield"></i>
 				</button>
 				${exception_action}`;
+		} else if (_can_exception) {
+			// VAS / Protection Plan / non-serial line: exception button only.
+			const exception_action = item.exception_request
+				? `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-remove-exception" data-idx="${idx}" title="${__("Remove Exception")}">
+					<i class="fa fa-times-circle"></i>
+				</button>`
+				: `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-exception" data-idx="${idx}" title="${__("Exception")}">
+					<i class="fa fa-exclamation-triangle"></i>
+				</button>`;
+			inline_actions = exception_action;
 		}
 
 		return `

@@ -1010,9 +1010,21 @@ export class CartService {
 
 	_apply_exception_pricing_to_cart(exception_data) {
 		const data = exception_data || PosState.exception_request_data;
-		if (!data) return;
-		PosState.exception_request_data = data;
-		PosState.cart.forEach((cart_item) => this._apply_exception_pricing_to_item(cart_item, data));
+		// Bill-level exception (legacy "Apply & Bill" path): apply to every
+		// cart line — the per-item filter inside _apply_exception_pricing_to_item
+		// will only override the matching item_code.
+		if (data) {
+			PosState.exception_request_data = data;
+			PosState.cart.forEach((cart_item) => this._apply_exception_pricing_to_item(cart_item, data));
+		}
+		// Per-line exceptions: each cart line may carry its OWN exception_request_data
+		// (raised from the line-level Exception button). Apply each one independently
+		// so a bill can carry multiple exceptions (e.g. one on a phone, one on a VAS plan).
+		PosState.cart.forEach((cart_item) => {
+			if (cart_item && cart_item.exception_request_data) {
+				this._apply_exception_pricing_to_item(cart_item, cart_item.exception_request_data);
+			}
+		});
 	}
 
 	_remove_exception_from_item(cart_item) {

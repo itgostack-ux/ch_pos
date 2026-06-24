@@ -839,16 +839,30 @@ def create_pos_invoice(pos_profile, customer, items,
             frappe.throw(frappe._("Guided Session {0} not found").format(guided_session))
         inv.custom_guided_session = guided_session
 
-    # Exception request link — validate it's still valid before billing
-    exception_request_doc = None
-    if exception_request:
-        exc = frappe.get_doc("CH Exception Request", exception_request)
+    # Exception request links — validate every exception (bill-level + per-line)
+    # before billing. Multiple exceptions per invoice are allowed: cashier may
+    # have raised one exception per cart line (e.g. a price-override on a phone
+    # AND a price-override on a VAS plan in the same bill). Each request must
+    # individually pass validity / customer / not-already-consumed checks.
+    exception_request_doc = None          # primary (bill-level) — kept for back-compat
+    exception_request_doc_map: dict = {}  # name → CH Exception Request doc (deduped)
+
+    def _phone_tail(phone_value):
+        return "".join(ch for ch in str(phone_value or "") if ch.isdigit())[-10:]
+
+    def _validate_exception(exc_name: str):
+        """Load + validate one CH Exception Request against this invoice's customer."""
+        if not exc_name:
+            return None
+        if exc_name in exception_request_doc_map:
+            return exception_request_doc_map[exc_name]
+        exc = frappe.get_doc("CH Exception Request", exc_name)
         if not exc.is_valid():
             frappe.throw(frappe._("Exception Request {0} is no longer valid (status: {1})").format(
-                exception_request, exc.status))
+                exc_name, exc.status))
         if exc.pos_invoice:
             frappe.throw(frappe._("Exception Request {0} was already used in invoice {1}").format(
-                exception_request, exc.pos_invoice))
+                exc_name, exc.pos_invoice))
         if exc.customer:
             cust = frappe.db.get_value(
                 "Customer",
@@ -862,21 +876,40 @@ def create_pos_invoice(pos_profile, customer, items,
                 ["mobile_no", "ch_alternate_phone"],
                 as_dict=True,
             ) if customer else None
-            def _phone_tail(phone_value):
-                return "".join(ch for ch in str(phone_value or "") if ch.isdigit())[-10:]
             allowed_phone = _phone_tail(exc.customer_phone or (cust.mobile_no if cust else "") or (cust.ch_alternate_phone if cust else ""))
             current_phone = _phone_tail((current_customer.mobile_no if current_customer else "") or (current_customer.ch_alternate_phone if current_customer else ""))
             if exc.customer != customer or (allowed_phone and current_phone and allowed_phone != current_phone):
-                frappe.throw(frappe._("Exception Request {0} is tied to a different customer phone.").format(exception_request))
+                frappe.throw(frappe._("Exception Request {0} is tied to a different customer phone.").format(exc_name))
+        exception_request_doc_map[exc_name] = exc
+        return exc
+
+    # Bill-level exception (legacy + apply-and-bill path).
+    if exception_request:
+        exception_request_doc = _validate_exception(exception_request)
         inv.custom_exception_request = exception_request
-        exception_request_doc = exc
         # Disable pricing rule engine for this invoice so ERPNext's
         # set_missing_item_details / calculate_taxes_and_totals cannot
         # override the exception-approved item rate with a standard
         # Pricing Rule (e.g. PRLE-0002 at 10% discount).
         inv.ignore_pricing_rule = 1
-        # IMPORTANT: Keep this flag set even if exception is linked later via workflow.
-        # This ensures pricing rules never override approved exception prices.
+
+    # Per-line exceptions — cashier may have raised one exception per cart line.
+    # Each line carries its own `exception_request` already validated client-side.
+    # We re-validate server-side and dedupe against bill-level above.
+    for _it in (items or []):
+        _line_exc = (_it or {}).get("exception_request")
+        if not _line_exc:
+            continue
+        _validate_exception(_line_exc)
+        # When ANY line carries an exception we must also disable pricing
+        # rules so the approved override price survives ERPNext's recalc.
+        inv.ignore_pricing_rule = 1
+        # If bill-level field is empty, surface the first per-line exception
+        # there so legacy reports / dashboards keep working.
+        if not inv.get("custom_exception_request"):
+            inv.custom_exception_request = _line_exc
+            if exception_request_doc is None:
+                exception_request_doc = exception_request_doc_map.get(_line_exc)
 
     # Warranty claim link — validate processing fee is pending
     if warranty_claim:
@@ -965,35 +998,43 @@ def create_pos_invoice(pos_profile, customer, items,
             or uploaded_rate
         )
         item_exception_final = flt(item.get("exception_final_rate") or uploaded_rate)
-        if exception_request_doc and item.get("item_code") == exception_request_doc.item_code:
-            serial_match = not exception_request_doc.serial_no or item_serial == (exception_request_doc.serial_no or "").strip()
+        # Resolve which CH Exception Request applies to THIS row:
+        #   1. If the line carries its own `exception_request` and that name
+        #      passed server-side validation above, use it directly.
+        #   2. Otherwise fall back to the bill-level `exception_request_doc`
+        #      when its item_code matches the row (legacy single-exception path).
+        _row_exc_name = (item.get("exception_request") or "").strip()
+        _row_exc_doc = exception_request_doc_map.get(_row_exc_name) if _row_exc_name else None
+        if not _row_exc_doc and exception_request_doc and item.get("item_code") == exception_request_doc.item_code:
+            _row_exc_doc = exception_request_doc
+            _row_exc_name = exception_request_doc.name
+        if _row_exc_doc:
+            serial_match = not _row_exc_doc.serial_no or item_serial == (_row_exc_doc.serial_no or "").strip()
             phone_match = True
-            if exception_request_doc.customer_phone or exception_request_doc.customer:
-                phone_match = exception_request_doc.customer == customer
-            if exception_request_doc.customer_phone:
+            if _row_exc_doc.customer_phone or _row_exc_doc.customer:
+                phone_match = _row_exc_doc.customer == customer
+            if _row_exc_doc.customer_phone:
                 cust = frappe.db.get_value(
                     "Customer",
                     customer,
                     ["mobile_no", "ch_alternate_phone"],
                     as_dict=True,
                 ) if customer else None
-                def _phone_tail(phone_value):
-                    return "".join(ch for ch in str(phone_value or "") if ch.isdigit())[-10:]
                 current_phone = _phone_tail((cust.mobile_no if cust else "") or (cust.ch_alternate_phone if cust else ""))
-                allowed_phone = _phone_tail(exception_request_doc.customer_phone)
+                allowed_phone = _phone_tail(_row_exc_doc.customer_phone)
                 phone_match = bool(allowed_phone and current_phone and allowed_phone == current_phone)
             if not (serial_match and phone_match):
                 # Even if serial/phone match fails, still try to apply exception if item matches
                 # This handles cases where exception was approved but frontend didn't send exception_final_rate
-                if exception_request_doc.customer == customer or not exception_request_doc.customer:
-                    item_exception_original = flt(exception_request_doc.original_value or item_exception_original)
-                    item_exception_final = flt(exception_request_doc.resolution_value or exception_request_doc.requested_value or item_exception_final)
+                if _row_exc_doc.customer == customer or not _row_exc_doc.customer:
+                    item_exception_original = flt(_row_exc_doc.original_value or item_exception_original)
+                    item_exception_final = flt(_row_exc_doc.resolution_value or _row_exc_doc.requested_value or item_exception_final)
                 else:
                     continue
             else:
-                if not exception_request_doc.customer or exception_request_doc.customer == customer:
-                    item_exception_original = flt(exception_request_doc.original_value or item_exception_original)
-                    item_exception_final = flt(exception_request_doc.resolution_value or exception_request_doc.requested_value or item_exception_final)
+                if not _row_exc_doc.customer or _row_exc_doc.customer == customer:
+                    item_exception_original = flt(_row_exc_doc.original_value or item_exception_original)
+                    item_exception_final = flt(_row_exc_doc.resolution_value or _row_exc_doc.requested_value or item_exception_final)
 
         row = {
             "item_code": item.get("item_code"),
@@ -1040,8 +1081,8 @@ def create_pos_invoice(pos_profile, customer, items,
             row["custom_override_reason"] = item.get("override_reason") or ""
 
         # Store exception request details on item row for audit trail and pricing preservation
-        if exception_request_doc and item.get("item_code") == exception_request_doc.item_code:
-            row["custom_exception_request"] = exception_request
+        if _row_exc_doc:
+            row["custom_exception_request"] = _row_exc_name
             row["custom_exception_original_rate"] = item_exception_original
             row["custom_exception_final_rate"] = item_exception_final
 
@@ -1892,18 +1933,21 @@ def create_pos_invoice(pos_profile, customer, items,
             frappe.log_error(frappe.get_traceback(),
                              f"BBO exchange link failed for {buyback_order}")
 
-    # Back-link exception request to this invoice (marks it as consumed)
-    if exception_request:
+    # Back-link every exception request used by this invoice (bill-level +
+    # per-line) so each is marked consumed. We back-link directly via
+    # `frappe.db.set_value` (no doc reload) to avoid re-running the request's
+    # own validation hooks on a submitted document.
+    for _exc_name in exception_request_doc_map.keys():
         try:
             frappe.db.set_value(
-                "CH Exception Request", exception_request,
+                "CH Exception Request", _exc_name,
                 "pos_invoice", inv.name,
                 update_modified=False,
             )
         except Exception:
             frappe.log_error(
                 frappe.get_traceback(),
-                f"Exception request link failed for {exception_request} → {inv.name}",
+                f"Exception request link failed for {_exc_name} → {inv.name}",
             )
 
     # Back-link warranty claim — mark processing fee as paid

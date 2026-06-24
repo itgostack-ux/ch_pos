@@ -357,8 +357,19 @@ export class ExceptionWorkspace {
 					{ exception_name: res.name }
 				).then((full) => {
 					if (full && full.valid) {
+						// Bill-level mirror (legacy listeners + persistence).
 						PosState.exception_request = res.name;
 						PosState.exception_request_data = full;
+						// Replace the partial snapshot we bound earlier with the
+						// FULL exception data (carries resolution_value /
+						// requested_value needed for per-line price override).
+						// This is what unlocks multi-exception per bill: every
+						// cart line owns its own exception_request_data so
+						// cart_service can apply pricing per line.
+						this._bind_request_to_cart_line(
+							{ ...full, name: res.name },
+							locked_ctx,
+						);
 						EventBus.emit("exception:applied", { name: res.name, data: full });
 					}
 				}).catch(() => {});
