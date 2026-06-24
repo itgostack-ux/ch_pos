@@ -37,7 +37,7 @@ export class CartPanel {
 				<div class="ch-pos-token-banner" style="display:none"></div>
 				<div class="ch-pos-customer-select"></div>
 				<div class="ch-pos-customer-row">
-					<div class="ch-pos-customer-tag walk-in">
+					<div class="ch-pos-customer-tag walk-in" title="${__("Click to edit customer")}">
 						<i class="fa fa-user-o" style="font-size:10px"></i> ${__("Walk-in")}
 					</div>
 				</div>
@@ -410,12 +410,32 @@ export class CartPanel {
 		});
 	}
 
+	// _show_new_customer_dialog() {
+	// 	window.ch_open_new_customer_dialog({
+	// 		company: PosState.company,
+	// 		on_success: (name, mobile) => {
+	// 			this.customer_field.set_value(name);
+	// 			this._commit_customer(name);
+	// 		},
+	// 		on_use_existing: (customer, cname) => {
+	// 			this.customer_field.set_value(customer);
+	// 			this._commit_customer(customer);
+	// 		},
+	// 	});
+	// }
+	
+
+	// updated
 	_show_new_customer_dialog() {
 		window.ch_open_new_customer_dialog({
 			company: PosState.company,
-			on_success: (name, mobile) => {
-				this.customer_field.set_value(name);
-				this._commit_customer(name);
+			on_success: (name, mobile, formData) => {
+				// ⚡ After customer creation, sync ALL fields (especially address)
+				// via our update_customer_complete API
+				this._sync_new_customer_address(name, formData).then(() => {
+					this.customer_field.set_value(name);
+					this._commit_customer(name);
+				});
 			},
 			on_use_existing: (customer, cname) => {
 				this.customer_field.set_value(customer);
@@ -424,12 +444,407 @@ export class CartPanel {
 		});
 	}
 
+	_sync_new_customer_address(customer, formData) {
+		// formData may not be passed; if not, skip
+		if (!formData) {
+			return Promise.resolve();
+		}
+		
+		// Build payload from new customer dialog data
+		const payload = {
+			address_line1: formData.address_line1 || formData.address1 || "",
+			address_line2: formData.address_line2 || formData.address2 || "",
+			city: formData.city || "",
+			state: formData.state || "",
+			pincode: formData.pincode || formData.pin_code || "",
+			gstin: formData.gstin || "",
+			pan: formData.pan || formData.pan_number || "",
+			area: formData.area || "",
+		};
+		
+		// Only call if there's address data
+		const hasData = Object.values(payload).some(v => v);
+		if (!hasData) return Promise.resolve();
+		
+		return frappe.xcall("ch_pos.api.pos_api.update_customer_complete", {
+			customer: customer,
+			payload: payload,
+		}).catch((err) => {
+			console.error("Failed to sync new customer address:", err);
+		});
+	}
+
+	_show_edit_customer_dialog() {
+		const customer = PosState.customer;
+		if (!customer) {
+			frappe.show_alert({
+				message: __("Select a customer first"),
+				indicator: "orange"
+			});
+			return;
+		}
+
+		// ⚡ Force fresh fetch — bypass any cache
+		frappe.xcall("ch_pos.api.pos_api.get_customer_full_details", { 
+			customer,
+			_ts: Date.now()   // cache buster
+		})
+			.then((doc) => {
+				if (!doc || !doc.name) {
+					frappe.msgprint(__("Customer not found"));
+					return;
+				}
+				console.log("📥 Loaded customer data:", doc);  // debug
+				this._open_edit_dialog(customer, doc);
+			})
+			.catch((err) => {
+				console.error(err);
+				frappe.msgprint(__("Could not load customer details"));
+			});
+	}
+
+	_open_edit_dialog(customer, doc) {
+		const me = this;
+
+		// Auto-fill from pincode (India Post API)
+		const autofillFromPincode = (dialog, pin, prefix = "") => {
+			if (!pin || !/^\d{6}$/.test(pin)) return;
+			const stateField = prefix ? `${prefix}_state` : "state";
+			const cityField  = prefix ? `${prefix}_city`  : "city";
+
+			fetch(`https://api.postalpincode.in/pincode/${pin}`)
+				.then(r => r.json())
+				.then(data => {
+					if (!data?.[0]?.PostOffice?.length) {
+						frappe.show_alert({ message: __("Invalid pincode {0}", [pin]), indicator: "red" });
+						return;
+					}
+					const po = data[0].PostOffice[0];
+					dialog.set_value(stateField, po.State);
+					
+					// Ensure CH City exists, then set city
+					frappe.db.exists("CH City", po.District).then((exists) => {
+						if (!exists) {
+							return frappe.db.insert({
+								doctype: "CH City",
+								city_name: po.District,
+								state: po.State,
+							});
+						}
+					}).then(() => {
+						dialog.set_value(cityField, po.District);
+					});
+				})
+				.catch(() => {});
+		};
+
+		// Dialog
+		const d = new frappe.ui.Dialog({
+			title: __("Edit Customer"),
+			size: "large",
+			fields: [
+				{ fieldname: "customer_name", fieldtype: "Data", label: __("Customer Name"),
+				reqd: 1, read_only: 1, default: doc.customer_name || "" },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "email_id", fieldtype: "Data", label: __("Email"),
+				options: "Email", default: doc.email_id || "" },
+
+				{ fieldtype: "Section Break" },
+				{ fieldname: "mobile_no", fieldtype: "Data", label: __("Mobile Number"),
+				reqd: 1, read_only: 1, default: doc.mobile_no || "" },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "customer_group", fieldtype: "Link", options: "Customer Group",
+				label: __("Customer Group"), default: doc.customer_group || "Individual" },
+
+				{ fieldtype: "Section Break", label: __("Additional Contact") },
+				{ fieldname: "alternate_no", fieldtype: "Data", label: __("Alternate Number"),
+				default: doc.alternate_no || "" },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "whatsapp_no", fieldtype: "Data", label: __("WhatsApp Number"),
+				read_only: 1, default: doc.whatsapp_no || doc.mobile_no || "" },
+
+				{ fieldtype: "Section Break", label: __("Billing Address") },
+				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1"),
+				default: doc.address_line1 || "" },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2"),
+				default: doc.address_line2 || "" },
+
+				{ fieldtype: "Section Break" },
+				{
+					fieldname: "pincode",
+					fieldtype: "Data",
+					label: __("Pincode"),
+					default: doc.pincode || "",
+					description: __("Enter pincode — state & city auto-fill"),
+					onchange: function () {
+						autofillFromPincode(d, d.get_value("pincode"));
+					},
+				},
+				{ fieldtype: "Column Break" },
+				{ fieldname: "gstin", fieldtype: "Data", label: __("GSTIN"),
+				default: doc.gstin || "" },
+
+				{ fieldtype: "Section Break" },
+				{
+					fieldname: "state",
+					fieldtype: "Link",
+					options: "CH State",
+					label: __("State"),
+					reqd: 1,
+					default: doc.state || "",
+					get_query: () => ({ filters: { disabled: 0, country: "India" } }),
+					onchange: function () {
+						// If current city belongs to different state, clear it
+						const current_city = d.get_value("city");
+						if (current_city) {
+							frappe.db.get_value("CH City", current_city, "state").then((r) => {
+								const city_state = r?.message?.state;
+								if (city_state && city_state !== d.get_value("state")) {
+									d.set_value("city", "");
+								}
+							});
+						}
+					},
+				},
+				{ fieldtype: "Column Break" },
+				{
+					fieldname: "city",
+					fieldtype: "Link",
+					options: "CH City",
+					label: __("City"),
+					default: doc.city || "",
+					get_query: () => {
+						const filters = { disabled: 0 };
+						const selected_state = d.get_value("state");
+						if (selected_state) filters.state = selected_state;
+						return { filters };
+					},
+					onchange: function () {
+						// If city belongs to a state, auto-fill state if empty
+						const city_val = d.get_value("city");
+						if (!city_val) return;
+						frappe.db.get_value("CH City", city_val, "state").then((r) => {
+							const city_state = r?.message?.state;
+							if (city_state && !d.get_value("state")) {
+								d.set_value("state", city_state);
+							}
+						});
+					},
+				},
+
+				{ fieldtype: "Section Break" },
+				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality"),
+				default: doc.area || "" },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "pan", fieldtype: "Data", label: __("PAN Number"),
+				default: doc.pan || "",
+				description: __("10-character PAN (AAAAA9999A)") },
+
+				// Shipping
+				{ fieldtype: "Section Break", label: __("Shipping") },
+				{
+					fieldname: "ship_to_same_as_billing",
+					fieldtype: "Check",
+					label: __("Ship to same as billing address"),
+					default: doc.ship_to_same_as_billing ?? 1,
+				},
+
+				{ fieldtype: "Section Break" },
+				{
+					fieldname: "shipping_pincode",
+					fieldtype: "Data",
+					label: __("Shipping Pincode"),
+					default: doc.shipping_pincode || "",
+					depends_on: "eval:!doc.ship_to_same_as_billing",
+					onchange: function () {
+						autofillFromPincode(d, d.get_value("shipping_pincode"), "shipping");
+					},
+				},
+				{ fieldtype: "Column Break" },
+				{
+					fieldname: "shipping_address_line1",
+					fieldtype: "Data",
+					label: __("Shipping Address Line 1"),
+					default: doc.shipping_address_line1 || "",
+					depends_on: "eval:!doc.ship_to_same_as_billing",
+				},
+
+				{ fieldtype: "Section Break" },
+				{
+					fieldname: "shipping_state",
+					fieldtype: "Link",
+					options: "CH State",
+					label: __("Shipping State"),
+					default: doc.shipping_state || "",
+					depends_on: "eval:!doc.ship_to_same_as_billing",
+					get_query: () => ({ filters: { disabled: 0, country: "India" } }),
+					onchange: function () {
+						const current_city = d.get_value("shipping_city");
+						if (current_city) {
+							frappe.db.get_value("CH City", current_city, "state").then((r) => {
+								const city_state = r?.message?.state;
+								if (city_state && city_state !== d.get_value("shipping_state")) {
+									d.set_value("shipping_city", "");
+								}
+							});
+						}
+					},
+				},
+				{ fieldtype: "Column Break" },
+				{
+					fieldname: "shipping_city",
+					fieldtype: "Link",
+					options: "CH City",
+					label: __("Shipping City"),
+					default: doc.shipping_city || "",
+					depends_on: "eval:!doc.ship_to_same_as_billing",
+					get_query: () => {
+						const filters = { disabled: 0 };
+						const selected_state = d.get_value("shipping_state");
+						if (selected_state) filters.state = selected_state;
+						return { filters };
+					},
+					onchange: function () {
+						const city_val = d.get_value("shipping_city");
+						if (!city_val) return;
+						frappe.db.get_value("CH City", city_val, "state").then((r) => {
+							const city_state = r?.message?.state;
+							if (city_state && !d.get_value("shipping_state")) {
+								d.set_value("shipping_state", city_state);
+							}
+						});
+					},
+				},
+			],
+
+			primary_action_label: __("Update"),
+			primary_action: (values) => {
+				if (values.pan) {
+					values.pan = values.pan.trim().toUpperCase();
+					if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(values.pan)) {
+						frappe.msgprint(__("Invalid PAN format (AAAAA9999A)"));
+						return;
+					}
+				}
+				if (values.gstin) values.gstin = values.gstin.trim().toUpperCase();
+				if (values.pincode && values.pincode.trim() && !/^\d{6}$/.test(values.pincode.trim())) {
+					frappe.msgprint(__("Billing pincode must be 6 digits"));
+					return;
+				}
+				// Validate city/state combo before saving
+				if (values.city && values.state) {
+					const cityExists = await frappe.db.exists("CH City", values.city);
+					if (cityExists) {
+						const r = await frappe.db.get_value("CH City", values.city, "state");
+						const cityState = r?.message?.state;
+						if (cityState && cityState !== values.state) {
+							frappe.msgprint({
+								title: __("City / State Mismatch"),
+								message: __("City '{0}' belongs to '{1}'. Please update state or pick a city from '{2}'.", 
+									[values.city, cityState, values.state]),
+								indicator: "red",
+							});
+							return;
+						}
+					}
+				}
+				
+				if (!values.ship_to_same_as_billing && values.shipping_pincode 
+					&& values.shipping_pincode.trim() 
+					&& !/^\d{6}$/.test(values.shipping_pincode.trim())) {
+					frappe.msgprint(__("Shipping pincode must be 6 digits"));
+					return;
+				}
+
+				frappe.xcall("ch_pos.api.pos_api.update_customer_complete", {
+					customer: customer,
+					payload: values,
+				})
+				.then(() => {
+					frappe.show_alert({ message: __("Customer updated successfully"), indicator: "green" });
+					d.hide();
+					PosState.customer_info = null;
+					me._commit_customer(customer);
+				})
+				.catch((err) => {
+					console.error("Update error:", err);
+					const msg = err.message
+						|| (err._server_messages ? JSON.parse(err._server_messages)[0] : null)
+						|| __("Could not update customer");
+					frappe.msgprint({ title: __("Update Failed"), message: msg, indicator: "red" });
+				});
+			},
+		});
+
+		d.show();
+
+		setTimeout(async () => {
+			// Validate & set billing city
+			await validateAndSetCity(d, doc.city, doc.state, "city", "state");
+			// Validate & set shipping city
+			if (!doc.ship_to_same_as_billing) {
+				await validateAndSetCity(d, doc.shipping_city, doc.shipping_state, "shipping_city", "shipping_state");
+			}
+		}, 150);
+
+		// Helper: only sets city if it belongs to the given state
+		async function validateAndSetCity(dialog, cityVal, stateVal, cityField, stateField) {
+			if (!cityVal) return;
+			
+			// If state is empty, just set the city (no validation needed)
+			if (!stateVal) {
+				dialog.set_value(cityField, cityVal);
+				return;
+			}
+			
+			// Check if city actually belongs to the given state
+			try {
+				const cityExists = await frappe.db.exists("CH City", cityVal);
+				if (!cityExists) {
+					console.warn(`CH City "${cityVal}" doesn't exist — clearing field`);
+					return;
+				}
+				
+				const r = await frappe.db.get_value("CH City", cityVal, "state");
+				const cityActualState = r?.message?.state;
+				
+				if (!cityActualState) {
+					// CH City has no state — auto-heal it to match address state
+					await frappe.db.set_value("CH City", cityVal, "state", stateVal);
+					console.log(`Auto-healed CH City "${cityVal}" → state "${stateVal}"`);
+					dialog.set_value(cityField, cityVal);
+				} else if (cityActualState === stateVal) {
+					// ✅ Valid combo — set city
+					dialog.set_value(cityField, cityVal);
+				} else {
+					// ❌ MISMATCH: City belongs to a different state than the address
+					console.warn(`City "${cityVal}" belongs to "${cityActualState}" but address state is "${stateVal}"`);
+					frappe.show_alert({
+						message: __("City '{0}' doesn't match state '{1}' — please re-select city", [cityVal, stateVal]),
+						indicator: "orange",
+					});
+					// Leave city empty — user must pick a matching one
+				}
+			} catch (err) {
+				console.error("validateAndSetCity error:", err);
+			}
+		}
+	}
+
 	bind() {
 		const w = this.wrapper;
 
 		// New customer quick-create
 		w.on("click", ".ch-pos-btn-new-customer", () => this._show_new_customer_dialog());
 		EventBus.on("customer:new", () => this._show_new_customer_dialog());
+
+		// Edit existing customer — click on the customer tag (only when not walk-in)
+		w.on("click", ".ch-pos-customer-tag.existing, .ch-pos-customer-tag.loyalty", () => {
+			if (PosState.customer) {
+				this._show_edit_customer_dialog();
+			}
+		});
 
 		// Executive selector change
 		w.on("change", ".ch-pos-executive-select", (e) => {

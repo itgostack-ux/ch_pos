@@ -8508,6 +8508,261 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
         "pan": cust.get("ch_pan_number") or cust.get("pan") or "",
     }
 
+@frappe.whitelist()
+def update_customer_complete(customer, payload):
+    """
+    Single atomic update for Customer + Billing Address + Shipping Address + Extras.
+    Handles everything in ONE transaction → no deadlocks.
+    """
+    import json
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+
+    frappe.has_permission("Customer", "write", throw=True)
+
+    if not customer or not frappe.db.exists("Customer", customer):
+        frappe.throw(_("Customer {0} not found").format(customer))
+
+    # ──────────────────────────────────────────────
+    # 1. UPDATE CUSTOMER DOC
+    # ──────────────────────────────────────────────
+    cust = frappe.get_doc("Customer", customer)
+    cust_changed = False
+
+    # Editable customer-level fields (name/mobile/email/whatsapp are locked on frontend)
+    standard_map = {
+        "customer_group": "customer_group",
+        "gstin": "gstin",
+    }
+    for src, dest in standard_map.items():
+        val = payload.get(src)
+        if val is not None:
+            val = val.strip() if isinstance(val, str) else val
+            if src == "gstin":
+                val = val.upper() if val else ""
+            if val != (cust.get(dest) or ""):
+                cust.set(dest, val)
+                cust_changed = True
+
+    # Custom (ch_*) editable fields
+    custom_map = {
+        "alternate_no": "ch_alternate_phone",
+    }
+    for src, dest in custom_map.items():
+        val = payload.get(src)
+        if val is not None:
+            val = val.strip() if isinstance(val, str) else val
+            if val != (cust.get(dest) or ""):
+                cust.set(dest, val)
+                cust_changed = True
+
+    # PAN — mirror to both fields
+    if payload.get("pan") is not None:
+        pan_clean = (payload["pan"] or "").strip().upper()
+        if pan_clean != (cust.get("ch_pan_number") or ""):
+            cust.ch_pan_number = pan_clean
+            cust.pan = pan_clean
+            cust_changed = True
+
+    if cust_changed:
+        cust.flags.ignore_permissions = True
+        cust.save()
+
+    # 2. BILLING ADDRESS (primary)
+    billing_fields = ["address_line1", "address_line2", "city", "state", "pincode"]
+    has_billing_data = any(payload.get(f) for f in billing_fields)
+
+    if has_billing_data:
+        _upsert_address(
+            customer=customer,
+            customer_name=cust.customer_name,
+            address_type="Billing",
+            is_primary=1,
+            is_shipping=0,
+            data={
+                "address_line1": payload.get("address_line1"),
+                "address_line2": payload.get("address_line2"),
+                "city": payload.get("city"),
+                "state": payload.get("state"),
+                "pincode": payload.get("pincode"),
+            },
+            link_field="customer_primary_address",
+        )
+
+    # 3. SHIPPING ADDRESS
+    ship_same = payload.get("ship_to_same_as_billing")
+    
+    # If "same as billing" is checked → skip shipping save (or delete old shipping)
+    if ship_same:
+        # Optionally remove existing separate shipping address
+        pass
+    else:
+        shipping_fields = ["shipping_address_line1", "shipping_city", "shipping_state", "shipping_pincode"]
+        has_shipping_data = any(payload.get(f) for f in shipping_fields)
+
+        if has_shipping_data:
+            _upsert_address(
+                customer=customer,
+                customer_name=cust.customer_name,
+                address_type="Shipping",
+                is_primary=0,
+                is_shipping=1,
+                data={
+                    "address_line1": payload.get("shipping_address_line1"),
+                    "address_line2": payload.get("shipping_address_line2"),
+                    "city": payload.get("shipping_city"),
+                    "state": payload.get("shipping_state"),
+                    "pincode": payload.get("shipping_pincode"),
+                },
+                link_field=None,  # shipping isn't linked as "primary"
+            )
+
+    # ... shipping address code above ...
+
+    # ── Clear caches so next fetch returns fresh data ──
+    frappe.clear_document_cache("Customer", customer)
+    primary_addr = frappe.db.get_value("Customer", customer, "customer_primary_address")
+    if primary_addr:
+        frappe.clear_document_cache("Address", primary_addr)
+
+    frappe.db.commit()
+
+    return {
+        "ok": True,
+        "customer": customer,
+        "customer_name": cust.customer_name,
+    }
+
+def _upsert_address(customer, customer_name, address_type, is_primary, is_shipping, data, link_field=None):
+    """
+    Find/create address. For billing → uses customer_primary_address as single source of truth.
+    For shipping → finds existing shipping address by type.
+    Auto-creates CH City record if missing, syncs CH City state.
+    """
+    addr = None
+    addr_name = None
+
+    # ── BILLING: Use customer_primary_address field as source of truth ──
+    if address_type == "Billing":
+        addr_name = frappe.db.get_value("Customer", customer, "customer_primary_address")
+        if addr_name and frappe.db.exists("Address", addr_name):
+            addr = frappe.get_doc("Address", addr_name)
+
+    # ── SHIPPING: Find existing shipping address by type ──
+    elif address_type == "Shipping":
+        existing = frappe.db.sql("""
+            SELECT addr.name
+            FROM `tabAddress` addr
+            INNER JOIN `tabDynamic Link` dl ON dl.parent = addr.name
+            WHERE dl.link_doctype = 'Customer'
+              AND dl.link_name = %s
+              AND dl.parenttype = 'Address'
+              AND addr.address_type = 'Shipping'
+            ORDER BY addr.modified DESC
+            LIMIT 1
+        """, customer, as_dict=True)
+        if existing:
+            addr = frappe.get_doc("Address", existing[0].name)
+            addr_name = addr.name
+
+    # ── Create new if not found ──
+    if not addr:
+        addr = frappe.new_doc("Address")
+        addr.address_title = f"{customer_name}-{address_type}"
+        addr.address_type = address_type
+        addr.is_primary_address = is_primary
+        addr.is_shipping_address = is_shipping
+        addr.country = "India"
+        addr.append("links", {
+            "link_doctype": "Customer",
+            "link_name": customer,
+        })
+
+    # ── Apply changes ──
+    if "address_line1" in data:
+        addr.address_line1 = (data.get("address_line1") or "").strip() or "N/A"
+    if "address_line2" in data:
+        addr.address_line2 = (data.get("address_line2") or "").strip()
+    if "city" in data:
+        addr.city = (data.get("city") or "").strip()
+    if "state" in data:
+        addr.state = (data.get("state") or "").strip()
+    if "pincode" in data:
+        addr.pincode = (data.get("pincode") or "").strip()
+    if not addr.country:
+        addr.country = "India"
+
+    addr.is_primary_address = is_primary
+    addr.is_shipping_address = is_shipping
+
+    # ── Auto-create CH City record if doesn't exist, sync state ──
+    if addr.city:
+        try:
+            if not frappe.db.exists("CH City", addr.city):
+                # Create new CH City
+                new_city = frappe.new_doc("CH City")
+                # Try common fieldnames
+                meta = frappe.get_meta("CH City")
+                if meta.has_field("city_name"):
+                    new_city.city_name = addr.city
+                elif meta.has_field("city"):
+                    new_city.city = addr.city
+                if addr.state and meta.has_field("state"):
+                    new_city.state = addr.state
+                new_city.flags.ignore_permissions = True
+                new_city.insert(ignore_if_duplicate=True)
+            elif addr.state:
+                # Update CH City's state to match
+                current_state = frappe.db.get_value("CH City", addr.city, "state")
+                if not current_state or current_state != addr.state:
+                    frappe.db.set_value(
+                        "CH City", addr.city, "state", addr.state,
+                        update_modified=False
+                    )
+        except Exception as e:
+            frappe.log_error(f"CH City sync failed: {e}", "update_customer_complete")
+
+    # ── Auto-create CH State if doesn't exist ──
+    if addr.state:
+        try:
+            if not frappe.db.exists("CH State", addr.state):
+                new_state = frappe.new_doc("CH State")
+                meta = frappe.get_meta("CH State")
+                if meta.has_field("state_name"):
+                    new_state.state_name = addr.state
+                elif meta.has_field("state"):
+                    new_state.state = addr.state
+                new_state.flags.ignore_permissions = True
+                new_state.insert(ignore_if_duplicate=True)
+        except Exception as e:
+            frappe.log_error(f"CH State sync failed: {e}", "update_customer_complete")
+
+    # ── Save with retry on pincode validation failure ──
+    addr.flags.ignore_permissions = True
+    try:
+        addr.save()
+    except frappe.ValidationError as e:
+        err_msg = str(e)
+        if "Postal Code" in err_msg and "not associated" in err_msg:
+            frappe.db.rollback()
+            if addr_name:
+                addr = frappe.get_doc("Address", addr_name)
+            addr.pincode = ""
+            if "city" in data: addr.city = (data.get("city") or "").strip()
+            if "state" in data: addr.state = (data.get("state") or "").strip()
+            addr.flags.ignore_permissions = True
+            addr.save()
+        else:
+            frappe.throw(err_msg, title=_(f"{address_type} Address Validation Failed"))
+
+    # ── Always set as primary address for billing ──
+    if address_type == "Billing":
+        frappe.db.set_value(
+            "Customer", customer, "customer_primary_address", addr.name,
+            update_modified=False
+        )
+
+    return addr.name
 
 def _phone_suffix_10(phone_no):
     """Return normalized 10-digit Indian phone suffix, or empty string."""
@@ -11041,3 +11296,112 @@ def _pickup_invoice_response(inv, status="ok"):
                      f"&name={quote(inv.name)}"
                      f"&format={quote(print_format)}&no_letterhead=0",
     }
+
+
+@frappe.whitelist()
+def get_customer_full_details(customer, **kwargs):
+    """Fetch fresh customer details with robust address lookup."""
+    if not customer:
+        return {}
+
+    # ⚡ Clear cache first to guarantee fresh data
+    frappe.clear_document_cache("Customer", customer)
+
+    # Use db.get_value to read directly from DB (no cache)
+    cust_data = frappe.db.get_value("Customer", customer, [
+        "name", "customer_name", "customer_group", "customer_type",
+        "email_id", "mobile_no",
+        "ch_whatsapp_number", "ch_alternate_phone",
+        "pan", "ch_pan_number", "gstin", "tax_id",
+        "customer_primary_address"
+    ], as_dict=True)
+
+    if not cust_data:
+        return {}
+
+    result = {
+        "name": cust_data.name,
+        "customer_name": cust_data.customer_name,
+        "customer_group": cust_data.customer_group,
+        "customer_type": cust_data.customer_type,
+        "email_id": cust_data.email_id,
+        "mobile_no": cust_data.mobile_no,
+        "whatsapp_no": cust_data.ch_whatsapp_number,
+        "alternate_no": cust_data.ch_alternate_phone,
+        "pan": cust_data.pan or cust_data.ch_pan_number,
+        "gstin": cust_data.gstin or cust_data.tax_id,
+    }
+
+    # ── BILLING ADDRESS: Try customer_primary_address first ──
+    billing_addr_name = cust_data.customer_primary_address
+
+    # Fallback: Find any billing address linked to customer
+    if not billing_addr_name:
+        existing = frappe.db.sql("""
+            SELECT addr.name
+            FROM `tabAddress` addr
+            INNER JOIN `tabDynamic Link` dl ON dl.parent = addr.name
+            WHERE dl.link_doctype = 'Customer'
+              AND dl.link_name = %s
+              AND dl.parenttype = 'Address'
+              AND addr.address_type = 'Billing'
+            ORDER BY addr.is_primary_address DESC, addr.creation DESC
+            LIMIT 1
+        """, customer, as_dict=True)
+        if existing:
+            billing_addr_name = existing[0].name
+            # Also set as customer_primary_address for next time
+            frappe.db.set_value(
+                "Customer", customer, "customer_primary_address", billing_addr_name,
+                update_modified=False
+            )
+
+    if billing_addr_name and frappe.db.exists("Address", billing_addr_name):
+        # Read directly from DB to bypass cache
+        billing = frappe.db.get_value("Address", billing_addr_name, [
+            "address_line1", "address_line2", "city", "state", "pincode", "country"
+        ], as_dict=True)
+        if billing:
+            result.update({
+                "address_line1": billing.address_line1,
+                "address_line2": billing.address_line2,
+                "city": billing.city,
+                "state": billing.state,
+                "pincode": billing.pincode,
+                "country": billing.country,
+                "billing_address_name": billing_addr_name,
+            })
+
+    # ── SHIPPING ADDRESS ──
+    shipping_existing = frappe.db.sql("""
+        SELECT addr.name
+        FROM `tabAddress` addr
+        INNER JOIN `tabDynamic Link` dl ON dl.parent = addr.name
+        WHERE dl.link_doctype = 'Customer'
+          AND dl.link_name = %s
+          AND dl.parenttype = 'Address'
+          AND addr.address_type = 'Shipping'
+        ORDER BY addr.modified DESC
+        LIMIT 1
+    """, customer, as_dict=True)
+
+    if shipping_existing:
+        shipping = frappe.db.get_value("Address", shipping_existing[0].name, [
+            "address_line1", "address_line2", "city", "state", "pincode"
+        ], as_dict=True)
+        if shipping:
+            result.update({
+                "shipping_address_line1": shipping.address_line1,
+                "shipping_address_line2": shipping.address_line2,
+                "shipping_city": shipping.city,
+                "shipping_state": shipping.state,
+                "shipping_pincode": shipping.pincode,
+                "shipping_address_name": shipping_existing[0].name,
+                "ship_to_same_as_billing": 0,
+            })
+        else:
+            result["ship_to_same_as_billing"] = 1
+    else:
+        result["ship_to_same_as_billing"] = 1
+
+    return result

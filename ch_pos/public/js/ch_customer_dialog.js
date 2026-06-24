@@ -62,6 +62,67 @@
 		let last_otp_trigger_at = 0;
 		let otp_request_in_flight = false;
 
+
+		const PHONE_RULES = {
+			"India":         { length: 10, starts_with: /^[6-9]/, label: "Indian" },
+			"United States": { length: 10, starts_with: /^[2-9]/, label: "US" },
+			"United Kingdom":{ length: 10, starts_with: /^7/,     label: "UK" },
+			"UAE":           { length: 9,  starts_with: /^5/,     label: "UAE" },
+			// default fallback if country not listed
+			"default":       { length: 10, starts_with: /^[1-9]/, label: "" },
+		};
+
+		let phone_rule = PHONE_RULES.default;
+		// Load country from Company doc once
+		if (company) {
+			frappe.db.get_value("Company", company, "country").then((r) => {
+				const country = r?.message?.country;
+				if (country && PHONE_RULES[country]) {
+					phone_rule = PHONE_RULES[country];
+				}
+			});
+		}
+		
+		const enforce_digits_only = (fieldname) => {
+			const $el = d.$wrapper.find(`[data-fieldname="${fieldname}"] input`);
+			
+			$el.attr("maxlength", phone_rule.length);
+			
+			$el.off("input.digits_only").on("input.digits_only", function () {
+				let cleaned = (this.value || "").replace(/\D/g, "");
+				
+				// Limit length
+				if (cleaned.length > phone_rule.length) {
+					cleaned = cleaned.slice(0, phone_rule.length);
+				}
+				
+				// Block invalid starting digits
+				if (cleaned && !phone_rule.starts_with.test(cleaned)) {
+					cleaned = "";
+					frappe.show_alert({ 
+						message: __("Invalid {0} mobile number", [phone_rule.label]), 
+						indicator: "orange" 
+					});
+				}
+				
+				if (cleaned !== this.value) this.value = cleaned;
+			});
+			
+			$el.off("keypress.digits_only").on("keypress.digits_only", function (e) {
+				const charCode = e.which || e.keyCode;
+				// Only digits
+				if (charCode < 48 || charCode > 57) {
+					e.preventDefault();
+					return false;
+				}
+				// Max length reached
+				if (this.value.length >= phone_rule.length) {
+					e.preventDefault();
+					return false;
+				}
+			});
+		};
+
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
 
@@ -70,8 +131,9 @@
 			const mobile_no = input_value("mobile_no");
 			const whatsapp_number = input_value("whatsapp_number");
 			const state = input_value("state");
+			const city = input_value("city");
 			
-			const all_filled = customer_name && mobile_no && whatsapp_number && state;
+			const all_filled = customer_name && mobile_no && whatsapp_number && state && city;
 			const $btn = d.$wrapper.find(".ch-send-customer-otp");
 			const $status = d.fields_dict.otp_status?.$wrapper;
 			
@@ -285,14 +347,46 @@
 				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1") },
 				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2") },
 				{ fieldtype: "Column Break" },
-				{ fieldname: "city", fieldtype: "Link", options: "CH City", label: __("City"),
-				  get_query: () => {
-					const filters = { disabled: 0 };
-					if (company) filters.company = company;
-					return { filters };
-				  } },
+
 				{ fieldname: "state", fieldtype: "Link", options: "CH State", label: __("State"), reqd: 1,
-				  get_query: () => ({ filters: { disabled: 0, country: "India" } }) },
+				get_query: () => ({ filters: { disabled: 0, country: "India" } }),
+				onchange: function () {
+					const current_city = d.get_value("city");
+					if (current_city) {
+						frappe.db.get_value("CH City", current_city, "state").then((r) => {
+							const city_state = r?.message?.state;
+							if (city_state && city_state !== d.get_value("state")) {
+								d.set_value("city", "");
+							}
+						});
+					}
+					toggle_send_otp_button();
+				}},
+
+				{ fieldname: "city", fieldtype: "Link", options: "CH City", label: __("City"), reqd: 1,
+				get_query: () => {
+					const filters = { disabled: 0 };
+					const selected_state = d.get_value("state");
+					if (selected_state) {
+						filters.state = selected_state;  
+					}
+					return { filters };
+				},
+				onchange: function () {
+					const city_val = d.get_value("city");
+					if (!city_val) {
+						toggle_send_otp_button();
+						return;
+					}
+					frappe.db.get_value("CH City", city_val, "state").then((r) => {
+						const city_state = r?.message?.state;
+						if (city_state && !d.get_value("state")) {
+							d.set_value("state", city_state);
+						}
+						toggle_send_otp_button();
+					});
+				}},
+
 				{ fieldtype: "Section Break" },
 				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode") },
 				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality") },
@@ -381,8 +475,8 @@
 					whatsapp_number: whatsapp,
 					address_line1: values.address_line1 || "",
 					address_line2: values.address_line2 || "",
-					city: values.city || "",
 					state: values.state || "",
+					city: values.city || "",
 					pincode: values.pincode || "",
 					area: values.area || "",
 					gstin: values.gstin || "",
@@ -653,6 +747,19 @@
 		};
 
 		setTimeout(bind_native_inputs, 50);
+
+		setTimeout(() => {
+			enforce_digits_only("mobile_no");
+			enforce_digits_only("alternate_phone");
+			enforce_digits_only("whatsapp_number");
+		}, 100);
+
+		d.$wrapper.one("shown.bs.modal", () => {
+			enforce_digits_only("mobile_no");
+			enforce_digits_only("alternate_phone");
+			enforce_digits_only("whatsapp_number");
+		});
+
 		d.$wrapper.one("shown.bs.modal", bind_native_inputs);
 		setTimeout(bind_send_otp_button, 50);
 		setTimeout(bind_otp_auto_verify, 50);
