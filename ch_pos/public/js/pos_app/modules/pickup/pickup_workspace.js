@@ -139,18 +139,24 @@ export class PickupWorkspace {
 			this._refresh_kpis();
 			this._load();
 		});
-		panel.on("click", ".ch-pickup-open", (e) => {
-			const name = $(e.currentTarget).data("name");
-			window.open(`/app/sales-order/${encodeURIComponent(name)}`, "_blank");
-		});
 		panel.on("click", ".ch-pickup-bill", (e) => {
 			const name = $(e.currentTarget).data("name");
 			const row = this._rows.find(r => r.name === name);
-			if (row) this._bill_flow(row);
-		});
-		panel.on("click", ".ch-pickup-invoice-open", (e) => {
-			const name = $(e.currentTarget).data("name");
-			window.open(`/app/sales-invoice/${encodeURIComponent(name)}`, "_blank");
+			if (!row) return;
+			// Reserved-stock prebookings need their IMEI tagged first. Previously
+			// the button was simply disabled, so clicking did nothing with no
+			// explanation — now give clear, actionable feedback instead.
+			const requires_gate = cint(row.reserve_stock) === 1;
+			const ready = !requires_gate || (row.reserved_serials || []).length > 0;
+			if (!ready) {
+				frappe.msgprint({
+					title: __("Reserved IMEI Not Tagged"),
+					indicator: "orange",
+					message: __("This prebooking reserves stock. Tag the reserved IMEI in the 'Reserved IMEIs / Serials' tab before billing."),
+				});
+				return;
+			}
+			this._bill_flow(row);
 		});
 		panel.on("click", ".ch-pickup-invoice-print", (e) => {
 			const url = $(e.currentTarget).data("url");
@@ -350,9 +356,7 @@ export class PickupWorkspace {
 						<div class="small ${due_class}" style="margin-top:4px;">
 							<i class="fa fa-calendar"></i> ${__("Due")}: ${due_label} ${due_badge}
 						</div>
-						<div class="small text-muted">
-							<a href="/app/sales-order/${encodeURIComponent(r.name)}" target="_blank">${r.name}</a>
-						</div>
+						<div class="small text-muted">${r.name}</div>
 						${imei_badge}
 					</div>
 					<div style="flex:1.5;min-width:200px;font-size:12px;">
@@ -365,11 +369,8 @@ export class PickupWorkspace {
 						<div style="margin-top:2px;"><b>${__("Balance")}: \u20B9${format_number(bal)}</b></div>
 					</div>
 					<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:140px;">
-						<button class="btn btn-success btn-sm ch-pickup-bill" data-name="${r.name}" title="${frappe.utils.escape_html(bill_title)}" ${imei_ready ? "" : "disabled"}>
+						<button class="btn btn-success btn-sm ch-pickup-bill" data-name="${r.name}" title="${frappe.utils.escape_html(bill_title)}">
 							<i class="fa fa-check"></i> ${__("Bill & Pickup")}
-						</button>
-						<button class="btn btn-default btn-xs ch-pickup-open" data-name="${r.name}">
-							<i class="fa fa-external-link"></i> ${__("Open SO")}
 						</button>
 					</div>
 				</div>
@@ -415,7 +416,7 @@ export class PickupWorkspace {
 								<td><code>${frappe.utils.escape_html(r.serial_no)}</code></td>
 								<td>${frappe.utils.escape_html(r.item_name || r.item_code)}<div class="small text-muted">${frappe.utils.escape_html(r.item_code)}</div></td>
 								<td>${frappe.utils.escape_html(r.customer_name)}<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div></td>
-								<td><a href="/app/sales-order/${encodeURIComponent(r.sales_order)}" target="_blank">${r.sales_order}</a></td>
+								<td>${frappe.utils.escape_html(r.sales_order)}</td>
 								<td>${r.delivery_date || "—"}${overdue}</td>
 								<td>${frappe.utils.escape_html(r.warehouse || "—")}</td>
 							</tr>
@@ -446,7 +447,7 @@ export class PickupWorkspace {
 					<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name || r.customer)}</div>
 					<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div>
 					<div class="small text-muted" style="margin-top:4px;">
-						<a href="/app/sales-invoice/${encodeURIComponent(r.name)}" target="_blank">${r.name}</a> \u00B7 ${r.posting_time || ""}
+						${r.name} \u00B7 ${r.posting_time || ""}
 					</div>
 				</div>
 				<div style="flex:0.9;min-width:140px;text-align:right;font-size:12px;">
@@ -459,9 +460,6 @@ export class PickupWorkspace {
 					<button class="btn btn-default btn-xs ch-pickup-invoice-print"
 						data-url="/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(r.name)}&format=Custom%20Sales%20Invoice&no_letterhead=0">
 						<i class="fa fa-print"></i> ${__("Print")}
-					</button>
-					<button class="btn btn-default btn-xs ch-pickup-invoice-open" data-name="${r.name}">
-						<i class="fa fa-external-link"></i> ${__("Open")}
 					</button>
 				</div>
 			</div>
@@ -626,7 +624,6 @@ export class PickupWorkspace {
 	}
 
 	_show_success(inv, auto_print) {
-		const desk_url = `/app/sales-invoice/${encodeURIComponent(inv.name)}`;
 		const print_url = inv.print_url;
 
 		frappe.show_alert({
@@ -649,9 +646,6 @@ export class PickupWorkspace {
 					<div style="margin-top:14px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
 						<a class="btn btn-primary btn-sm" target="_blank" href="${print_url}">
 							<i class="fa fa-print"></i> ${__("Print Invoice")}
-						</a>
-						<a class="btn btn-default btn-sm" target="_blank" href="${desk_url}">
-							<i class="fa fa-external-link"></i> ${__("Open in Desk")}
 						</a>
 					</div>
 				</div>`,

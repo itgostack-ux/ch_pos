@@ -477,6 +477,12 @@ export class BuybackWorkspace {
 			</div>
 		`);
 
+		// Surface any price exceptions raised against this order (parity with
+		// how sale exceptions are shown in POS).
+		if (data.order && data.order.name) {
+			this._render_order_exceptions(el, data.order.name);
+		}
+
 		el.find(".ch-bb-open-desk").on("click", function (e) {
 			e.preventDefault();
 			frappe.set_route("Form", "Buyback Assessment", $(this).data("name"));
@@ -1123,11 +1129,55 @@ export class BuybackWorkspace {
 					style="width:100%;border-radius:var(--pos-radius,8px)">
 					<i class="fa fa-pencil"></i> ${__("Approve In-Store (Customer Present)")}
 				</button>
+				<button class="btn btn-outline-warning ch-bb-act ch-bb-raise-price-exc"
+					data-order="${order ? frappe.utils.escape_html(order.name) : ""}"
+					data-price="${price}"
+					style="width:100%;border-radius:var(--pos-radius,8px)">
+					<i class="fa fa-gavel"></i> ${__("Raise Price Exception")}
+				</button>
 			</div>`;
 	}
 
 	_esc(v) {
 		return frappe.utils.escape_html(v == null ? "" : String(v));
+	}
+
+	// Show price exceptions raised against this Buyback Order, with live status,
+	// at the top of the stage body — so POS reflects them like other exceptions.
+	_render_order_exceptions(el, order_name) {
+		frappe.xcall("frappe.client.get_list", {
+			doctype: "CH Exception Request",
+			filters: { reference_doctype: "Buyback Order", reference_name: order_name },
+			fields: ["name", "exception_type", "status", "requested_value", "resolution_value"],
+			order_by: "creation desc",
+			limit_page_length: 5,
+		}).then((rows) => {
+			if (!rows || !rows.length) return;
+			const color = {
+				Pending: "#b45309", Escalated: "#b45309", Approved: "#065f46",
+				"Auto-Approved": "#065f46", Rejected: "#b91c1c", Expired: "#6b7280",
+			};
+			const items = rows.map((r) => {
+				const c = color[r.status] || "#6b7280";
+				const amt = flt(r.resolution_value) || flt(r.requested_value);
+				return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:3px 0">
+						<a class="ch-bb-open-exc" data-name="${frappe.utils.escape_html(r.name)}" href="#" style="color:inherit">
+							<i class="fa fa-gavel"></i> ${frappe.utils.escape_html(r.exception_type)} — ₹${format_number(amt)}
+						</a>
+						<span style="font-weight:700;color:${c}">${frappe.utils.escape_html(r.status)}</span>
+					</div>`;
+			}).join("");
+			const banner = `<div class="ch-bb-info-note" style="margin-bottom:12px;background:#fffbeb;border-color:#f59e0b">
+					<div style="font-weight:700;margin-bottom:4px;color:#92400e">
+						<i class="fa fa-gavel"></i> ${__("Price Exceptions")}
+					</div>${items}</div>`;
+			const body = el.find(".ch-bb-stage-body");
+			body.prepend(banner);
+			body.find(".ch-bb-open-exc").on("click", (e) => {
+				e.preventDefault();
+				frappe.set_route("Form", "CH Exception Request", $(e.currentTarget).data("name"));
+			});
+		}).catch(() => {});
 	}
 
 	_selected(actual, expected) {
@@ -1651,6 +1701,48 @@ export class BuybackWorkspace {
 				return;
 			}
 			this._show_instore_approval_dialog(data);
+		});
+
+		// Store-initiated price negotiation → routes to Buyback Manager, who
+		// approves it; on approval the order's payout is updated (close-the-loop).
+		el.on("click.bbstage", ".ch-bb-raise-price-exc", (e) => {
+			const order_name = $(e.currentTarget).data("order") || (data.order && data.order.name);
+			const current = flt($(e.currentTarget).data("price"));
+			if (!order_name) {
+				frappe.show_alert({ message: __("No Buyback Order found — complete inspection first"), indicator: "orange" });
+				return;
+			}
+			const d = new frappe.ui.Dialog({
+				title: __("Raise Price Exception"),
+				fields: [
+					{ fieldname: "current", fieldtype: "Currency", label: __("Current Price"),
+					  default: current, read_only: 1 },
+					{ fieldname: "requested_price", fieldtype: "Currency", label: __("Requested Price"),
+					  reqd: 1, default: current },
+					{ fieldname: "reason", fieldtype: "Small Text", label: __("Reason"), reqd: 1,
+					  description: __("Sent to the Buyback Manager for approval.") },
+				],
+				primary_action_label: __("Submit to Manager"),
+				primary_action: (v) => {
+					if (!v.reason || !flt(v.requested_price)) {
+						frappe.show_alert({ message: __("Enter a price and a reason"), indicator: "orange" });
+						return;
+					}
+					d.hide();
+					frappe.xcall("buyback.api.raise_buyback_exception", {
+						order: order_name,
+						requested_price: flt(v.requested_price),
+						reason: v.reason,
+					}).then((res) => {
+						frappe.show_alert({
+							message: __("Price exception {0} sent to Buyback Manager.", [res.name]),
+							indicator: "orange",
+						});
+						this._reload();
+					});
+				},
+			});
+			d.show();
 		});
 
 		el.on("click.bbstage", ".ch-bb-cashback", (e) => {

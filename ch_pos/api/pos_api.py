@@ -581,6 +581,140 @@ def _create_pre_booking_advance_pe(so, mode_of_payment: str, amount: float,
 
 
 @frappe.whitelist()
+def cancel_pre_booking(sales_order, action="refund",
+                       refund_mode_of_payment=None, reason=None) -> dict:
+    """Cancel a pre-booking Sales Order and handle its advance (#9 / #11).
+
+    ``action``:
+      * ``refund``         — return the advance to the customer. A *draft*
+                             advance Payment Entry is deleted (nothing was
+                             posted); a *submitted* one is cancelled, reversing
+                             the receipt.
+      * ``retain_credit``  — keep the advance as an on-account customer credit so
+                             it can be applied to another bill / a different
+                             model (the #11 "change model, reuse advance" path).
+                             The advance PE is left in place; cancelling the SO
+                             frees its allocation so the amount becomes an
+                             unallocated customer advance.
+
+    Stock reservation is released by the standard Sales Order cancel.
+    """
+    so = frappe.get_doc("Sales Order", sales_order)
+    if so.docstatus == 2:
+        return {"status": "already_cancelled", "name": so.name}
+    if flt(so.per_delivered) > 0 or flt(so.per_billed) > 0:
+        frappe.throw(_("Cannot cancel — pre-booking {0} is already partly "
+                       "delivered or billed.").format(so.name))
+
+    action = (action or "refund").lower()
+    retain = action == "retain_credit"
+
+    # Advance Payment Entries referencing this SO.
+    pe_names = list({r.parent for r in frappe.get_all(
+        "Payment Entry Reference",
+        filters={"reference_doctype": "Sales Order", "reference_name": so.name},
+        fields=["parent"])})
+
+    refunded = 0.0
+    retained = 0.0
+    for pe_name in pe_names:
+        pe = frappe.get_doc("Payment Entry", pe_name)
+        amt = flt(pe.paid_amount)
+        if pe.docstatus == 0:
+            # Draft — never posted. Refund: just drop it. Retain: re-collect on
+            # the new bill, so dropping it is also correct (no credit to keep).
+            frappe.delete_doc("Payment Entry", pe_name, force=True, ignore_permissions=True)
+        elif pe.docstatus == 1:
+            pe.flags.ignore_permissions = True
+            pe.cancel()
+            if retain:
+                # Re-book the receipt as an unallocated on-account advance so the
+                # customer keeps the credit for another bill / model.
+                _create_on_account_advance_pe(so, pe.mode_of_payment, amt, pe.reference_no)
+                retained += amt
+            else:
+                if refund_mode_of_payment:
+                    _create_advance_refund_pe(so, refund_mode_of_payment, amt)
+                refunded += amt
+
+    so.reload()
+    so.flags.ignore_permissions = True
+    so.cancel()  # releases stock reservation
+
+    try:
+        so.add_comment("Comment", _("Pre-booking cancelled ({0}).{1}").format(
+            "refunded" if not retain else "advance retained as credit",
+            (" " + reason) if reason else ""))
+    except Exception:
+        pass
+
+    return {"status": "cancelled", "name": so.name, "action": action,
+            "refunded": round(refunded, 2), "retained": round(retained, 2)}
+
+
+def _create_on_account_advance_pe(so, mode_of_payment, amount, reference_no=None):
+    """Draft on-account 'Receive' Payment Entry (no SO reference) so the amount
+    sits as an unallocated customer advance, reusable on the next bill."""
+    company = so.company
+    mop = frappe.get_doc("Mode of Payment", mode_of_payment)
+    paid_to = next((a.default_account for a in (mop.accounts or [])
+                    if a.company == company and a.default_account), None)
+    receivable = frappe.db.get_value("Company", company, "default_receivable_account")
+    if not paid_to or not receivable:
+        return None
+    pe = frappe.new_doc("Payment Entry")
+    pe.payment_type = "Receive"
+    pe.posting_date = nowdate()
+    pe.company = company
+    pe.mode_of_payment = mode_of_payment
+    pe.party_type = "Customer"
+    pe.party = so.customer
+    pe.paid_from = receivable
+    pe.paid_to = paid_to
+    pe.paid_amount = amount
+    pe.received_amount = amount
+    pe.source_exchange_rate = 1
+    pe.target_exchange_rate = 1
+    pe.reference_no = reference_no or so.name
+    pe.reference_date = nowdate()
+    pe.remarks = _("Retained advance credit from cancelled pre-booking {0}").format(so.name)
+    pe.flags.ignore_permissions = True
+    pe.insert(ignore_permissions=True)
+    return pe.name
+
+
+def _create_advance_refund_pe(so, mode_of_payment, amount):
+    """Best-effort outward 'Pay' Payment Entry returning the advance to the
+    customer via ``mode_of_payment`` (so the cash/UPI refund is on the books)."""
+    company = so.company
+    mop = frappe.get_doc("Mode of Payment", mode_of_payment)
+    paid_from = next((a.default_account for a in (mop.accounts or [])
+                      if a.company == company and a.default_account), None)
+    receivable = frappe.db.get_value("Company", company, "default_receivable_account")
+    if not paid_from or not receivable:
+        return None
+    pe = frappe.new_doc("Payment Entry")
+    pe.payment_type = "Pay"
+    pe.posting_date = nowdate()
+    pe.company = company
+    pe.mode_of_payment = mode_of_payment
+    pe.party_type = "Customer"
+    pe.party = so.customer
+    pe.paid_from = paid_from
+    pe.paid_to = receivable
+    pe.paid_amount = amount
+    pe.received_amount = amount
+    pe.source_exchange_rate = 1
+    pe.target_exchange_rate = 1
+    pe.reference_no = so.name
+    pe.reference_date = nowdate()
+    pe.remarks = _("Refund of pre-booking advance for cancelled {0}").format(so.name)
+    pe.flags.ignore_permissions = True
+    pe.insert(ignore_permissions=True)
+    return pe.name
+
+
+@frappe.whitelist()
 def create_pos_quotation(pos_profile, customer, items, valid_till=None,
                           notes=None, sales_executive=None,
                           advance_amount=0) -> dict:
@@ -5393,14 +5527,17 @@ def request_manager_approval(mobile_no, purpose, reference_doctype=None, referen
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Manager approval request audit failed")
-    # Send OTP via email (lookup email by mobile)
+    # Send OTP across all channels — SMS, WhatsApp and email.
+    channels = {}
     try:
-        from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
-        manager_email = _get_email_for_mobile(mobile_no)
-        send_otp_email(manager_email, otp, purpose, reference_name or "")
+        from buyback.buyback.whatsapp_notifications import send_otp as _send_otp
+        channels = _send_otp(mobile_no, otp, purpose,
+                             ref_doctype=reference_doctype or "CH OTP Log",
+                             ref_name=reference_name or "")
     except Exception:
-        frappe.log_error(title="Manager OTP email delivery failed")
-    return {"sent": True, "mobile": mobile_no[:3] + "****" + mobile_no[-3:], "otp_generated": bool(otp)}
+        frappe.log_error(title="Manager OTP delivery failed")
+    return {"sent": True, "mobile": mobile_no[:3] + "****" + mobile_no[-3:],
+            "otp_generated": bool(otp), "channels": channels}
 
 
 @frappe.whitelist()
@@ -5978,10 +6115,11 @@ def customer_360(identifier, company=None) -> dict:
 
 
 @frappe.whitelist()
-def store_dashboard(pos_profile) -> dict:
-    """Return today's sales summary, top items, staff performance and inventory alerts."""
+def store_dashboard(pos_profile, date=None) -> dict:
+    """Return a day's sales summary, top items, staff performance and inventory
+    alerts. ``date`` defaults to today (the dashboard's date filter passes it)."""
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    today = nowdate()
+    today = date or nowdate()
     warehouse = profile.warehouse
 
     # Today's invoices

@@ -9,14 +9,46 @@ import { format_number } from "../../shared/helpers.js";
 
 export class ReportsWorkspace {
 	constructor() {
+		this._date = frappe.datetime.get_today();
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "reports") return;
 			this.render(ctx.panel);
 		});
 	}
 
+	_download_csv() {
+		const d = this._dashboard_data || {};
+		const date = this._date || frappe.datetime.get_today();
+		const avg = d.total_invoices ? (d.total_revenue / d.total_invoices) : 0;
+		const rows = [
+			[__("Store Dashboard"), date],
+			[__("POS Profile"), PosState.pos_profile || ""],
+			[],
+			[__("Metric"), __("Value")],
+			[__("Revenue"), d.total_revenue || 0],
+			[__("Invoices"), d.total_invoices || 0],
+			[__("Items Sold"), d.total_items_sold || 0],
+			[__("Avg Basket"), Math.round(avg * 100) / 100],
+			[__("Returns"), d.total_returns || 0],
+			[__("Stock Value"), d.stock_value || 0],
+			[__("Aging Stock (>90d)"), d.aging_stock_value || 0],
+		];
+		const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+		const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = `store-dashboard-${date}.csv`;
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+		URL.revokeObjectURL(url);
+		frappe.show_alert({ message: __("Dashboard downloaded for {0}", [date]), indicator: "green" });
+	}
+
 	render(panel) {
-		const today = frappe.datetime.get_today();
+		this._panel = panel;
+		const today = this._date || frappe.datetime.get_today();
 		const pp = encodeURIComponent(PosState.pos_profile || "");
 		const wh = encodeURIComponent(PosState.warehouse || "");
 		const enc = (v) => encodeURIComponent(JSON.stringify(v));
@@ -80,6 +112,15 @@ export class ReportsWorkspace {
 						<button class="btn btn-sm btn-default ch-rpt-stock-audit"
 							title="${__("Open the Stock Audit workspace \u2014 stock report, cycle count, count history, variance approvals.")}">
 							<i class="fa fa-balance-scale"></i> ${__("Stock Audit")}
+						</button>
+						<input type="date" class="form-control input-sm ch-rpt-date"
+							value="${this._date || frappe.datetime.get_today()}"
+							max="${frappe.datetime.get_today()}"
+							style="width:150px;display:inline-block;vertical-align:middle"
+							title="${__("View a different date")}">
+						<button class="btn btn-sm btn-default ch-rpt-download"
+							title="${__("Download this day's summary as CSV")}">
+							<i class="fa fa-download"></i> ${__("Download")}
 						</button>
 						<button class="btn btn-sm btn-default ch-rpt-refresh">
 							<i class="fa fa-refresh"></i> ${__("Refresh")}
@@ -205,6 +246,13 @@ export class ReportsWorkspace {
 			panel.find(".ch-rpt-loading").show();
 			this._load_data(panel);
 		});
+		// #14: date filter — re-render the dashboard for the chosen day.
+		panel.on("change", ".ch-rpt-date", (e) => {
+			this._date = $(e.currentTarget).val() || frappe.datetime.get_today();
+			this.render(panel);
+		});
+		// #14: download the day's summary as CSV.
+		panel.on("click", ".ch-rpt-download", () => this._download_csv());
 		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
 		panel.on("click", ".ch-rpt-stock-audit", () => EventBus.emit("mode:switch", "stock_audit"));
 
@@ -265,12 +313,13 @@ export class ReportsWorkspace {
 
 		frappe.call({
 			method: "ch_pos.api.pos_api.store_dashboard",
-			args: { pos_profile: PosState.pos_profile },
+			args: { pos_profile: PosState.pos_profile, date: this._date },
 			callback: (r) => {
 				panel.find(".ch-rpt-loading").hide();
 				const content = panel.find(".ch-rpt-content");
 				content.show();
 				const d = r.message || {};
+				this._dashboard_data = d;  // cached for CSV download
 
 				// KPIs
 				content.find(".ch-rpt-revenue").text(`₹${format_number(d.total_revenue || 0)}`);

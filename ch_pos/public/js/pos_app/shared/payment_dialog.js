@@ -844,16 +844,22 @@ placeholder="${__("Enter code...")}">
 			}
 
 			const due = this._calc_balance_due();
+			// #2: UPI / card are distinct instruments — a customer may pay across
+			// two different UPI apps (or cards), each with its own reference. So
+			// adding the same UPI/card mode again creates a NEW row instead of
+			// merging. Cash (and bank etc.) still top-up the single existing row.
+			const mtype = this._mop_type(mop);
+			const allow_multiple = (mtype === "upi" || mtype === "card");
 			const idx = this._payments.findIndex(p => p.mode === mop);
-			if (idx >= 0) {
+			if (idx >= 0 && !allow_multiple) {
 				// Already present — top-up with remaining balance
 				this._payments[idx].amount = flt(this._payments[idx].amount) + Math.max(0, due);
-			} else if (this._payments.length === 1 && due === 0) {
+			} else if (idx < 0 && this._payments.length === 1 && due === 0) {
 				// Single row covering full amount, not manually split yet — switch mode entirely
 				const total = this._payments[0].amount;
 				this._payments = [{ mode: mop, amount: total, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
 			} else {
-				// Partial/split — add new row for remaining due
+				// Partial/split, or an additional UPI/card instrument — add new row.
 				this._payments.push({ mode: mop, amount: Math.max(0, due), upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 });
 			}
 			this._render_payments();
@@ -1199,10 +1205,21 @@ placeholder="${__("Enter code...")}">
 					});
 				}
 				this._sync_finance_payments();
-			} else if (had_finance) {
+			} else {
 				// Switching AWAY from finance must hard-reset payment state so stale
 				// finance/gateway metadata never keeps fields locked for Direct Sale.
-				this._reset_after_finance_exit();
+				if (had_finance) {
+					this._reset_after_finance_exit();
+				} else {
+					// No finance row, but clear any lingering finance selections.
+					PosState.sale_sub_type = null;
+					PosState.finance_tenure = null;
+					PosState.sale_reference = null;
+				}
+				// #3: always hide the finance-only sub-controls + reference when the
+				// sale type is not finance, so finance never visually lingers.
+				ov.find("#ch-pay-sale-fin-tenure").hide().val("");
+				ov.find("#ch-pay-sale-ref-input").hide().val("");
 			}
 			// Always re-render rows and ensure #ch-pay-rows / #ch-pay-mop-section are visible
 			ov.find("#ch-pay-mop-section").show();

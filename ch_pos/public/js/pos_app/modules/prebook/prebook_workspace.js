@@ -117,12 +117,10 @@ export class PrebookWorkspace {
 			const url = $(e.currentTarget).data("url");
 			if (url) window.open(url, "_blank");
 		});
-		panel.on("click", ".ch-pb-open", (e) => {
-			const doctype = $(e.currentTarget).data("doctype");
-			const name = $(e.currentTarget).data("name");
-			if (doctype && name) {
-				window.open(`/app/${doctype.toLowerCase().replace(/ /g, "-")}/${encodeURIComponent(name)}`, "_blank");
-			}
+		panel.on("click", ".ch-pb-cancel", (e) => {
+			this._cancel_prebook_flow(
+				$(e.currentTarget).data("name"),
+				flt($(e.currentTarget).data("advance")));
 		});
 	}
 
@@ -354,9 +352,7 @@ export class PrebookWorkspace {
 				<div style="flex:1.2;min-width:180px;">
 					<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name)}</div>
 					<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div>
-					<div class="small text-muted" style="margin-top:4px;">
-						<a href="/app/quotation/${encodeURIComponent(r.name)}" target="_blank">${r.name}</a>
-					</div>
+					<div class="small text-muted" style="margin-top:4px;">${r.name}</div>
 				</div>
 				<div style="flex:1.4;min-width:200px;font-size:12px;">
 					${(r.items || []).slice(0,3).map(it => `${frappe.utils.escape_html(it.item_name || it.item_code)} \u00D7 ${flt(it.qty)}`).join("<br>")}
@@ -374,9 +370,6 @@ export class PrebookWorkspace {
 				<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:130px;">
 					<button class="btn btn-default btn-xs ch-pb-print" data-url="${r.print_url}">
 						<i class="fa fa-print"></i> ${__("Print")}
-					</button>
-					<button class="btn btn-default btn-xs ch-pb-open" data-doctype="Quotation" data-name="${r.name}">
-						<i class="fa fa-external-link"></i> ${__("Open")}
 					</button>
 				</div>
 			</div>
@@ -404,9 +397,7 @@ export class PrebookWorkspace {
 					<div style="flex:1.2;min-width:180px;">
 						<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name)}</div>
 						<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div>
-						<div class="small text-muted" style="margin-top:4px;">
-							<a href="/app/sales-order/${encodeURIComponent(r.name)}" target="_blank">${r.name}</a>
-						</div>
+						<div class="small text-muted" style="margin-top:4px;">${r.name}</div>
 						${reserved}
 					</div>
 					<div style="flex:1.4;min-width:200px;font-size:12px;">
@@ -419,14 +410,68 @@ export class PrebookWorkspace {
 						<div>${__("Balance")}: <b>\u20B9${format_number(r.balance_due)}</b></div>
 						<div class="small text-muted">${__("Due")}: ${r.delivery_date || "—"} ${overdue}</div>
 					</div>
-					<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:130px;">
-						<button class="btn btn-default btn-xs ch-pb-open" data-doctype="Sales Order" data-name="${r.name}">
-							<i class="fa fa-external-link"></i> ${__("Open SO")}
+					<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:120px;">
+						<button class="btn btn-default btn-xs ch-pb-cancel" data-name="${r.name}" data-advance="${flt(r.advance_paid)}">
+							<i class="fa fa-times-circle"></i> ${__("Cancel")}
 						</button>
 					</div>
 				</div>
 			`;
 		}).join(""));
+	}
+
+	_cancel_prebook_flow(name, advance) {
+		const d = new frappe.ui.Dialog({
+			title: __("Cancel Pre-Booking {0}", [name]),
+			fields: [
+				advance > 0
+					? {
+						fieldtype: "Select", fieldname: "action", reqd: 1,
+						label: __("Advance ₹{0} collected — what to do?", [format_number(advance)]),
+						options: [__("Refund to customer"), __("Keep as credit (adjust to another bill)")].join("\n"),
+						default: __("Refund to customer"),
+					}
+					: { fieldtype: "HTML", fieldname: "noadv", options: `<div class="text-muted">${__("No advance collected on this pre-booking.")}</div>` },
+				{
+					fieldtype: "Link", fieldname: "refund_mode", label: __("Refund Mode"), options: "Mode of Payment",
+					depends_on: `eval:doc.action == '${__("Refund to customer")}'`,
+					description: __("Posts the cash / UPI refund back to the customer."),
+				},
+				{ fieldtype: "Small Text", fieldname: "reason", label: __("Reason") },
+			],
+			primary_action_label: __("Cancel Pre-Booking"),
+			primary_action: (v) => {
+				const retain = v.action === __("Keep as credit (adjust to another bill)");
+				d.hide();
+				frappe.confirm(
+					__("Cancel pre-booking {0}? Any reserved stock is released.", [name]),
+					() => {
+						frappe.call({
+							method: "ch_pos.api.pos_api.cancel_pre_booking",
+							args: {
+								sales_order: name,
+								action: retain ? "retain_credit" : "refund",
+								refund_mode_of_payment: retain ? null : (v.refund_mode || null),
+								reason: v.reason || null,
+							},
+							freeze: true,
+							freeze_message: __("Cancelling…"),
+							callback: (r) => {
+								if (!r.message) return;
+								const m = r.message;
+								frappe.show_alert({
+									message: retain
+										? __("Cancelled — ₹{0} kept as customer credit.", [format_number(m.retained)])
+										: __("Cancelled — advance handled."),
+									indicator: "orange",
+								});
+								this._reload_list();
+							},
+						});
+					});
+			},
+		});
+		d.show();
 	}
 
 	_proforma_flow(cart, customer) {
@@ -544,11 +589,25 @@ export class PrebookWorkspace {
 				{ fieldname: "column_break_a", fieldtype: "Column Break" },
 				{
 					fieldname: "advance_amount", fieldtype: "Currency", label: __("Advance Amount"),
-					description: __("Optional. Logged as a comment on the Sales Order; collect payment via Payment Entry."),
+					description: __("Optional. A Payment Entry is created against the Sales Order."),
 				},
 				{
 					fieldname: "reserve_stock", fieldtype: "Check",
 					label: __("Reserve Stock"), default: 1,
+				},
+				{ fieldname: "section_break_pay", fieldtype: "Section Break" },
+				{
+					fieldname: "mode_of_payment", fieldtype: "Link", options: "Mode of Payment",
+					label: __("Advance Payment Mode"),
+					depends_on: "eval:doc.advance_amount > 0",
+					mandatory_depends_on: "eval:doc.advance_amount > 0",
+					description: __("How the advance is collected (UPI / Cash / Card)."),
+				},
+				{ fieldname: "column_break_pay", fieldtype: "Column Break" },
+				{
+					fieldname: "payment_reference_no", fieldtype: "Data", label: __("Payment Reference"),
+					depends_on: "eval:doc.advance_amount > 0",
+					description: __("UPI txn id / card or cheque ref (optional)."),
 				},
 				{ fieldname: "section_break_b", fieldtype: "Section Break" },
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Notes") },
@@ -573,6 +632,8 @@ export class PrebookWorkspace {
 						})),
 						delivery_date: v.delivery_date,
 						advance_amount: flt(v.advance_amount),
+						mode_of_payment: v.mode_of_payment || null,
+						payment_reference_no: v.payment_reference_no || null,
 						notes: v.notes,
 						reserve_stock: v.reserve_stock ? 1 : 0,
 					},
@@ -584,7 +645,6 @@ export class PrebookWorkspace {
 						const so = r.message;
 						PosState.reset_transaction();
 						const so_name = so.name || __("Sales Order");
-						const so_url = so.name ? `/app/sales-order/${encodeURIComponent(so.name)}` : "/app/sales-order";
 						// frappe.msgprint({
 						// 	title: __("Pre-Booking Created"),
 						// 	indicator: so.docstatus === 1 ? "green" : "orange",

@@ -790,12 +790,26 @@ def get_x_report(session_name) -> dict:
             "posting_date": session.business_date,
         },
         fields=["name", "grand_total", "is_return", "total_taxes_and_charges",
-                "posting_time", "customer_name"],
+                "posting_time", "customer_name", "custom_ch_sale_type"],
     )
 
     total_sales = sum(flt(i.grand_total) for i in invoices if not i.is_return)
     total_returns = sum(abs(flt(i.grand_total)) for i in invoices if i.is_return)
     total_tax = sum(flt(i.total_taxes_and_charges) for i in invoices if not i.is_return)
+
+    # Sales bifurcation by sale type (Direct Sale / Finance / Exchange / Free …).
+    _by_type = {}
+    for i in invoices:
+        if i.is_return:
+            continue
+        key = i.custom_ch_sale_type or _("Direct Sale")
+        agg = _by_type.setdefault(key, {"total": 0.0, "count": 0})
+        agg["total"] += flt(i.grand_total)
+        agg["count"] += 1
+    sales_by_type = [
+        {"type": k, "total": round(v["total"], 2), "count": v["count"]}
+        for k, v in sorted(_by_type.items(), key=lambda kv: kv[1]["total"], reverse=True)
+    ]
 
     return {
         "session_name": session.name,
@@ -812,6 +826,7 @@ def get_x_report(session_name) -> dict:
         "net_sales": total_sales - total_returns,
         "total_tax": total_tax,
         "payment_modes": [{"mode": r.mode_of_payment, "total": flt(r.total)} for r in snapshot["payment_rows"]],
+        "sales_by_type": sales_by_type,
         "cash_in_drawer": snapshot["expected_closing_cash"],
         "total_cash_drops": snapshot["cash_drop_total"],
         "refund_cash_out": snapshot["refund_cash_out"],

@@ -124,6 +124,9 @@ export class CartPanel {
 				<button class="btn btn-xs btn-default ch-pos-btn-sell-vas" title="${__("Sell a Value Added Service — incl. for a phone bought elsewhere (external IMEI)")}">
 					<i class="fa fa-shield"></i> ${__("Sell VAS")}
 				</button>
+				<button class="btn btn-xs btn-default ch-pos-btn-prebook" title="${__("Pre-Book the current cart — carries the items & customer into the Pre-Book screen")}">
+					<i class="fa fa-bookmark"></i> ${__("Prebook")}
+				</button>
 			</div>
 			<div class="ch-pos-cart-actions">
 				<button class="btn btn-outline-danger ch-pos-btn-cancel">${__("Cancel")}</button>
@@ -382,6 +385,23 @@ export class CartPanel {
 		if (val === PosState.customer) return;
 		PosState.customer = val;
 		PosState.customer_info = null;
+		// #12: a pending buyback/exchange credit belongs to the PREVIOUS customer.
+		// Clear it on a real customer change so it can never carry over to the
+		// new customer's bill.
+		if (PosState.exchange_amount || PosState.product_exchange_credit
+			|| PosState.exchange_assessment || PosState.exchange_order) {
+			PosState.exchange_assessment = null;
+			PosState.exchange_amount = 0;
+			PosState.exchange_order = null;
+			PosState.product_exchange_credit = 0;
+			PosState.product_exchange_invoice = null;
+			this.wrapper.find(".ch-pos-exchange-banner, .ch-pos-product-exchange-banner").hide().empty();
+			frappe.show_alert({
+				message: __("Exchange credit removed — it was linked to the previous customer."),
+				indicator: "orange",
+			});
+			EventBus.emit("cart:updated");
+		}
 		EventBus.emit("customer:changed", val);
 		// Update tag
 		const tag = this.wrapper.find(".ch-pos-customer-tag");
@@ -705,7 +725,7 @@ export class CartPanel {
 			],
 
 			primary_action_label: __("Update"),
-			primary_action: (values) => {
+			primary_action: async (values) => {
 				if (values.pan) {
 					values.pan = values.pan.trim().toUpperCase();
 					if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(values.pan)) {
@@ -881,6 +901,11 @@ export class CartPanel {
 		// Service against a customer's own phone (external IMEI) — a device not
 		// purchased from us. Plans flagged allow_external_device drive this.
 		w.on("click", ".ch-pos-btn-sell-vas", () => EventBus.emit("vas:open", {}));
+
+		// #7: jump to the Pre-Book screen carrying the current cart + customer.
+		// The cart lives on PosState, which persists across modes, so the
+		// prebook workspace renders it pre-filled (no re-entry).
+		w.on("click", ".ch-pos-btn-prebook", () => EventBus.emit("mode:set", "prebook"));
 
 		// Keep held-bills badge current whenever any held bill changes
 		EventBus.on("held_bills:updated", () => this._refresh_held_count(w));

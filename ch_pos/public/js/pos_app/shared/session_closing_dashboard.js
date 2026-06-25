@@ -96,6 +96,20 @@ export class SessionClosingDashboard {
 			.map((p) => `<tr><td>${frappe.utils.escape_html(p.mode)}</td><td class="text-right">${frappe.format(p.total, { fieldtype: "Currency" })}</td></tr>`)
 			.join("");
 
+		const type_rows = (d.sales_by_type || [])
+			.map((s) => `<tr><td>${frappe.utils.escape_html(s.type)}</td><td class="text-right">${s.count}</td><td class="text-right">${frappe.format(s.total, { fieldtype: "Currency" })}</td></tr>`)
+			.join("");
+		const bifurcation_html = (d.sales_by_type && d.sales_by_type.length) ? `
+			<div class="row" style="margin-top:12px">
+				<div class="col-md-6">
+					<h6 style="font-weight:700;margin-bottom:8px">${__("Sales Bifurcation (by Type)")}</h6>
+					<table class="table table-sm table-borderless">
+						<thead><tr><th>${__("Sale Type")}</th><th class="text-right">${__("Count")}</th><th class="text-right">${__("Amount")}</th></tr></thead>
+						<tbody>${type_rows}</tbody>
+					</table>
+				</div>
+			</div>` : "";
+
 		return `
 		<div class="row" style="font-size:0.95rem">
 			<div class="col-md-4">
@@ -128,7 +142,8 @@ export class SessionClosingDashboard {
 					<tr><td class="text-muted"><b>${__("Cash in Drawer")}</b></td><td><b>${frappe.format(d.cash_in_drawer, { fieldtype: "Currency" })}</b></td></tr>
 				</table>
 			</div>
-		</div>`;
+		</div>
+		${bifurcation_html}`;
 	}
 
 	_build_denomination_html() {
