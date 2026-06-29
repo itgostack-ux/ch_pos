@@ -198,12 +198,22 @@ def get_context():
     ctx["mop_upi"]   = next((m.name for m in mops if "upi"   in m.name.lower()), None)
 
     # Coupon code — prefer our test coupon, fallback to any unused
-    coupons = frappe.get_all("Coupon Code",
-        filters={"used": 0},
-        fields=["name", "coupon_code", "pricing_rule"],
-        order_by="FIELD(coupon_code, 'TESTCOUPON10') DESC",
-        limit=1)
-    ctx["coupon"] = coupons[0] if coupons else None
+    coupon = frappe.db.get_value(
+        "Coupon Code",
+        {"coupon_code": "TESTCOUPON10", "used": 0},
+        ["name", "coupon_code", "pricing_rule"],
+        as_dict=True,
+    )
+    if not coupon:
+        coupons = frappe.get_all(
+            "Coupon Code",
+            filters={"used": 0},
+            fields=["name", "coupon_code", "pricing_rule"],
+            order_by="modified desc",
+            limit=1,
+        )
+        coupon = coupons[0] if coupons else None
+    ctx["coupon"] = coupon
 
     # CH Buyback Assessment (exchange credit)
     if frappe.db.exists("DocType", "CH Buyback Assessment"):

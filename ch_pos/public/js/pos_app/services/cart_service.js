@@ -212,6 +212,19 @@ export class CartService {
 				setTimeout(() => $st.removeClass("ch-saletype-required-pulse"), 2000);
 				return;
 			}
+			
+			// Check if this is a Pre Booking sale type
+			const current_sale_type = (PosState._sale_types_cache || []).find(
+				st => st.sale_type_name === PosState.sale_type
+			);
+			const is_prebook = (current_sale_type && current_sale_type.code || "").toUpperCase() === "PB";
+			
+			if (is_prebook) {
+				// Pre Booking flow: route to prebook workspace instead of payment
+				EventBus.emit("mode:switch", "prebook");
+				return;
+			}
+			
 			// Last-chance customer sync — Link control may not have fired change
 			EventBus.emit("cart:pre_pay_sync");
 			EventBus.emit("payment:open");
@@ -370,9 +383,14 @@ export class CartService {
 			frappe.show_alert({ message: __("Item {0} is out of stock", [item_data.item_name]), indicator: "red" });
 			return;
 		}
-		// Block items with no selling price (unless allow_zero_rate is set)
+		// Zero-price guard: block ONLY when no price AND zero-rate is NOT explicitly allowed.
+		// Items with ch_allow_zero_rate=1 (free gifts, bundles, accessories) are added at ₹0
+		// — industry standard on GoFrugal/Tally/ERPNext/SAP Retail.
 		if (!flt(item_data.selling_price) && !flt(item_data.mrp) && !cint(item_data.ch_allow_zero_rate)) {
-			frappe.show_alert({ message: __("Item {0} has no selling price. Cannot add to cart.", [item_data.item_name]), indicator: "red" });
+			frappe.show_alert({
+				message: __("No selling price for {0}. Enable 'Allow Zero Rate' on the item to add as a free gift.", [item_data.item_name]),
+				indicator: "red",
+			});
 			return;
 		}
 		if (PosState.voucher_code && !item_data.is_warranty && !item_data.is_vas) {
@@ -417,10 +435,10 @@ export class CartService {
 			return;
 		}
 
-		// Block items with no selling price (unless allow_zero_rate is set)
+		// Zero-price guard: block ONLY when no price AND zero-rate is NOT explicitly allowed.
 		if (!flt(item_data.selling_price) && !flt(item_data.mrp) && !cint(item_data.ch_allow_zero_rate)) {
 			frappe.show_alert({
-				message: __("Item {0} has no selling price. Cannot add to cart.", [item_data.item_name]),
+				message: __("No selling price for {0}. Enable 'Allow Zero Rate' on the item to add as a free gift.", [item_data.item_name]),
 				indicator: "red",
 			});
 			return;
@@ -2075,49 +2093,80 @@ export class CartService {
 		// Use input date; default today
 		const today = frappe.datetime.get_today();
 
-		const build_invoice_list = (date, phone, invoice_no, container) => {
+		const build_invoice_list = (date, phone, invoice_no, container, doc_type) => {
+			doc_type = doc_type || "Invoice";
+			const is_proforma = doc_type === "Proforma";
+			const is_receipt = doc_type === "Advance Receipt";
 			container.html(`<div class="text-center text-muted" style="padding:20px">
 				<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}
 			</div>`);
-			const args = { pos_profile: PosState.pos_profile };
+			const args = { pos_profile: PosState.pos_profile, doc_type };
 			if (invoice_no) args.invoice_no = invoice_no;
 			else if (phone) args.phone = phone;
 			else args.date = date;
 			frappe.xcall("ch_pos.api.pos_api.get_todays_invoices", args).then((invoices) => {
 				if (!invoices || !invoices.length) {
+					const noun = is_proforma ? __("proformas")
+						: (is_receipt ? __("advance receipts") : __("invoices"));
 					const msg = invoice_no
-						? __("No invoices found for this invoice number")
-						: (phone ? __("No invoices found for this phone number") : __("No invoices for this date"));
+						? __("No {0} found for this number", [noun])
+						: (phone ? __("No {0} found for this phone number", [noun])
+						         : __("No {0} for this date", [noun]));
 					container.html(`<div class="text-center text-muted" style="padding:20px">${msg}</div>`);
 					return;
 				}
 				const rows = invoices.map(inv => {
 					const is_ret = inv.is_return ? `<span class="badge badge-warning">${__("Return")}</span>` : "";
+					const type_tag = is_proforma
+						? `<span class="badge badge-info">${__("Proforma")}</span>`
+						: (is_receipt
+							? `<span class="badge" style="background:#dbeafe;color:#1d4ed8;">${__("Advance Receipt")}</span>`
+							: "");
 					const sign = inv.is_return ? "-" : "";
 					const sale_type = frappe.utils.escape_html(inv.custom_ch_sale_type || "");
 					const mop = frappe.utils.escape_html(inv.mode_of_payment || "");
 					const customer = frappe.utils.escape_html(inv.customer_name || inv.customer || "");
+					const receipt_state = frappe.utils.escape_html(inv.receipt_state || "");
+					const receipt_badge = is_receipt
+						? `<span class="badge" style="background:${inv.__docstatus === 1 ? "#dcfce7" : "#fef3c7"};color:${inv.__docstatus === 1 ? "#166534" : "#92400e"};margin-left:6px;">${inv.__docstatus === 1 ? __("Receipt Final") : __("Receipt Draft")}</span>`
+						: "";
+					const meta_line = is_proforma
+						? `${__("Status")}: ${frappe.utils.escape_html(inv.status || "-")}`
+						: (is_receipt
+							? `${__("State")}: ${receipt_state || "-"} · ${__("MOP")}: ${mop || "-"} · ${__("Sales Order")}: ${frappe.utils.escape_html(inv.linked_sales_orders || "-")}`
+							: `${__("Sale Type")}: ${sale_type || "-"} · ${__("MOP")}: ${mop || "-"}`);
+					const dt = frappe.utils.escape_html(inv.__doctype || "Sales Invoice");
+					const fmt = frappe.utils.escape_html(inv.__print_format || "");
 					return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
 						<div style="flex:1">
-							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${is_ret}</div>
-							<div class="text-muted" style="font-size:12px">${customer} · ${sign}₹${format_number(flt(inv.grand_total))} · ${phone || invoice_no ? frappe.utils.escape_html(inv.posting_date || "") + " " : ""}${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
-							<div class="text-muted" style="font-size:11px">${__("Sale Type")}: ${sale_type || "-"} · ${__("MOP")}: ${mop || "-"}</div>
+							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${type_tag} ${receipt_badge} ${is_ret}</div>
+							<div class="text-muted" style="font-size:12px">${customer} · ${sign}₹${format_number(flt(inv.grand_total))} · ${frappe.utils.escape_html(inv.posting_date || "")} ${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
+							<div class="text-muted" style="font-size:11px">${meta_line}</div>
 							${inv.items_summary ? `<div class="text-muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">${frappe.utils.escape_html(inv.items_summary)}</div>` : ""}
 						</div>
-						<button class="btn btn-xs btn-default ch-reprint-btn" data-name="${frappe.utils.escape_html(inv.name)}">
+						<button class="btn btn-xs btn-default ch-reprint-btn"
+						        data-name="${frappe.utils.escape_html(inv.name)}"
+						        data-doctype="${dt}" data-format="${fmt}">
 							<i class="fa fa-print"></i> ${__("Print")}
 						</button>
 					</div>`;
 				}).join("");
 				container.html(`<div class="ch-reprint-list" style="max-height:380px;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${rows}</div>`);
 			}).catch(() => {
-				container.html(`<div class="text-danger text-center" style="padding:12px">${__("Failed to load invoices")}</div>`);
+				container.html(`<div class="text-danger text-center" style="padding:12px">${__("Failed to load")}</div>`);
 			});
 		};
 
 		const dlg = new frappe.ui.Dialog({
-			title: __("Reprint Invoice"),
+			title: __("Reprint Invoice / Proforma / Advance Receipt"),
 			fields: [
+				{
+					fieldname: "doc_type",
+					fieldtype: "Select",
+					label: __("Document Type"),
+					options: "Invoice\nProforma\nAdvance Receipt",
+					default: "Invoice",
+				},
 				{
 					fieldname: "search_by",
 					fieldtype: "Select",
@@ -2142,9 +2191,9 @@ export class CartService {
 				{
 					fieldname: "invoice_no",
 					fieldtype: "Data",
-					label: __("Invoice Number"),
+					label: __("Document Number"),
 					depends_on: "eval:doc.search_by==='Invoice Number'",
-					description: __("Enter full or partial invoice number"),
+					description: __("Enter full or partial document number"),
 				},
 				{
 					fieldname: "invoices_html",
@@ -2157,14 +2206,35 @@ export class CartService {
 
 		dlg.show();
 
+		const current_doc_type = () => (dlg.get_value("doc_type") || "Invoice");
+		const reload_by_mode = () => {
+			const mode = dlg.get_value("search_by");
+			const dt = current_doc_type();
+			if (mode === "Date") {
+				const d = dlg.get_value("date");
+				if (d) build_invoice_list(d, null, null, container, dt);
+			} else if (mode === "Invoice Number") {
+				const inv = (dlg.get_value("invoice_no") || "").trim();
+				if (inv) build_invoice_list(null, null, inv, container, dt);
+				else container.html(`<div class="text-center text-muted" style="padding:20px">${__("Enter number and press Enter")}</div>`);
+			} else {
+				const p = (dlg.get_value("phone") || "").trim();
+				if (p && p.length >= 4) build_invoice_list(null, p, null, container, dt);
+				else container.html(`<div class="text-center text-muted" style="padding:20px">${__("Enter a phone number and press Enter")}</div>`);
+			}
+		};
+
 		// Initial load
 		const container = dlg.$wrapper.find(".ch-reprint-container");
-		build_invoice_list(today, null, null, container);
+		build_invoice_list(today, null, null, container, "Invoice");
+
+		// Reload when doc type changes (re-runs the active search)
+		dlg.fields_dict.doc_type.$input.on("change", reload_by_mode);
 
 		// Reload when date changes
 		dlg.fields_dict.date.$input.on("change", () => {
 			const d = dlg.get_value("date");
-			if (d) build_invoice_list(d, null, null, container);
+			if (d) build_invoice_list(d, null, null, container, current_doc_type());
 		});
 
 		// Search when phone is entered (on Enter key or blur)
@@ -2173,12 +2243,12 @@ export class CartService {
 			if (e.key === "Enter") {
 				e.preventDefault();
 				const p = dlg.get_value("phone");
-				if (p && p.length >= 4) build_invoice_list(null, p, null, container);
+				if (p && p.length >= 4) build_invoice_list(null, p, null, container, current_doc_type());
 			}
 		});
 		phone_input.on("blur", () => {
 			const p = dlg.get_value("phone");
-			if (p && p.length >= 4) build_invoice_list(null, p, null, container);
+			if (p && p.length >= 4) build_invoice_list(null, p, null, container, current_doc_type());
 		});
 
 		const invoice_input = dlg.fields_dict.invoice_no.$input;
@@ -2186,33 +2256,31 @@ export class CartService {
 			if (e.key === "Enter") {
 				e.preventDefault();
 				const inv = (dlg.get_value("invoice_no") || "").trim();
-				if (inv) build_invoice_list(null, null, inv, container);
+				if (inv) build_invoice_list(null, null, inv, container, current_doc_type());
 			}
 		});
 		invoice_input.on("blur", () => {
 			const inv = (dlg.get_value("invoice_no") || "").trim();
-			if (inv) build_invoice_list(null, null, inv, container);
+			if (inv) build_invoice_list(null, null, inv, container, current_doc_type());
 		});
 
 		// Clear results when switching search mode
-		dlg.fields_dict.search_by.$input.on("change", () => {
-			const mode = dlg.get_value("search_by");
-			if (mode === "Date") {
-				const d = dlg.get_value("date");
-				if (d) build_invoice_list(d, null, null, container);
-			} else if (mode === "Invoice Number") {
-				container.html(`<div class="text-center text-muted" style="padding:20px">${__("Enter invoice number and press Enter")}</div>`);
-			} else {
-				container.html(`<div class="text-center text-muted" style="padding:20px">${__("Enter a phone number and press Enter")}</div>`);
-			}
-		});
+		dlg.fields_dict.search_by.$input.on("change", reload_by_mode);
 
-		// Print button — server-rendered PDF (header on every page)
+		// Print button — uses doctype + print format stamped on the row by the API
 		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
-			const name = $(e.currentTarget).data("name");
-			const is_gofix = $(e.currentTarget).data("gofix");
-			const fmt = is_gofix ? "GoFix Service Invoice" : "Custom Sales Invoice";
-			print_invoice_pdf(name, fmt);
+			const $btn = $(e.currentTarget);
+			const name = $btn.data("name");
+			const dt = $btn.data("doctype") || "Sales Invoice";
+			let fmt = $btn.data("format") || "";
+			if (!fmt) {
+				const is_gofix = $btn.data("gofix");
+				fmt = is_gofix ? "GoFix Service Invoice"
+			               : (dt === "Quotation"
+								? "Proforma Invoice"
+								: (dt === "Payment Entry" ? "Standard" : "Custom Sales Invoice"));
+			}
+			print_invoice_pdf(name, fmt, { doctype: dt });
 		});
 	}
 

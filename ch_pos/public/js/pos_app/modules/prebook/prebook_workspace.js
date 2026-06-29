@@ -27,6 +27,15 @@ export class PrebookWorkspace {
 			if (ctx.mode !== "prebook") return;
 			this.render(ctx.panel);
 		});
+		// Deep-link hint: the Pickup/Bill "Proforma Open" KPI fires this so
+		// the workspace opens directly on the My Proformas tab where the
+		// cashier can Convert → Sale or Convert → Pre-Booking.
+		EventBus.on("prebook:goto_proformas", () => {
+			this._active_tab = "proformas";
+			if (this._panel && this._panel.is(":visible")) {
+				this._switch_tab("proformas");
+			}
+		});
 	}
 
 	render(panel) {
@@ -121,6 +130,18 @@ export class PrebookWorkspace {
 			this._cancel_prebook_flow(
 				$(e.currentTarget).data("name"),
 				flt($(e.currentTarget).data("advance")));
+		});
+		// Proforma → Sale: load Quotation items into Sell cart, switch mode.
+		// Cashier can then add/remove items, scan IMEIs, and press PAY.
+		panel.on("click", ".ch-pb-convert-sale", (e) => {
+			const name = $(e.currentTarget).data("name");
+			if (name) this._convert_proforma_to_sale(name);
+		});
+		// Proforma → Pre-Booking: pre-fill the prebook dialog with Quotation
+		// items + customer; cashier sets delivery date and collects advance.
+		panel.on("click", ".ch-pb-convert-prebook", (e) => {
+			const name = $(e.currentTarget).data("name");
+			if (name) this._convert_proforma_to_prebook(name);
 		});
 	}
 
@@ -367,10 +388,18 @@ export class PrebookWorkspace {
 					${status_badge(r.status, r.is_expiring_soon, r.is_expired)}
 					${r.days_left !== null && r.days_left !== undefined ? `<div class="small text-muted" style="margin-top:4px;">${r.days_left >= 0 ? __("{0}d left", [r.days_left]) : __("{0}d ago", [-r.days_left])}</div>` : ""}
 				</div>
-				<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:130px;">
+				<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:160px;">
 					<button class="btn btn-default btn-xs ch-pb-print" data-url="${r.print_url}">
 						<i class="fa fa-print"></i> ${__("Print")}
 					</button>
+					${r.status === "Open" && !r.is_expired ? `
+						<button class="btn btn-primary btn-xs ch-pb-convert-sale" data-name="${r.name}" title="${__("Bill this proforma now — items load into the Sell cart; add accessories or scan IMEIs before PAY")}">
+							<i class="fa fa-shopping-cart"></i> ${__("Convert → Sale")}
+						</button>
+						<button class="btn btn-success btn-xs ch-pb-convert-prebook" data-name="${r.name}" title="${__("Reserve stock and collect advance — opens Pre-Booking dialog pre-filled with these items")}">
+							<i class="fa fa-bookmark"></i> ${__("Convert → Pre-Booking")}
+						</button>
+					` : ""}
 				</div>
 			</div>
 		`).join(""));
@@ -489,28 +518,16 @@ export class PrebookWorkspace {
 					fieldname: "valid_till", fieldtype: "Date", label: __("Valid Till"),
 					default: frappe.datetime.add_days(frappe.datetime.nowdate(), 15),
 				},
-				{ fieldname: "column_break_a", fieldtype: "Column Break" },
-				{
-					fieldname: "advance_amount", fieldtype: "Currency",
-					label: __("Advance Amount"),
-					description: __("Optional. Shown on the Proforma as Advance Received and Balance Due. Collect via Payment Entry separately."),
-				},
 				{ fieldname: "section_break_b", fieldtype: "Section Break" },
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Terms / Notes") },
 				{
 					fieldname: "html_total", fieldtype: "HTML",
-					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> \u20B9${format_number(cart_total)}</div>`,
+					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> \u20B9${format_number(cart_total)}</div>
+						<div class="text-muted" style="font-size:11px;text-align:right;">${__("Proforma is a non-binding quote. Collect advance via Pre-Booking only.")}</div>`,
 				},
 			],
 			primary_action_label: __("Generate"),
 			primary_action: (v) => {
-				if (flt(v.advance_amount) > cart_total + 0.005) {
-					frappe.show_alert({
-						message: __("Advance cannot exceed Order Total"),
-						indicator: "orange",
-					});
-					return;
-				}
 				frappe.call({
 					method: "ch_pos.api.pos_api.create_pos_quotation",
 					args: {
@@ -525,7 +542,6 @@ export class PrebookWorkspace {
 						})),
 						valid_till: v.valid_till,
 						notes: v.notes,
-						advance_amount: flt(v.advance_amount),
 					},
 					freeze: true,
 					freeze_message: __("Creating Proforma..."),
@@ -543,12 +559,6 @@ export class PrebookWorkspace {
 	_show_proforma_success(qtn) {
 		const print_url = `/printview?doctype=Quotation&name=${encodeURIComponent(qtn.name)}`
 			+ `&format=${encodeURIComponent(qtn.print_format || "Proforma Invoice")}&no_letterhead=0`;
-		const adv = flt(qtn.advance_received);
-		const bal = flt(qtn.balance_due);
-		const advance_html = adv > 0
-			? `<p>${__("Advance Received")}: <b>₹${format_number(adv)}</b></p>
-			   <p>${__("Balance Due")}: <b>₹${format_number(bal)}</b></p>`
-			: "";
 		frappe.msgprint({
 			title: __("Proforma Created"),
 			indicator: "green",
@@ -557,7 +567,7 @@ export class PrebookWorkspace {
 					<i class="fa fa-check-circle text-success" style="font-size:42px;"></i>
 					<h4 style="margin:14px 0 6px;">${frappe.utils.escape_html(qtn.name)}</h4>
 					<p>${__("Grand Total")}: <b>₹${format_number(qtn.grand_total)}</b></p>
-					${advance_html}
+					<p class="text-muted" style="font-size:12px;">${__("Convert to Pre-Booking to collect advance and reserve stock.")}</p>
 					<p class="text-muted">${__("Valid till")} ${qtn.valid_till}</p>
 					<div style="margin-top:14px;display:flex;gap:8px;justify-content:center;">
 						${qtn.docstatus === 1
@@ -597,18 +607,11 @@ export class PrebookWorkspace {
 				},
 				{ fieldname: "section_break_pay", fieldtype: "Section Break" },
 				{
-					fieldname: "mode_of_payment", fieldtype: "Link", options: "Mode of Payment",
-					label: __("Advance Payment Mode"),
-					depends_on: "eval:doc.advance_amount > 0",
-					mandatory_depends_on: "eval:doc.advance_amount > 0",
-					description: __("How the advance is collected (UPI / Cash / Card)."),
+					fieldname: "payments_html", fieldtype: "HTML",
+					options: `<div class="ch-pb-pay-block"></div>`,
 				},
-				{ fieldname: "column_break_pay", fieldtype: "Column Break" },
-				{
-					fieldname: "payment_reference_no", fieldtype: "Data", label: __("Payment Reference"),
-					depends_on: "eval:doc.advance_amount > 0",
-					description: __("UPI txn id / card or cheque ref (optional)."),
-				},
+				// Hidden payload populated by the inline split-tender UI.
+				{ fieldname: "payments_json", fieldtype: "Data", hidden: 1, default: "[]" },
 				{ fieldname: "section_break_b", fieldtype: "Section Break" },
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Notes") },
 				{
@@ -618,6 +621,52 @@ export class PrebookWorkspace {
 			],
 			primary_action_label: __("Create Pre-Booking"),
 			primary_action: (v) => {
+				// Parse split-tender rows from the inline UI's hidden payload
+				let payments = [];
+				try { payments = JSON.parse(v.payments_json || "[]"); } catch (e) { payments = []; }
+				payments = (payments || [])
+					.filter((p) => p && p.mode_of_payment && flt(p.amount) > 0)
+					.map((p) => ({
+						mode_of_payment: p.mode_of_payment,
+						amount: flt(p.amount),
+						reference_no: (p.reference_no || "").trim() || null,
+					}));
+
+				const advance = flt(v.advance_amount);
+				if (advance > 0) {
+					// Fallback safety: if UI rows were not added yet, auto-create one
+					// default payment row so cashiers are never blocked in submit.
+					if (!payments.length) {
+						const fallback_modes = (PosState.payment_modes || [])
+							.map((m) => (m.mode_of_payment || "").trim())
+							.filter(Boolean);
+						const fallback_default = ((PosState.payment_modes || []).find((m) => m.default)
+							|| {}).mode_of_payment || fallback_modes[0] || "Cash";
+						payments = [{
+							mode_of_payment: fallback_default,
+							amount: advance,
+							reference_no: null,
+						}];
+					}
+					if (!payments.length) {
+						frappe.show_alert({
+							message: __("Add at least one payment row for the advance amount."),
+							indicator: "red",
+						});
+						return;
+					}
+					const allocated = payments.reduce((s, p) => s + flt(p.amount), 0);
+					if (Math.abs(allocated - advance) > 0.01) {
+						frappe.show_alert({
+							message: __("Allocated ₹{0} must equal advance ₹{1}.", [
+								format_number(allocated), format_number(advance),
+							]),
+							indicator: "red",
+						});
+						return;
+					}
+				}
+
 				frappe.call({
 					method: "ch_pos.api.pos_api.create_pre_booking",
 					args: {
@@ -632,8 +681,7 @@ export class PrebookWorkspace {
 						})),
 						delivery_date: v.delivery_date,
 						advance_amount: flt(v.advance_amount),
-						mode_of_payment: v.mode_of_payment || null,
-						payment_reference_no: v.payment_reference_no || null,
+						payments: payments,
 						notes: v.notes,
 						reserve_stock: v.reserve_stock ? 1 : 0,
 					},
@@ -644,27 +692,421 @@ export class PrebookWorkspace {
 						dlg.hide();
 						const so = r.message;
 						PosState.reset_transaction();
-						const so_name = so.name || __("Sales Order");
-						// frappe.msgprint({
-						// 	title: __("Pre-Booking Created"),
-						// 	indicator: so.docstatus === 1 ? "green" : "orange",
-						// 	message: `
-						// 		<div style="text-align:center;padding:12px;">
-						// 			<i class="fa fa-bookmark text-success" style="font-size:42px;"></i>
-						// 			<h4 style="margin:14px 0 6px;">${frappe.utils.escape_html(so_name)}</h4>
-						// 			<p>${__("Created Sales Order")}: <b>${frappe.utils.escape_html(so_name)}</b></p>
-						// 			<p>${__("Status")}: <b>${frappe.utils.escape_html(so.status || "-")}</b></p>
-						// 			<p class="text-muted">${__("Delivery")}: ${frappe.utils.escape_html(so.delivery_date || "-")} · ${__("Stock reserved")}: ${so.reserve_stock ? __("Yes") : __("No")}</p>
-						// 			${so.warning ? `<p class="text-warning">${frappe.utils.escape_html(so.warning)}</p>` : ""}
-						// 			<a class="btn btn-default btn-sm" target="_blank" href="${so_url}">
-						// 				<i class="fa fa-external-link"></i> ${__("Open Sales Order")}
-						// 			</a>
-						// 		</div>`,
-						// });
+						this._show_prebook_success(so);
 					},
 				});
 			},
 		});
 		dlg.show();
+		this._mount_advance_payments_ui(dlg);
+	}
+
+	_show_prebook_success(so) {
+		const so_name = so.name || __("Sales Order");
+		const so_url = `/app/sales-order/${encodeURIComponent(so_name)}`;
+		const so_print = `/printview?doctype=Sales%20Order&name=${encodeURIComponent(so_name)}&no_letterhead=0`;
+		const pe_details = (so.advance_payment_entries_detail || []).filter(Boolean);
+		const pe_names = pe_details.length
+			? pe_details.map((d) => d.name).filter(Boolean)
+			: (so.advance_payment_entries || []).filter(Boolean);
+		const pe_state_map = {};
+		pe_details.forEach((d) => {
+			if (!d || !d.name) return;
+			pe_state_map[d.name] = {
+				receipt_state: d.receipt_state || (cint(d.docstatus) === 1 ? "Final" : "Draft"),
+				docstatus: cint(d.docstatus || 0),
+			};
+		});
+		const pe_links = pe_names.length
+			? pe_names.map((pe) => {
+				const open_url = `/app/payment-entry/${encodeURIComponent(pe)}`;
+				const print_url = `/printview?doctype=Payment%20Entry&name=${encodeURIComponent(pe)}&no_letterhead=0`;
+				const st = pe_state_map[pe] || { receipt_state: "Draft", docstatus: 0 };
+				const is_final = cint(st.docstatus) === 1 || String(st.receipt_state || "").toLowerCase() === "final";
+				const badge = `<span class="badge" style="background:${is_final ? "#dcfce7" : "#fef3c7"};color:${is_final ? "#166534" : "#92400e"};margin-left:6px;">${is_final ? __("Receipt Final") : __("Receipt Draft")}</span>`;
+				return `
+					<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+						<span style="font-size:12px;">${frappe.utils.escape_html(pe)} ${badge}</span>
+						<span style="display:flex;gap:6px;">
+							<a class="btn btn-default btn-xs" target="_blank" href="${open_url}">
+								<i class="fa fa-external-link"></i> ${__("Open")}
+							</a>
+							<a class="btn btn-default btn-xs" target="_blank" href="${print_url}">
+								<i class="fa fa-print"></i> ${__("Print Receipt")}
+							</a>
+						</span>
+					</div>`;
+			}).join("")
+			: `<div class="text-muted" style="font-size:12px;">${__("No advance receipt generated.")}</div>`;
+
+		frappe.msgprint({
+			title: __("Pre-Booking Created"),
+			indicator: so.docstatus === 1 ? "green" : "orange",
+			message: `
+				<div style="padding:8px 2px;">
+					<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+						<div>
+							<div style="font-weight:700;font-size:16px;">${frappe.utils.escape_html(so_name)}</div>
+							<div class="text-muted" style="font-size:12px;">
+								${__("Delivery")}: ${frappe.utils.escape_html(so.delivery_date || "-")} ·
+								${__("Stock reserved")}: ${so.reserve_stock ? __("Yes") : __("No")}
+							</div>
+						</div>
+						<div style="font-size:12px;text-align:right;">
+							<div>${__("Advance")}: <b>₹${format_number(so.advance_amount || 0)}</b></div>
+							<div>${__("Status")}: <b>${frappe.utils.escape_html(so.status || "-")}</b></div>
+						</div>
+					</div>
+					${so.warning ? `<div class="text-warning" style="font-size:12px;margin-top:8px;">${frappe.utils.escape_html(so.warning)}</div>` : ""}
+					<div style="margin-top:10px;padding:8px;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;">
+						<div style="font-weight:600;margin-bottom:6px;">${__("Advance Receipt(s)")}</div>
+						${pe_links}
+						<div class="text-muted" style="font-size:11px;margin-top:6px;">
+							${__("If workflow is enabled, receipt docs may remain Draft until checker approval.")}
+						</div>
+					</div>
+					<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
+						<a class="btn btn-default btn-sm" target="_blank" href="${so_url}">
+							<i class="fa fa-external-link"></i> ${__("Open Sales Order")}
+						</a>
+						<a class="btn btn-default btn-sm" target="_blank" href="${so_print}">
+							<i class="fa fa-print"></i> ${__("Print Pre-Booking")}
+						</a>
+					</div>
+				</div>`,
+			primary_action: {
+				label: __("Open Pickup / Bill Queue"),
+				action: () => {
+					EventBus.emit("pickup:focus_so", so_name);
+					EventBus.emit("mode:switch", "pickup");
+				},
+			},
+		});
+	}
+
+	/**
+	 * Mount the inline split-tender block inside the Pre-Booking dialog.
+	 * Mirrors the main PaymentDialog UX — MOP quick-add buttons (Cash / UPI /
+	 * Card / …) feed rows of {mode, amount, reference}. The hidden
+	 * `payments_json` field carries the canonical payload to the backend.
+	 *
+	 * Industry parity (SAP Retail / Oracle Xstore / GoFrugal):
+	 *   advance/deposit collection is a *mini-tender* on the booking form,
+	 *   not a single forced MOP — cashiers can split UPI + cash.
+	 */
+	_mount_advance_payments_ui(dlg) {
+		const $wrap = dlg.$wrapper.find(".ch-pb-pay-block");
+		if (!$wrap.length) return;
+
+		const modes = (PosState.payment_modes || [])
+			.map((m) => (m.mode_of_payment || "").trim())
+			.filter(Boolean);
+		const fallback = modes.length ? modes : ["Cash", "UPI", "Credit Card"];
+		const default_mop = ((PosState.payment_modes || []).find((m) => m.default)
+			|| {}).mode_of_payment || fallback[0];
+
+		let rows = []; // [{ mode_of_payment, amount, reference_no }]
+
+		const _mop_kind = (name) => {
+			const lc = (name || "").toLowerCase();
+			if (lc.includes("upi")) return "upi";
+			if (lc.includes("card")) return "card";
+			if (lc.includes("cash")) return "cash";
+			if (lc.includes("cheque")) return "cheque";
+			if (lc.includes("wallet")) return "wallet";
+			if (lc.includes("finance") || lc.includes("emi")) return "finance";
+			return "other";
+		};
+		const _mop_icon = (name) => ({
+			upi: "fa fa-mobile-alt",
+			card: "fa fa-credit-card",
+			cash: "fa fa-money-bill",
+			cheque: "fa fa-money-check",
+			wallet: "fa fa-wallet",
+			finance: "fa fa-handshake",
+			other: "fa fa-circle",
+		})[_mop_kind(name)];
+		const _needs_ref = (name) => {
+			const k = _mop_kind(name);
+			return k === "upi" || k === "card" || k === "cheque";
+		};
+
+		const sync_payload = () => dlg.set_value("payments_json", JSON.stringify(rows));
+
+		const remaining_advance = () => {
+			const advance = flt(dlg.get_value("advance_amount"));
+			const allocated = rows.reduce((s, p) => s + flt(p.amount), 0);
+			return Math.max(0, advance - allocated);
+		};
+
+		const update_totals_only = () => {
+			const advance = flt(dlg.get_value("advance_amount"));
+			const allocated = rows.reduce((s, p) => s + flt(p.amount), 0);
+			const balance = advance - allocated;
+			const balance_cls = Math.abs(balance) < 0.01 ? "text-success"
+				: (balance > 0 ? "text-warning" : "text-danger");
+			$wrap.find(".ch-pb-pay-card-head").html(`
+				<div style="font-weight:600;">${__("Collect Advance")}</div>
+				<div style="font-size:12px;">
+					<span class="text-muted">${__("Allocated")}:</span>
+					<b>₹${format_number(allocated)}</b>
+					<span class="text-muted" style="margin-left:8px;">${__("Balance")}:</span>
+					<b class="${balance_cls}">₹${format_number(Math.abs(balance))}</b>
+				</div>
+			`);
+		};
+
+		const add_row = (mop) => {
+			const advance = flt(dlg.get_value("advance_amount"));
+			if (advance <= 0) {
+				frappe.show_alert({
+					message: __("Enter Advance Amount first."),
+					indicator: "orange",
+				});
+				return;
+			}
+			const left = remaining_advance();
+			const amt = rows.length === 0 ? advance : left;
+			if (amt <= 0) {
+				frappe.show_alert({
+					message: __("Advance is fully allocated. Remove a row to add another."),
+					indicator: "orange",
+				});
+				return;
+			}
+			rows.push({
+				mode_of_payment: mop || default_mop,
+				amount: amt,
+				reference_no: "",
+			});
+			render();
+		};
+
+		const render = () => {
+			const advance = flt(dlg.get_value("advance_amount"));
+			const btns_html = fallback.map((m) => `
+				<button type="button" class="btn btn-default btn-sm ch-pb-mop-btn"
+				        data-mop="${frappe.utils.escape_html(m)}"
+				        style="margin:2px;display:inline-flex;align-items:center;gap:6px;">
+					<i class="${_mop_icon(m)}"></i> ${frappe.utils.escape_html(m)}
+				</button>`).join("");
+
+			const rows_html = rows.length === 0
+				? `<div class="text-muted" style="padding:8px 4px;font-size:12px;">
+					${advance > 0
+						? __("Tap a payment mode above to split the advance, or keep single-row default.")
+						: __("Enter Advance Amount first, then choose payment mode(s).")}
+				</div>`
+				: `<table class="table table-sm" style="margin-bottom:6px;">
+					<thead><tr>
+						<th style="width:32%;">${__("Mode")}</th>
+						<th style="width:24%;text-align:right;">${__("Amount")}</th>
+						<th>${__("Reference")}</th>
+						<th style="width:36px;"></th>
+					</tr></thead>
+					<tbody>
+					${rows.map((r, i) => `
+						<tr data-idx="${i}">
+							<td>
+								<select class="form-control input-sm ch-pb-row-mop">
+									${fallback.map((m) => `
+										<option value="${frappe.utils.escape_html(m)}"
+										        ${m === r.mode_of_payment ? "selected" : ""}>
+											${frappe.utils.escape_html(m)}
+										</option>`).join("")}
+								</select>
+							</td>
+							<td>
+								<input type="number" step="0.01" min="0"
+								       class="form-control input-sm ch-pb-row-amt text-right"
+								       value="${flt(r.amount)}">
+							</td>
+							<td>
+								<input type="text" class="form-control input-sm ch-pb-row-ref"
+								       placeholder="${_needs_ref(r.mode_of_payment) ? __("UPI / RRN / Cheque #") : __("optional")}"
+								       value="${frappe.utils.escape_html(r.reference_no || "")}">
+							</td>
+							<td style="text-align:center;">
+								<button type="button" class="btn btn-link btn-xs ch-pb-row-del"
+								        title="${__("Remove")}">
+									<i class="fa fa-times text-danger"></i>
+								</button>
+							</td>
+						</tr>`).join("")}
+					</tbody>
+				</table>`;
+
+			$wrap.html(`
+				<div class="ch-pb-pay-card" style="border:1px solid var(--border-color,#e7e7e9);border-radius:8px;padding:10px 12px;background:var(--bg-light,#fafafa);">
+					<div class="ch-pb-pay-card-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;"></div>
+					<div class="text-muted" style="font-size:11px;margin-bottom:8px;">
+						${__("Advance Payment Split")} · ${__("Supports Cash/UPI/Card split in a single booking.")}
+					</div>
+					<div class="ch-pb-mop-btns" style="margin-bottom:8px;">${btns_html}</div>
+					${rows_html}
+				</div>
+			`);
+			update_totals_only();
+			sync_payload();
+		};
+
+		// Re-render when the advance amount changes; auto-fit a single row.
+		if (dlg.fields_dict.advance_amount) {
+			dlg.fields_dict.advance_amount.df.onchange = () => {
+				const advance = flt(dlg.get_value("advance_amount"));
+				if (advance <= 0) {
+					rows = [];
+				} else if (rows.length === 0) {
+					rows = [{
+						mode_of_payment: default_mop,
+						amount: advance,
+						reference_no: "",
+					}];
+				} else if (rows.length === 1) {
+					rows[0].amount = advance;
+				}
+				render();
+			};
+		}
+
+		// Event delegation for the dynamic block
+		$wrap.on("click", ".ch-pb-mop-btn", (e) => {
+			add_row($(e.currentTarget).data("mop"));
+		});
+		$wrap.on("change", ".ch-pb-row-mop", (e) => {
+			const i = parseInt($(e.currentTarget).closest("tr").data("idx"), 10);
+			if (rows[i]) {
+				rows[i].mode_of_payment = $(e.currentTarget).val();
+				render();
+			}
+		});
+		$wrap.on("input change", ".ch-pb-row-amt", (e) => {
+			const i = parseInt($(e.currentTarget).closest("tr").data("idx"), 10);
+			if (rows[i]) {
+				rows[i].amount = flt($(e.currentTarget).val());
+				update_totals_only();
+				sync_payload();
+			}
+		});
+		$wrap.on("input change", ".ch-pb-row-ref", (e) => {
+			const i = parseInt($(e.currentTarget).closest("tr").data("idx"), 10);
+			if (rows[i]) {
+				rows[i].reference_no = $(e.currentTarget).val();
+				sync_payload();
+			}
+		});
+		$wrap.on("click", ".ch-pb-row-del", (e) => {
+			const i = parseInt($(e.currentTarget).closest("tr").data("idx"), 10);
+			rows.splice(i, 1);
+			render();
+		});
+
+		render();
+	}
+
+	// -----------------------------------------------------------------------
+	// Proforma → Sale / Pre-Booking conversion
+	// -----------------------------------------------------------------------
+	// Industry parity (SAP SD "Create with Reference", Oracle Xstore "Convert
+	// Quote", MS D365 Retail "Quote → Sales Order", Zoho/Odoo/GoFrugal/Tally
+	// "Convert to Invoice", ERPNext core "Make → Sales Invoice"). All seven
+	// systems converge on: (1) load source items into an editable target,
+	// (2) allow add/remove items + change IMEI/serial before commit,
+	// (3) preserve audit linkage back to the source Quotation.
+	//
+	// In ch_pos this maps cleanly to:
+	//   * Convert → Sale: seed Sell cart, switch to sell mode. Cashier scans
+	//     IMEIs / adds accessories / presses PAY. Source quotation reference
+	//     is stamped on each cart row (`source_quotation`, `quotation_item`).
+	//   * Convert → Pre-Booking: open the existing prebook dialog pre-filled,
+	//     letting the cashier set delivery date + collect advance with the
+	//     split-tender mini-tender.
+	// -----------------------------------------------------------------------
+	_load_quotation(name) {
+		return frappe.xcall("ch_pos.api.pos_api.load_quotation_to_cart", {
+			pos_profile: PosState.pos_profile,
+			quotation: name,
+		});
+	}
+
+	_confirm_discard_cart(message) {
+		return new Promise((resolve) => {
+			if (!(PosState.cart || []).length) return resolve(true);
+			frappe.confirm(message, () => resolve(true), () => resolve(false));
+		});
+	}
+
+	_convert_proforma_to_sale(name) {
+		if (!PosState.pos_profile) {
+			frappe.show_alert({ message: __("POS Profile not loaded"), indicator: "red" });
+			return;
+		}
+		this._confirm_discard_cart(
+			__("The current cart has items. Discard them and load Proforma {0}?", [name]),
+		).then((ok) => {
+			if (!ok) return;
+			this._load_quotation(name).then((res) => {
+				if (!res || !res.items || !res.items.length) {
+					frappe.show_alert({
+						message: __("Proforma has no items to convert"),
+						indicator: "orange",
+					});
+					return;
+				}
+				if (res.warning) {
+					frappe.show_alert({ message: res.warning, indicator: "orange" });
+				}
+				// Seed the Sell cart with proforma items + stamp linkage.
+				PosState.reset_transaction();
+				PosState.customer = res.customer;
+				PosState.cart = res.items;
+				PosState.source_quotation = res.quotation;
+				PosState.source_quotation_total = flt(res.grand_total || 0);
+				EventBus.emit("mode:switch", "sell");
+				EventBus.emit("customer:set", res.customer);
+				EventBus.emit("cart:updated");
+				frappe.show_alert({
+					message: __("Loaded {0} from Proforma {1} — scan IMEIs and PAY",
+						[res.item_count, res.quotation]),
+					indicator: "green",
+				});
+			}).catch((err) => {
+				console.error("[ch_pos] Proforma → Sale failed", err);
+			});
+		});
+	}
+
+	_convert_proforma_to_prebook(name) {
+		if (!PosState.pos_profile) {
+			frappe.show_alert({ message: __("POS Profile not loaded"), indicator: "red" });
+			return;
+		}
+		this._load_quotation(name).then((res) => {
+			if (!res || !res.items || !res.items.length) {
+				frappe.show_alert({
+					message: __("Proforma has no items to convert"),
+					indicator: "orange",
+				});
+				return;
+			}
+			if (res.warning) {
+				frappe.show_alert({ message: res.warning, indicator: "orange" });
+			}
+			// Open prebook dialog pre-filled. The dialog reads from the cart
+			// array we pass in — no PosState mutation needed here.
+			const cart = res.items.map((it) => ({
+				item_code: it.item_code,
+				item_name: it.item_name,
+				qty: flt(it.qty || 1),
+				rate: flt(it.rate || 0),
+				uom: it.uom || "Nos",
+				warehouse: it.warehouse,
+				source_quotation: res.quotation,
+				quotation_item: it.quotation_item,
+			}));
+			this._prebook_flow(cart, res.customer, flt(res.grand_total || 0));
+		}).catch((err) => {
+			console.error("[ch_pos] Proforma → Pre-Booking failed", err);
+		});
 	}
 }

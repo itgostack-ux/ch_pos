@@ -123,6 +123,15 @@
 			});
 		};
 
+		const enforce_pincode_digits = () => {
+			const $el = d.$wrapper.find('[data-fieldname="pincode"] input');
+			$el.attr("maxlength", 6);
+			$el.off("input.pincode_only").on("input.pincode_only", function () {
+				const cleaned = (this.value || "").replace(/\D/g, "").slice(0, 6);
+				if (cleaned !== this.value) this.value = cleaned;
+			});
+		};
+
 		const status_html = (message, color = "#6b7280") =>
 			`<div style="font-size:12px;color:${color};padding-top:4px">${frappe.utils.escape_html(message || "")}</div>`;
 
@@ -130,12 +139,12 @@
 			const customer_name = input_value("customer_name");
 			const mobile_no = input_value("mobile_no");
 			const whatsapp_number = input_value("whatsapp_number");
+			const pincode = input_value("pincode");
 			const state = input_value("state");
-			const address_line1 = input_value("address_line1");
 			const city = input_value("city");
 			
 			// All mandatory fields required before showing Send OTP button
-			const all_filled = customer_name && mobile_no && whatsapp_number && state && address_line1 && city;
+			const all_filled = customer_name && mobile_no && whatsapp_number && pincode && state && city;
 			
 			const $btn = d.$wrapper.find(".ch-send-customer-otp");
 			const $status = d.fields_dict.otp_status?.$wrapper;
@@ -171,6 +180,35 @@
 			if (f && f.$input && f.$input[0]) return f.$input[0];
 			const $i = d.$wrapper.find(`[data-fieldname="${fieldname}"] input`).first();
 			return $i[0] || null;
+		};
+
+		const sync_city_state_from_pincode = () => {
+			const raw = input_value("pincode");
+			const pincode = raw.replace(/\D/g, "").slice(0, 6);
+			if (raw !== pincode) {
+				d.set_value("pincode", pincode);
+			}
+			if (!pincode || pincode.length < 6) {
+				toggle_send_otp_button();
+				return;
+			}
+
+			frappe.db.get_value("CH Pincode", { pincode, disabled: 0 }, ["city", "state"]).then((res) => {
+				const row = res?.message || res;
+				if (!row || (!row.city && !row.state)) {
+					toggle_send_otp_button();
+					return;
+				}
+				if (row.city) {
+					d.set_value("city", row.city);
+				}
+				if (row.state) {
+					d.set_value("state", row.state);
+				}
+				toggle_send_otp_button();
+			}).catch(() => {
+				toggle_send_otp_button();
+			});
 		};
 
 		const validate_email_input = () => {
@@ -335,9 +373,18 @@
 				{ fieldtype: "Column Break" },
 				{ fieldname: "whatsapp_number", fieldtype: "Data", label: __("WhatsApp Number"), reqd: 1 },
 
-				{ fieldtype: "Section Break", label: __("WhatsApp Verification") },
+				{ fieldtype: "Section Break", label: __("OTP Verification") },
+				{ fieldname: "otp_channel", fieldtype: "Select", label: __("Send OTP Via"),
+				  options: [
+					{ label: __("Auto (WhatsApp + SMS)"), value: "auto" },
+					{ label: __("WhatsApp"), value: "whatsapp" },
+					{ label: __("SMS"), value: "sms" },
+					{ label: __("Email"), value: "email" },
+				  ],
+				  default: "auto",
+				  description: __("Customer preference. Auto tries WhatsApp + SMS together.") },
 				{ fieldname: "otp_code", fieldtype: "Data", label: __("OTP Code"),
-				  description: __("Enter the 6-digit code received on WhatsApp / Email. Verified automatically.") },
+				  description: __("Enter the 6-digit code received on the selected channel. Verified automatically.") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "otp_actions", fieldtype: "HTML", options: `
 					<div class="ch-customer-otp-actions" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding-top:2px">
@@ -347,8 +394,11 @@
 
 				// ── Address ──
 				{ fieldtype: "Section Break", label: __("Address") },
-				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1"),reqd: 1, },
-				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2") },
+				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode"), reqd: 1,
+				onchange: function () {
+					sync_city_state_from_pincode();
+				}
+				},
 				{ fieldtype: "Column Break" },
 
 				{ fieldname: "state", fieldtype: "Link", options: "CH State", label: __("State"), reqd: 1,
@@ -391,7 +441,8 @@
 				}},
 
 				{ fieldtype: "Section Break" },
-				{ fieldname: "pincode", fieldtype: "Data", label: __("Pincode") },
+				{ fieldname: "address_line1", fieldtype: "Data", label: __("Address Line 1") },
+				{ fieldname: "address_line2", fieldtype: "Data", label: __("Address Line 2") },
 				{ fieldname: "area", fieldtype: "Data", label: __("Area / Locality") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "gstin", fieldtype: "Data", label: __("GSTIN") },
@@ -566,7 +617,7 @@
 				fieldname: ["city_name", "state"],
 			}).then((row) => {
 				if (!row || !row.state) return;
-				frappe.xcall("ch_item_master.ch_item_master.ch_core.doctype.ch_state.ch_state.ensure_state", {
+				frappe.xcall("ch_item_master.ch_core.doctype.ch_state.ch_state.ensure_state_api", {
 					state_name: row.state,
 				}).then((state_name) => {
 					const value = state_name || row.state;
@@ -580,6 +631,10 @@
 		});
 
 		$body.on("change blur", '[data-fieldname="email_id"] input', validate_email_input);
+		$body.on("input change blur", '[data-fieldname="pincode"] input', () => {
+			sync_city_state_from_pincode();
+			toggle_send_otp_button();
+		});
 
 		$body.on("input keyup change", '[data-fieldname="customer_name"] input', () => {
 			toggle_send_otp_button();
@@ -650,14 +705,17 @@
 					mobile_no: whatsapp,
 					customer_name: input_value("customer_name") || "Customer",
 					email_id: input_value("email_id"),
+					channel: d.get_value("otp_channel") || "auto",
+					company: company || "",
 				});
 				otp_verified_number = "";
 				const channels = [];
 				if (res && res.sent_whatsapp) channels.push(__("WhatsApp"));
+				if (res && res.sent_sms) channels.push(__("SMS"));
 				if (res && res.sent_email) channels.push(__("Email"));
 				const channel_text = channels.length ? channels.join(" + ") : __("OTP log");
-				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP generated via {0}", [channel_text]), "#15803d"));
-				frappe.show_alert({ message: __("OTP generated via {0}", [channel_text]), indicator: "green" });
+				d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP sent via {0}", [channel_text]), "#15803d"));
+				frappe.show_alert({ message: __("OTP sent via {0}", [channel_text]), indicator: "green" });
 			} catch (err) {
 				const message = otp_error_message(err, __("Failed to send OTP"));
 				d.fields_dict.otp_status.$wrapper.html(status_html(message, "#b91c1c"));
@@ -758,12 +816,14 @@
 			enforce_digits_only("mobile_no");
 			enforce_digits_only("alternate_phone");
 			enforce_digits_only("whatsapp_number");
+			enforce_pincode_digits();
 		}, 100);
 
 		d.$wrapper.one("shown.bs.modal", () => {
 			enforce_digits_only("mobile_no");
 			enforce_digits_only("alternate_phone");
 			enforce_digits_only("whatsapp_number");
+			enforce_pincode_digits();
 		});
 
 		d.$wrapper.one("shown.bs.modal", bind_native_inputs);

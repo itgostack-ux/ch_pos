@@ -98,19 +98,10 @@ def _share_whatsapp(invoice_name: str, fmt: str, mobile_no: str | None) -> dict:
 	except Exception:
 		return {"success": False, "message": _("WhatsApp helper not installed.")}
 
-	# Try a dedicated invoice template; fall back to a generic one.
-	# Field may not exist on CH WhatsApp Settings — degrade silently.
-	template_name = None
-	try:
-		if frappe.db.exists("DocType", "CH WhatsApp Settings"):
-			meta = frappe.get_meta("CH WhatsApp Settings")
-			if meta.get_field("invoice_template_name"):
-				template_name = frappe.db.get_single_value(
-					"CH WhatsApp Settings", "invoice_template_name"
-				)
-	except Exception:
-		template_name = None
-	template_name = template_name or "invoice_receipt"
+	# Resolve the invoice template from the per-company library (event
+	# "invoice_receipt"); fall back to the conventional literal name.
+	from ch_item_master.ch_core.whatsapp import get_template
+	template_name = get_template(doc.company, "invoice_receipt")[0] or "invoice_receipt"
 
 	pdf_url = get_url(_pdf_download_url(invoice_name, fmt))
 	body_values = {
@@ -122,12 +113,13 @@ def _share_whatsapp(invoice_name: str, fmt: str, mobile_no: str | None) -> dict:
 	try:
 		send_template_message(
 			phone=phone,
-			template_name=template_name,
+			event="invoice_receipt",
 			body_values=body_values,
 			customer_name=doc.customer_name or doc.customer,
 			ref_doctype="Sales Invoice",
 			ref_name=invoice_name,
 			enqueue=True,
+			company=doc.company,
 		)
 		return {"success": True, "recipient": phone, "template": template_name}
 	except Exception as exc:

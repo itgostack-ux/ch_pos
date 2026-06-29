@@ -23,7 +23,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 import frappe
-from frappe.utils import flt, cint, nowdate, now_datetime, fmt_money
+from frappe.utils import flt, cint, nowdate, now_datetime, fmt_money, getdate
 
 # Severity ordering — lower rank surfaces first.
 _SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
@@ -48,41 +48,80 @@ def _inr(value) -> str:
     return "₹" + fmt_money(flt(value), precision=0, currency="INR").replace("₹", "").strip()
 
 
+def _date_range(date=None, from_date=None, to_date=None) -> tuple[str, str]:
+    start = getdate(from_date or date or nowdate())
+    end = getdate(to_date or date or from_date or nowdate())
+    if start > end:
+        start, end = end, start
+    return str(start), str(end)
+
+
 @frappe.whitelist()
-def store_insights(pos_profile: str) -> dict:
+def store_insights(
+    pos_profile: str,
+    date: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    salesman: str | None = None,
+) -> dict:
     """Return prioritised, DB-derived store insights for the dashboard panel."""
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     warehouse = profile.warehouse
     today = nowdate()
+    from_date, to_date = _date_range(date=date, from_date=from_date, to_date=to_date)
+    salesman = (salesman or "").strip()
     now_dt = now_datetime()
+    has_salesman_field = frappe.get_meta("Sales Invoice").has_field("custom_sales_executive")
+    sales_conditions = [
+        "si.pos_profile = %(pp)s",
+        "si.posting_date BETWEEN %(from_date)s AND %(to_date)s",
+        "si.docstatus = 1",
+        "si.is_return = 0",
+    ]
+    sales_params = {"pp": pos_profile, "from_date": from_date, "to_date": to_date}
+    if salesman and has_salesman_field:
+        sales_conditions.append("si.custom_sales_executive = %(salesman)s")
+        sales_params["salesman"] = salesman
+    sales_where = " AND ".join(sales_conditions)
 
     insights: list[dict] = []
 
-    # ── Today's sales snapshot ──────────────────────────────────────────
+    # ── Selected-period sales snapshot ──────────────────────────────────
     sales = frappe.db.sql(
-        """SELECT COUNT(*) AS bills, COALESCE(SUM(grand_total), 0) AS revenue
-           FROM `tabSales Invoice`
-           WHERE pos_profile = %(pp)s AND posting_date = %(d)s
-             AND docstatus = 1 AND is_return = 0""",
-        {"pp": pos_profile, "d": today},
+        f"""SELECT COUNT(*) AS bills, COALESCE(SUM(si.grand_total), 0) AS revenue
+           FROM `tabSales Invoice` si
+           WHERE {sales_where}""",
+        sales_params,
         as_dict=True,
     )[0]
     bills = cint(sales.bills)
     revenue = flt(sales.revenue)
 
-    returns = frappe.db.count(
-        "Sales Invoice",
-        {"pos_profile": pos_profile, "posting_date": today, "docstatus": 1, "is_return": 1},
-    )
+    return_filters = {
+        "pos_profile": pos_profile,
+        "posting_date": ["between", [from_date, to_date]],
+        "docstatus": 1,
+        "is_return": 1,
+    }
+    if salesman and has_salesman_field:
+        return_filters["custom_sales_executive"] = salesman
+    returns = frappe.db.count("Sales Invoice", return_filters)
 
-    # 1) No sales yet (and the day is well underway)
-    if bills == 0 and now_dt.hour >= _NO_SALES_HOUR:
+    # 1) No sales yet / no sales in selected period
+    today_only = from_date == today and to_date == today
+    if bills == 0 and ((today_only and now_dt.hour >= _NO_SALES_HOUR) or not today_only):
+        if today_only:
+            title = "No sales billed yet today"
+            detail = (f"It's {now_dt.strftime('%I:%M %p').lstrip('0')} and no invoice has been "
+                      "raised. Confirm a counter session is open and the till is ready.")
+        else:
+            title = "No sales billed in selected period"
+            detail = "No submitted invoice matches the selected date range and salesman filter."
         insights.append({
             "severity": "High",
             "icon": "fa-shopping-cart",
-            "title": "No sales billed yet today",
-            "detail": f"It's {now_dt.strftime('%I:%M %p').lstrip('0')} and no invoice has been "
-                      "raised. Confirm a counter session is open and the till is ready.",
+            "title": title,
+            "detail": detail,
             "metric": "0 bills",
         })
 
@@ -92,22 +131,21 @@ def store_insights(pos_profile: str) -> dict:
         insights.append({
             "severity": "Medium",
             "icon": "fa-undo",
-            "title": "Return rate is high today",
+            "title": "Return rate is high",
             "detail": f"{returns} of {bills} bills were returns. Review return reasons with "
-                      "the team to protect today's net sales.",
+                      "the team to protect net sales.",
             "metric": f"{pct}%",
         })
 
-    # 3) Best-selling item today (positive signal)
+    # 3) Best-selling item in the selected period (positive signal)
     if revenue > 0:
         top = frappe.db.sql(
-            """SELECT ii.item_name, SUM(ii.qty) AS qty, SUM(ii.amount) AS amt
+            f"""SELECT ii.item_name, SUM(ii.qty) AS qty, SUM(ii.amount) AS amt
                FROM `tabSales Invoice Item` ii
                JOIN `tabSales Invoice` si ON si.name = ii.parent
-               WHERE si.pos_profile = %(pp)s AND si.posting_date = %(d)s
-                 AND si.docstatus = 1 AND si.is_return = 0
-               GROUP BY ii.item_code ORDER BY amt DESC LIMIT 1""",
-            {"pp": pos_profile, "d": today},
+               WHERE {sales_where}
+               GROUP BY ii.item_code, ii.item_name ORDER BY amt DESC LIMIT 1""",
+            sales_params,
             as_dict=True,
         )
         if top and top[0].item_name:
@@ -116,7 +154,7 @@ def store_insights(pos_profile: str) -> dict:
                 "severity": "Info",
                 "icon": "fa-trophy",
                 "title": f"Top seller: {t.item_name}",
-                "detail": f"{cint(t.qty)} units sold today for {_inr(t.amt)} — your strongest "
+                "detail": f"{cint(t.qty)} units sold for {_inr(t.amt)} — your strongest "
                           "performer. Keep it stocked and in view.",
                 "metric": _inr(t.amt),
             })
@@ -294,4 +332,7 @@ def store_insights(pos_profile: str) -> dict:
         "insights": insights[:_MAX_CARDS],
         "healthy": healthy,
         "generated_on": now_dt.strftime("%I:%M %p").lstrip("0"),
+        "from_date": from_date,
+        "to_date": to_date,
+        "salesman": salesman,
     }

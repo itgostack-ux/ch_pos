@@ -281,7 +281,7 @@ def unlock_session(session_name, password=None) -> dict:
 
 @frappe.whitelist()
 def create_settlement(session_name, actual_closing_cash, denominations=None,
-                      variance_reason=None, manager_pin=None) -> dict:
+                      variance_reason=None, manager_pin=None, petty_expenses=None) -> dict:
     """Create a CH POS Settlement for a session. Called before session close."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
@@ -299,15 +299,79 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
         frappe.throw(_("Settlement {0} already exists for this session.").format(existing), title=_("API Error"))
 
     denomination_rows = frappe.parse_json(denominations) if denominations else []
+    petty_rows = frappe.parse_json(petty_expenses) if petty_expenses else []
+    clean_petty_rows = []
+    for row in petty_rows:
+        reason = (row.get("reason") or "").strip()
+        amount = flt(row.get("amount"))
+        remarks = (row.get("remarks") or "").strip()
+        if not reason and amount <= 0 and not remarks:
+            continue
+        if amount <= 0:
+            frappe.throw(_("Petty cash amount must be positive."), title=_("Settlement Error"))
+        if not reason:
+            frappe.throw(_("Petty cash reason is required."), title=_("Settlement Error"))
+        clean_petty_rows.append({"reason": reason, "amount": amount, "remarks": remarks})
 
-    # Manager PIN for variance approval
+    petty_total = sum(flt(row["amount"]) for row in clean_petty_rows)
+    from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import build_settlement_snapshot
+    snapshot = build_settlement_snapshot(session)
+    expected_after_petty = flt(snapshot["expected_closing_cash"]) - petty_total
+    variance_after_petty = flt(actual_closing_cash) - expected_after_petty
+    threshold = flt(frappe.db.get_single_value("CH POS Control Settings", "variance_approval_threshold") or 100)
+    needs_closing_approval = abs(variance_after_petty) > threshold
+
+    # Manager PIN for variance / petty-cash approval.
     manager_user = None
-    if manager_pin:
+    manager_name = None
+    petty_manager_user = None
+    petty_manager_name = None
+    if needs_closing_approval:
+        if not manager_pin:
+            frappe.throw(
+                _("Manager PIN is required because variance is ₹{0}, above the ₹{1} threshold.").format(
+                    abs(variance_after_petty), threshold
+                ),
+                title=_("Settlement Error"),
+            )
         from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
         pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_closing")
         if not pin_result.get("valid"):
             frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
         manager_user = pin_result["user"]
+        manager_name = pin_result.get("name")
+
+    if clean_petty_rows:
+        if not manager_pin:
+            frappe.throw(_("Manager PIN is required to approve petty cash expenses."), title=_("Settlement Error"))
+        from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
+        pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_cash_drop")
+        if not pin_result.get("valid"):
+            frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+        petty_manager_user = pin_result["user"]
+        petty_manager_name = pin_result.get("name")
+
+        for row in clean_petty_rows:
+            petty = frappe.get_doc({
+                "doctype": "CH Cash Drop",
+                "session": session_name,
+                "store": session.store,
+                "pos_profile": session.pos_profile,
+                "company": session.company,
+                "device": session.device,
+                "user": frappe.session.user,
+                "business_date": session.business_date,
+                "movement_type": "Petty Expense",
+                "amount": row["amount"],
+                "reason": row["reason"],
+                "remarks": row["remarks"],
+                "created_by": frappe.session.user,
+                "posting_time": now_datetime(),
+                "approved_by": petty_manager_user,
+                "approved_at": now_datetime(),
+            })
+            petty.insert(ignore_permissions=True)
+            petty.submit()
 
     # Create settlement
     settlement = frappe.get_doc({
@@ -363,6 +427,8 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
         "actual_closing_cash": flt(settlement.actual_closing_cash),
         "variance": flt(settlement.variance_amount),
         "session_status": "Pending Close",
+        "petty_cash_logged": sum(flt(row["amount"]) for row in clean_petty_rows),
+        "petty_cash_approved_by": petty_manager_name,
     }
 
 

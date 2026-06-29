@@ -154,6 +154,8 @@ def validate_pos_commercial_policy(doc, method=None):
 						pos_profile=doc.pos_profile,
 						company=company,
 						warehouse=item.warehouse or doc.set_warehouse,
+						customer=doc.customer,
+						posting_date=doc.posting_date,
 					)
 
 					# ── Also create a CH Exception Request for audit ────

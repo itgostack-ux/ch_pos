@@ -74,18 +74,17 @@ def get_data(filters):
 
         ba = frappe.db.get_value(
             "Buyback Assessment", assessment,
-            ["status", "condition_grade"], as_dict=True,
+            ["status", "estimated_grade"], as_dict=True,
         ) or {}
 
         # Find Buyback Order linked to this assessment
-        order_name = frappe.db.get_value(
+        order = frappe.db.get_value(
             "Buyback Order",
-            {"buyback_assessment": assessment, "docstatus": 1},
-            "name",
-        )
-        buyback_payout = 0.0
-        if order_name:
-            buyback_payout = flt(frappe.db.get_value("Buyback Order", order_name, "final_price"))
+            {"buyback_assessment": assessment, "docstatus": ["<", 2]},
+            ["name", "final_price", "condition_grade"],
+            as_dict=True,
+        ) or {}
+        buyback_payout = flt(order.get("final_price"))
 
         exchange_amount = flt(inv.exchange_amount)
         delta = exchange_amount - buyback_payout
@@ -98,10 +97,10 @@ def get_data(filters):
             "exchange_assessment": assessment,
             "assessment_status": ba.get("status", ""),
             "exchange_amount": exchange_amount,
-            "buyback_order": order_name or "",
+            "buyback_order": order.get("name") or "",
             "buyback_payout": buyback_payout,
             "delta": delta,
-            "condition_grade": ba.get("condition_grade", ""),
+            "condition_grade": order.get("condition_grade") or ba.get("estimated_grade") or "",
         })
 
     return data

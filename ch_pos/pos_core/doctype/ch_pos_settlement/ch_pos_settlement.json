@@ -2,6 +2,7 @@
  "actions": [],
  "allow_import": 1,
  "allow_rename": 0,
+ "autoname": "naming_series:",
  "creation": "2026-03-19 10:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -418,24 +419,24 @@
  "sort_field": "creation",
  "sort_order": "DESC",
  "track_changes": 1,
- "search_fields": "pos_session,store,status",
- "title_field": "pos_session",
+ "search_fields": "session,store,settlement_status,business_date",
+ "title_field": "session",
  "states": [
-  {
-   "color": "Green",
-   "title": "Settled"
-  },
-  {
-   "color": "Yellow",
-   "title": "Pending"
-  },
-  {
-   "color": "Red",
-   "title": "Discrepancy"
-  },
   {
    "color": "Gray",
    "title": "Draft"
+  },
+  {
+   "color": "Yellow",
+   "title": "Submitted"
+  },
+  {
+   "color": "Green",
+   "title": "Approved"
+  },
+  {
+   "color": "Blue",
+   "title": "Closed"
   }
  ]
 }

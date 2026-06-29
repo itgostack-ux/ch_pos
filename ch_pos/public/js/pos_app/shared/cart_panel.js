@@ -58,6 +58,7 @@ export class CartPanel {
 
 			<!-- B. Quick Retail Actions -->
 			<div class="ch-pos-quick-actions">
+				<div class="ch-pos-sales-order-banner" style="display:none"></div>
 				<div class="ch-pos-exchange-banner" style="display:none"></div>
 				<div class="ch-pos-product-exchange-banner" style="display:none"></div>
 				<div class="ch-pos-exception-banner" style="display:none"></div>
@@ -104,6 +105,10 @@ export class CartPanel {
 				</div>
 				<div class="summary-row product-exchange-credit" style="display:none">
 					<span><i class="fa fa-retweet"></i> ${__("Swap Credit")}</span>
+					<span class="value">-₹0</span>
+				</div>
+				<div class="summary-row sales-order-advance" style="display:none">
+					<span><i class="fa fa-money"></i> ${__("Advance (Sales Order)")}</span>
 					<span class="value">-₹0</span>
 				</div>
 				<div class="summary-row grand-total">
@@ -905,7 +910,7 @@ export class CartPanel {
 		// #7: jump to the Pre-Book screen carrying the current cart + customer.
 		// The cart lives on PosState, which persists across modes, so the
 		// prebook workspace renders it pre-filled (no re-entry).
-		w.on("click", ".ch-pos-btn-prebook", () => EventBus.emit("mode:set", "prebook"));
+		w.on("click", ".ch-pos-btn-prebook", () => EventBus.emit("mode:switch", "prebook"));
 
 		// Keep held-bills badge current whenever any held bill changes
 		EventBus.on("held_bills:updated", () => this._refresh_held_count(w));
@@ -1091,6 +1096,7 @@ export class CartPanel {
 		}
 
 		this._update_summary();
+		this._update_sales_order_banner();
 	}
 
 	_cart_line_html(item, idx) {
@@ -1125,6 +1131,12 @@ export class CartPanel {
 			? `<span class="cart-offer-tag" title="${__("Exception Request")}">${frappe.utils.escape_html(item.exception_request)}${exception_status ? ` • ${exception_status_icon}${frappe.utils.escape_html(exception_status)}` : ""}</span>`
 			: "";
 		const special = item.is_warranty ? " is-warranty-line" : item.is_vas ? " is-vas-line" : "";
+		// Free-gift badge: shown when rate is zero but item is explicitly allowed (ch_allow_zero_rate)
+		const free_gift_tag = (cint(item.ch_allow_zero_rate) && !flt(item.rate))
+			? `<span class="cart-offer-tag" style="background:#dcfce7;color:#166534;" title="${__("Free gift / zero-rate item")}">
+				<i class="fa fa-gift" style="margin-right:3px;"></i>${__("Free")}
+			</span>`
+			: "";
 		const fixed_qty = cint(item.has_serial_no || item.is_warranty || item.is_vas);
 		const whole_uom = cint(item.must_be_whole_number || fixed_qty);
 		const qty_display = whole_uom
@@ -1198,7 +1210,7 @@ export class CartPanel {
 				<div class="cart-line-top">
 					<span class="cart-item-name">
 						${frappe.utils.escape_html(item.item_name)}
-						${offer_tag}${uom_tag}${serial_tag}${margin_tag}${exception_tag}
+						${offer_tag}${free_gift_tag}${uom_tag}${serial_tag}${margin_tag}${exception_tag}
 					</span>
 					<span class="cart-item-amount">
 						${computed_discount_amt > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);margin-right:6px">₹${format_number(base_amount)}</span>` : ""}
@@ -1334,7 +1346,8 @@ export class CartPanel {
 		const net             = subtotal - disc_total;
 		const exchange_credit = flt(PosState.exchange_amount);
 		const pe_credit       = flt(PosState.product_exchange_credit);
-		const grand_total     = Math.max(0, net - exchange_credit - pe_credit);
+		const so_advance      = PosState.sales_order_reference ? flt(PosState.sales_order_advance) : 0;
+		const grand_total     = Math.max(0, net - exchange_credit - pe_credit - so_advance);
 
 		s.find(".total-qty .value").text(Number.isInteger(total_qty) ? total_qty : format_number(total_qty));
 
@@ -1344,7 +1357,54 @@ export class CartPanel {
 		const pe_row = s.find(".product-exchange-credit");
 		pe_credit > 0 ? pe_row.show().find(".value").text(`-₹${format_number(pe_credit)}`) : pe_row.hide();
 
+		const so_row = s.find(".sales-order-advance");
+		so_advance > 0 ? so_row.show().find(".value").text(`-₹${format_number(so_advance)}`) : so_row.hide();
+
 		s.find(".grand-total .value").text(`₹${format_number(grand_total)}`);
+	}
+
+	_update_sales_order_banner() {
+		const banner = this.wrapper.find(".ch-pos-sales-order-banner");
+		const so = PosState.sales_order_reference;
+		if (!so) {
+			banner.hide().empty();
+			return;
+		}
+		const advance = flt(PosState.sales_order_advance);
+		const summary = PosState.sales_order_summary || {};
+		const reserved_count = (summary.reserved_serials || []).length;
+		const due = summary.delivery_date ? `· ${__("Due")}: ${summary.delivery_date}` : "";
+		banner.html(`
+			<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
+				background:linear-gradient(90deg,#ecfeff,#f0f9ff);
+				border:1px solid #67e8f9;border-radius:var(--pos-radius-sm,6px);
+				margin-top:6px;font-size:12px;">
+				<i class="fa fa-bookmark" style="color:#0e7490;font-size:14px"></i>
+				<div style="flex:1;line-height:1.35">
+					<div style="font-weight:600;color:#0e7490">
+						${__("Billing Sales Order")}: ${frappe.utils.escape_html(so)}
+						${reserved_count ? ` <span class="text-muted">· ${__("{0} reserved IMEI(s)", [reserved_count])}</span>` : ""}
+					</div>
+					<div class="text-muted" style="font-size:11px">
+						${advance > 0
+							? __("Advance ₹{0} will be auto-applied at PAY", [format_number(advance)])
+							: __("No advance on this order")}
+						${due}
+					</div>
+				</div>
+				<button type="button" class="btn btn-xs btn-default ch-pos-so-clear"
+					title="${__("Discard the loaded Sales Order")}">
+					<i class="fa fa-times"></i>
+				</button>
+			</div>
+		`).show();
+
+		banner.off("click", ".ch-pos-so-clear").on("click", ".ch-pos-so-clear", () => {
+			frappe.confirm(__("Discard Sales Order {0} from cart?", [so]), () => {
+				PosState.reset_transaction();
+				EventBus.emit("cart:updated");
+			});
+		});
 	}
 
 	_refresh_held_count(w) {

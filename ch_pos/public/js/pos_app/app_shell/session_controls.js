@@ -568,6 +568,60 @@ export class SessionControls {
 
 	_render_settlement_dialog(x_data) {
 		const DENOMS = [2000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
+		const esc = frappe.utils.escape_html;
+		const money = (value) => frappe.format(Number(value || 0), { fieldtype: "Currency" });
+		const num = (value) => Number(value || 0);
+		const tender_other = num(x_data.total_sales_wallet) + num(x_data.total_sales_bank);
+		const tender_cards = [
+			{ cls: "cash", icon: "fa-money", label: __("Cash"), value: x_data.total_sales_cash },
+			{ cls: "upi", icon: "fa-qrcode", label: __("UPI"), value: x_data.total_sales_upi },
+			{ cls: "card", icon: "fa-credit-card", label: __("Card"), value: x_data.total_sales_card },
+			{ cls: "other", icon: "fa-university", label: __("Other"), value: tender_other },
+		].map((t) => `
+			<div class="ch-settle-tender-card ${t.cls}">
+				<div class="ch-settle-tender-icon"><i class="fa ${t.icon}"></i></div>
+				<div>
+					<div class="ch-settle-tender-label">${t.label}</div>
+					<div class="ch-settle-tender-value">${money(t.value)}</div>
+				</div>
+			</div>
+		`).join("");
+
+		const payment_rows = (x_data.payment_modes || [])
+			.map((p) => `<tr>
+				<td>${esc(p.mode || "")}</td>
+				<td class="text-right">${money(p.total)}</td>
+			</tr>`)
+			.join("") || `<tr><td colspan="2" class="text-muted text-center">${__("No payments")}</td></tr>`;
+
+		const existing_petty_rows = (x_data.petty_cash_rows || [])
+			.map((p) => `<tr>
+				<td>${esc(p.reason || "")}</td>
+				<td class="text-right">${money(p.amount)}</td>
+			</tr>`)
+			.join("");
+
+		const petty_row_html = (reason = "", amount = "", remarks = "") => `
+			<tr class="ch-settle-petty-row">
+				<td>
+					<input type="text" class="form-control input-sm ch-settle-petty-reason"
+						value="${esc(reason)}" placeholder="${__("Tea, snacks, petrol")}">
+				</td>
+				<td>
+					<input type="number" class="form-control input-sm ch-settle-petty-amount"
+						min="0" step="0.01" value="${amount ? esc(String(amount)) : ""}" placeholder="0">
+				</td>
+				<td>
+					<input type="text" class="form-control input-sm ch-settle-petty-remarks"
+						value="${esc(remarks)}" placeholder="${__("Optional")}">
+				</td>
+				<td class="text-right">
+					<button type="button" class="btn btn-xs btn-default ch-settle-petty-remove" title="${__("Remove")}">
+						<i class="fa fa-times"></i>
+					</button>
+				</td>
+			</tr>`;
+
 		const denom_rows = DENOMS.map((d) => `
 			<div class="d-flex align-items-center mb-2" style="gap:12px">
 				<span style="width:60px;font-weight:600;text-align:right">₹${d}</span>
@@ -587,19 +641,81 @@ export class SessionControls {
 				{
 					fieldname: "summary_html",
 					fieldtype: "HTML",
-					options: `<div class="row" style="font-size:0.9rem">
-						<div class="col-md-6">
-							<table class="table table-sm table-borderless">
-								<tr><td class="text-muted">${__("Opening Cash")}</td><td>${frappe.format(x_data.opening_cash, { fieldtype: "Currency" })}</td></tr>
-								<tr><td class="text-muted">${__("Cash Sales")}</td><td>${frappe.format(x_data.cash_in_drawer - x_data.opening_cash + x_data.total_cash_drops, { fieldtype: "Currency" })}</td></tr>
-								<tr><td class="text-muted">${__("Cash Drops")}</td><td>- ${frappe.format(x_data.total_cash_drops, { fieldtype: "Currency" })}</td></tr>
-								<tr><td class="text-muted"><b>${__("Expected Cash")}</b></td><td><b>${frappe.format(x_data.cash_in_drawer, { fieldtype: "Currency" })}</b></td></tr>
-							</table>
+					options: `
+					<div class="ch-settle-shell">
+						<div class="ch-settle-hero">
+							<div>
+								<div class="ch-settle-eyebrow">${__("Session Settlement")}</div>
+								<div class="ch-settle-title">${esc(x_data.store || "")}</div>
+								<div class="ch-settle-subtitle">
+									${__("Session")} ${esc(x_data.session_name || "")} · ${__("Cashier")} ${esc(x_data.cashier || "")}
+								</div>
+							</div>
+							<div class="ch-settle-hero-total">
+								<span>${__("Net Sales")}</span>
+								<strong>${money(x_data.net_sales)}</strong>
+							</div>
 						</div>
-						<div class="col-md-6">
-							<table class="table table-sm table-borderless">
-								<tr><td class="text-muted">${__("Invoices")}</td><td>${x_data.invoices_count}</td></tr>
-								<tr><td class="text-muted">${__("Net Sales")}</td><td>${frappe.format(x_data.net_sales, { fieldtype: "Currency" })}</td></tr>
+
+						<div class="ch-settle-tender-grid">${tender_cards}</div>
+
+						<div class="ch-settle-summary-grid">
+							<div class="ch-settle-panel">
+								<div class="ch-settle-panel-head">
+									<span><i class="fa fa-calculator"></i> ${__("Cash Reconciliation")}</span>
+								</div>
+								<table class="table table-sm table-borderless ch-settle-table">
+									<tr><td>${__("Opening Cash")}</td><td class="text-right">${money(x_data.opening_cash)}</td></tr>
+									<tr><td>${__("Cash Sales")}</td><td class="text-right">${money(x_data.total_sales_cash)}</td></tr>
+									<tr><td>${__("Cash Returns / Refunds")}</td><td class="text-right">- ${money(x_data.refund_cash_out)}</td></tr>
+									<tr><td>${__("Cash Drops")}</td><td class="text-right">- ${money(x_data.total_cash_drops)}</td></tr>
+									<tr><td>${__("Buyback Cash Payout")}</td><td class="text-right">- ${money(x_data.buyback_cash_out)}</td></tr>
+									<tr><td>${__("Petty Cash Logged")}</td><td class="text-right">- ${money(x_data.petty_cash_out)}</td></tr>
+									<tr><td>${__("New Petty Cash")}</td><td class="text-right">- <span class="ch-settle-new-petty-total">${money(0)}</span></td></tr>
+									<tr class="ch-settle-total-row"><td>${__("Expected Cash")}</td><td class="text-right ch-settle-expected-final">${money(x_data.cash_in_drawer)}</td></tr>
+								</table>
+							</div>
+							<div class="ch-settle-panel">
+								<div class="ch-settle-panel-head">
+									<span><i class="fa fa-list"></i> ${__("Payment Mode Details")}</span>
+									<span>${x_data.invoices_count || 0} ${__("bills")}</span>
+								</div>
+								<table class="table table-sm table-borderless ch-settle-table">
+									<tbody>${payment_rows}</tbody>
+								</table>
+								<div class="ch-settle-mini-stats">
+									<span>${__("Total Sales")} <b>${money(x_data.total_sales)}</b></span>
+									<span>${__("Returns")} <b>${money(x_data.total_returns)}</b></span>
+									<span>${__("Tax")} <b>${money(x_data.total_tax)}</b></span>
+								</div>
+							</div>
+						</div>
+
+						<div class="ch-settle-panel ch-settle-petty-panel">
+							<div class="ch-settle-panel-head">
+								<span><i class="fa fa-ticket"></i> ${__("Petty Cash Used Today")}</span>
+								<button type="button" class="btn btn-xs btn-default ch-settle-petty-add">
+									<i class="fa fa-plus"></i> ${__("Add Expense")}
+								</button>
+							</div>
+							${existing_petty_rows ? `
+								<table class="table table-sm table-borderless ch-settle-existing-petty">
+									<thead><tr><th>${__("Already Logged")}</th><th class="text-right">${__("Amount")}</th></tr></thead>
+									<tbody>${existing_petty_rows}</tbody>
+								</table>` : ""}
+							<div class="ch-settle-petty-quick">
+								<button type="button" data-reason="Tea" data-amount="10">${__("Tea")} · ₹10</button>
+								<button type="button" data-reason="Snacks" data-amount="30">${__("Snacks")} · ₹30</button>
+								<button type="button" data-reason="Petrol" data-amount="">${__("Petrol")}</button>
+							</div>
+							<table class="table table-sm ch-settle-petty-table">
+								<thead><tr>
+									<th>${__("Reason")}</th>
+									<th style="width:150px">${__("Amount")}</th>
+									<th>${__("Remarks")}</th>
+									<th style="width:42px"></th>
+								</tr></thead>
+								<tbody class="ch-settle-petty-body"></tbody>
 							</table>
 						</div>
 					</div>`,
@@ -638,14 +754,28 @@ export class SessionControls {
 				{ fieldtype: "Column Break" },
 				{
 					fieldname: "manager_pin",
-					fieldtype: "Data",
+					fieldtype: "Password",
 					label: __("Manager PIN"),
 					options: "",
-					description: __("Required if variance exceeds threshold"),
+					description: __("Required for petty cash or variance above threshold"),
 				},
 			],
 			primary_action_label: __("Submit Settlement"),
 			primary_action: (values) => {
+				const petty = this._read_settlement_petty_rows(dlg);
+				if (petty.error) {
+					frappe.msgprint({ title: __("Petty Cash Error"), message: petty.error, indicator: "red" });
+					return;
+				}
+				if (petty.rows.length && !values.manager_pin) {
+					frappe.msgprint({
+						title: __("Manager PIN Required"),
+						message: __("Manager PIN is required to approve petty cash expenses."),
+						indicator: "orange",
+					});
+					return;
+				}
+
 				const denominations = [];
 				dlg.$wrapper.find(".ch-settle-denom").each(function () {
 					const count = parseInt($(this).val()) || 0;
@@ -664,6 +794,7 @@ export class SessionControls {
 						session_name: PosState.session_name,
 						actual_closing_cash: values.actual_closing_cash || 0,
 						denominations: JSON.stringify(denominations),
+						petty_expenses: JSON.stringify(petty.rows),
 						variance_reason: values.variance_reason || "",
 						manager_pin: values.manager_pin || null,
 					},
@@ -673,7 +804,9 @@ export class SessionControls {
 							PosState.session_status = "Pending Close";
 							this._update_info();
 							frappe.show_alert({
-								message: __("Settlement submitted. Session is now Pending Close."),
+								message: petty.rows.length
+									? __("Settlement submitted with petty cash logged. Session is now Pending Close.")
+									: __("Settlement submitted. Session is now Pending Close."),
 								indicator: "blue",
 							});
 						}
@@ -691,7 +824,7 @@ export class SessionControls {
 
 		// Bind denomination inputs
 		setTimeout(() => {
-			dlg.$wrapper.find(".ch-settle-denom").on("input", () => {
+			const refresh_totals = () => {
 				let total = 0;
 				dlg.$wrapper.find(".ch-settle-denom").each(function () {
 					const denom = parseInt($(this).data("denom"));
@@ -705,18 +838,58 @@ export class SessionControls {
 				dlg.$wrapper.find(".ch-settle-grand-total").text(`₹${total.toLocaleString("en-IN")}`);
 				dlg.set_value("actual_closing_cash", total);
 
-				const expected = x_data.cash_in_drawer || 0;
+				const petty = this._read_settlement_petty_rows(dlg, true);
+				const new_petty_total = petty.rows.reduce((sum, row) => sum + num(row.amount), 0);
+				const expected = num(x_data.cash_in_drawer) - new_petty_total;
 				const variance = total - expected;
 				const abs_var = Math.abs(variance);
 				const color = abs_var === 0 ? "green" : abs_var <= 100 ? "orange" : "red";
+				dlg.$wrapper.find(".ch-settle-new-petty-total").text(money(new_petty_total));
+				dlg.$wrapper.find(".ch-settle-expected-final").text(money(expected));
 				dlg.$wrapper.find(".ch-settle-variance").html(`
 					<span style="color:var(--${color === "green" ? "dark-green" : color})">
 						${__("Variance")}: ₹${variance.toLocaleString("en-IN")}
 						${abs_var > 100 ? `<small>(${__("manager approval needed")})</small>` : ""}
 					</span>
 				`);
+			};
+			const add_petty_row = (reason = "", amount = "", remarks = "") => {
+				dlg.$wrapper.find(".ch-settle-petty-body").append(petty_row_html(reason, amount, remarks));
+				refresh_totals();
+			};
+			dlg.$wrapper.find(".ch-settle-denom").on("input", refresh_totals);
+			dlg.$wrapper.on("input", ".ch-settle-petty-reason, .ch-settle-petty-amount, .ch-settle-petty-remarks", refresh_totals);
+			dlg.$wrapper.on("click", ".ch-settle-petty-add", () => add_petty_row());
+			dlg.$wrapper.on("click", ".ch-settle-petty-remove", function () {
+				$(this).closest("tr").remove();
+				refresh_totals();
 			});
+			dlg.$wrapper.on("click", ".ch-settle-petty-quick button", function () {
+				add_petty_row($(this).data("reason") || "", $(this).data("amount") || "", "");
+			});
+			refresh_totals();
 		}, 100);
+	}
+
+	_read_settlement_petty_rows(dlg, quiet = false) {
+		const rows = [];
+		let error = "";
+		dlg.$wrapper.find(".ch-settle-petty-row").each(function () {
+			const reason = ($(this).find(".ch-settle-petty-reason").val() || "").trim();
+			const amount = Number($(this).find(".ch-settle-petty-amount").val() || 0);
+			const remarks = ($(this).find(".ch-settle-petty-remarks").val() || "").trim();
+			if (!reason && !amount && !remarks) return;
+			if (!reason) {
+				error = __("Reason is required for every petty cash row.");
+				return false;
+			}
+			if (amount <= 0) {
+				error = __("Amount must be positive for every petty cash row.");
+				return false;
+			}
+			rows.push({ reason, amount, remarks });
+		});
+		return { rows: quiet && error ? [] : rows, error: quiet ? "" : error };
 	}
 
 	_show_close_session() {

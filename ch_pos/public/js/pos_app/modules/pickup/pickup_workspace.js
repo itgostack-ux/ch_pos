@@ -31,9 +31,19 @@ export class PickupWorkspace {
 		this._reserved_rows = [];
 		this._today_rows = [];
 		this._filter = { search: "", days_ahead: 30, overdue_only: 0 };
+		this._focus_so = null;
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "pickup") return;
 			this.render(ctx.panel);
+		});
+		// Deep-link from prebooking success: jump directly to pending queue
+		// and filter to the newly created Sales Order.
+		EventBus.on("pickup:focus_so", (so_name) => {
+			this._focus_so = (so_name || "").trim();
+			this._active_tab = "pending";
+			if (this._panel && this._panel.is(":visible")) {
+				this._apply_focus_filter();
+			}
 		});
 	}
 
@@ -110,7 +120,11 @@ export class PickupWorkspace {
 
 		this._bind(panel);
 		this._refresh_kpis();
-		this._switch_tab(this._active_tab);
+		if (this._focus_so) {
+			this._apply_focus_filter();
+		} else {
+			this._switch_tab(this._active_tab);
+		}
 	}
 
 	_bind(panel) {
@@ -120,6 +134,12 @@ export class PickupWorkspace {
 			if (tab) this._switch_tab(tab);
 		});
 		panel.on("click", ".ch-pu-go-prebook", () => {
+			EventBus.emit("mode:switch", "prebook");
+		});
+		// Proforma Open KPI is a deep-link into Prebook → My Proformas where
+		// the cashier can Convert → Sale or Convert → Pre-Booking.
+		panel.on("click", ".ch-pu-kpi-proforma", () => {
+			EventBus.emit("prebook:goto_proformas");
 			EventBus.emit("mode:switch", "prebook");
 		});
 		panel.on("input", ".ch-pickup-search", (e) => {
@@ -188,6 +208,19 @@ export class PickupWorkspace {
 		this._load();
 	}
 
+	_apply_focus_filter() {
+		if (!this._focus_so) return;
+		this._active_tab = "pending";
+		this._filter.search = this._focus_so;
+		this._filter.overdue_only = 0;
+		this._filter.days_ahead = 30;
+		this._panel.find(".ch-pickup-search").val(this._focus_so);
+		this._panel.find(".ch-pickup-overdue").prop("checked", false);
+		this._panel.find(".ch-pickup-window").val("30");
+		this._focus_so = null;
+		this._switch_tab("pending");
+	}
+
 	_refresh_kpis() {
 		if (!PosState.pos_profile) {
 			this._panel.find(".ch-pu-kpi-strip").html("");
@@ -199,9 +232,9 @@ export class PickupWorkspace {
 			callback: (r) => {
 				if (!r.message) return;
 				const k = r.message;
-				const card = (label, value, sub, color) => `
-					<div style="flex:1;min-width:140px;background:#fff;border:1px solid var(--pos-border);
-						border-left:3px solid ${color};border-radius:var(--pos-radius);padding:10px 12px;">
+				const card = (label, value, sub, color, klass) => `
+					<div class="${klass || ""}" style="flex:1;min-width:140px;background:#fff;border:1px solid var(--pos-border);
+						border-left:3px solid ${color};border-radius:var(--pos-radius);padding:10px 12px;${klass ? "cursor:pointer;" : ""}">
 						<div class="text-muted" style="font-size:11px;text-transform:uppercase;letter-spacing:0.3px;">${label}</div>
 						<div style="font-size:20px;font-weight:600;margin-top:2px;">${value}</div>
 						<div class="text-muted" style="font-size:11px;margin-top:2px;">${sub || ""}</div>
@@ -212,7 +245,7 @@ export class PickupWorkspace {
 					${card(__("Overdue"), k.prebook.overdue_count, __("needs attention"), "#dc2626")}
 					${card(__("Billed Today"), k.prebook.billed_today_count, `\u20B9${format_number(k.prebook.billed_today_value)}`, "#2563eb")}
 					${card(__("Reserved IMEIs"), k.reserved_serials, __("across open pre-bookings"), "#f59e0b")}
-					${card(__("Proforma Open"), k.proforma.open_count, __("last {0} days", [k.window_days]), "#0ea5e9")}
+					${card(__("Proforma Open"), k.proforma.open_count, __("click to convert →"), "#0ea5e9", "ch-pu-kpi-proforma")}
 				`);
 			},
 		});
@@ -467,13 +500,23 @@ export class PickupWorkspace {
 	}
 
 	_bill_flow(row) {
-		const balance = flt(row.balance_due);
-		const advance = flt(row.advance_paid);
+		// New flow: load the Sales Order into the right-panel cart so the
+		// cashier sees items + advance subtraction and bills via the regular
+		// PAY (F8) flow. Reserved IMEIs still require physical scan-confirm
+		// before billing — that gate is a smaller, focused dialog now.
 		const reserved = (row.reserved_serials || []).map((s) => String(s).trim()).filter(Boolean);
+		if (reserved.length) {
+			this._confirm_imeis_then_load(row, reserved);
+		} else {
+			this._load_so_into_cart(row);
+		}
+	}
+
+	_confirm_imeis_then_load(row, reserved) {
 		const scanned = [];
 
 		const dlg = new frappe.ui.Dialog({
-			title: __("Bill & Pickup — {0}", [row.customer_name]),
+			title: __("Confirm IMEI Hand-over — {0}", [row.customer_name]),
 			fields: [
 				{
 					fieldtype: "HTML",
@@ -482,145 +525,160 @@ export class PickupWorkspace {
 						<div style="background:#f8fafc;border:1px solid var(--pos-border);
 							border-radius:var(--pos-radius);padding:10px;margin-bottom:8px;">
 							<div><b>${__("Sales Order")}:</b> ${row.name}</div>
-							<div><b>${__("Grand Total")}:</b> ₹${format_number(row.grand_total)}</div>
-							${advance > 0 ? `<div class="text-success"><b>${__("Advance already paid")}:</b> ₹${format_number(advance)}</div>` : ""}
-							<div><b>${__("Balance due now")}:</b> ₹${format_number(balance)}</div>
+							<div><b>${__("Customer")}:</b> ${frappe.utils.escape_html(row.customer_name || row.customer || "")}</div>
+							<div><b>${__("Grand Total")}:</b> ₹${format_number(row.grand_total)}
+								&nbsp;\u00B7&nbsp;
+								<span class="text-success"><b>${__("Advance")}: ₹${format_number(row.advance_paid)}</b></span>
+							</div>
 						</div>`,
 				},
 				{
 					fieldtype: "HTML",
 					fieldname: "imei_scan",
-					options: reserved.length ? `
+					options: `
 						<div class="pk-imei-confirm" style="border:1px solid #f59e0b;background:#fffbeb;
-							border-radius:8px;padding:10px;margin-bottom:8px;">
+							border-radius:8px;padding:10px;">
 							<div style="font-weight:600;margin-bottom:6px;">
-								<i class="fa fa-barcode"></i> ${__("Confirm IMEI hand-over")} (${reserved.length})
-							</div>
-							<div class="small" style="color:#9a3412;margin-bottom:6px;">
-								<i class="fa fa-lock"></i> ${__("Create Invoice stays locked until all reserved IMEIs are scanned.")}
+								<i class="fa fa-barcode"></i> ${__("Scan all reserved IMEIs to continue")} (${reserved.length})
 							</div>
 							<input type="text" class="form-control input-sm pk-imei-input"
 								placeholder="${__("Scan reserved IMEI, press Enter")}">
 							<div class="pk-imei-chips" style="margin-top:6px;"></div>
 							<div class="pk-imei-req text-muted" style="font-size:0.78rem;margin-top:4px;"></div>
 							<div class="pk-imei-progress" style="font-size:0.78rem;margin-top:4px;font-weight:600;"></div>
-						</div>` : "",
-				},
-				{
-					fieldtype: "Link",
-					fieldname: "mode_of_payment",
-					label: __("Collect Balance Via"),
-					options: "Mode of Payment",
-					default: "Cash",
-					description: __("Leave the amount as 0 to create the invoice without collecting payment now."),
-				},
-				{
-					fieldtype: "Currency",
-					fieldname: "paid_amount",
-					label: __("Amount Collected"),
-					default: balance > 0 ? balance : 0,
-				},
-				{ fieldtype: "Column Break" },
-				{
-					fieldtype: "Check",
-					fieldname: "apply_advance",
-					label: __("Apply Advance Paid"),
-					default: advance > 0 ? 1 : 0,
-				},
-				{
-					fieldtype: "Check",
-					fieldname: "print_after",
-					label: __("Print Invoice After Billing"),
-					default: 1,
+						</div>`,
 				},
 			],
-			primary_action_label: __("Create Invoice"),
-			primary_action: (v) => {
-				if (reserved.length) {
-					const missing = reserved.filter((s) => !scanned.includes(s));
-					if (missing.length) {
-						frappe.msgprint({
-							title: __("IMEI Scan Required"),
-							indicator: "orange",
-							message: __("Scan all reserved IMEIs before billing: {0}", [missing.join(", ")]),
-						});
-						return;
-					}
+			primary_action_label: __("Load into Cart"),
+			primary_action: () => {
+				const missing = reserved.filter((s) => !scanned.includes(s));
+				if (missing.length) {
+					frappe.msgprint({
+						title: __("IMEI Scan Required"),
+						indicator: "orange",
+						message: __("Scan all reserved IMEIs before billing: {0}", [missing.join(", ")]),
+					});
+					return;
 				}
-				const args = {
-					pos_profile: PosState.pos_profile,
-					sales_order: row.name,
-					mode_of_payment: v.mode_of_payment || null,
-					paid_amount: flt(v.paid_amount || 0),
-					apply_advance: v.apply_advance ? 1 : 0,
-					client_request_id: frappe.utils.get_random(20),
-					scanned_serials: reserved.length ? JSON.stringify(scanned) : null,
-				};
-				frappe.call({
-					method: "ch_pos.api.pos_api.convert_prebooking_to_invoice",
-					args,
-					freeze: true,
-					freeze_message: __("Creating invoice…"),
-					callback: (r) => {
-						if (!r.message) return;
-						dlg.hide();
-						this._show_success(r.message, !!v.print_after);
-						this._load();
-					},
-				});
+				dlg.hide();
+				this._load_so_into_cart(row, scanned);
 			},
 		});
 		dlg.show();
 
-		// ── IMEI scan-and-confirm wiring ───────────────────────────────
-		if (reserved.length) {
-			const $w = dlg.$wrapper;
-			const render = () => {
-				const missing = reserved.filter((s) => !scanned.includes(s));
-				const done = reserved.length - missing.length;
-				$w.find(".pk-imei-chips").html(
-					scanned.map((s, i) =>
-						`<span class="badge" data-idx="${i}" style="background:#e0e7ff;color:#3730a3;margin:2px;cursor:pointer">${frappe.utils.escape_html(s)} ✕</span>`
-					).join("")
-				);
-				$w.find(".pk-imei-req").html(
-					reserved.map((s) => {
-						const ok = scanned.includes(s);
-						return `<span style="margin-right:10px;color:${ok ? "#16a34a" : "#b91c1c"}">${ok ? "✔" : "○"} <code>${frappe.utils.escape_html(s)}</code></span>`;
-					}).join("")
-				);
-				$w.find(".pk-imei-progress").html(
-					missing.length
-						? `<span style="color:#b91c1c">${__("{0}/{1} IMEIs confirmed ", [done, reserved.length])}· ${__("{0} pending", [missing.length])}</span>`
-						: `<span style="color:#166534">${__("All reserved IMEIs confirmed")}</span>`
-				);
-				if (missing.length) {
-					dlg.disable_primary_action();
-				} else {
-					dlg.enable_primary_action();
-				}
-			};
-			$w.find(".pk-imei-input").on("keydown", function (e) {
-				if (e.key !== "Enter") return;
-				e.preventDefault();
-				const val = ($(this).val() || "").trim();
-				if (!val) return;
-				if (!reserved.includes(val)) {
-					frappe.show_alert({ message: __("IMEI {0} is not reserved on this pre-booking", [val]), indicator: "red" });
-					$(this).val("");
-					return;
-				}
-				if (!scanned.includes(val)) scanned.push(val);
+		const $w = dlg.$wrapper;
+		const render = () => {
+			const missing = reserved.filter((s) => !scanned.includes(s));
+			const done = reserved.length - missing.length;
+			$w.find(".pk-imei-chips").html(
+				scanned.map((s, i) =>
+					`<span class="badge" data-idx="${i}" style="background:#e0e7ff;color:#3730a3;margin:2px;cursor:pointer">${frappe.utils.escape_html(s)} ✕</span>`
+				).join("")
+			);
+			$w.find(".pk-imei-req").html(
+				reserved.map((s) => {
+					const ok = scanned.includes(s);
+					return `<span style="margin-right:10px;color:${ok ? "#16a34a" : "#b91c1c"}">${ok ? "✔" : "○"} <code>${frappe.utils.escape_html(s)}</code></span>`;
+				}).join("")
+			);
+			$w.find(".pk-imei-progress").html(
+				missing.length
+					? `<span style="color:#b91c1c">${__("{0}/{1} IMEIs confirmed ", [done, reserved.length])}· ${__("{0} pending", [missing.length])}</span>`
+					: `<span style="color:#166534">${__("All reserved IMEIs confirmed")}</span>`
+			);
+			if (missing.length) {
+				dlg.disable_primary_action();
+			} else {
+				dlg.enable_primary_action();
+			}
+		};
+		$w.find(".pk-imei-input").on("keydown", function (e) {
+			if (e.key !== "Enter") return;
+			e.preventDefault();
+			const val = ($(this).val() || "").trim();
+			if (!val) return;
+			if (!reserved.includes(val)) {
+				frappe.show_alert({ message: __("IMEI {0} is not reserved on this pre-booking", [val]), indicator: "red" });
 				$(this).val("");
-				render();
-			});
-			$w.on("click", ".pk-imei-chips .badge", function () {
-				scanned.splice($(this).data("idx"), 1);
-				render();
-			});
-			dlg.disable_primary_action();
+				return;
+			}
+			if (!scanned.includes(val)) scanned.push(val);
+			$(this).val("");
 			render();
+		});
+		$w.on("click", ".pk-imei-chips .badge", function () {
+			scanned.splice($(this).data("idx"), 1);
+			render();
+		});
+		dlg.disable_primary_action();
+		render();
+		setTimeout(() => $w.find(".pk-imei-input").trigger("focus"), 100);
+	}
+
+	_load_so_into_cart(row, scanned_serials) {
+		if (!PosState.pos_profile) {
+			frappe.show_alert({ message: __("POS Profile not loaded"), indicator: "red" });
+			return;
 		}
+		// Cart already has items? Confirm before discarding.
+		const proceed = () => this._do_load_so_into_cart(row, scanned_serials);
+		if ((PosState.cart || []).length > 0) {
+			frappe.confirm(
+				__("The current cart has items. Discard them and load Sales Order {0}?", [row.name]),
+				proceed,
+			);
+		} else {
+			proceed();
+		}
+	}
+
+	_do_load_so_into_cart(row, scanned_serials) {
+		frappe.xcall("ch_pos.api.pos_api.load_sales_order_to_cart", {
+			pos_profile: PosState.pos_profile,
+			sales_order: row.name,
+		}).then((res) => {
+			if (!res || !res.items || !res.items.length) {
+				frappe.show_alert({ message: __("Nothing left to bill on this Sales Order"), indicator: "orange" });
+				return;
+			}
+
+			// Reset transaction, then seed from SO.
+			PosState.reset_transaction();
+			PosState.customer = res.customer;
+			PosState.sale_type = res.sale_type || null;
+			PosState.cart = res.items.map((it) => {
+				// Stamp scanned IMEIs back onto matching serial rows when the
+				// cashier completed the IMEI confirm step.
+				if (scanned_serials && scanned_serials.length && it.has_serial_no && !it.serial_no) {
+					const next = scanned_serials.shift();
+					if (next) it.serial_no = String(next);
+				}
+				return it;
+			});
+			PosState.sales_order_reference = res.sales_order;
+			PosState.sales_order_advance = flt(res.advance_paid || 0);
+			PosState.sales_order_grand_total = flt(res.grand_total || 0);
+			PosState.sales_order_summary = {
+				name: res.sales_order,
+				customer_name: res.customer_name,
+				balance_due: flt(res.balance_due || 0),
+				reserved_serials: res.reserved_serials || [],
+				delivery_date: res.delivery_date || null,
+			};
+
+			// Switch to the sell workspace so the cashier sees the cart and PAY.
+			EventBus.emit("mode:switch", "sell");
+			EventBus.emit("customer:changed");
+			EventBus.emit("cart:updated");
+
+			frappe.show_alert({
+				message: __("Sales Order {0} loaded — review & press PAY (F8)", [row.name]),
+				indicator: "green",
+			});
+		}).catch((err) => {
+			const msg = err && err.message ? err.message : __("Failed to load Sales Order");
+			frappe.msgprint({ title: __("Load Failed"), indicator: "red", message: msg });
+		});
 	}
 
 	_show_success(inv, auto_print) {

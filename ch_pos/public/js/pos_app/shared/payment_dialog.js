@@ -97,6 +97,54 @@ export class PaymentDialog {
 		EventBus.on("payment:open", () => this.show());
 		EventBus.on("executive:changed", () => this._sync_executive_badge());
 		EventBus.on("profile:loaded", () => this._sync_executive_badge());
+
+		// Market-standard behaviour (Oracle Xstore, SAP CAR, MS D365, Odoo, Zoho):
+		// changing the sale type resets the tender lines so a stale Finance row
+		// (or other sale-mode-specific instruments) cannot leak across sales.
+		// The in-overlay sale-type pill already reconciles `this._payments` in
+		// place; this listener handles the case where the user changes the
+		// sale type from the cart panel pills while the overlay is closed
+		// (the saved `PosState._payment_state` would otherwise restore a
+		// stale Finance row on the next PAY click).
+		EventBus.on("sale_type:changed", (payload) => {
+			const type = (typeof payload === "string")
+				? payload
+				: (payload && payload.sale_type) || null;
+
+			// If the overlay is currently mounted, the in-dialog pill handler
+			// has already reconciled this._payments — nothing more to do.
+			if (this._overlay && this._overlay.length) return;
+
+			// Overlay closed: scrub stale finance/down-payment metadata so the
+			// next show() reseeds a clean Cash row at full grand total.
+			if (PosState._payment_state) {
+				const saved = PosState._payment_state;
+				const had_finance = (saved.payments || []).some(p => {
+					const lc = (p && p.mode || "").toLowerCase();
+					return lc.includes("finance") || lc.includes("emi");
+				});
+				const new_is_finance = this._sale_type_name_is_finance(type);
+				if (had_finance || new_is_finance) {
+					// Drop tender rows entirely; show() will re-seed a default
+					// MOP row covering the grand total.
+					saved.payments = [];
+				}
+			}
+			// Always clear lingering finance-only PosState fields when the
+			// active sale type is non-finance, so re-entering payment never
+			// shows a stale provider/tenure/approval pre-selected.
+			if (!this._sale_type_name_is_finance(type)) {
+				PosState.sale_sub_type = null;
+				PosState.finance_tenure = null;
+				PosState.sale_reference = null;
+			}
+		});
+	}
+
+	/** Lightweight finance-type check by name (no dependency on _sale_types cache). */
+	_sale_type_name_is_finance(type_name) {
+		const lc = (type_name || "").toLowerCase();
+		return lc.includes("finance") || lc.includes("emi") || lc === "fs";
 	}
 
 	show() {
@@ -172,6 +220,12 @@ export class PaymentDialog {
 			this._original_invoice_reason = "";
 			this._advance_amount = 0;
 			this._customer_advances = [];
+			// When the cart is loaded from a Sales Order pickup, seed the
+			// advance with the SO's already-paid advance so PAY only collects
+			// the remaining balance.
+			if (PosState.sales_order_reference) {
+				this._advance_amount = flt(PosState.sales_order_advance) || 0;
+			}
 			this._disc_pct    = 0;
 			this._disc_amt    = 0;
 			this._disc_reason = "";
@@ -663,7 +717,8 @@ placeholder="${__("Enter code...")}">
 
 						<!-- ─ Step 3: Payment Instruments ─ -->
 						<div class="ch-pay-instruments-zone">
-							<div class="ch-pay-zone-label">${__("Payment")}</div>
+							<div class="ch-pay-zone-label" id="ch-pay-zone-label">${__("Payment")}</div>
+							<div class="ch-pay-zone-hint" id="ch-pay-zone-hint" style="display:none;font-size:11px;color:#6b7280;margin:-4px 0 6px;"></div>
 
 							<!-- MOP quick-add buttons -->
 							<div class="ch-pay-mop-section" id="ch-pay-mop-section">
@@ -1971,6 +2026,25 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const container = this._overlay.find("#ch-pay-rows");
 		container.empty();
 
+		// Re-label the Payment zone for Finance Sale so cashiers understand
+		// that Cash / UPI / Card buttons add DOWN-PAYMENT rows (the financed
+		// remainder is auto-calculated in the read-only Finance row below).
+		// This mirrors how Oracle Xstore, SAP Hybris POS, MS D365 Commerce
+		// and Odoo POS label split-tender on EMI / financed transactions.
+		const lbl = this._overlay.find("#ch-pay-zone-label");
+		const hint = this._overlay.find("#ch-pay-zone-hint");
+		if (lbl.length) {
+			const is_finance = this._is_finance_sale_type(PosState.sale_type);
+			if (is_finance && !this._is_free_sale) {
+				lbl.text(__("Down Payment"));
+				hint.text(__("Add Cash / UPI / Card rows for the customer's down payment. The Finance row below is auto-calculated and will be settled by the finance partner."))
+					.show();
+			} else {
+				lbl.text(__("Payment"));
+				hint.hide().text("");
+			}
+		}
+
 		this._payments.forEach((p, idx) => {
 			const type = this._mop_type(p.mode);
 			let ref_html = "";
@@ -2750,6 +2824,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			manager_user:     c.manager_user || null,
 			override_reason:  c.override_reason || null,
 			serial_no:        c.serial_no || null,
+			// Sales Order pickup linkage — per-row so the SI Items carry the
+			// reference back to the SO Item, which is what drives per_billed and
+			// Stock Reservation Entry matching on the backend.
+			sales_order:      c.sales_order || null,
+			so_detail:        c.so_detail || null,
 		}));
 
 		const payments = this._is_free_sale ? [] : this._payments.map(p => ({
@@ -2814,6 +2893,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			original_invoice:               this._original_invoice || null,
 			original_invoice_reason:        this._original_invoice_reason || null,
 			advance_amount:                 advance > 0 ? advance : 0,
+			sales_order:                    PosState.sales_order_reference || null,
+			source_quotation:               PosState.source_quotation || null,
 			kiosk_token:                    PosState.kiosk_token || null,
 			guided_session:                 PosState.guided_session || null,
 			exception_request:              PosState.exception_request || null,

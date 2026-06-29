@@ -170,6 +170,77 @@ def _allocate_customer_advance(inv, requested):
     return allocated_total
 
 
+def _allocate_sales_order_advance(inv, sales_order, cap=None):
+    """Pull advance allocations sitting on a Sales Order onto ``inv.advances``.
+
+    When a pre-booking is billed, ERPNext's ``make_sales_invoice`` mapper copies
+    the SO's ``advances`` child rows onto the Sales Invoice. Our POS path
+    builds the SI from scratch (so the cashier can edit / append items at
+    pickup time) so we replicate that copy explicitly: every Payment Entry
+    that referenced the SO is added as an advance allocation, capped at the
+    invoice's grand_total so we never over-apply.
+
+    Returns the total amount allocated.
+    """
+    if not sales_order:
+        return 0.0
+
+    so_advances = frappe.db.sql(
+        """
+        SELECT  per.reference_name AS pe_name,
+                pe.unallocated_amount,
+                per.allocated_amount
+          FROM `tabPayment Entry Reference` per
+          JOIN `tabPayment Entry` pe ON pe.name = per.parent
+         WHERE per.reference_doctype = 'Sales Order'
+           AND per.reference_name   = %(so)s
+           AND pe.docstatus = 1
+           AND pe.party_type = 'Customer'
+           AND pe.party = %(party)s
+           AND pe.company = %(company)s
+           AND per.allocated_amount > 0.005
+         ORDER BY pe.posting_date, pe.creation
+        """,
+        {"so": sales_order, "party": inv.customer, "company": inv.company},
+        as_dict=True,
+    )
+    if not so_advances:
+        return 0.0
+
+    # Cap at invoice grand total so we never over-allocate.
+    try:
+        inv.run_method("calculate_taxes_and_totals")
+    except Exception:
+        pass
+    target = flt(cap if cap is not None else (inv.rounded_total or inv.grand_total))
+    if target <= 0:
+        return 0.0
+
+    # De-duplicate PEs across multiple SO references and start fresh.
+    seen = set()
+    total = 0.0
+    for adv in so_advances:
+        if adv.pe_name in seen:
+            continue
+        seen.add(adv.pe_name)
+        remaining = target - total
+        if remaining <= 0.005:
+            break
+        alloc = min(flt(adv.allocated_amount), remaining)
+        if alloc <= 0:
+            continue
+        inv.append("advances", {
+            "reference_type": "Payment Entry",
+            "reference_name": adv.pe_name,
+            "advance_amount": flt(adv.allocated_amount),
+            "allocated_amount": alloc,
+            "remarks": f"POS pickup — advance from Sales Order {sales_order}",
+        })
+        total += alloc
+
+    return total
+
+
 def _enforce_token_linkage(pos_profile, kiosk_token):
     """Block billing without a linked kiosk token when enforcement is enabled."""
     if kiosk_token:
@@ -351,7 +422,8 @@ def _ensure_pre_booking_sale_type():
 def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=None,
                        delivery_date=None, sales_executive=None, sale_reference=None,
                        reserve_stock=1, client_request_id=None,
-                       mode_of_payment=None, payment_reference_no=None) -> dict:
+                       mode_of_payment=None, payment_reference_no=None,
+                       payments=None) -> dict:
     """Create a reservation-style Sales Order for pre-booking / advance orders.
 
     When ``advance_amount`` > 0 and ``mode_of_payment`` is provided, a Draft
@@ -486,25 +558,71 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         except Exception:
             pass
 
-    # ── Advance Payment Entry ────────────────────────────────────────────
+    # ── Advance Payment Entries (split-tender capable) ──────────────────
     # Reuse the same advance pattern as ch_payments.advance_payments —
-    # create a Draft Payment Entry referencing this Sales Order with
-    # allocated_amount = advance_amount. ERPNext's set_total_advance_paid
-    # will keep SO.advance_paid in sync once the PE is submitted by the
-    # workflow Checker.
-    advance_pe_name = None
+    # create one Draft Payment Entry per tender row referencing this
+    # Sales Order. ERPNext's set_total_advance_paid keeps SO.advance_paid
+    # in sync once the PEs are submitted by the workflow Checker.
+    #
+    # Accepts EITHER (preferred) a `payments=[{mode_of_payment, amount,
+    # reference_no?}, …]` list for split-tender, OR (legacy single-row)
+    # `mode_of_payment` + `payment_reference_no` covering the full advance.
+    advance_pe_names: list[str] = []
+    advance_pe_details: list[dict] = []
     advance_pe_warning = None
-    if flt(advance_amount) > 0 and mode_of_payment and so.docstatus == 1:
-        try:
-            advance_pe_name = _create_pre_booking_advance_pe(
-                so, mode_of_payment, flt(advance_amount), payment_reference_no
+
+    pay_rows: list[dict] = []
+    if payments:
+        if isinstance(payments, str):
+            payments = frappe.parse_json(payments)
+        for r in (payments or []):
+            mop = (r.get("mode_of_payment") or "").strip()
+            amt = flt(r.get("amount"))
+            if not mop or amt <= 0:
+                continue
+            pay_rows.append({
+                "mode_of_payment": mop,
+                "amount": amt,
+                "reference_no": (r.get("reference_no") or "").strip() or None,
+            })
+    elif mode_of_payment and flt(advance_amount) > 0:
+        pay_rows.append({
+            "mode_of_payment": mode_of_payment,
+            "amount": flt(advance_amount),
+            "reference_no": payment_reference_no,
+        })
+
+    if pay_rows and so.docstatus == 1:
+        # Sanity: row sum should match advance_amount (1-paisa tolerance).
+        row_sum = sum(flt(r["amount"]) for r in pay_rows)
+        if flt(advance_amount) > 0 and abs(row_sum - flt(advance_amount)) > 0.01:
+            frappe.throw(
+                _("Advance payment rows total {0} does not match advance amount {1}.")
+                .format(fmt_money(row_sum, currency=so.currency),
+                        fmt_money(advance_amount, currency=so.currency))
             )
-        except Exception:
-            advance_pe_warning = frappe.get_traceback()
-            frappe.log_error(
-                advance_pe_warning,
-                f"Pre-booking advance PE failed for {so.name}",
-            )
+        for r in pay_rows:
+            try:
+                pe_name = _create_pre_booking_advance_pe(
+                    so, r["mode_of_payment"], flt(r["amount"]), r.get("reference_no")
+                )
+                advance_pe_names.append(pe_name)
+                pe_docstatus = cint(frappe.db.get_value("Payment Entry", pe_name, "docstatus") or 0)
+                advance_pe_details.append({
+                    "name": pe_name,
+                    "mode_of_payment": r["mode_of_payment"],
+                    "amount": flt(r["amount"]),
+                    "docstatus": pe_docstatus,
+                    "receipt_state": "Final" if pe_docstatus == 1 else "Draft",
+                })
+            except Exception:
+                advance_pe_warning = frappe.get_traceback()
+                frappe.log_error(
+                    advance_pe_warning,
+                    f"Pre-booking advance PE failed for {so.name} / {r.get('mode_of_payment')}",
+                )
+
+    advance_pe_name = advance_pe_names[0] if advance_pe_names else None
 
     return {
         "doctype": "Sales Order",
@@ -514,6 +632,8 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         "reserve_stock": cint(getattr(so, "reserve_stock", 0)),
         "advance_amount": flt(advance_amount),
         "advance_payment_entry": advance_pe_name,
+        "advance_payment_entries": advance_pe_names,
+        "advance_payment_entries_detail": advance_pe_details,
         "delivery_date": requested_delivery,
         "warning": _("Saved as draft") if so.docstatus == 0 and submit_warning else (
             _("Advance recorded but Payment Entry could not be created — please raise it manually")
@@ -725,10 +845,18 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
     so the POS can hand a draft quote to the customer without leaving the
     cashier screen. The same Proforma print format used in Desk works here.
 
-    If ``advance_amount`` is provided, it is stamped on the Quotation's
-    ``custom_advance_received`` field so the Proforma print format shows
-    Advance Received and Balance Due. The actual Payment Entry is still
-    expected to be created via the Collect Advance flow on Desk.
+    Market parity (SAP SD / Oracle Xstore / GoFrugal / Zoho / Odoo):
+        A Proforma Invoice is a **non-binding quote** — no commercial
+        commitment, no advance is collected against it. Advance / deposit
+        collection belongs to **Pre-Booking** (Sales Order with reserved
+        stock) via :py:func:`create_pre_booking`.
+
+    The legacy ``advance_amount`` parameter is therefore **deprecated and
+    ignored** at the POS layer; it is kept in the signature only for
+    backward-compatibility with older clients. Submitted Payment Entries
+    that reference a Quotation will still update ``custom_advance_received``
+    via the existing ``ch_payments.advance_payments`` flow on Desk — that
+    pathway is unchanged.
     """
     frappe.has_permission("Quotation", "create", throw=True)
 
@@ -768,14 +896,14 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
     qtn.insert(ignore_permissions=True)
     qtn.submit()
 
-    # Stamp advance on the submitted Quotation (field is read_only +
-    # allow_on_submit, so bypass with db.set_value). Cap at grand_total.
-    advance = flt(advance_amount)
-    if advance > 0 and qtn.meta.has_field("custom_advance_received"):
-        capped = min(advance, flt(qtn.grand_total))
-        frappe.db.set_value("Quotation", qtn.name, "custom_advance_received", capped,
-                            update_modified=False)
-        qtn.reload()
+    # ``advance_amount`` is intentionally NOT stamped here — see docstring.
+    # Per market standards a Proforma carries no advance; only Pre-Booking
+    # does. We accept the param for backward-compat and silently drop it.
+    if flt(advance_amount) > 0:
+        frappe.logger().info(
+            f"create_pos_quotation: ignoring advance_amount={advance_amount} "
+            f"on Quotation {qtn.name} — advances belong to Pre-Booking only."
+        )
 
     return {
         "doctype": "Quotation",
@@ -783,8 +911,6 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
         "docstatus": qtn.docstatus,
         "status": qtn.status,
         "grand_total": flt(qtn.grand_total),
-        "advance_received": flt(getattr(qtn, "custom_advance_received", 0)),
-        "balance_due": flt(qtn.grand_total) - flt(getattr(qtn, "custom_advance_received", 0)),
         "valid_till": str(qtn.valid_till),
         "print_format": "Proforma Invoice",
     }
@@ -820,6 +946,8 @@ def create_pos_invoice(pos_profile, customer, items,
                        discount_authorized_by=None,
                        allow_surplus_refund=0,
                        surplus_refund_mode_of_payment=None,
+                       sales_order=None,
+                       source_quotation=None,
                        **_ignored) -> dict:
     """Create and submit a Sales Invoice from the CH POS App cart.
 
@@ -1181,6 +1309,19 @@ def create_pos_invoice(pos_profile, customer, items,
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
 
+        # Pickup billing — when a Sales Order is loaded into the cart each row
+        # carries ``sales_order`` + ``so_detail``. Propagate them onto the SI
+        # Item so ERPNext can:
+        #   • update per_billed on the SO on submit,
+        #   • match Stock Reservation Entries by voucher_detail_no,
+        #   • surface the SI under the SO's "Connections" view.
+        _item_so = (item.get("sales_order") or sales_order or "").strip()
+        _item_so_detail = (item.get("so_detail") or "").strip()
+        if _item_so:
+            row["sales_order"] = _item_so
+        if _item_so_detail:
+            row["so_detail"] = _item_so_detail
+
         # If amount was explicitly uploaded, align rate so ERPNext recalculation
         # keeps the uploaded amount instead of drifting to zero.
         if uploaded_amount and item_qty:
@@ -1497,10 +1638,61 @@ def create_pos_invoice(pos_profile, customer, items,
     # via the standard ERPNext `advances` table. This reduces SI outstanding
     # without touching grand_total / discount_amount, so GST stays correct on
     # the full taxable value and the customer ledger reconciles.
+    #
+    # Two sources are supported:
+    #   1. Sales Order pickup flow — when ``sales_order`` is set, the advance
+    #      already booked against the SO (Payment Entry → SO references) is
+    #      copied onto the SI. This mirrors ``make_sales_invoice(source=SO)``.
+    #   2. Customer-level adjustment — for non-pickup sales, the cashier may
+    #      apply unallocated customer Payment Entries.
     if flt(advance_amount) > 0 and not cint(is_free_sale):
-        allocated = _allocate_customer_advance(inv, advance_amount)
+        if sales_order:
+            allocated = _allocate_sales_order_advance(
+                inv, sales_order, cap=flt(advance_amount)
+            )
+        else:
+            allocated = _allocate_customer_advance(inv, advance_amount)
         # Stamp for receipt printing / reporting parity with prior behaviour.
         inv.custom_advance_adjusted = flt(allocated)
+
+    # Sales Order pickup — hydrate Serial and Batch Bundles for items backed by
+    # a Stock Reservation Entry. ``make_sales_invoice`` does this for the SO
+    # mapper path; the POS create path builds rows manually so we replicate it
+    # to keep ``update_stock=1`` from blowing up with "Serial and Batch Bundle
+    # None not found" on submit.
+    if sales_order:
+        try:
+            from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
+                get_sre_details_for_voucher,
+                get_ssb_bundle_for_voucher,
+            )
+            sre_list = get_sre_details_for_voucher("Sales Order", sales_order) or []
+            sre_by_detail = {s.voucher_detail_no: s for s in sre_list}
+            for it in inv.items:
+                if it.get("serial_and_batch_bundle"):
+                    continue
+                so_detail = it.get("so_detail")
+                if not so_detail:
+                    continue
+                sre = sre_by_detail.get(so_detail)
+                if not sre:
+                    continue
+                if (
+                    sre.reservation_based_on == "Serial and Batch"
+                    and (sre.has_serial_no or sre.has_batch_no)
+                ):
+                    bundle = get_ssb_bundle_for_voucher(sre)
+                    if bundle:
+                        it.serial_and_batch_bundle = (
+                            bundle.name if hasattr(bundle, "name") else bundle
+                        )
+                        if sre.warehouse and not it.warehouse:
+                            it.warehouse = sre.warehouse
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"POS pickup: serial/batch bundle hydration failed for SO {sales_order}",
+            )
 
     # Taxes from POS Profile
     for tax in (profile.get("taxes") or []):
@@ -1988,6 +2180,84 @@ def create_pos_invoice(pos_profile, customer, items,
             {"linked_pos_invoice": inv.name, "exchange_amount": exchange_credit},
             update_modified=False,
         )
+
+    # ── Proforma → Sale audit linkage ────────────────────────────────────────
+    # When the cashier clicked "Convert → Sale" on a Proforma (Quotation), the
+    # frontend threads the source quotation through here so we can:
+    #   1. Stamp ``custom_source_quotation`` on the SI (if the custom field
+    #      exists) — gives a clickable backref on the invoice form.
+    #   2. Set Sales Invoice Item.quotation / .quotation_item on rows whose
+    #      cart payload carried ``source_quotation`` / ``quotation_item``
+    #      (standard ERPNext mapper fields — drives Quotation status flip to
+    #      "Ordered" via the linked-doctype hook).
+    #   3. Add a Frappe Comment for an immutable trail in the Activity log.
+    # Failures here MUST NOT roll back the invoice — purely informational.
+    if source_quotation and frappe.db.exists("Quotation", source_quotation):
+        try:
+            si_item_meta = frappe.get_meta("Sales Invoice Item")
+            has_qtn_field = bool(si_item_meta.get_field("quotation"))
+            has_qtn_item_field = bool(si_item_meta.get_field("quotation_item"))
+            # Build a map from item_code → quotation_item child name based on
+            # the cart payload — frontend stamps these on rows it sourced
+            # from a proforma. Matched best-effort by (item_code, qty).
+            cart_items_raw = items
+            if isinstance(cart_items_raw, str):
+                import json as _json
+                try:
+                    cart_items_raw = _json.loads(cart_items_raw)
+                except Exception:
+                    cart_items_raw = []
+            qtn_item_by_code = {}
+            for c in (cart_items_raw or []):
+                if not isinstance(c, dict):
+                    continue
+                qi = c.get("quotation_item") or c.get("source_quotation_item")
+                ic = c.get("item_code")
+                if qi and ic:
+                    qtn_item_by_code.setdefault(ic, []).append(qi)
+            for d in inv.items:
+                if has_qtn_field and not d.get("quotation"):
+                    frappe.db.set_value(
+                        "Sales Invoice Item", d.name,
+                        "quotation", source_quotation,
+                        update_modified=False,
+                    )
+                if has_qtn_item_field:
+                    pool = qtn_item_by_code.get(d.item_code) or []
+                    if pool:
+                        frappe.db.set_value(
+                            "Sales Invoice Item", d.name,
+                            "quotation_item", pool.pop(0),
+                            update_modified=False,
+                        )
+            si_meta = frappe.get_meta("Sales Invoice")
+            if si_meta.get_field("custom_source_quotation"):
+                frappe.db.set_value(
+                    "Sales Invoice", inv.name,
+                    "custom_source_quotation", source_quotation,
+                    update_modified=False,
+                )
+            inv.add_comment(
+                "Info",
+                _("Converted from Proforma {0}").format(
+                    f'<a href="/app/quotation/{source_quotation}">{source_quotation}</a>'
+                ),
+            )
+            # Flip the Quotation status to "Ordered" if ERPNext didn't already
+            # (the standard hook fires when SO is made; for direct SI we do it
+            # ourselves to keep the proforma list filter accurate).
+            qtn_status = frappe.db.get_value("Quotation", source_quotation, "status")
+            if qtn_status == "Open":
+                frappe.db.set_value(
+                    "Quotation", source_quotation,
+                    "status", "Ordered",
+                    update_modified=False,
+                )
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Proforma → Sale linkage failed for {inv.name}",
+            )
 
     # Req #17: post the surplus refund Journal Entry. The SI consumed only
     # `exchange_credit` from the Buyback Liability; the residual `surplus`
@@ -5573,8 +5843,28 @@ def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None
 
 
 @frappe.whitelist()
-def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification", customer_name="Customer", email_id=None) -> dict:
-    """Generate and send OTP for customer WhatsApp verification before quick create."""
+def request_customer_whatsapp_otp(
+    mobile_no,
+    purpose="POS Customer Verification",
+    customer_name="Customer",
+    email_id=None,
+    channel: str = "auto",
+    company: str | None = None,
+    pos_profile: str | None = None,
+) -> dict:
+    """Generate and send OTP for customer verification before quick create.
+
+    ``channel`` controls which delivery routes to attempt:
+      * ``"auto"`` (default): WhatsApp + SMS in parallel, email as last fallback.
+      * ``"whatsapp"``: WhatsApp only (via CH WhatsApp Template).
+      * ``"sms"``: SMS only (via CH SMS Account).
+      * ``"email"``: Email only (requires ``email_id`` or a stored email).
+
+    ``company`` (or ``pos_profile``) routes the message via the matching
+    CH WhatsApp Account / CH SMS Account. Since Customer is a global master,
+    the company must come from the active POS Profile / session, not the
+    user's personal default.
+    """
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
 
     mobile_no = validate_indian_phone(mobile_no)
@@ -5582,6 +5872,9 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
     if to_email:
         to_email = validate_email_address(to_email, throw=True)
     purpose = "POS Customer Verification"
+    channel = (channel or "auto").strip().lower()
+    if channel not in {"auto", "whatsapp", "sms", "email"}:
+        channel = "auto"
 
     try:
         otp_code = CHOTPLog.generate_otp(
@@ -5599,45 +5892,145 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
         raise
 
     sent_whatsapp = False
+    sent_sms = False
     sent_email = False
-    try:
-        wa_settings = frappe.get_cached_doc("CH WhatsApp Settings")
-        if wa_settings and cint(wa_settings.enabled):
-            from ch_item_master.ch_core.whatsapp import send_template_message
-            template_name = wa_settings.get("general_otp") or "ch_otp_verification"
-            send_template_message(
-                phone=mobile_no,
-                template_name=template_name,
-                body_values={"1": otp_code},
-                customer_name=(customer_name or "Customer")[:140],
-                ref_doctype="Customer",
-                ref_name="",
-                enqueue=False,
+
+    # Resolve the active company for this OTP. Customer is a global master, so
+    # we must NOT silently fall back to the user's personal default if a POS
+    # caller supplied an explicit company / pos_profile.
+    _company = (company or "").strip() or None
+    if not _company and pos_profile:
+        _company = frappe.db.get_value("POS Profile", pos_profile, "company") or None
+    if not _company:
+        _company = frappe.defaults.get_user_default("Company") or frappe.defaults.get_global_default("company")
+
+    try_whatsapp = channel in ("auto", "whatsapp")
+    try_sms = channel in ("auto", "sms")
+    # Email runs as the last-mile fallback under "auto", or as the sole channel
+    # when the executive explicitly selects "email".
+    try_email = channel in ("auto", "email")
+
+    # 1) WhatsApp via the company's CH WhatsApp Account + CH WhatsApp Template
+    #    mapped to the "general_otp" CH WhatsApp Event (catalog-driven).
+    if try_whatsapp:
+        try:
+            from ch_item_master.ch_core.whatsapp import get_whatsapp_settings, send_template_message
+            wa_settings = get_whatsapp_settings(_company)
+            if wa_settings and cint(wa_settings.enabled):
+                send_template_message(
+                    phone=mobile_no,
+                    event="general_otp",
+                    body_values={"1": otp_code},
+                    customer_name=(customer_name or "Customer")[:140],
+                    ref_doctype="Customer",
+                    ref_name="",
+                    enqueue=False,
+                    company=_company,
+                )
+                sent_whatsapp = True
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Customer WhatsApp OTP delivery failed")
+
+    # 2) SMS via the company's CH SMS Account (falls back to global SMS Settings).
+    #    Message body source order:
+    #       (a) CH Message Template registry  (code="OTP", channel="SMS", company)
+    #       (b) Frappe System Settings.otp_sms_template ({{otp}})
+    #       (c) Hard-coded localized default
+    if try_sms:
+        try:
+            from ch_item_master.ch_core.sms import send_company_sms, get_otp_expiry
+            from ch_item_master.ch_core.message_template import render_template as _render_msg
+            mins = get_otp_expiry(_company)
+            company_label = _company or frappe.defaults.get_global_default("company") or ""
+            rendered = _render_msg(
+                code="OTP",
+                vars={
+                    "OTP": otp_code,
+                    "MIN": str(mins),
+                    "CompanyName": company_label,
+                    "CustomerName": (customer_name or "Customer"),
+                    "Purpose": purpose,
+                },
+                channel="SMS",
+                company=_company,
             )
-            sent_whatsapp = True
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Customer WhatsApp OTP delivery failed")
+            if rendered and rendered.get("body"):
+                sms_message = rendered["body"]
+            else:
+                custom_tpl = (frappe.get_system_settings("otp_sms_template") or "").strip()
+                if custom_tpl and "{{otp}}" in custom_tpl.replace(" ", ""):
+                    sms_message = custom_tpl.replace("{{ otp }}", otp_code).replace("{{otp}}", otp_code)
+                else:
+                    sms_message = (
+                        f"Your OTP for {purpose} is {otp_code}. "
+                        f"Valid for {mins} minutes. Do not share it with anyone."
+                    )
+            accepted = send_company_sms([mobile_no], sms_message, company=_company)
+            sent_sms = bool(accepted)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Customer SMS OTP delivery failed")
 
-    try:
-        from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
-        if not to_email:
-            to_email = _get_email_for_mobile(mobile_no)
-        if to_email:
-            sent_email = send_otp_email(to_email, otp_code, purpose, "")
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Customer OTP email delivery failed")
+    # 3) Email — only when permitted by the selected channel and an address exists.
+    #    Under "auto" it only runs if no phone channel succeeded.
+    #    Subject and body come from the CH Message Template registry (code="EOTP")
+    #    when present; otherwise we fall back to the legacy ``send_otp_email`` helper.
+    if try_email and (channel == "email" or not (sent_whatsapp or sent_sms)):
+        try:
+            from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
+            from ch_item_master.ch_core.message_template import render_template as _render_msg
+            from ch_item_master.ch_core.sms import get_otp_expiry
+            if not to_email:
+                to_email = _get_email_for_mobile(mobile_no)
+            if to_email:
+                rendered = _render_msg(
+                    code="EOTP",
+                    vars={
+                        "OTP": otp_code,
+                        "OTPCode": otp_code,
+                        "MIN": str(get_otp_expiry(_company)),
+                        "CompanyName": _company or "",
+                        "CustomerName": (customer_name or "Customer"),
+                        "Purpose": purpose,
+                    },
+                    channel="Email",
+                    company=_company,
+                )
+                if rendered and rendered.get("body"):
+                    frappe.sendmail(
+                        recipients=[to_email],
+                        subject=rendered.get("subject")
+                            or f"Your OTP for {purpose}",
+                        message=rendered["body"],
+                        delayed=False,
+                    )
+                    sent_email = True
+                else:
+                    sent_email = send_otp_email(to_email, otp_code, purpose, "")
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Customer OTP email delivery failed")
 
-    if not sent_whatsapp and not sent_email:
-        frappe.throw(
-            _("OTP was generated, but no delivery channel is enabled. Enable WhatsApp OTP or provide a valid customer email."),
-            title=_("OTP Delivery Not Configured"),
-        )
+    if not (sent_whatsapp or sent_sms or sent_email):
+        if channel == "whatsapp":
+            msg = _("WhatsApp OTP could not be sent. Check CH WhatsApp Account / Template configuration for the active company.")
+        elif channel == "sms":
+            msg = _("SMS OTP could not be sent. Check CH SMS Account configuration for the active company.")
+        elif channel == "email":
+            msg = _("Email OTP could not be sent. Provide a valid customer email and ensure outgoing email is configured.")
+        else:
+            msg = _(
+                "OTP was generated, but no delivery channel succeeded. "
+                "Configure CH WhatsApp Account / Template, CH SMS Account, "
+                "or provide a valid customer email."
+            )
+        frappe.throw(msg, title=_("OTP Delivery Not Configured"))
 
     return {
         "sent": True,
         "mobile": mobile_no[:3] + "****" + mobile_no[-3:],
         "otp_generated": bool(otp_code),
+        "channel": channel,
         "sent_whatsapp": sent_whatsapp,
+        "sent_sms": sent_sms,
         "sent_email": sent_email,
     }
 
@@ -6114,75 +6507,130 @@ def customer_360(identifier, company=None) -> dict:
     return out
 
 
-@frappe.whitelist()
-def store_dashboard(pos_profile, date=None) -> dict:
-    """Return a day's sales summary, top items, staff performance and inventory
-    alerts. ``date`` defaults to today (the dashboard's date filter passes it)."""
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    today = date or nowdate()
-    warehouse = profile.warehouse
+def _dashboard_date_range(date=None, from_date=None, to_date=None):
+    """Normalize dashboard date filters while preserving the legacy ``date`` arg."""
+    start = getdate(from_date or date or nowdate())
+    end = getdate(to_date or date or from_date or nowdate())
+    if start > end:
+        start, end = end, start
+    return str(start), str(end)
 
-    # Today's invoices
+
+@frappe.whitelist()
+def store_dashboard(pos_profile, date=None, from_date=None, to_date=None, salesman=None) -> dict:
+    """Return sales summary, top items, staff performance and inventory alerts.
+
+    ``date`` is retained for older clients. New callers can pass ``from_date``,
+    ``to_date`` and ``salesman`` (POS Executive) for dashboard filtering.
+    """
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    from_date, to_date = _dashboard_date_range(date=date, from_date=from_date, to_date=to_date)
+    salesman = (salesman or "").strip()
+    warehouse = profile.warehouse
+    si_meta = frappe.get_meta("Sales Invoice")
+    has_salesman_field = si_meta.has_field("custom_sales_executive")
+
+    invoice_filters = {
+        "pos_profile": pos_profile,
+        "posting_date": ["between", [from_date, to_date]],
+        "docstatus": 1,
+        "is_return": 0,
+    }
+    if salesman and has_salesman_field:
+        invoice_filters["custom_sales_executive"] = salesman
+
+    invoice_fields = ["name", "grand_total", "owner"]
+    if has_salesman_field:
+        invoice_fields.append("custom_sales_executive")
+
     invoices = frappe.get_all(
         "Sales Invoice",
-        filters={
-            "pos_profile": pos_profile,
-            "posting_date": today,
-            "docstatus": 1,
-            "is_return": 0,
-        },
-        fields=["name", "grand_total", "owner"],
+        filters=invoice_filters,
+        fields=invoice_fields,
     )
     total_revenue = sum(flt(inv.grand_total) for inv in invoices)
     total_invoices = len(invoices)
 
-    # Items sold today
+    # Items sold for the selected period.
     items_sold = 0
     if invoices:
         inv_names = [inv.name for inv in invoices]
         items_sold = frappe.db.sql(
             """SELECT COALESCE(SUM(ii.qty), 0)
                FROM `tabSales Invoice Item` ii
-               WHERE ii.parent IN %s""",
-            (inv_names,),
+               WHERE ii.parent IN %(parents)s""",
+            {"parents": tuple(inv_names)},
         )[0][0] or 0
 
-    # Returns today
+    # Returns for the selected period.
+    return_filters = {
+        "pos_profile": pos_profile,
+        "posting_date": ["between", [from_date, to_date]],
+        "docstatus": 1,
+        "is_return": 1,
+    }
+    if salesman and has_salesman_field:
+        return_filters["custom_sales_executive"] = salesman
     total_returns = frappe.db.count(
         "Sales Invoice",
-        filters={
-            "pos_profile": pos_profile,
-            "posting_date": today,
-            "docstatus": 1,
-            "is_return": 1,
-        },
+        filters=return_filters,
     )
 
-    # Top selling items today
+    sales_conditions = [
+        "pi.pos_profile = %(pos_profile)s",
+        "pi.posting_date BETWEEN %(from_date)s AND %(to_date)s",
+        "pi.docstatus = 1",
+        "pi.is_return = 0",
+    ]
+    sales_params = {
+        "pos_profile": pos_profile,
+        "from_date": from_date,
+        "to_date": to_date,
+    }
+    if salesman and has_salesman_field:
+        sales_conditions.append("pi.custom_sales_executive = %(salesman)s")
+        sales_params["salesman"] = salesman
+    sales_where = " AND ".join(sales_conditions)
+
+    # Top selling items for the selected period.
     top_items = []
     if invoices:
         top_items_raw = frappe.db.sql(
-            """SELECT ii.item_name, SUM(ii.qty) AS qty, SUM(ii.amount) AS revenue
+            f"""SELECT ii.item_name, SUM(ii.qty) AS qty, SUM(ii.amount) AS revenue
                FROM `tabSales Invoice Item` ii
                JOIN `tabSales Invoice` pi ON pi.name = ii.parent
-               WHERE pi.pos_profile = %s AND pi.posting_date = %s
-                 AND pi.docstatus = 1 AND pi.is_return = 0
-               GROUP BY ii.item_code
+               WHERE {sales_where}
+               GROUP BY ii.item_code, ii.item_name
                ORDER BY revenue DESC
                LIMIT 10""",
-            (pos_profile, today),
+            sales_params,
             as_dict=True,
         )
         top_items = [{"item_name": r.item_name, "qty": flt(r.qty), "revenue": flt(r.revenue)} for r in top_items_raw]
 
-    # Staff performance
+    # Staff performance: prefer POS Executive attribution, fall back to cashier.
+    exec_names = []
+    if has_salesman_field:
+        exec_names = [inv.custom_sales_executive for inv in invoices if inv.get("custom_sales_executive")]
+    exec_labels = {}
+    if exec_names:
+        exec_rows = frappe.get_all(
+            "POS Executive",
+            filters={"name": ["in", list(set(exec_names))]},
+            fields=["name", "executive_name"],
+            ignore_permissions=True,
+        )
+        exec_labels = {r.name: (r.executive_name or r.name) for r in exec_rows}
+
     staff_map = {}
     for inv in invoices:
-        owner = inv.owner
-        if owner not in staff_map:
-            staff_map[owner] = {"cashier": frappe.utils.get_fullname(owner) or owner, "invoices": 0, "revenue": 0}
-        staff_map[owner]["invoices"] += 1
-        staff_map[owner]["revenue"] += flt(inv.grand_total)
+        exec_name = inv.get("custom_sales_executive") if has_salesman_field else None
+        key = exec_name or inv.owner
+        label = exec_labels.get(exec_name) if exec_name else (frappe.utils.get_fullname(inv.owner) or inv.owner)
+        if key not in staff_map:
+            staff_map[key] = {"cashier": label or key, "invoices": 0, "revenue": 0}
+        staff_map[key]["invoices"] += 1
+        staff_map[key]["revenue"] += flt(inv.grand_total)
     staff_performance = sorted(staff_map.values(), key=lambda x: x["revenue"], reverse=True)
 
     # Inventory alerts — items with low stock or zero stock in this warehouse
@@ -6224,18 +6672,17 @@ def store_dashboard(pos_profile, date=None) -> dict:
                 [{"item_code": r.item_code, "item_name": r.item_name, "qty": 0} for r in no_bin_items]
             )
 
-    # Hourly sales breakdown for bar chart
+    # Hourly sales breakdown for bar chart.
     hourly_sales = []
     if invoices:
         hourly_raw = frappe.db.sql(
-            """SELECT HOUR(pi.posting_time) AS hr, SUM(pi.grand_total) AS revenue,
+            f"""SELECT HOUR(pi.posting_time) AS hr, SUM(pi.grand_total) AS revenue,
                       COUNT(*) AS cnt
                FROM `tabSales Invoice` pi
-               WHERE pi.pos_profile = %s AND pi.posting_date = %s
-                 AND pi.docstatus = 1 AND pi.is_return = 0
+               WHERE {sales_where}
                GROUP BY HOUR(pi.posting_time)
                ORDER BY hr""",
-            (pos_profile, today),
+            sales_params,
             as_dict=True,
         )
         hourly_sales = [{"hour": cint(r.hr), "revenue": flt(r.revenue), "count": cint(r.cnt)}
@@ -6338,6 +6785,9 @@ def store_dashboard(pos_profile, date=None) -> dict:
         "stock_value": stock_value,
         "aging_stock_value": aging_stock_value,
         "warehouse": warehouse,
+        "from_date": from_date,
+        "to_date": to_date,
+        "salesman": salesman,
     }
 
 
@@ -9303,14 +9753,17 @@ def increment_buyback_count(pos_profile) -> dict:
 
 
 @frappe.whitelist()
-def get_today_footfall(pos_profile) -> dict:
-    """Return today's footfall summary derived from POS Kiosk Token records.
+def get_today_footfall(pos_profile, date=None, from_date=None, to_date=None, salesman=None) -> dict:
+    """Return footfall summary derived from POS Kiosk Token records.
 
     When the POS Profile Extension is configured for a non-Kiosk pos_mode
     (System / Tablet), kiosk-specific counters are forced to zero so that
     counter-only stores never see misleading kiosk widgets.
     """
-    today = nowdate()
+    from_date, to_date = _dashboard_date_range(date=date, from_date=from_date, to_date=to_date)
+    salesman = (salesman or "").strip()
+    start_dt = f"{from_date} 00:00:00"
+    end_dt = f"{to_date} 23:59:59"
 
     # Decouple from kiosk: when this profile is not a kiosk, zero out the
     # kiosk counters so the front-end can hide kiosk widgets entirely.
@@ -9319,45 +9772,66 @@ def get_today_footfall(pos_profile) -> dict:
     ) or "System"
     kiosk_enabled = (pos_mode == "Kiosk")
 
+    token_meta = frappe.get_meta("POS Kiosk Token")
+    token_salesman_sql = ""
+    token_params = {
+        "pos_profile": pos_profile,
+        "start_dt": start_dt,
+        "end_dt": end_dt,
+    }
+    if salesman and token_meta.has_field("sales_executive"):
+        token_salesman_sql = " AND sales_executive = %(salesman)s"
+        token_params["salesman"] = salesman
+
     # Primary source: POS Kiosk Token records
-    source_counts = frappe.db.sql("""
+    source_counts = frappe.db.sql(f"""
         SELECT IFNULL(visit_source, 'Counter') AS visit_source, COUNT(*) AS cnt
         FROM `tabPOS Kiosk Token`
-        WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
+        WHERE pos_profile = %(pos_profile)s
+          AND creation BETWEEN %(start_dt)s AND %(end_dt)s
+          AND status != 'Cancelled'
+          {token_salesman_sql}
         GROUP BY visit_source
-    """, (pos_profile, today), as_dict=True)
+    """, token_params, as_dict=True)
 
     source_map = {r.visit_source: cint(r.cnt) for r in source_counts}
     walkin_count = source_map.get("Counter", 0)
     kiosk_count = source_map.get("Kiosk", 0)
     other_count = sum(v for k, v in source_map.items() if k not in ("Counter", "Kiosk"))
 
-    purpose_counts = frappe.db.sql("""
+    purpose_counts = frappe.db.sql(f"""
         SELECT IFNULL(visit_purpose, '') AS visit_purpose, COUNT(*) AS cnt
         FROM `tabPOS Kiosk Token`
-        WHERE pos_profile = %s AND DATE(creation) = %s AND status != 'Cancelled'
+        WHERE pos_profile = %(pos_profile)s
+          AND creation BETWEEN %(start_dt)s AND %(end_dt)s
+          AND status != 'Cancelled'
+          {token_salesman_sql}
         GROUP BY visit_purpose
-    """, (pos_profile, today), as_dict=True)
+    """, token_params, as_dict=True)
 
     purpose_map = {r.visit_purpose: cint(r.cnt) for r in purpose_counts}
     repair_intake_count = purpose_map.get("Repair", 0)
     buyback_count = purpose_map.get("Buyback", 0)
 
-    # Invoices today
-    invoices_today = frappe.db.count("Sales Invoice", {
+    invoice_filters = {
         "pos_profile": pos_profile,
-        "posting_date": today,
+        "posting_date": ["between", [from_date, to_date]],
         "docstatus": 1,
         "is_return": 0,
-    })
+    }
+    if salesman and frappe.get_meta("Sales Invoice").has_field("custom_sales_executive"):
+        invoice_filters["custom_sales_executive"] = salesman
+    invoices_today = frappe.db.count("Sales Invoice", invoice_filters)
 
     # Status counts
-    status_counts = frappe.db.sql("""
+    status_counts = frappe.db.sql(f"""
         SELECT status, COUNT(*) AS cnt
         FROM `tabPOS Kiosk Token`
-        WHERE pos_profile = %s AND DATE(creation) = %s
+        WHERE pos_profile = %(pos_profile)s
+          AND creation BETWEEN %(start_dt)s AND %(end_dt)s
+          {token_salesman_sql}
         GROUP BY status
-    """, (pos_profile, today), as_dict=True)
+    """, token_params, as_dict=True)
 
     status_map = {r.status: cint(r.cnt) for r in status_counts}
     cancelled_count = cint(status_map.get("Cancelled", 0))
@@ -9381,6 +9855,9 @@ def get_today_footfall(pos_profile) -> dict:
         "total_footfall": total_footfall,
         "invoices_today": invoices_today,
         "conversion_pct": conversion_pct,
+        "from_date": from_date,
+        "to_date": to_date,
+        "salesman": salesman,
     }
 
 
@@ -10075,23 +10552,19 @@ def pos_send_approval_link(order_name) -> dict:
     price_fmt = f"₹{flt(doc.final_price):,.0f}"
     customer_name = doc.customer_name or "Customer"
 
-    # ── Send WhatsApp ────────────────────────────────────────────
+    # ── Send WhatsApp (via this order's company account) ──────────
     try:
-        from ch_item_master.ch_core.whatsapp import send_template_message
+        from ch_item_master.ch_core.whatsapp import get_whatsapp_settings, get_template, send_template_message
 
-        settings = None
-        try:
-            s = frappe.get_cached_doc("CH WhatsApp Settings")
-            if s.enabled:
-                settings = s
-        except frappe.DoesNotExistError:
-            pass
+        settings = get_whatsapp_settings(doc.company)
+        if settings and not settings.enabled:
+            settings = None
 
-        template_name = getattr(settings, "buyback_customer_approval", "") if settings else ""
+        template_name = get_template(doc.company, "buyback_customer_approval")[0] if settings else ""
         if template_name:
             send_template_message(
                 phone=doc.mobile_no,
-                template_name=template_name,
+                event="buyback_customer_approval",
                 body_values={
                     "1": customer_name,
                     "2": item_label,
@@ -10101,6 +10574,7 @@ def pos_send_approval_link(order_name) -> dict:
                 customer_name=customer_name,
                 ref_doctype="Buyback Order",
                 ref_name=doc.name,
+                company=doc.company,
             )
             frappe.logger().info(f"[pos_send_approval_link] WhatsApp sent to {doc.mobile_no}")
         else:
@@ -10541,12 +11015,21 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 # ═══════════════════════════════════════════════════════════════════════════
 
 @frappe.whitelist()
-def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None) -> list:
-    """Return POS invoices for a profile filtered by date, phone, or invoice number.
+def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
+                        doc_type="Invoice") -> list:
+    """Return POS documents for a profile filtered by date, phone, or document number.
 
     Used by the Reprint dialog in the POS frontend. Company isolation is enforced
-    via the POS Profile's company so the same customer's invoices in another
+    via the POS Profile's company so the same customer's documents in another
     company (e.g. GoFix vs GoGizmo) are never exposed to this profile.
+
+    ``doc_type`` (default ``Invoice``) selects the source:
+      * ``Invoice``  → submitted Sales Invoices (POS bills + returns)
+      * ``Proforma`` → submitted Quotations (POS proformas via create_pos_quotation)
+
+    Both branches return a uniform row shape so the UI can render with one
+    template; the ``__doctype`` field tells the client which print format /
+    Frappe doctype to use when reprinting.
     """
     from frappe.utils import getdate
 
@@ -10556,6 +11039,17 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None) -> 
     company = frappe.db.get_value("POS Profile", pos_profile, "company")
     if not company:
         frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
+
+    doc_key = (doc_type or "Invoice").strip().lower()
+    if doc_key in ("proforma", "quotation"):
+        return _get_proforma_quotations(company, date=date, phone=phone, invoice_no=invoice_no)
+    if doc_key in ("advance receipt", "advance_receipt", "receipt", "prebooking receipt"):
+        return _get_prebooking_advance_receipts(
+            company=company,
+            date=date,
+            phone=phone,
+            invoice_no=invoice_no,
+        )
 
     if invoice_no:
         invoice_no = (invoice_no or "").strip()
@@ -10649,6 +11143,164 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None) -> 
         ORDER BY pi.posting_time DESC
     """, (pos_profile, company, filter_date), as_dict=True)
 
+    return rows
+
+
+def _get_prebooking_advance_receipts(company, date=None, phone=None, invoice_no=None) -> list:
+    """Return pre-booking advance receipts (Payment Entries) for Reprint.
+
+    Only customer-receive Payment Entries linked to Sales Orders are returned,
+    so the dialog shows true pre-booking advance receipts, not unrelated PEs.
+    """
+    from frappe.utils import getdate
+
+    select_cols = """
+        pe.name,
+        pe.party AS customer,
+        pe.party_name AS customer_name,
+        pe.paid_amount AS grand_total,
+        pe.posting_date,
+        NULL AS posting_time,
+        0 AS is_return,
+        CASE WHEN pe.docstatus = 1 THEN 'Submitted' ELSE 'Draft' END AS status,
+        NULL AS custom_ch_sale_type,
+        pe.mode_of_payment,
+        GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS linked_sales_orders,
+        GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS items_summary,
+        'Payment Entry' AS __doctype,
+        'Standard' AS __print_format,
+        pe.docstatus AS __docstatus,
+        CASE WHEN pe.docstatus = 1 THEN 'Final' ELSE 'Draft' END AS receipt_state
+    """
+    from_clause = """
+        FROM `tabPayment Entry` pe
+        JOIN `tabPayment Entry Reference` per
+          ON per.parent = pe.name
+         AND per.reference_doctype = 'Sales Order'
+    """
+    where_base = """
+        WHERE pe.company = %(company)s
+          AND pe.docstatus != 2
+          AND pe.payment_type = 'Receive'
+          AND pe.party_type = 'Customer'
+    """
+
+    if invoice_no:
+        return frappe.db.sql(
+            "SELECT" + select_cols + from_clause + where_base + """
+                AND pe.name LIKE %(needle)s
+                GROUP BY pe.name
+                ORDER BY pe.posting_date DESC, pe.creation DESC
+                LIMIT 50
+            """,
+            {"company": company, "needle": f"%{(invoice_no or '').strip()}%"},
+            as_dict=True,
+        )
+
+    if phone:
+        customers = frappe.get_all(
+            "Customer",
+            filters={"mobile_no": ["like", f"%{phone.strip()}"]},
+            pluck="name",
+            limit=50,
+        )
+        if not customers:
+            return []
+        cust_placeholders = ", ".join(["%s"] * len(customers))
+        sql = (
+            "SELECT" + select_cols + from_clause + where_base
+            + f" AND pe.party IN ({cust_placeholders}) "
+            + "GROUP BY pe.name ORDER BY pe.posting_date DESC, pe.creation DESC LIMIT 50"
+        )
+        return frappe.db.sql(sql, [company] + customers, as_dict=True)
+
+    filter_date = getdate(date) if date else getdate(nowdate())
+    return frappe.db.sql(
+        "SELECT" + select_cols + from_clause + where_base + """
+            AND pe.posting_date = %(d)s
+            GROUP BY pe.name
+            ORDER BY pe.creation DESC
+        """,
+        {"company": company, "d": filter_date},
+        as_dict=True,
+    )
+
+
+def _get_proforma_quotations(company, date=None, phone=None, invoice_no=None) -> list:
+    """Return submitted Quotations (POS proformas) for the Reprint dialog.
+
+    Returns the same row shape as Sales-Invoice rows so the UI template can be
+    shared; ``__doctype`` is set to ``"Quotation"`` so the print button knows
+    which doctype + print format to request.
+    """
+    from frappe.utils import getdate
+
+    select_cols = """
+        q.name,
+        q.party_name AS customer,
+        q.customer_name,
+        q.grand_total,
+        q.transaction_date AS posting_date,
+        NULL AS posting_time,
+        0 AS is_return,
+        q.status,
+        NULL AS custom_ch_sale_type,
+        NULL AS mode_of_payment,
+        GROUP_CONCAT(qi.item_name ORDER BY qi.idx SEPARATOR ', ') AS items_summary,
+        'Quotation' AS __doctype,
+        'Proforma Invoice' AS __print_format
+    """
+    from_clause = """
+        FROM `tabQuotation` q
+        JOIN `tabQuotation Item` qi ON qi.parent = q.name
+    """
+    where_base = """
+        WHERE q.company = %(company)s
+          AND q.docstatus = 1
+          AND q.quotation_to = 'Customer'
+    """
+
+    if invoice_no:
+        rows = frappe.db.sql(
+            select_cols.join(["SELECT", from_clause]) + where_base + """
+                AND q.name LIKE %(needle)s
+                GROUP BY q.name
+                ORDER BY q.transaction_date DESC, q.creation DESC
+                LIMIT 50
+            """,
+            {"company": company, "needle": f"%{(invoice_no or '').strip()}%"},
+            as_dict=True,
+        )
+        return rows
+
+    if phone:
+        customers = frappe.get_all(
+            "Customer",
+            filters={"mobile_no": ["like", f"%{phone.strip()}"]},
+            pluck="name",
+            limit=50,
+        )
+        if not customers:
+            return []
+        cust_placeholders = ", ".join(["%s"] * len(customers))
+        sql = (
+            "SELECT" + select_cols + from_clause + where_base
+            + f" AND q.party_name IN ({cust_placeholders}) "
+            + "GROUP BY q.name ORDER BY q.transaction_date DESC, q.creation DESC LIMIT 50"
+        )
+        rows = frappe.db.sql(sql, [company] + customers, as_dict=True)
+        return rows
+
+    filter_date = getdate(date) if date else getdate(nowdate())
+    rows = frappe.db.sql(
+        "SELECT" + select_cols + from_clause + where_base + """
+            AND q.transaction_date = %(d)s
+            GROUP BY q.name
+            ORDER BY q.creation DESC
+        """,
+        {"company": company, "d": filter_date},
+        as_dict=True,
+    )
     return rows
 
 
@@ -11362,6 +12014,311 @@ def list_my_proformas(pos_profile, status=None, search=None,
                          f"&format=Proforma+Invoice&no_letterhead=0",
         })
     return out
+
+
+@frappe.whitelist()
+def load_sales_order_to_cart(pos_profile, sales_order):
+    """Load a submitted pre-booking Sales Order into POS cart-item shape.
+
+    Returns the data the cart panel needs to bill the SO inline (right-panel
+    flow): cart items, customer, sale_type, advance, balance due, IMEI
+    reservations. The POS payment dialog then submits via ``create_pos_invoice``
+    with ``sales_order`` set; the backend re-links each item to its SO row via
+    ``so_detail`` so ``per_billed`` / advance allocation / stock reservation
+    behave exactly like ``make_sales_invoice(source=SO)``.
+    """
+    frappe.has_permission("Sales Order", "read", throw=True)
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required"))
+    if not sales_order:
+        frappe.throw(_("Sales Order is required"))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    so = frappe.get_doc("Sales Order", sales_order)
+
+    if so.docstatus != 1:
+        frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
+    if so.company != profile.company:
+        frappe.throw(
+            _("Sales Order company ({0}) does not match POS Profile company ({1})").format(
+                so.company, profile.company
+            )
+        )
+    if flt(so.per_billed) >= 100:
+        frappe.throw(_("Sales Order {0} is already fully billed").format(sales_order))
+
+    # Sale type carried on the SO (custom field) — replayed onto cart so the
+    # cashier sees the same context before billing.
+    sale_type = (
+        so.get("custom_sale_type")
+        or so.get("ch_sale_type")
+        or so.get("sale_type")
+        or None
+    )
+
+    # Per-item cache for item-level flags the cart panel needs.
+    item_codes = list({d.item_code for d in (so.items or [])})
+    item_meta = {}
+    if item_codes:
+        # ``must_be_whole_number`` is optional on many sites (custom field).
+        # Query it only when present to keep this API migration-safe.
+        item_meta_doc = frappe.get_meta("Item")
+        has_whole_col = bool(item_meta_doc.get_field("must_be_whole_number"))
+        select_cols = (
+            "name AS item_code, item_name, stock_uom, has_serial_no, "
+            "ch_item_type, ch_allow_zero_rate"
+        )
+        if has_whole_col:
+            select_cols += ", must_be_whole_number"
+        rows = frappe.db.sql(
+            f"""SELECT {select_cols}
+                 FROM `tabItem`
+                WHERE name IN %(p)s""",
+            {"p": tuple(item_codes)},
+            as_dict=True,
+        )
+        item_meta = {r.item_code: r for r in rows}
+
+    def _split_serials(raw):
+        if not raw:
+            return []
+        return [s.strip() for s in str(raw).replace("\r", "").split("\n") if s.strip()]
+
+    cart_items = []
+    all_reserved = []
+    for d in (so.items or []):
+        # Skip rows already fully billed (defensive).
+        billed_qty = flt(d.qty) * (flt(d.billed_amt) / flt(d.amount) if flt(d.amount) else 0)
+        remaining_qty = max(flt(d.qty) - billed_qty, 0)
+        if remaining_qty <= 0:
+            continue
+
+        meta = item_meta.get(d.item_code) or {}
+        has_serial = cint(meta.get("has_serial_no") or 0)
+        reserved = _split_serials(d.get("custom_serial_no"))
+        all_reserved.extend(reserved)
+
+        rate = flt(d.rate)
+        price_list_rate = flt(d.price_list_rate or d.rate)
+        discount_amount = max(0, price_list_rate - rate)
+        discount_pct = (discount_amount / price_list_rate * 100) if price_list_rate > 0 else 0
+
+        base_row = {
+            "item_code": d.item_code,
+            "item_name": d.item_name or meta.get("item_name") or d.item_code,
+            "rate": rate,
+            "price_list_rate": price_list_rate,
+            "mrp": price_list_rate,
+            "uom": d.uom or meta.get("stock_uom") or "Nos",
+            "discount_percentage": flt(discount_pct),
+            "discount_amount": flt(discount_amount),
+            "offers": [],
+            "applied_offer": None,
+            "warranty_plan": None,
+            "is_warranty": False,
+            "is_vas": False,
+            "has_serial_no": cint(has_serial),
+            "ch_item_type": meta.get("ch_item_type") or "",
+            "ch_allow_zero_rate": cint(meta.get("ch_allow_zero_rate") or 0),
+            "must_be_whole_number": cint(meta.get("must_be_whole_number") or 0),
+            "stock_qty": flt(remaining_qty),
+            # Sales-order linkage — passed back to ``create_pos_invoice`` so the
+            # generated Sales Invoice Item lands with proper SO references and
+            # ``per_billed`` updates on submit.
+            "sales_order": so.name,
+            "so_detail": d.name,
+            "from_sales_order": True,
+        }
+
+        # Serial-backed items: expand one cart row per reserved IMEI so the
+        # cashier can see them individually (matches the rest of the cart UX
+        # where serial items are always qty=1 per row).
+        if has_serial and reserved:
+            for sn in reserved:
+                row = dict(base_row)
+                row["qty"] = 1
+                row["serial_no"] = sn
+                cart_items.append(row)
+            # If reserved count < SO qty, fill remainder as unserialised slots
+            # the cashier must scan.
+            extra = int(remaining_qty) - len(reserved)
+            for _ in range(max(extra, 0)):
+                row = dict(base_row)
+                row["qty"] = 1
+                row["serial_no"] = ""
+                cart_items.append(row)
+        elif has_serial:
+            for _ in range(int(remaining_qty) or 1):
+                row = dict(base_row)
+                row["qty"] = 1
+                row["serial_no"] = ""
+                cart_items.append(row)
+        else:
+            row = dict(base_row)
+            row["qty"] = flt(remaining_qty)
+            row["serial_no"] = ""
+            cart_items.append(row)
+
+    advance = flt(so.advance_paid)
+    grand_total = flt(so.grand_total)
+    balance_due = max(grand_total - advance, 0)
+
+    return {
+        "sales_order": so.name,
+        "customer": so.customer,
+        "customer_name": so.customer_name or so.customer,
+        "sale_type": sale_type,
+        "grand_total": grand_total,
+        "advance_paid": advance,
+        "balance_due": balance_due,
+        "currency": so.currency,
+        "delivery_date": str(so.delivery_date) if so.delivery_date else None,
+        "reserved_serials": all_reserved,
+        "items": cart_items,
+        "item_count": len(cart_items),
+    }
+
+
+@frappe.whitelist()
+def load_quotation_to_cart(pos_profile, quotation):
+    """Load a submitted Quotation (POS Proforma) into POS cart-item shape.
+
+    Mirrors :py:func:`load_sales_order_to_cart` but sources from a Quotation
+    so the cashier can:
+
+      * **Convert → Sale**: seed the Sell cart with proforma items, then
+        scan IMEIs, add accessories/VAS, change qty, and press PAY normally.
+        The resulting Sales Invoice is linked back via
+        ``custom_source_quotation`` for audit (no field write on the
+        Quotation here — its status auto-updates to ``Ordered`` when a
+        downstream SO/SI references its items the standard ERPNext way).
+
+      * **Convert → Pre-Booking**: seed the Pre-Booking dialog with the
+        same items + customer; cashier picks delivery date, collects
+        advance via split-tender, and the Sales Order is created. The
+        Quotation status flips to ``Ordered`` via the standard mapper.
+
+    Market parity:
+      * SAP SD F2 with reference to F5/F8
+      * Oracle Xstore Quote → Order (Create with Reference)
+      * MS D365 Retail Quote → Sales Order
+      * Zoho / Odoo / GoFrugal / Tally — "Convert to Invoice" / "Make Bill"
+      * ERPNext core ``make_sales_invoice`` / ``make_sales_order`` mappers
+    """
+    frappe.has_permission("Quotation", "read", throw=True)
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required"))
+    if not quotation:
+        frappe.throw(_("Quotation is required"))
+
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    qtn = frappe.get_doc("Quotation", quotation)
+
+    if qtn.docstatus != 1:
+        frappe.throw(_("Quotation {0} is not submitted").format(quotation))
+    if qtn.company != profile.company:
+        frappe.throw(
+            _("Quotation company ({0}) does not match POS Profile company ({1})").format(
+                qtn.company, profile.company
+            )
+        )
+    if (qtn.status or "").lower() in ("lost", "cancelled"):
+        frappe.throw(_("Quotation {0} is {1} — cannot convert").format(quotation, qtn.status))
+    if qtn.valid_till and getdate(qtn.valid_till) < getdate(nowdate()):
+        # Soft warning rather than hard throw — cashiers may still want to
+        # re-quote an expired proforma. Frontend surfaces this as a confirm.
+        warning = _("Quotation {0} expired on {1}").format(quotation, qtn.valid_till)
+    else:
+        warning = None
+
+    # Per-item cache for cart flags
+    item_codes = list({d.item_code for d in (qtn.items or [])})
+    item_meta = {}
+    if item_codes:
+        # NOTE: ``must_be_whole_number`` is a ch_pos JS-side qty-step flag,
+        # not a guaranteed schema column on tabItem (older installs lack the
+        # custom field). Pull it conditionally via Item meta so the loader
+        # works on every site; default to 0 (allow decimal qty) when absent.
+        item_meta_doc = frappe.get_meta("Item")
+        has_whole_col = bool(item_meta_doc.get_field("must_be_whole_number"))
+        select_cols = (
+            "name AS item_code, item_name, stock_uom, has_serial_no, "
+            "ch_item_type, ch_allow_zero_rate"
+        )
+        if has_whole_col:
+            select_cols += ", must_be_whole_number"
+        rows = frappe.db.sql(
+            f"""SELECT {select_cols}
+                 FROM `tabItem`
+                WHERE name IN %(p)s""",
+            {"p": tuple(item_codes)},
+            as_dict=True,
+        )
+        item_meta = {r.item_code: r for r in rows}
+
+    cart_items = []
+    for d in (qtn.items or []):
+        meta = item_meta.get(d.item_code) or {}
+        has_serial = cint(meta.get("has_serial_no") or 0)
+        rate = flt(d.rate)
+        price_list_rate = flt(d.price_list_rate or d.rate)
+        discount_amount = max(0, price_list_rate - rate)
+        discount_pct = (discount_amount / price_list_rate * 100) if price_list_rate > 0 else 0
+
+        base_row = {
+            "item_code": d.item_code,
+            "item_name": d.item_name or meta.get("item_name") or d.item_code,
+            "rate": rate,
+            "price_list_rate": price_list_rate,
+            "mrp": price_list_rate,
+            "uom": d.uom or meta.get("stock_uom") or "Nos",
+            "discount_percentage": flt(discount_pct),
+            "discount_amount": flt(discount_amount),
+            "offers": [],
+            "applied_offer": None,
+            "warranty_plan": None,
+            "is_warranty": False,
+            "is_vas": False,
+            "has_serial_no": cint(has_serial),
+            "ch_item_type": meta.get("ch_item_type") or "",
+            "ch_allow_zero_rate": cint(meta.get("ch_allow_zero_rate") or 0),
+            "must_be_whole_number": cint(meta.get("must_be_whole_number") or 0),
+            "stock_qty": flt(d.qty),
+            # Quotation linkage — kept on each row so the eventual Sales
+            # Invoice / Sales Order can stamp prevdoc_docname for audit
+            # parity with the ERPNext "Make → Sales Invoice" mapper.
+            "source_quotation": qtn.name,
+            "quotation_item": d.name,
+            "from_quotation": True,
+        }
+
+        # Serial-backed items: expand one row per qty so the cashier scans
+        # an IMEI per unit at billing time (proforma never carries IMEIs).
+        if has_serial:
+            for _ in range(int(flt(d.qty)) or 1):
+                row = dict(base_row)
+                row["qty"] = 1
+                row["serial_no"] = ""
+                cart_items.append(row)
+        else:
+            row = dict(base_row)
+            row["qty"] = flt(d.qty)
+            row["serial_no"] = ""
+            cart_items.append(row)
+
+    return {
+        "quotation": qtn.name,
+        "customer": qtn.party_name,
+        "customer_name": qtn.customer_name or qtn.party_name,
+        "sale_type": None,           # Cashier picks at billing time
+        "grand_total": flt(qtn.grand_total),
+        "currency": qtn.currency,
+        "valid_till": str(qtn.valid_till) if qtn.valid_till else None,
+        "status": qtn.status,
+        "items": cart_items,
+        "item_count": len(cart_items),
+        "warning": warning,
+    }
 
 
 @frappe.whitelist()

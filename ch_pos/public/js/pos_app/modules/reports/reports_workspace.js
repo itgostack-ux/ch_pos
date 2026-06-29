@@ -9,20 +9,89 @@ import { format_number } from "../../shared/helpers.js";
 
 export class ReportsWorkspace {
 	constructor() {
-		this._date = frappe.datetime.get_today();
+		const today = frappe.datetime.get_today();
+		this._date = today;
+		this._from_date = today;
+		this._to_date = today;
+		this._salesman = "";
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "reports") return;
 			this.render(ctx.panel);
 		});
 	}
 
+	_get_filters() {
+		const today = frappe.datetime.get_today();
+		let from_date = this._from_date || this._date || today;
+		let to_date = this._to_date || this._date || from_date;
+		if (from_date > to_date) {
+			const tmp = from_date;
+			from_date = to_date;
+			to_date = tmp;
+		}
+		return {
+			from_date,
+			to_date,
+			salesman: this._salesman || "",
+		};
+	}
+
+	_range_label(filters = this._get_filters()) {
+		const from_user = frappe.datetime.str_to_user(filters.from_date);
+		const to_user = frappe.datetime.str_to_user(filters.to_date);
+		return filters.from_date === filters.to_date ? from_user : `${from_user} - ${to_user}`;
+	}
+
+	_salesman_options() {
+		const esc = frappe.utils.escape_html;
+		const access = PosState.executive_access || {};
+		const by_company = access.store_executives || {};
+		const company = PosState.active_company;
+		const pools = company && by_company[company] ? [by_company[company]] : Object.values(by_company);
+		const seen = new Set();
+		const execs = [];
+
+		pools.forEach((pool) => {
+			(pool || []).forEach((ex) => {
+				if (!ex || !ex.name || seen.has(ex.name)) return;
+				seen.add(ex.name);
+				execs.push(ex);
+			});
+		});
+
+		const selected = this._salesman || "";
+		let options = `<option value="">${__("All Salesmen")}</option>`;
+		execs.forEach((ex) => {
+			const sel = ex.name === selected ? " selected" : "";
+			const role = ex.role && ex.role !== "Executive" ? ` (${ex.role})` : "";
+			options += `<option value="${esc(ex.name)}"${sel}>${esc(ex.executive_name || ex.name)}${esc(role)}</option>`;
+		});
+		if (selected && !seen.has(selected)) {
+			options += `<option value="${esc(selected)}" selected>${esc(selected)}</option>`;
+		}
+		return options;
+	}
+
+	_salesman_label() {
+		if (!this._salesman) return __("All Salesmen");
+		const access = PosState.executive_access || {};
+		const pools = Object.values(access.store_executives || {});
+		for (const pool of pools) {
+			const match = (pool || []).find((ex) => ex.name === this._salesman);
+			if (match) return match.executive_name || match.name;
+		}
+		return this._salesman;
+	}
+
 	_download_csv() {
 		const d = this._dashboard_data || {};
-		const date = this._date || frappe.datetime.get_today();
+		const filters = this._get_filters();
+		const range = this._range_label(filters);
 		const avg = d.total_invoices ? (d.total_revenue / d.total_invoices) : 0;
 		const rows = [
-			[__("Store Dashboard"), date],
+			[__("Store Dashboard"), range],
 			[__("POS Profile"), PosState.pos_profile || ""],
+			[__("Salesman"), this._salesman_label()],
 			[],
 			[__("Metric"), __("Value")],
 			[__("Revenue"), d.total_revenue || 0],
@@ -38,37 +107,46 @@ export class ReportsWorkspace {
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
 		a.href = url;
-		a.download = `store-dashboard-${date}.csv`;
+		const suffix = this._salesman ? `-${this._salesman.replace(/[^a-z0-9_-]/gi, "_")}` : "";
+		a.download = `store-dashboard-${filters.from_date}-${filters.to_date}${suffix}.csv`;
 		document.body.appendChild(a);
 		a.click();
 		document.body.removeChild(a);
 		URL.revokeObjectURL(url);
-		frappe.show_alert({ message: __("Dashboard downloaded for {0}", [date]), indicator: "green" });
+		frappe.show_alert({ message: __("Dashboard downloaded for {0}", [range]), indicator: "green" });
 	}
 
 	render(panel) {
 		this._panel = panel;
-		const today = this._date || frappe.datetime.get_today();
+		const today = frappe.datetime.get_today();
+		const filters = this._get_filters();
+		const from_date = filters.from_date;
+		const to_date = filters.to_date;
+		const salesman = filters.salesman;
 		const pp = encodeURIComponent(PosState.pos_profile || "");
 		const wh = encodeURIComponent(PosState.warehouse || "");
 		const enc = (v) => encodeURIComponent(JSON.stringify(v));
+		const posting_date_filter = enc(["between", [from_date, to_date]]);
+		const creation_filter = enc(["between", [`${from_date} 00:00:00`, `${to_date} 23:59:59`]]);
+		const salesman_invoice_filter = salesman ? `&custom_sales_executive=${encodeURIComponent(salesman)}` : "";
+		const salesman_token_filter = salesman ? `&sales_executive=${encodeURIComponent(salesman)}` : "";
 
 		/* KPI definitions — { cls, icon, color, bg, label, link? } */
 		const footfall = [
-{ cls: "walkins",   icon: "fa-sign-in",    color: "#4f46e5", bg: "#e0e7ff", label: __("Walk-ins"),   link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_source=Counter&creation=${enc([">", today])}&status=${enc(["!=", "Cancelled"])}` },
-{ cls: "kiosk",     icon: "fa-tablet",     color: "#7c3aed", bg: "#f3e8ff", label: __("Kiosk"),      link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_source=Kiosk&creation=${enc([">", today])}&status=${enc(["!=", "Cancelled"])}` },
+{ cls: "walkins",   icon: "fa-sign-in",    color: "#4f46e5", bg: "#e0e7ff", label: __("Walk-ins"),   link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_source=Counter&creation=${creation_filter}&status=${enc(["!=", "Cancelled"])}${salesman_token_filter}` },
+{ cls: "kiosk",     icon: "fa-tablet",     color: "#7c3aed", bg: "#f3e8ff", label: __("Kiosk"),      link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_source=Kiosk&creation=${creation_filter}&status=${enc(["!=", "Cancelled"])}${salesman_token_filter}` },
 			{ cls: "conversion",icon: "fa-percent",    color: "#16a34a", bg: "#dcfce7", label: __("Conversion") },
-{ cls: "repairs",   icon: "fa-wrench",     color: "#d97706", bg: "#fef3c7", label: __("Repairs"),    link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_purpose=Repair&creation=${enc([">", today])}` },
-{ cls: "buybacks",  icon: "fa-exchange",   color: "#dc2626", bg: "#fef2f2", label: __("Buybacks"),   link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_purpose=Buyback&creation=${enc([">", today])}` },
-{ cls: "cancelled", icon: "fa-ban",        color: "#ef4444", bg: "#fee2e2", label: __("Cancelled"),  link: `/desk/pos-kiosk-token?pos_profile=${pp}&status=Cancelled&creation=${enc([">", today])}` },
-{ cls: "dropped",   icon: "fa-user-times", color: "#f97316", bg: "#fff7ed", label: __("Dropped"),    link: `/desk/pos-kiosk-token?pos_profile=${pp}&status=Dropped&creation=${enc([">", today])}` },
+{ cls: "repairs",   icon: "fa-wrench",     color: "#d97706", bg: "#fef3c7", label: __("Repairs"),    link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_purpose=Repair&creation=${creation_filter}${salesman_token_filter}` },
+{ cls: "buybacks",  icon: "fa-exchange",   color: "#dc2626", bg: "#fef2f2", label: __("Buybacks"),   link: `/desk/pos-kiosk-token?pos_profile=${pp}&visit_purpose=Buyback&creation=${creation_filter}${salesman_token_filter}` },
+{ cls: "cancelled", icon: "fa-ban",        color: "#ef4444", bg: "#fee2e2", label: __("Cancelled"),  link: `/desk/pos-kiosk-token?pos_profile=${pp}&status=Cancelled&creation=${creation_filter}${salesman_token_filter}` },
+{ cls: "dropped",   icon: "fa-user-times", color: "#f97316", bg: "#fff7ed", label: __("Dropped"),    link: `/desk/pos-kiosk-token?pos_profile=${pp}&status=Dropped&creation=${creation_filter}${salesman_token_filter}` },
 		];
 		const sales = [
-			{ cls: "revenue",    icon: "fa-inr",         color: "#2563eb", bg: "#dbeafe", label: __("Revenue"),    link: `/desk/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=0` },
-			{ cls: "invoices",   icon: "fa-file-text-o", color: "#16a34a", bg: "#dcfce7", label: __("Invoices"),   link: `/desk/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=0` },
+			{ cls: "revenue",    icon: "fa-inr",         color: "#2563eb", bg: "#dbeafe", label: __("Revenue"),    link: `/desk/sales-invoice?pos_profile=${pp}&posting_date=${posting_date_filter}&docstatus=1&is_return=0${salesman_invoice_filter}` },
+			{ cls: "invoices",   icon: "fa-file-text-o", color: "#16a34a", bg: "#dcfce7", label: __("Invoices"),   link: `/desk/sales-invoice?pos_profile=${pp}&posting_date=${posting_date_filter}&docstatus=1&is_return=0${salesman_invoice_filter}` },
 			{ cls: "items-sold", icon: "fa-shopping-bag", color: "#d97706", bg: "#fef3c7", label: __("Items Sold") },
 			{ cls: "avg-basket", icon: "fa-calculator",  color: "#4f46e5", bg: "#e0e7ff", label: __("Avg Basket") },
-			{ cls: "returns",    icon: "fa-undo",        color: "#dc2626", bg: "#fef2f2", label: __("Returns"),    link: `/desk/sales-invoice?pos_profile=${pp}&posting_date=${today}&docstatus=1&is_return=1` },
+			{ cls: "returns",    icon: "fa-undo",        color: "#dc2626", bg: "#fef2f2", label: __("Returns"),    link: `/desk/sales-invoice?pos_profile=${pp}&posting_date=${posting_date_filter}&docstatus=1&is_return=1${salesman_invoice_filter}` },
 		];
 		// Stock-value KPIs — populated from store_dashboard response (warehouse-level totals).
 		const stock = [
@@ -102,7 +180,7 @@ export class ReportsWorkspace {
 							</span>
 							${__("Store Dashboard")}
 						</h4>
-						<span class="ch-mode-hint">${__("Today's performance at a glance")}</span>
+						<span class="ch-mode-hint">${__("Performance for selected period")}</span>
 					</div>
 					<div class="ch-rpt-header-actions">
 						<button class="btn btn-sm btn-default ch-rpt-z-report"
@@ -113,13 +191,22 @@ export class ReportsWorkspace {
 							title="${__("Open the Stock Audit workspace \u2014 stock report, cycle count, count history, variance approvals.")}">
 							<i class="fa fa-balance-scale"></i> ${__("Stock Audit")}
 						</button>
-						<input type="date" class="form-control input-sm ch-rpt-date"
-							value="${this._date || frappe.datetime.get_today()}"
-							max="${frappe.datetime.get_today()}"
-							style="width:150px;display:inline-block;vertical-align:middle"
-							title="${__("View a different date")}">
+						<span class="ch-rpt-filter-group" title="${__("From Date")}">
+							<i class="fa fa-calendar-o"></i>
+							<input type="date" class="form-control input-sm ch-rpt-from-date"
+								value="${from_date}" max="${today}">
+						</span>
+						<span class="ch-rpt-filter-group" title="${__("To Date")}">
+							<i class="fa fa-calendar-check-o"></i>
+							<input type="date" class="form-control input-sm ch-rpt-to-date"
+								value="${to_date}" max="${today}">
+						</span>
+						<select class="form-control input-sm ch-rpt-salesman"
+							title="${__("Filter by Salesman")}">
+							${this._salesman_options()}
+						</select>
 						<button class="btn btn-sm btn-default ch-rpt-download"
-							title="${__("Download this day's summary as CSV")}">
+							title="${__("Download this summary as CSV")}">
 							<i class="fa fa-download"></i> ${__("Download")}
 						</button>
 						<button class="btn btn-sm btn-default ch-rpt-refresh">
@@ -169,7 +256,7 @@ export class ReportsWorkspace {
 							<div class="ch-rpt-chart-empty" style="display:none;">
 								<div class="ch-rpt-empty">
 									<i class="fa fa-bar-chart"></i>
-									<span>${__("No sales recorded yet today")}</span>
+									<span>${__("No sales recorded for this period")}</span>
 								</div>
 							</div>
 						</div>
@@ -195,7 +282,7 @@ export class ReportsWorkspace {
 							<div class="ch-rpt-section-body ch-rpt-section-body--flush">
 								<table class="ch-rpt-table">
 									<thead><tr>
-										<th>${__("Cashier")}</th>
+										<th>${__("Salesman")}</th>
 										<th class="text-right">${__("Bills")}</th>
 										<th class="text-right">${__("Revenue")}</th>
 									</tr></thead>
@@ -241,58 +328,86 @@ export class ReportsWorkspace {
 	}
 
 	_bind(panel) {
-		panel.on("click", ".ch-rpt-refresh", () => {
+		panel.off(".chReports");
+		panel.on("click.chReports", ".ch-rpt-refresh", () => {
 			panel.find(".ch-rpt-content").hide();
 			panel.find(".ch-rpt-loading").show();
 			this._load_data(panel);
 		});
-		// #14: date filter — re-render the dashboard for the chosen day.
-		panel.on("change", ".ch-rpt-date", (e) => {
-			this._date = $(e.currentTarget).val() || frappe.datetime.get_today();
+		panel.on("change.chReports", ".ch-rpt-from-date, .ch-rpt-to-date", (e) => {
+			const today = frappe.datetime.get_today();
+			let from_date = panel.find(".ch-rpt-from-date").val() || today;
+			let to_date = panel.find(".ch-rpt-to-date").val() || from_date;
+			if (from_date > to_date) {
+				if ($(e.currentTarget).hasClass("ch-rpt-from-date")) {
+					to_date = from_date;
+				} else {
+					from_date = to_date;
+				}
+			}
+			this._from_date = from_date;
+			this._to_date = to_date;
+			this._date = to_date;
 			this.render(panel);
 		});
-		// #14: download the day's summary as CSV.
-		panel.on("click", ".ch-rpt-download", () => this._download_csv());
-		panel.on("click", ".ch-rpt-z-report", () => this._show_z_report());
-		panel.on("click", ".ch-rpt-stock-audit", () => EventBus.emit("mode:switch", "stock_audit"));
+		panel.on("change.chReports", ".ch-rpt-salesman", (e) => {
+			this._salesman = $(e.currentTarget).val() || "";
+			this.render(panel);
+		});
+		panel.on("click.chReports", ".ch-rpt-download", () => this._download_csv());
+		panel.on("click.chReports", ".ch-rpt-z-report", () => this._show_z_report());
+		panel.on("click.chReports", ".ch-rpt-stock-audit", () => EventBus.emit("mode:switch", "stock_audit"));
 
 		// Store Insights — refresh + open referenced document
-		panel.on("click", ".ch-rpt-ai-refresh", () => this._load_ai_insights(panel, true));
-		panel.on("click", ".ch-rpt-ai-card[data-href]", function (e) {
+		panel.on("click.chReports", ".ch-rpt-ai-refresh", () => this._load_ai_insights(panel, true));
+		panel.on("click.chReports", ".ch-rpt-ai-card[data-href]", function (e) {
 			if ($(e.target).closest("a,button").length) return;
 			window.open($(this).attr("data-href"), "_blank");
 		});
-		panel.on("click", ".ch-rpt-ai-card [data-action='open-ref']", function (e) {
+		panel.on("click.chReports", ".ch-rpt-ai-card [data-action='open-ref']", function (e) {
 			e.stopPropagation();
 			const dt = $(this).attr("data-dt"), dn = $(this).attr("data-dn");
 			if (dt && dn) window.open(`/desk/${frappe.router.slug(dt)}/${encodeURIComponent(dn)}`, "_blank");
 		});
 
 		// KPI cards → open filtered list in new tab
-		panel.on("click", ".ch-rpt-kpi--link", function () {
+		panel.on("click.chReports", ".ch-rpt-kpi--link", function () {
 			const href = $(this).attr("data-href");
 			if (href) window.open(href, "_blank");
 		});
 		// MR / STE / inventory pill clicks
-		panel.on("click", ".ch-rpt-doc-row[data-href]", function () {
+		panel.on("click.chReports", ".ch-rpt-doc-row[data-href]", function () {
 			window.open($(this).attr("data-href"), "_blank");
 		});
-		panel.on("click", ".ch-rpt-inv-pill[data-item]", function () {
+		panel.on("click.chReports", ".ch-rpt-inv-pill[data-item]", function () {
 			window.open(`/desk/item/${encodeURIComponent($(this).attr("data-item"))}`, "_blank");
 		});
 
-		EventBus.on("walkin:logged", (d) => {
-			panel.find(".ch-rpt-walkins").text(d.walkin_count || 0);
-			panel.find(".ch-rpt-kiosk").text(d.kiosk_count || 0);
-		});
+		if (!this._walkin_bound) {
+			this._walkin_bound = true;
+			EventBus.on("walkin:logged", (d) => {
+				const current_panel = this._panel;
+				const filters = this._get_filters();
+				const today = frappe.datetime.get_today();
+				if (!current_panel || filters.from_date !== today || filters.to_date !== today || filters.salesman) return;
+				current_panel.find(".ch-rpt-walkins").text(d.walkin_count || 0);
+				current_panel.find(".ch-rpt-kiosk").text(d.kiosk_count || 0);
+			});
+		}
 	}
 
 	_load_data(panel) {
+		const filters = this._get_filters();
 		this._load_ai_insights(panel, false);
 
 		frappe.call({
 			method: "ch_pos.api.pos_api.get_today_footfall",
-			args: { pos_profile: PosState.pos_profile },
+			args: {
+				pos_profile: PosState.pos_profile,
+				from_date: filters.from_date,
+				to_date: filters.to_date,
+				salesman: filters.salesman,
+			},
 			callback: (r) => {
 				const f = r.message || {};
 				// Hide kiosk KPI tile entirely when this profile is not kiosk-enabled.
@@ -313,7 +428,12 @@ export class ReportsWorkspace {
 
 		frappe.call({
 			method: "ch_pos.api.pos_api.store_dashboard",
-			args: { pos_profile: PosState.pos_profile, date: this._date },
+			args: {
+				pos_profile: PosState.pos_profile,
+				from_date: filters.from_date,
+				to_date: filters.to_date,
+				salesman: filters.salesman,
+			},
 			callback: (r) => {
 				panel.find(".ch-rpt-loading").hide();
 				const content = panel.find(".ch-rpt-content");
@@ -375,7 +495,7 @@ export class ReportsWorkspace {
 					</tr>`);
 				});
 				if (!(d.top_items || []).length) {
-					top_body.append(`<tr><td colspan="4" class="text-muted text-center" style="padding:20px">${__("No sales today")}</td></tr>`);
+					top_body.append(`<tr><td colspan="4" class="text-muted text-center" style="padding:20px">${__("No sales for this period")}</td></tr>`);
 				}
 
 				// Staff
@@ -472,6 +592,7 @@ export class ReportsWorkspace {
 	_load_ai_insights(panel, force) {
 		const section = panel.find(".ch-rpt-ai");
 		if (!section.length) return;
+		const filters = this._get_filters();
 		const loading = section.find(".ch-rpt-ai-loading");
 		const list = section.find(".ch-rpt-ai-list");
 		loading.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Analysing your store…")}`).show();
@@ -479,7 +600,12 @@ export class ReportsWorkspace {
 
 		frappe.call({
 			method: "ch_pos.api.store_insights.store_insights",
-			args: { pos_profile: PosState.pos_profile },
+			args: {
+				pos_profile: PosState.pos_profile,
+				from_date: filters.from_date,
+				to_date: filters.to_date,
+				salesman: filters.salesman,
+			},
 			callback: (r) => {
 				const data = (r && r.message) || {};
 				const cards = data.insights || [];

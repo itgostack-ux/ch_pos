@@ -105,6 +105,24 @@ export const PosState = {
 	// ── B2B/B2C ─────────────────────────────────────────
 	billing_gstin: "",          // GSTIN entered at billing time (overrides customer's saved GSTIN)
 
+	// ── Sales Order Pickup ─────────────────────────────
+	// When a pre-booking (Sales Order) is loaded into the cart for pickup
+	// billing, ``sales_order_reference`` is the SO name. Items in the cart
+	// carry per-line ``sales_order`` + ``so_detail`` so the backend can map
+	// them back to the SO and pull the advance via ``set_advances()``.
+	sales_order_reference: null,       // Sales Order being billed at pickup
+	sales_order_advance: 0,            // Advance already paid on the SO (auto-applied at PAY)
+	sales_order_grand_total: 0,        // SO grand total — used to render the cart banner
+	sales_order_summary: null,         // { name, customer_name, due_date, reserved_serials }
+
+	// ── Proforma → Sale Conversion ─────────────────────
+	// When a Quotation (Proforma) is converted to a Sale via Prebook
+	// workspace "Convert → Sale", the source quotation name is stamped here
+	// so downstream code (audit log, print headers) can reference the
+	// originating proforma. Cleared on transaction reset.
+	source_quotation: null,            // Quotation name (proforma) being billed
+	source_quotation_total: 0,         // Proforma grand total for reference
+
 	// ── Customer Summary (enriched) ─────────────────────
 	customer_summary: null,     // { order_count, active_warranties, active_service_jobs }
 
@@ -148,6 +166,13 @@ export const PosState = {
 		this.exception_request_data = null;
 		this.warranty_claim = null;
 		this.billing_gstin = "";
+		this.sales_order_reference = null;
+		this.sales_order_advance = 0;
+		this.sales_order_grand_total = 0;
+		this.sales_order_summary = null;
+		// Proforma → Sale conversion linkage (cleared per transaction)
+		this.source_quotation = null;
+		this.source_quotation_total = 0;
 		// POS-10 fix: Clear persisted cart on transaction reset
 		try { localStorage.removeItem("ch_pos_active_cart"); } catch (e) {}
 		// Keep executive and company selection across transactions

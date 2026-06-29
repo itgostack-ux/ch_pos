@@ -124,6 +124,55 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "Buyback",
+   "link_count": 4,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback Assessment",
+   "link_count": 0,
+   "link_to": "Buyback Assessment",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback Inspection",
+   "link_count": 0,
+   "link_to": "Buyback Inspection",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback Order",
+   "link_count": 0,
+   "link_to": "Buyback Order",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Buyback Exchange Order",
+   "link_count": 0,
+   "link_to": "Buyback Exchange Order",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Store Reports",
    "link_count": 0,
    "link_type": "DocType",
