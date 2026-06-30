@@ -2,8 +2,10 @@
  * CH Bin Transfer Dialog
  *
  * Exposes a globally-accessible dialog for POS / store users to move stock
- * between the 5 bins of their store (Sellable / In-Transit / Damaged /
- * Disposed / Reserved) with a controlled "reason".
+ * between the canonical per-store bins (Sellable / Damaged / Demo / Buyback)
+ * with a controlled "reason". In-Transit / Disposed / Reserved are NOT move
+ * targets — transit is company-level (Goods In Transit), disposal is a
+ * write-off, reservation is a soft table (Path B Phase 3).
  *
  * Trigger from anywhere:
  *     frappe.ch_pos.show_bin_transfer_dialog({ store: "STO-BMPL-CHENNA-0001" });
@@ -15,7 +17,7 @@
 
 frappe.provide("frappe.ch_pos");
 
-const BIN_TYPES = ["Sellable", "In-Transit", "Damaged", "Disposed", "Reserved"];
+const BIN_TYPES = ["Sellable", "Damaged", "Demo", "Buyback"];
 
 frappe.ch_pos.show_bin_transfer_dialog = function (opts = {}) {
 	const store = opts.store || null;

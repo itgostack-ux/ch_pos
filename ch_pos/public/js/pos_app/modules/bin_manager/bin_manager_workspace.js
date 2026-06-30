@@ -9,17 +9,25 @@
  */
 import { PosState, EventBus } from "../../state.js";
 
-const BIN_TYPES = ["Sellable", "In-Transit", "Damaged", "Disposed", "Reserved", "Demo"];
+// Canonical movable per-store bins (ch_store.STORE_BIN_TYPES). In-Transit /
+// Disposed / Reserved per-store bins were removed in Path B Phase 3 \u2014 transit
+// is company-level (Goods In Transit), disposal is a write-off, reservation is
+// a soft table. We keep **In-Transit as a READ-ONLY view** (stock dispatched to
+// this store on an active manifest), not a move target.
+const MOVABLE_BINS = ["Sellable", "Damaged", "Demo", "Buyback"];
+const READONLY_BINS = ["In-Transit"];
+const BIN_TYPES = [...MOVABLE_BINS, ...READONLY_BINS];
 
 // Visual config per bin type (theme tokens used by ch-pos styles)
 const BIN_META = {
 	"Sellable":   { icon: "fa-check-circle",   tone: "success", color: "#1f8f5f", bg: "#e8f7ef", hint: __("Available for sale on the shop floor") },
-	"In-Transit": { icon: "fa-truck",          tone: "info",    color: "#0b6bcb", bg: "#e7f1ff", hint: __("In-flight between store and zone hub") },
 	"Damaged":    { icon: "fa-wrench",         tone: "warning", color: "#b45309", bg: "#fef3c7", hint: __("Awaiting inspection or repair") },
-	"Disposed":   { icon: "fa-trash",          tone: "danger",  color: "#b91c1c", bg: "#fee2e2", hint: __("Scrapped / written off \u2014 locked") },
-	"Reserved":   { icon: "fa-bookmark",       tone: "purple",  color: "#6d28d9", bg: "#ede9fe", hint: __("Held against bookings / customer orders") },
 	"Demo":       { icon: "fa-mobile",         tone: "info",    color: "#0891b2", bg: "#cffafe", hint: __("In-store demonstration units \u2014 valued stock") },
+	"Buyback":    { icon: "fa-recycle",        tone: "info",    color: "#0e7490", bg: "#cffafe", hint: __("Traded-in devices held for refurb / resale") },
+	"In-Transit": { icon: "fa-truck",          tone: "info",    color: "#0b6bcb", bg: "#e7f1ff", hint: __("Dispatched to this store, not yet received (read-only)") },
 };
+
+const IS_READONLY_BIN = (bin) => READONLY_BINS.includes(bin);
 
 export class BinManagerWorkspace {
 	constructor() {
@@ -112,8 +120,8 @@ export class BinManagerWorkspace {
 				<div class="ch-bm-tabs">${tabs_html}</div>
 
 				<div class="ch-bm-grid">
-					<!-- Left: Move action card -->
-					<div class="ch-bm-card">
+					<!-- Left: Move action card (hidden for read-only In-Transit) -->
+					<div class="ch-bm-card" id="ch-bm-move-card">
 						<div class="ch-bm-card-head">
 							<i class="fa fa-exchange" style="color:#0b6bcb"></i>
 							<h5>${__("Move Stock To Bin")}</h5>
@@ -172,9 +180,20 @@ export class BinManagerWorkspace {
 		this._init_controls(panel);
 		this._bind(panel);
 		this._update_dest_pill();
+		this._apply_readonly_state();
 		this._load_reasons();
 		this._load_counts();
 		this._refresh_bin_view();
+	}
+
+	_apply_readonly_state() {
+		const ro = IS_READONLY_BIN(this._active_bin);
+		this.panel.find("#ch-bm-move-card").toggle(!ro);
+		// List spans full width when the move card is hidden (read-only view).
+		this.panel.find(".ch-bm-grid").css(
+			"grid-template-columns",
+			ro ? "minmax(0,1fr)" : "minmax(0,1.05fr) minmax(0,1.4fr)",
+		);
 	}
 
 	_init_controls(panel) {
@@ -216,7 +235,8 @@ export class BinManagerWorkspace {
 			panel.find(".ch-bm-meta-hint").text(BIN_META[bin].hint);
 			panel.find(".ch-bm-move").html(`<i class="fa fa-arrow-right"></i> ${__("Move to {0}", [bin])}`);
 			this._update_dest_pill();
-			this._set_reason_options();
+			this._apply_readonly_state();
+			if (!IS_READONLY_BIN(bin)) this._set_reason_options();
 			this._refresh_bin_view();
 		});
 
@@ -279,13 +299,25 @@ export class BinManagerWorkspace {
 					data[row.bin_type] = row;
 				}
 				this._counts = data;
-				BIN_TYPES.forEach((bin) => {
+				MOVABLE_BINS.forEach((bin) => {
 					const info = data[bin] || {};
 					const qty = info.qty != null ? info.qty : (info.items || 0);
 					this.panel.find(`[data-bin-count="${bin}"]`).text(
 						qty ? __("{0} units", [qty]) : __("Empty")
 					);
 				});
+			},
+		});
+
+		// In-Transit (read-only) count comes from active manifests, not the bin summary.
+		frappe.call({
+			method: "ch_item_master.ch_core.bin_transfer.get_store_in_transit",
+			args: { store: PosState.store },
+			callback: (r) => {
+				const n = ((r.message || {}).serials || []).length;
+				this.panel.find(`[data-bin-count="In-Transit"]`).text(
+					n ? __("{0} units", [n]) : __("Empty")
+				);
 			},
 		});
 	}
@@ -396,14 +428,21 @@ export class BinManagerWorkspace {
 		const wh_el = this.panel.find('[data-role="warehouse"]');
 		list.html(`<div class="ch-bm-empty"><i class="fa fa-spinner fa-spin"></i><br>${__("Loading...")}</div>`);
 
-		frappe.call({
-			method: "ch_item_master.ch_core.bin_transfer.get_store_bin_serials",
-			args: {
+		const readonly = IS_READONLY_BIN(this._active_bin);
+		const method = readonly
+			? "ch_item_master.ch_core.bin_transfer.get_store_in_transit"
+			: "ch_item_master.ch_core.bin_transfer.get_store_bin_serials";
+		const args = readonly
+			? { store: PosState.store || null }
+			: {
 				store: PosState.store || null,
 				bin_type: this._active_bin,
 				item_code: this.item_field ? this.item_field.get_value() : null,
 				limit: 200,
-			},
+			};
+
+		frappe.call({
+			method, args,
 			callback: (r) => {
 				const d = r.message || {};
 				const rows = d.serials || [];
@@ -414,9 +453,40 @@ export class BinManagerWorkspace {
 					list.html(`
 						<div class="ch-bm-empty">
 							<div class="icon"><i class="fa ${m.icon}"></i></div>
-							${__("No serials in {0} bin yet", [this._active_bin])}
+							${readonly ? __("Nothing in transit to this store") : __("No serials in {0} bin yet", [this._active_bin])}
 							<div style="font-size:11px;color:#94a3b8;margin-top:6px">${m.hint}</div>
 						</div>
+					`);
+					return;
+				}
+
+				if (readonly) {
+					list.html(`
+						<table class="ch-bm-list-table">
+							<thead>
+								<tr>
+									<th>${__("Item")}</th>
+									<th style="width:60px">${__("Qty")}</th>
+									<th>${__("From")}</th>
+									<th style="width:140px">${__("Manifest")}</th>
+									<th style="width:110px">${__("Status")}</th>
+								</tr>
+							</thead>
+							<tbody>
+								${rows.map((x) => `
+									<tr>
+										<td>
+											<div class="mono">${frappe.utils.escape_html(x.item_code || "")}</div>
+											<div class="item-name">${frappe.utils.escape_html(x.item_name || "")}${x.serial_no ? " · " + frappe.utils.escape_html(x.serial_no) : ""}</div>
+										</td>
+										<td>${frappe.utils.escape_html(String(x.qty || ""))}</td>
+										<td>${frappe.utils.escape_html(x.source || "—")}</td>
+										<td><a href="/app/ch-transfer-manifest/${encodeURIComponent(x.manifest)}" target="_blank">${frappe.utils.escape_html(x.manifest || "")}</a></td>
+										<td><span class="ch-bm-status-badge">${frappe.utils.escape_html(x.status || "—")}</span></td>
+									</tr>
+								`).join("")}
+							</tbody>
+						</table>
 					`);
 					return;
 				}
