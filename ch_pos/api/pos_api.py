@@ -303,7 +303,7 @@ def get_pos_profile_data(pos_profile) -> dict:
             "stores": [],
         }
 
-    return {
+    return {        
         "warehouse": profile.warehouse,
         "price_list": profile.selling_price_list,
         "company": profile.company,
@@ -5843,28 +5843,8 @@ def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None
 
 
 @frappe.whitelist()
-def request_customer_whatsapp_otp(
-    mobile_no,
-    purpose="POS Customer Verification",
-    customer_name="Customer",
-    email_id=None,
-    channel: str = "auto",
-    company: str | None = None,
-    pos_profile: str | None = None,
-) -> dict:
-    """Generate and send OTP for customer verification before quick create.
-
-    ``channel`` controls which delivery routes to attempt:
-      * ``"auto"`` (default): WhatsApp + SMS in parallel, email as last fallback.
-      * ``"whatsapp"``: WhatsApp only (via CH WhatsApp Template).
-      * ``"sms"``: SMS only (via CH SMS Account).
-      * ``"email"``: Email only (requires ``email_id`` or a stored email).
-
-    ``company`` (or ``pos_profile``) routes the message via the matching
-    CH WhatsApp Account / CH SMS Account. Since Customer is a global master,
-    the company must come from the active POS Profile / session, not the
-    user's personal default.
-    """
+def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification", customer_name="Customer", email_id=None) -> dict:
+    """Generate and send OTP for customer WhatsApp verification before quick create."""
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
 
     mobile_no = validate_indian_phone(mobile_no)
@@ -5872,9 +5852,6 @@ def request_customer_whatsapp_otp(
     if to_email:
         to_email = validate_email_address(to_email, throw=True)
     purpose = "POS Customer Verification"
-    channel = (channel or "auto").strip().lower()
-    if channel not in {"auto", "whatsapp", "sms", "email"}:
-        channel = "auto"
 
     try:
         otp_code = CHOTPLog.generate_otp(
@@ -5892,145 +5869,47 @@ def request_customer_whatsapp_otp(
         raise
 
     sent_whatsapp = False
-    sent_sms = False
     sent_email = False
-
-    # Resolve the active company for this OTP. Customer is a global master, so
-    # we must NOT silently fall back to the user's personal default if a POS
-    # caller supplied an explicit company / pos_profile.
-    _company = (company or "").strip() or None
-    if not _company and pos_profile:
-        _company = frappe.db.get_value("POS Profile", pos_profile, "company") or None
-    if not _company:
-        _company = frappe.defaults.get_user_default("Company") or frappe.defaults.get_global_default("company")
-
-    try_whatsapp = channel in ("auto", "whatsapp")
-    try_sms = channel in ("auto", "sms")
-    # Email runs as the last-mile fallback under "auto", or as the sole channel
-    # when the executive explicitly selects "email".
-    try_email = channel in ("auto", "email")
-
-    # 1) WhatsApp via the company's CH WhatsApp Account + CH WhatsApp Template
-    #    mapped to the "general_otp" CH WhatsApp Event (catalog-driven).
-    if try_whatsapp:
-        try:
-            from ch_item_master.ch_core.whatsapp import get_whatsapp_settings, send_template_message
-            wa_settings = get_whatsapp_settings(_company)
-            if wa_settings and cint(wa_settings.enabled):
-                send_template_message(
-                    phone=mobile_no,
-                    event="general_otp",
-                    body_values={"1": otp_code},
-                    customer_name=(customer_name or "Customer")[:140],
-                    ref_doctype="Customer",
-                    ref_name="",
-                    enqueue=False,
-                    company=_company,
-                )
-                sent_whatsapp = True
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), "Customer WhatsApp OTP delivery failed")
-
-    # 2) SMS via the company's CH SMS Account (falls back to global SMS Settings).
-    #    Message body source order:
-    #       (a) CH Message Template registry  (code="OTP", channel="SMS", company)
-    #       (b) Frappe System Settings.otp_sms_template ({{otp}})
-    #       (c) Hard-coded localized default
-    if try_sms:
-        try:
-            from ch_item_master.ch_core.sms import send_company_sms, get_otp_expiry
-            from ch_item_master.ch_core.message_template import render_template as _render_msg
-            mins = get_otp_expiry(_company)
-            company_label = _company or frappe.defaults.get_global_default("company") or ""
-            rendered = _render_msg(
-                code="OTP",
-                vars={
-                    "OTP": otp_code,
-                    "MIN": str(mins),
-                    "CompanyName": company_label,
-                    "CustomerName": (customer_name or "Customer"),
-                    "Purpose": purpose,
-                },
-                channel="SMS",
+    try:
+        from ch_item_master.ch_core.whatsapp import get_whatsapp_settings, send_template_message
+        _company = frappe.defaults.get_user_default("Company")
+        wa_settings = get_whatsapp_settings(_company)
+        if wa_settings and cint(wa_settings.enabled):
+            template_name = wa_settings.get("general_otp") or "ch_otp_verification"
+            send_template_message(
+                phone=mobile_no,
+                template_name=template_name,
+                body_values={"1": otp_code},
+                customer_name=(customer_name or "Customer")[:140],
+                ref_doctype="Customer",
+                ref_name="",
+                enqueue=False,
                 company=_company,
             )
-            if rendered and rendered.get("body"):
-                sms_message = rendered["body"]
-            else:
-                custom_tpl = (frappe.get_system_settings("otp_sms_template") or "").strip()
-                if custom_tpl and "{{otp}}" in custom_tpl.replace(" ", ""):
-                    sms_message = custom_tpl.replace("{{ otp }}", otp_code).replace("{{otp}}", otp_code)
-                else:
-                    sms_message = (
-                        f"Your OTP for {purpose} is {otp_code}. "
-                        f"Valid for {mins} minutes. Do not share it with anyone."
-                    )
-            accepted = send_company_sms([mobile_no], sms_message, company=_company)
-            sent_sms = bool(accepted)
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), "Customer SMS OTP delivery failed")
+            sent_whatsapp = True
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Customer WhatsApp OTP delivery failed")
 
-    # 3) Email — only when permitted by the selected channel and an address exists.
-    #    Under "auto" it only runs if no phone channel succeeded.
-    #    Subject and body come from the CH Message Template registry (code="EOTP")
-    #    when present; otherwise we fall back to the legacy ``send_otp_email`` helper.
-    if try_email and (channel == "email" or not (sent_whatsapp or sent_sms)):
-        try:
-            from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
-            from ch_item_master.ch_core.message_template import render_template as _render_msg
-            from ch_item_master.ch_core.sms import get_otp_expiry
-            if not to_email:
-                to_email = _get_email_for_mobile(mobile_no)
-            if to_email:
-                rendered = _render_msg(
-                    code="EOTP",
-                    vars={
-                        "OTP": otp_code,
-                        "OTPCode": otp_code,
-                        "MIN": str(get_otp_expiry(_company)),
-                        "CompanyName": _company or "",
-                        "CustomerName": (customer_name or "Customer"),
-                        "Purpose": purpose,
-                    },
-                    channel="Email",
-                    company=_company,
-                )
-                if rendered and rendered.get("body"):
-                    frappe.sendmail(
-                        recipients=[to_email],
-                        subject=rendered.get("subject")
-                            or f"Your OTP for {purpose}",
-                        message=rendered["body"],
-                        delayed=False,
-                    )
-                    sent_email = True
-                else:
-                    sent_email = send_otp_email(to_email, otp_code, purpose, "")
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), "Customer OTP email delivery failed")
+    try:
+        from buyback.buyback.whatsapp_notifications import send_otp_email, _get_email_for_mobile
+        if not to_email:
+            to_email = _get_email_for_mobile(mobile_no)
+        if to_email:
+            sent_email = send_otp_email(to_email, otp_code, purpose, "")
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Customer OTP email delivery failed")
 
-    if not (sent_whatsapp or sent_sms or sent_email):
-        if channel == "whatsapp":
-            msg = _("WhatsApp OTP could not be sent. Check CH WhatsApp Account / Template configuration for the active company.")
-        elif channel == "sms":
-            msg = _("SMS OTP could not be sent. Check CH SMS Account configuration for the active company.")
-        elif channel == "email":
-            msg = _("Email OTP could not be sent. Provide a valid customer email and ensure outgoing email is configured.")
-        else:
-            msg = _(
-                "OTP was generated, but no delivery channel succeeded. "
-                "Configure CH WhatsApp Account / Template, CH SMS Account, "
-                "or provide a valid customer email."
-            )
-        frappe.throw(msg, title=_("OTP Delivery Not Configured"))
+    if not sent_whatsapp and not sent_email:
+        frappe.throw(
+            _("OTP was generated, but no delivery channel is enabled. Enable WhatsApp OTP or provide a valid customer email."),
+            title=_("OTP Delivery Not Configured"),
+        )
 
     return {
         "sent": True,
         "mobile": mobile_no[:3] + "****" + mobile_no[-3:],
         "otp_generated": bool(otp_code),
-        "channel": channel,
         "sent_whatsapp": sent_whatsapp,
-        "sent_sms": sent_sms,
         "sent_email": sent_email,
     }
 
@@ -10554,17 +10433,17 @@ def pos_send_approval_link(order_name) -> dict:
 
     # ── Send WhatsApp (via this order's company account) ──────────
     try:
-        from ch_item_master.ch_core.whatsapp import get_whatsapp_settings, get_template, send_template_message
+        from ch_item_master.ch_core.whatsapp import get_whatsapp_settings, send_template_message
 
         settings = get_whatsapp_settings(doc.company)
         if settings and not settings.enabled:
             settings = None
 
-        template_name = get_template(doc.company, "buyback_customer_approval")[0] if settings else ""
+        template_name = getattr(settings, "buyback_customer_approval", "") if settings else ""
         if template_name:
             send_template_message(
                 phone=doc.mobile_no,
-                event="buyback_customer_approval",
+                template_name=template_name,
                 body_values={
                     "1": customer_name,
                     "2": item_label,
