@@ -1336,16 +1336,69 @@ def get_reports(pos_profile: str = None, days: int = 7) -> dict:
     }
 
 
-@frappe.whitelist(allow_guest=True)
-def get_pos_profiles() -> dict:
-    """Returns list of active POS Profiles for store selector (management side)."""
-    profiles = frappe.get_all(
+@frappe.whitelist()
+def get_pos_profiles() -> list:
+    """Returns active POS Profiles the caller is entitled to see.
+
+    Filter rules (Tier 1 CH User Scope hardening, SAP/Oracle parity):
+
+      1. **System Manager / Administrator**: full list (bypass).
+      2. Any other authenticated user: only profiles whose ``name`` appears
+         in the resolved store set of the user's ``CH User Scope``. This
+         set is kept in lock-step with ``POS Profile.applicable_for_users``
+         by ``ch_erp15.ch_erp15.pos_profile_sync``, but we compute here from
+         the scope directly so a user with a fresh scope-save sees the
+         update immediately (no need to wait for the async gate sync).
+      3. Guest is refused. ``allow_guest`` was removed intentionally —
+         kiosks running the queue page anonymously must switch to a
+         service-account session (SAP dedicated dialog user pattern).
+
+    Result: a list of ``{name, company, warehouse}`` dicts, ordered by
+    ``name asc``, filtered to the entitled subset. Never raises when the
+    user has no scope; simply returns an empty list (fail-closed).
+    """
+    if frappe.session.user == "Guest":
+        frappe.throw(
+            frappe._("You must be signed in to list POS Profiles."),
+            frappe.PermissionError,
+        )
+
+    all_profiles = frappe.get_all(
         "POS Profile",
         filters={"disabled": 0},
         fields=["name", "company", "warehouse"],
         order_by="name asc",
     )
-    return profiles
+
+    # Lazy import to avoid a circular dep at module load (ch_pos → ch_erp15).
+    try:
+        from ch_erp15.ch_erp15.scope import get_user_scope
+    except ImportError:
+        # ch_erp15 not installed on this site — degrade to open list rather
+        # than 500. This only matters for stand-alone ch_pos deployments,
+        # which our repo does not use, but keeps unit tests importable.
+        return all_profiles
+
+    scope = get_user_scope()
+    if scope.get("bypass"):
+        return all_profiles
+
+    stores = scope.get("stores") or set()
+    if not stores:
+        # Fail-closed: an authenticated non-bypass user with no scope sees
+        # nothing. Admins provision access via CH User Scope.
+        return []
+
+    entitled_profiles = set(
+        frappe.get_all(
+            "CH Store",
+            filters={"name": ("in", list(stores))},
+            pluck="pos_profile",
+        )
+    )
+    entitled_profiles.discard(None)
+
+    return [p for p in all_profiles if p.name in entitled_profiles]
 
 
 # ---------------------------------------------------------------------------
