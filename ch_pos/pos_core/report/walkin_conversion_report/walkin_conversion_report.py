@@ -12,6 +12,8 @@ import frappe
 from frappe import _
 from frappe.utils import flt, today
 
+from ch_erp15.ch_erp15.report_scope import scope_where_clause
+
 
 def execute(filters=None):
     filters = filters or {}
@@ -36,30 +38,23 @@ def _apply_defaults(filters):
 
 
 # ---------------------------------------------------------------------------
-# permission scope — via CH Store User table
+# permission scope — delegated to the central CH User Scope helper.
+#
+# Historical implementation read `CH Store User` directly and returned an
+# empty fragment (i.e. full visibility) for any user with no scope row.
+# That silently broke fail-closed for scoped users who happened to have no
+# CH Store User membership. Tier 4 wires this through the central helper
+# so it inherits the same fail-closed contract every other report uses.
 # ---------------------------------------------------------------------------
 
 def _get_scope_sql():
-    user = frappe.session.user
-    if "System Manager" in frappe.get_roles(user):
-        return ""
-    try:
-        rows = frappe.db.sql(
-            """
-            SELECT DISTINCT cs.name AS store_name
-            FROM `tabCH Store` cs
-            INNER JOIN `tabCH Store User` su ON su.parent = cs.name
-            WHERE su.user = %s AND cs.disabled = 0
-            """,
-            user,
-            as_dict=True,
-        )
-        if rows:
-            store_list = ", ".join(frappe.db.escape(r.store_name) for r in rows)
-            return f" AND t.store IN ({store_list})"
-    except Exception:
-        pass
-    return ""
+    clause = scope_where_clause(
+        store_field="t.store",
+        pos_profile_field="t.pos_profile",
+    )
+    if clause is None:
+        return ""  # bypass caller — no additional filter
+    return f" AND {clause}"
 
 
 # ---------------------------------------------------------------------------

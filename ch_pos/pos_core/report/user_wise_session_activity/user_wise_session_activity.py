@@ -2,6 +2,8 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
+from ch_erp15.ch_erp15.report_scope import scope_where_clause
+
 
 def execute(filters=None):
     columns = [
@@ -28,6 +30,14 @@ def execute(filters=None):
         if filters.get("to_date"):
             conditions += " AND s.business_date <= %(to_date)s"
             params["to_date"] = getdate(filters["to_date"])
+
+    # Tier 4 — CH User Scope narrowing on CH POS Session (fail-closed).
+    scope_clause = scope_where_clause(
+        store_field="s.store",
+        pos_profile_field="s.pos_profile",
+    )
+    if scope_clause is not None:
+        conditions += f" AND {scope_clause}"
 
     data = frappe.db.sql("""
         SELECT

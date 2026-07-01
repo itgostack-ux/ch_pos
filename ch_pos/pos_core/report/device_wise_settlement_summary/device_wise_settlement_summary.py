@@ -2,6 +2,8 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
+from ch_erp15.ch_erp15.report_scope import narrow_filters_by_store_scope
+
 
 def execute(filters=None):
     columns = [
@@ -29,6 +31,10 @@ def execute(filters=None):
             conditions["business_date"] = (">=", getdate(filters["from_date"]))
         if filters.get("to_date"):
             conditions.setdefault("business_date", ("<=", getdate(filters["to_date"])))
+
+    # Tier 4 — CH User Scope narrowing on `store` (fail-closed).
+    if not narrow_filters_by_store_scope(conditions, store_field="store"):
+        return columns, []
 
     data = frappe.get_all(
         "CH POS Settlement",

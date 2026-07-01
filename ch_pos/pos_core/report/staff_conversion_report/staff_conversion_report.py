@@ -2,6 +2,8 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from ch_erp15.ch_erp15.report_scope import scope_where_clause
+
 
 def execute(filters=None):
     filters = filters or {}
@@ -47,6 +49,11 @@ def get_data(filters):
 
     # Only include tokens that have a staff assignment
     conditions.append("(t.technician IS NOT NULL AND t.technician != '')")
+
+    # Tier 4 — CH User Scope narrowing (fail-closed for scoped users).
+    scope_clause = scope_where_clause(pos_profile_field="t.pos_profile")
+    if scope_clause is not None:
+        conditions.append(scope_clause)
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 

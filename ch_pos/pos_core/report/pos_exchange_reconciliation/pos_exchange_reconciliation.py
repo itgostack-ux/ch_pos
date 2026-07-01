@@ -14,6 +14,8 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from ch_erp15.ch_erp15.report_scope import scope_where_clause
+
 
 def execute(filters=None):
     filters = filters or {}
@@ -116,6 +118,13 @@ def _build_conditions(filters):
         conditions.append("pi.company = %(company)s")
     if filters.get("store"):
         conditions.append("pi.set_warehouse = %(store)s")
+    # Tier 4 — CH User Scope narrowing (fail-closed for scoped users).
+    scope_clause = scope_where_clause(
+        warehouse_field="pi.set_warehouse",
+        pos_profile_field="pi.pos_profile",
+    )
+    if scope_clause is not None:
+        conditions.append(scope_clause)
     return ("AND " + " AND ".join(conditions)) if conditions else ""
 
 

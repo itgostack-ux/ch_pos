@@ -1,6 +1,8 @@
 import frappe
 from frappe import _
 
+from ch_erp15.ch_erp15.report_scope import narrow_filters_by_store_scope
+
 
 def execute(filters=None):
     columns = [
@@ -20,6 +22,10 @@ def execute(filters=None):
         conditions["company"] = filters["company"]
     if filters and filters.get("store"):
         conditions["store"] = filters["store"]
+
+    # Tier 4 — CH User Scope narrowing on `store` (fail-closed).
+    if not narrow_filters_by_store_scope(conditions, store_field="store"):
+        return columns, []
 
     data = frappe.get_all(
         "CH POS Session",

@@ -1,6 +1,8 @@
 import frappe
 from frappe import _
 
+from ch_erp15.ch_erp15.report_scope import narrow_filters_by_store_scope
+
 
 def execute(filters=None):
     columns = [
@@ -22,6 +24,10 @@ def execute(filters=None):
             conditions["store"] = filters["store"]
         if filters.get("status"):
             conditions["status"] = filters["status"]
+
+    # Tier 4 — CH User Scope narrowing on `store` (fail-closed).
+    if not narrow_filters_by_store_scope(conditions, store_field="store"):
+        return columns, []
 
     bd_list = frappe.get_all(
         "CH Business Date",

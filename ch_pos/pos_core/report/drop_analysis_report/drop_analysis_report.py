@@ -2,6 +2,8 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from ch_erp15.ch_erp15.report_scope import scope_where_clause
+
 
 def execute(filters=None):
     filters = filters or {}
@@ -41,6 +43,11 @@ def get_data(filters):
     if filters.get("company"):
         conditions.append("t.company = %(company)s")
         params["company"] = filters["company"]
+
+    # Tier 4 — CH User Scope narrowing (fail-closed for scoped users).
+    scope_clause = scope_where_clause(pos_profile_field="t.pos_profile")
+    if scope_clause is not None:
+        conditions.append(scope_clause)
 
     where = "WHERE " + " AND ".join(conditions)
 
