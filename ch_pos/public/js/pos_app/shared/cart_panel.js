@@ -910,7 +910,7 @@ export class CartPanel {
 		// #7: jump to the Pre-Book screen carrying the current cart + customer.
 		// The cart lives on PosState, which persists across modes, so the
 		// prebook workspace renders it pre-filled (no re-entry).
-		w.on("click", ".ch-pos-btn-prebook", () => EventBus.emit("mode:switch", "prebook"));
+		w.on("click", ".ch-pos-btn-prebook", () => EventBus.emit("mode:set", "prebook"));
 
 		// Keep held-bills badge current whenever any held bill changes
 		EventBus.on("held_bills:updated", () => this._refresh_held_count(w));
@@ -1131,12 +1131,6 @@ export class CartPanel {
 			? `<span class="cart-offer-tag" title="${__("Exception Request")}">${frappe.utils.escape_html(item.exception_request)}${exception_status ? ` • ${exception_status_icon}${frappe.utils.escape_html(exception_status)}` : ""}</span>`
 			: "";
 		const special = item.is_warranty ? " is-warranty-line" : item.is_vas ? " is-vas-line" : "";
-		// Free-gift badge: shown when rate is zero but item is explicitly allowed (ch_allow_zero_rate)
-		const free_gift_tag = (cint(item.ch_allow_zero_rate) && !flt(item.rate))
-			? `<span class="cart-offer-tag" style="background:#dcfce7;color:#166534;" title="${__("Free gift / zero-rate item")}">
-				<i class="fa fa-gift" style="margin-right:3px;"></i>${__("Free")}
-			</span>`
-			: "";
 		const fixed_qty = cint(item.has_serial_no || item.is_warranty || item.is_vas);
 		const whole_uom = cint(item.must_be_whole_number || fixed_qty);
 		const qty_display = whole_uom
@@ -1210,7 +1204,7 @@ export class CartPanel {
 				<div class="cart-line-top">
 					<span class="cart-item-name">
 						${frappe.utils.escape_html(item.item_name)}
-						${offer_tag}${free_gift_tag}${uom_tag}${serial_tag}${margin_tag}${exception_tag}
+						${offer_tag}${uom_tag}${serial_tag}${margin_tag}${exception_tag}
 					</span>
 					<span class="cart-item-amount">
 						${computed_discount_amt > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);margin-right:6px">₹${format_number(base_amount)}</span>` : ""}
