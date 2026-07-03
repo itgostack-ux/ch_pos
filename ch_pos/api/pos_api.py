@@ -8321,13 +8321,14 @@ _SHARED_MODES = ["imei", "customer360", "reports"]
 
 COMPANY_MODE_MAP = {
     "retail": [
-        "sell", "returns", "buyback", "material_request", "stock_transfer",
-        "guided", "model_compare", "claims", "exceptions", "queue", "prebook",
-        "pickup", "stock_audit",
+        "sell", "returns", "buyback", "material_request", "inbound_receive",
+        "stock_transfer", "guided", "model_compare", "claims", "exceptions",
+        "queue", "prebook", "pickup", "stock_audit",
     ] + _SHARED_MODES,
     "service": [
         "sell", "returns", "buyback", "repair", "queue", "service",
         "guided", "exceptions", "prebook", "pickup", "stock_audit",
+        "inbound_receive",
     ] + _SHARED_MODES,
 }
 

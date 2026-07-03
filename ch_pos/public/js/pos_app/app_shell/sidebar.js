@@ -36,6 +36,7 @@ const MODE_SECTIONS = [
 		label: __("Inventory"),
 		modes: [
 			{ key: "material_request", icon: "fa-clipboard",    label: __("Request Stock") },
+			{ key: "inbound_receive",  icon: "fa-inbox",        label: __("Inbound Receive") },
 			{ key: "stock_transfer",   icon: "fa-truck",        label: __("Transfers") },
 			{ key: "bin_manager",      icon: "fa-th-large",     label: __("Bin Manager") },
 			{ key: "stock_audit",      icon: "fa-balance-scale",label: __("Stock Audit") },
@@ -599,6 +600,6 @@ export class Sidebar {
 		return ["sell", "returns", "buyback", "repair"];
 	}
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["service", "imei", "customer360", "reports", "material_request", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
+		return ["service", "imei", "customer360", "reports", "material_request", "inbound_receive", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
 	}
 }

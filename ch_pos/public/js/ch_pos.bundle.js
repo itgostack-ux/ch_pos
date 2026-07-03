@@ -39,6 +39,7 @@ import { Customer360Workspace } from "./pos_app/modules/customer360/customer360_
 import { ReportsWorkspace } from "./pos_app/modules/reports/reports_workspace.js";
 import { MaterialRequestWorkspace } from "./pos_app/modules/material_request/material_request_workspace.js";
 import { StockTransferWorkspace } from "./pos_app/modules/stock_transfer/stock_transfer_workspace.js";
+import { InboundReceiveWorkspace } from "./pos_app/modules/inbound_receive/inbound_receive_workspace.js";
 import { BinManagerWorkspace } from "./pos_app/modules/bin_manager/bin_manager_workspace.js";
 import { GuidedWorkspace } from "./pos_app/modules/guided/guided_workspace.js";
 import { ModelCompareWorkspace } from "./pos_app/modules/model_compare/model_compare_workspace.js";
@@ -108,6 +109,7 @@ ch_pos.PosApp = class PosApp {
 		this.reports_workspace = new ReportsWorkspace();
 		this.material_request_workspace = new MaterialRequestWorkspace();
 		this.stock_transfer_workspace = new StockTransferWorkspace();
+		this.inbound_receive_workspace = new InboundReceiveWorkspace();
 		this.bin_manager_workspace = new BinManagerWorkspace();
 		this.guided_workspace = new GuidedWorkspace();
 		this.model_compare_workspace = new ModelCompareWorkspace();
