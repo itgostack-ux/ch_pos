@@ -659,9 +659,18 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── API ────────────────────────────────────────────────────────────────────
+// Backend module is chosen by the ``?system=`` URL param:
+//   (default) ── ch_pos.api.token_api          → POS Kiosk Token (BMPL walk-ins)
+//   ?system=gofix ── gofix.api.token_api       → GoFix Token (GSPL stores)
+// Both backends expose the same method names, so the UI is polymorphic.
+function _apiBase() {
+  const sys = (new URLSearchParams(window.location.search).get('system') || '').toLowerCase();
+  return sys === 'gofix' ? 'gofix.api.token_api' : 'ch_pos.api.token_api';
+}
+
 function api(method, args) {
   const qs = new URLSearchParams(args || {}).toString();
-  const url = '/api/method/ch_pos.api.token_api.' + method + (qs ? '?' + qs : '');
+  const url = '/api/method/' + _apiBase() + '.' + method + (qs ? '?' + qs : '');
   return fetch(url, {
     headers: { 'X-Frappe-CSRF-Token': getCsrf(), 'Accept': 'application/json' }
   }).then(r => r.json()).then(d => {
@@ -671,7 +680,7 @@ function api(method, args) {
 }
 
 function apiPost(method, body) {
-  return fetch('/api/method/ch_pos.api.token_api.' + method, {
+  return fetch('/api/method/' + _apiBase() + '.' + method, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
