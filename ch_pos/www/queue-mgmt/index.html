@@ -712,8 +712,21 @@ function detectSystems() {
     mgmt.availableSystems.pos   = Array.isArray(posRows)   && posRows.length   > 0;
     mgmt.availableSystems.gofix = Array.isArray(gofixRows) && gofixRows.length > 0;
 
+    // A ?store= that only one backend recognises decides the system —
+    // opening /queue-mgmt?store=GF-KOLATHUR must land on the GoFix
+    // backend even for users who also operate POS Kiosk stores,
+    // otherwise the dashboard shows zeros for a store with tokens.
+    const wanted = (params.get('store') || '').trim();
+    const owns = (rows) => Array.isArray(rows) && rows.some(
+      (r) => r && (r.name === wanted || r.warehouse === wanted)
+    );
+
     if (urlSys === 'pos' || urlSys === 'gofix') {
       mgmt.system = urlSys;
+    } else if (wanted && owns(gofixRows) && !owns(posRows)) {
+      mgmt.system = 'gofix';
+    } else if (wanted && owns(posRows) && !owns(gofixRows)) {
+      mgmt.system = 'pos';
     } else if (mgmt.availableSystems.gofix && !mgmt.availableSystems.pos) {
       mgmt.system = 'gofix';
     } else {
