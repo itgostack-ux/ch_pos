@@ -17,7 +17,7 @@ from frappe.utils import cint, flt, nowdate
 
 @frappe.whitelist()
 def create_pos_invoice_offline(**kwargs):
-    """Create a POS Invoice with idempotency guard on client_id.
+    """Create a POS Sales Invoice with idempotency guard on client_id.
 
     When the POS queues an invoice offline, it attaches a client_id (UUID-like
     string) to the payload.  If the submit succeeded but the ack was lost (e.g.
@@ -26,21 +26,17 @@ def create_pos_invoice_offline(**kwargs):
 
     Falls through to the standard create_pos_invoice for the actual creation.
     """
-    client_id = kwargs.get("client_id")
+    client_id = str(kwargs.get("client_id") or "").strip()
+    client_request_id = str(kwargs.get("client_request_id") or client_id or "").strip()
 
-    if client_id:
-        existing = frappe.db.get_value(
-            "POS Invoice",
-            {"ch_offline_client_id": client_id, "docstatus": ("!=", 2)},
-            "name",
-        )
-        if existing:
-            doc = frappe.get_doc("POS Invoice", existing)
-            return {
-                "name": doc.name,
-                "grand_total": flt(doc.grand_total),
-                "status": "already_exists",
-            }
+    existing = _find_existing_offline_sales_invoice(client_id, client_request_id)
+    if existing:
+        doc = frappe.get_doc("Sales Invoice", existing)
+        return {
+            "name": doc.name,
+            "grand_total": flt(doc.grand_total),
+            "status": "already_exists",
+        }
 
     # Delegate via frappe.call so get_newargs strips Frappe-internal keys
     # (cmd, csrf_token, ignore_permissions, etc.) that arrive in **kwargs
@@ -49,16 +45,54 @@ def create_pos_invoice_offline(**kwargs):
 
     _FRAPPE_INTERNAL = {"cmd", "csrf_token", "client_id", "data", "ignore_permissions", "flags"}
     clean_kwargs = {k: v for k, v in kwargs.items() if k not in _FRAPPE_INTERNAL}
+    if client_request_id and not clean_kwargs.get("client_request_id"):
+        clean_kwargs["client_request_id"] = client_request_id
     result = frappe.call(create_pos_invoice, **clean_kwargs)
 
     # Stamp the client_id on the created invoice so future retries hit the guard
-    if result and client_id:
+    if result and result.get("name") and (client_id or client_request_id):
         try:
-            frappe.db.set_value("POS Invoice", result["name"], "ch_offline_client_id", client_id)
+            updates = {}
+            if client_id and frappe.db.has_column("Sales Invoice", "ch_offline_client_id"):
+                updates["ch_offline_client_id"] = client_id[:140]
+            if client_request_id and frappe.db.has_column("Sales Invoice", "custom_client_request_id"):
+                updates["custom_client_request_id"] = client_request_id[:140]
+            if updates:
+                frappe.db.set_value("Sales Invoice", result["name"], updates, update_modified=False)
         except Exception:
-            pass  # non-critical — idempotency is best-effort
+            frappe.log_error(frappe.get_traceback(), f"Offline POS idempotency stamp failed: {result['name']}")
 
     return result
+
+
+def _find_existing_offline_sales_invoice(client_id: str | None, client_request_id: str | None) -> str | None:
+    """Return an existing Sales Invoice for a durable offline retry token."""
+    clauses = []
+    params = {}
+
+    if client_id and frappe.db.has_column("Sales Invoice", "ch_offline_client_id"):
+        clauses.append("ch_offline_client_id = %(client_id)s")
+        params["client_id"] = client_id[:140]
+    if client_request_id and frappe.db.has_column("Sales Invoice", "custom_client_request_id"):
+        clauses.append("custom_client_request_id = %(client_request_id)s")
+        params["client_request_id"] = client_request_id[:140]
+
+    if not clauses:
+        return None
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT name
+        FROM `tabSales Invoice`
+        WHERE docstatus != 2
+          AND ({' OR '.join(clauses)})
+        ORDER BY creation DESC
+        LIMIT 1
+        """,
+        params,
+        as_dict=True,
+    )
+    return rows[0].name if rows else None
 
 
 # ── Full Item Catalog ─────────────────────────────────────────────────────────
