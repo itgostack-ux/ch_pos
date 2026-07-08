@@ -2843,11 +2843,52 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
     sp.insert(ignore_permissions=True)
     sp.submit()
 
-    # Link active VAS plan back to CH Customer Device
+    # Link active VAS plan back to CH Customer Device — create the device
+    # record on-the-fly if one does not exist yet. Previously we only
+    # linked when a CH Customer Device row already existed, which meant
+    # POS-sold VAS plans on brand-new (or IMEI-migrated) devices left the
+    # customer-device ledger blank and the plan was invisible in the
+    # customer 360 / warranty dashboards.
     if serial_no:
         cd_name = frappe.db.get_value("CH Customer Device", {"serial_no": serial_no})
-        if cd_name:
-            frappe.db.set_value("CH Customer Device", cd_name, "active_warranty_plan", sp.name)
+        if not cd_name:
+            try:
+                item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
+                item_brand = frappe.db.get_value("Item", item_code, "brand")
+                cd = frappe.new_doc("CH Customer Device")
+                cd.customer = customer
+                cd.serial_no = serial_no
+                cd.item_code = item_code
+                cd.item_name = item_name
+                if item_brand:
+                    cd.brand = item_brand
+                cd.company = company
+                cd.imei_number = serial_no  # POS mostly deals with IMEI-serialised phones
+                cd.current_status = "Sold"
+                cd.purchase_date = today
+                cd.purchase_invoice = original_invoice or sales_invoice
+                cd.purchase_company = company
+                cd.purchase_price = flt(device_purchase_price)
+                cd.active_warranty_plan = sp.name
+                cd.warranty_status = "In Warranty"
+                cd.warranty_expiry = sp.end_date
+                cd.warranty_plan_name = frappe.db.get_value(
+                    "CH Warranty Plan", warranty_plan, "plan_name"
+                ) or warranty_plan
+                cd.warranty_months = plan_doc.duration_months or 0
+                cd.flags.ignore_permissions = True
+                cd.insert(ignore_permissions=True)
+            except Exception:
+                # Never block a warranty sale on the customer-device ledger —
+                # log for audit; the ledger can be reconciled by a nightly job.
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    f"POS: CH Customer Device auto-create failed for serial {serial_no}",
+                )
+        else:
+            frappe.db.set_value(
+                "CH Customer Device", cd_name, "active_warranty_plan", sp.name
+            )
 
     return sp
 

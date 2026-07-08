@@ -52,26 +52,61 @@ def get_attach_offers(item_code, pos_profile=None) -> dict:
 
 
 def _get_warranty_plans(item_code, item_group=None, brand=None):
-    """Retrieve warranty plans applicable to this item."""
+    """Retrieve warranty plans applicable to this item.
+
+    NOTE: `CH Warranty Plan` uses a `status` field (Draft/Active/Retired), NOT
+    `is_active`; brand is a top-level Link (`brand`), and item-group
+    applicability lives in the `applicable_item_groups` child table — the
+    legacy `applicable_item_group` / `applicable_brand` single-value fields
+    no longer exist. The previous filter shape referenced fields that
+    haven't been on the plan for two schema revisions, which effectively
+    hid every plan from the attach panel.
+    """
     if not frappe.db.table_exists("tabCH Warranty Plan"):
         return []
 
-    filters = {"is_active": 1}
-    plans = frappe.get_all("CH Warranty Plan",
+    today = nowdate()
+
+    filters = {"status": "Active"}
+    if brand:
+        # Plan.brand is optional — a NULL/empty means "applies to any brand",
+        # so match either the exact brand or a catch-all plan.
+        filters["brand"] = ["in", [brand, "", None]]
+
+    plans = frappe.get_all(
+        "CH Warranty Plan",
         filters=filters,
-        fields=["name", "plan_name", "plan_type", "duration_months", "price",
-                "service_item", "applicable_item_group", "applicable_brand"],
+        fields=[
+            "name", "plan_name", "plan_type", "duration_months", "price",
+            "service_item", "brand", "valid_from", "valid_to",
+        ],
         order_by="price asc",
     )
 
+    # Pre-load item-group applicability rows for the fetched plan set in a
+    # single query so we do not re-hit the DB per plan.
+    plan_names = [p.name for p in plans]
+    ig_map: dict[str, set[str]] = {}
+    if plan_names and frappe.db.table_exists("tabCH Warranty Plan Item Group"):
+        for row in frappe.get_all(
+            "CH Warranty Plan Item Group",
+            filters={"parent": ["in", plan_names], "parenttype": "CH Warranty Plan"},
+            fields=["parent", "item_group"],
+            limit_page_length=0,
+        ):
+            if row.item_group:
+                ig_map.setdefault(row.parent, set()).add(row.item_group)
+
     matched = []
     for p in plans:
-        # Match by item_group or brand (or catch-all with no filter)
-        ig = p.applicable_item_group
-        br = p.applicable_brand
-        if ig and ig != item_group:
+        # Validity window (either bound optional).
+        if p.valid_from and str(p.valid_from) > today:
             continue
-        if br and br != brand:
+        if p.valid_to and str(p.valid_to) < today:
+            continue
+        # Item-group applicability: catch-all when the plan has no rows.
+        applicable_groups = ig_map.get(p.name)
+        if applicable_groups and item_group and item_group not in applicable_groups:
             continue
         matched.append(p)
 
