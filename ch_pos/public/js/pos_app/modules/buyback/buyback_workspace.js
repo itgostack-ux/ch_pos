@@ -1362,6 +1362,61 @@ export class BuybackWorkspace {
 	_html_done(data) {
 		const order = data.order;
 		const price = order ? order.final_price : 0;
+		const order_name = order ? order.name : "";
+
+		// Phase B — Compliance surface
+		// Show indemnity + data-wipe + pickup state so the store agent knows
+		// whether the order is still open on the back-office side (Cashify /
+		// Samsung / Best Buy show this on their POS after payout too).
+		const indemnity_ok = !!(order && order.indemnity_signed);
+		const wipe_ok = !!(order && order.data_wipe_certificate);
+		const pickup_name = order && order.latest_pickup_appointment;
+		const pickup_attempts = order ? (order.pickup_attempts_count || 0) : 0;
+
+		const chip = (ok, label_ok, label_pending) =>
+			`<span class="ch-pos-badge ${ok ? "badge-success" : "badge-warning"}"
+				style="font-size:10px">
+				<i class="fa fa-${ok ? "check-circle" : "exclamation-triangle"}"></i>
+				${ok ? __(label_ok) : __(label_pending)}
+			</span>`;
+
+		const compliance_chips = order ? `
+			<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:10px">
+				${chip(indemnity_ok, "Indemnity Captured", "Indemnity Pending")}
+				${chip(wipe_ok, "Data Wiped", "Data Wipe Pending")}
+				${pickup_name
+					? `<span class="ch-pos-badge badge-primary" style="font-size:10px">
+						<i class="fa fa-truck"></i>
+						${__("Pickup")} ${frappe.utils.escape_html(pickup_name)}
+						${pickup_attempts > 1 ? ` (${pickup_attempts})` : ""}
+					</span>`
+					: `<span class="ch-pos-badge badge-muted" style="font-size:10px">
+						<i class="fa fa-truck"></i> ${__("No Pickup Scheduled")}
+					</span>`}
+			</div>` : "";
+
+		const compliance_actions = order ? `
+			<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+				${!indemnity_ok ? `
+					<button class="btn btn-outline-primary ch-bb-record-indemnity"
+						data-order="${frappe.utils.escape_html(order_name)}"
+						style="border-radius:var(--pos-radius,8px);min-height:36px;font-size:12px">
+						<i class="fa fa-file-signature"></i> ${__("Record Indemnity")}
+					</button>` : ""}
+				${!pickup_name && pickup_attempts < 3 ? `
+					<button class="btn btn-outline-primary ch-bb-schedule-pickup"
+						data-order="${frappe.utils.escape_html(order_name)}"
+						style="border-radius:var(--pos-radius,8px);min-height:36px;font-size:12px">
+						<i class="fa fa-truck"></i> ${__("Schedule Pickup")}
+					</button>` : ""}
+				${!wipe_ok ? `
+					<button class="btn btn-outline-primary ch-bb-record-wipe"
+						data-order="${frappe.utils.escape_html(order_name)}"
+						style="border-radius:var(--pos-radius,8px);min-height:36px;font-size:12px">
+						<i class="fa fa-eraser"></i> ${__("Record Data Wipe")}
+					</button>` : ""}
+			</div>` : "";
+
 		return `
 			<div class="ch-bb-valuation-banner" style="background:#d1fae5;border-color:#10b981">
 				<div class="ch-bb-val-label" style="color:#065f46">
@@ -1369,12 +1424,14 @@ export class BuybackWorkspace {
 				</div>
 				<div class="ch-bb-val-amount" style="color:#065f46">₹${format_number(price)}</div>
 				<div class="ch-bb-val-sub">
-					${__("Order")} ${order ? order.name : ""} · ${order ? __(order.status) : ""}
+					${__("Order")} ${order_name} · ${order ? __(order.status) : ""}
 				</div>
+				${compliance_chips}
 			</div>
+			${compliance_actions}
 			<div style="text-align:center;margin-top:16px;display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
 				<button class="btn btn-primary ch-bb-print-receipt"
-					data-order="${order ? order.name : ""}"
+					data-order="${order_name}"
 					style="border-radius:var(--pos-radius,8px);font-weight:600;min-height:40px">
 					<i class="fa fa-print"></i> ${__("Print Receipt")}
 				</button>
@@ -1795,6 +1852,215 @@ export class BuybackWorkspace {
 			if (w) {
 				w.addEventListener("load", () => setTimeout(() => w.print(), 600));
 			}
+		});
+
+		// ── Phase B — Indemnity capture from POS ────────────────────
+		el.on("click.bbstage", ".ch-bb-record-indemnity", (e) => {
+			const order_name = $(e.currentTarget).data("order");
+			if (!order_name) return;
+			const cust_name = (data.order && data.order.customer_name)
+				|| data.customer_name || "";
+			const d = new frappe.ui.Dialog({
+				title: __("Record Customer Indemnity / NOC"),
+				fields: [
+					{
+						fieldname: "signed_by_name", fieldtype: "Data",
+						label: __("Signed By (Customer Name)"),
+						reqd: 1, default: cust_name,
+					},
+					{
+						fieldname: "signature_type", fieldtype: "Select",
+						label: __("Signature Type"),
+						options: [
+							"E-Signature (Kiosk)",
+							"Wet Signature Scanned",
+							"Aadhaar OTP Consent",
+							"Digilocker eSign",
+						].join("\n"),
+						reqd: 1, default: "E-Signature (Kiosk)",
+					},
+					{
+						fieldname: "attachment", fieldtype: "Attach",
+						label: __("Signed Document (Optional)"),
+					},
+					{
+						fieldname: "notes", fieldtype: "Small Text",
+						label: __("Notes"),
+					},
+				],
+				primary_action_label: __("Record"),
+				primary_action: (v) => {
+					d.hide();
+					frappe.call({
+						method: "buyback.lifecycle_api.record_indemnity",
+						args: {
+							order_name: order_name,
+							signed_by_name: v.signed_by_name,
+							signature_type: v.signature_type,
+							attachment: v.attachment,
+							notes: v.notes,
+						},
+						freeze: true,
+						freeze_message: __("Recording indemnity…"),
+						callback: () => {
+							frappe.show_alert({
+								message: __("Indemnity captured."),
+								indicator: "green",
+							});
+							this._reload();
+						},
+					});
+				},
+			});
+			d.show();
+		});
+
+		// ── Phase B — Schedule Pickup from POS ──────────────────────
+		el.on("click.bbstage", ".ch-bb-schedule-pickup", (e) => {
+			const order_name = $(e.currentTarget).data("order");
+			if (!order_name) return;
+			const mobile = (data.order && data.order.mobile_no)
+				|| data.mobile_no || "";
+			const d = new frappe.ui.Dialog({
+				title: __("Schedule Pickup Appointment"),
+				fields: [
+					{
+						fieldname: "appointment_date", fieldtype: "Date",
+						label: __("Appointment Date"), reqd: 1,
+						default: frappe.datetime.add_days(
+							frappe.datetime.get_today(), 1),
+					},
+					{
+						fieldname: "appointment_slot", fieldtype: "Select",
+						label: __("Slot"),
+						options: [
+							"",
+							"09:00 - 12:00",
+							"12:00 - 15:00",
+							"15:00 - 18:00",
+							"18:00 - 21:00",
+						].join("\n"),
+					},
+					{
+						fieldname: "pickup_address", fieldtype: "Small Text",
+						label: __("Pickup Address"),
+						description: __(
+							"Leave blank to auto-fill from customer's primary address."),
+					},
+					{
+						fieldname: "contact_phone", fieldtype: "Data",
+						label: __("Contact Phone"), default: mobile,
+					},
+					{
+						fieldname: "vendor_partner", fieldtype: "Data",
+						label: __("Vendor Partner"),
+						description: __(
+							"e.g. Delhivery, Shadowfax, Porter, Own Fleet"),
+					},
+					{
+						fieldname: "remarks", fieldtype: "Small Text",
+						label: __("Remarks"),
+					},
+				],
+				primary_action_label: __("Schedule"),
+				primary_action: (v) => {
+					d.hide();
+					frappe.call({
+						method: "buyback.lifecycle_api.schedule_pickup",
+						args: Object.assign({ order_name: order_name }, v),
+						freeze: true,
+						freeze_message: __("Scheduling pickup…"),
+						callback: (r) => {
+							if (r.message && r.message.appointment) {
+								frappe.show_alert({
+									message: __(
+										"Pickup Appointment {0} created.",
+										[r.message.appointment]),
+									indicator: "green",
+								});
+								this._reload();
+							}
+						},
+					});
+				},
+			});
+			d.show();
+		});
+
+		// ── Phase B — Data-Wipe Certificate from POS ────────────────
+		el.on("click.bbstage", ".ch-bb-record-wipe", (e) => {
+			const order_name = $(e.currentTarget).data("order");
+			if (!order_name) return;
+			const d = new frappe.ui.Dialog({
+				title: __("Record Data-Wipe Certificate"),
+				fields: [
+					{
+						fieldname: "wipe_method", fieldtype: "Select",
+						label: __("Wipe Method"), reqd: 1,
+						options: [
+							"Factory Reset",
+							"Encrypted Erase",
+							"Overwrite (Single Pass)",
+							"Overwrite (Multi Pass)",
+							"Cryptographic Erase",
+							"Physical Destruction",
+						].join("\n"),
+						default: "Factory Reset",
+					},
+					{
+						fieldname: "wipe_standard", fieldtype: "Select",
+						label: __("Wipe Standard"),
+						options: [
+							"",
+							"DoD 5220.22-M",
+							"NIST SP 800-88 Clear",
+							"NIST SP 800-88 Purge",
+							"NIST SP 800-88 Destroy",
+							"Gutmann",
+							"Vendor Default",
+						].join("\n"),
+					},
+					{
+						fieldname: "wipe_tool", fieldtype: "Data",
+						label: __("Wipe Tool"),
+					},
+					{
+						fieldname: "wipe_duration_minutes", fieldtype: "Int",
+						label: __("Duration (minutes)"),
+					},
+					{
+						fieldname: "evidence_attachment", fieldtype: "Attach",
+						label: __("Evidence Report (PDF/Log)"),
+					},
+					{
+						fieldname: "remarks", fieldtype: "Small Text",
+						label: __("Remarks"),
+					},
+				],
+				primary_action_label: __("Submit Certificate"),
+				primary_action: (v) => {
+					d.hide();
+					frappe.call({
+						method: "buyback.lifecycle_api.record_data_wipe",
+						args: Object.assign(
+							{ order_name: order_name, submit: 1 }, v),
+						freeze: true,
+						freeze_message: __("Submitting Data-Wipe Certificate…"),
+						callback: (r) => {
+							if (r.message && r.message.certificate) {
+								frappe.show_alert({
+									message: __(
+										"Data-Wipe Certificate {0} submitted.",
+										[r.message.certificate]),
+									indicator: "green",
+								});
+								this._reload();
+							}
+						},
+					});
+				},
+			});
+			d.show();
 		});
 	}
 

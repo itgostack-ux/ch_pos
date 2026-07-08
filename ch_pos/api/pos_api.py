@@ -1785,6 +1785,34 @@ def create_pos_invoice(pos_profile, customer, items,
         exchange_credit = flt(ba.quoted_price) or flt(ba.estimated_price)
         inv.custom_exchange_amount = exchange_credit
 
+        # ── Phase B — Single Source of Truth ────────────────────────────────
+        # Every exchange application must resolve to exactly one
+        # Buyback Exchange Order so the Phase A `exchange_hooks` guardrails
+        # (customer match / no-dup / credit exhaustion) run uniformly whether
+        # the caller was POS or the Buyback Order form.
+        try:
+            from buyback.exchange_lifecycle import (
+                ensure_exchange_order_from_assessment,
+            )
+            _sot = ensure_exchange_order_from_assessment(
+                assessment_name=exchange_assessment,
+                customer=customer,
+                mobile_no=(ba.mobile_no if hasattr(ba, "mobile_no") else None),
+            )
+            if _sot and _sot.get("exchange_order"):
+                inv.ch_exchange_order = _sot["exchange_order"]
+                inv.ch_exchange_credit = exchange_credit
+        except frappe.ValidationError:
+            # Bubble validation errors (e.g. customer mismatch) up to caller.
+            raise
+        except Exception:
+            # Never break POS on an SoT hiccup — log & continue with the
+            # legacy assessment-only linkage.
+            frappe.log_error(
+                frappe.get_traceback(),
+                "pos_api._apply_exchange_credit: SoT bridge failed",
+            )
+
         # ── MARKET-PARITY GUARD ──────────────────────────────────────────────
         # Exchange credit must not exceed the new purchase value.
         try:
@@ -9928,6 +9956,27 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "approval_url": (
                 f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
                 if o.approval_token else ""
+            ),
+            # Phase B — market-standard compliance state
+            "indemnity_signed": cint(getattr(o, "indemnity_signed", 0)),
+            "indemnity_signed_at": (
+                str(getattr(o, "indemnity_signed_at", ""))
+                if getattr(o, "indemnity_signed_at", None) else ""
+            ),
+            "indemnity_signature_type": getattr(o, "indemnity_signature_type", "") or "",
+            "indemnity_signed_by_name": getattr(o, "indemnity_signed_by_name", "") or "",
+            "indemnity_captured_by": getattr(o, "indemnity_captured_by", "") or "",
+            "indemnity_attachment": getattr(o, "indemnity_attachment", "") or "",
+            "latest_pickup_appointment": getattr(o, "latest_pickup_appointment", "") or "",
+            "pickup_attempts_count": cint(getattr(o, "pickup_attempts_count", 0)),
+            "pickup_completed_at": (
+                str(getattr(o, "pickup_completed_at", ""))
+                if getattr(o, "pickup_completed_at", None) else ""
+            ),
+            "data_wipe_certificate": getattr(o, "data_wipe_certificate", "") or "",
+            "data_wipe_completed_at": (
+                str(getattr(o, "data_wipe_completed_at", ""))
+                if getattr(o, "data_wipe_completed_at", None) else ""
             ),
         }
 
