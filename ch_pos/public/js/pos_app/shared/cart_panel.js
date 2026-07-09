@@ -1131,7 +1131,7 @@ export class CartPanel {
 			? `<span class="cart-offer-tag" title="${__("Exception Request")}">${frappe.utils.escape_html(item.exception_request)}${exception_status ? ` • ${exception_status_icon}${frappe.utils.escape_html(exception_status)}` : ""}</span>`
 			: "";
 		const special = item.is_warranty ? " is-warranty-line" : item.is_vas ? " is-vas-line" : "";
-		const fixed_qty = cint(item.has_serial_no || item.is_warranty || item.is_vas);
+		const fixed_qty = cint(item.has_serial_no || item.is_warranty || item.is_vas || item.is_free_bundle_item);
 		const whole_uom = cint(item.must_be_whole_number || fixed_qty);
 		const qty_display = whole_uom
 			? `${Math.round(flt(item.qty))}`

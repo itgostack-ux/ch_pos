@@ -5,6 +5,8 @@ Each category has its own manager; if the cart spans multiple categories,
 ALL category managers must approve before the free sale can proceed.
 """
 
+import hashlib
+import hmac
 import json
 import secrets
 
@@ -17,6 +19,20 @@ from frappe.utils import now_datetime, get_url
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _manager_link_sig(token: str, manager: str) -> str:
+    """Per-manager signature binding one approval link to one manager row.
+
+    Keyed on the site's server-only encryption key so that a party who holds
+    only the (secret, shared-per-approval) approval token still cannot forge
+    a link for a different manager by editing the ``manager`` query param.
+    """
+    from frappe.utils.password import get_encryption_key
+
+    key = get_encryption_key()
+    if isinstance(key, str):
+        key = key.encode()
+    return hmac.new(key, f"{token}:{manager}".encode(), hashlib.sha256).hexdigest()
 
 def _rate_limit_token_attempt(token: str) -> None:
     """Raise PermissionError if this token has been attempted too many times.
@@ -167,13 +183,14 @@ def request_free_sale_approval(reason, customer, items, grand_total,
 
 def _send_approval_email(approval_doc, manager_info, token):
     """Send approval request email to a category manager."""
+    sig = _manager_link_sig(token, manager_info["manager"])
     approve_url = get_url(
         f"/api/method/ch_pos.api.free_sale_api.respond_to_approval"
-        f"?token={token}&manager={manager_info['manager']}&action=approve"
+        f"?token={token}&manager={manager_info['manager']}&action=approve&sig={sig}"
     )
     reject_url = get_url(
         f"/api/method/ch_pos.api.free_sale_api.respond_to_approval"
-        f"?token={token}&manager={manager_info['manager']}&action=reject"
+        f"?token={token}&manager={manager_info['manager']}&action=reject&sig={sig}"
     )
 
     # Build items summary for email
@@ -252,7 +269,7 @@ def _send_approval_email(approval_doc, manager_info, token):
 
 @frappe.whitelist(allow_guest=True)
 @rate_limit(limit=20, seconds=300, ip_based=True)
-def respond_to_approval(token: str, manager: str, action: str) -> None:
+def respond_to_approval(token: str, manager: str, action: str, sig: str | None = None) -> None:
     """Handle manager's response from email link.
 
     Token-based authentication — the cryptographic token (32+ chars) proves
@@ -313,6 +330,21 @@ def respond_to_approval(token: str, manager: str, action: str) -> None:
             indicator_color="red",
         )
         return
+
+    # Per-manager link binding: links issued after this hardening carry a
+    # `sig` that must match. This stops a holder of the shared approval token
+    # from approving as a *different* manager by editing the `manager` param.
+    # Links issued before the upgrade carry no sig and fall back to the
+    # token + pending-row check below; those tokens expire within
+    # `approval_token_ttl_hours` (default 24h), so the fallback is transient.
+    if sig:
+        if not hmac.compare_digest(_manager_link_sig(token, manager), sig):
+            frappe.respond_as_web_page(
+                _("Invalid Link"),
+                _("This approval link is not valid for the specified manager."),
+                indicator_color="red",
+            )
+            return
 
     doc = frappe.get_doc("CH Free Sale Approval", approval[0].name)
 

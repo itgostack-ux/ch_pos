@@ -1478,33 +1478,65 @@ def create_pos_invoice(pos_profile, customer, items,
         # the cashier clicked "Request Approval"). Fall back to the most recent
         # unused approval for this cashier — needed for offline-queued invoices
         # where the client may not have persisted the approval name.
-        approval_name = None
+        #
+        # Both paths are bound to THIS cashier (requested_by) so one cashier
+        # cannot consume another's approval; the explicit-name path previously
+        # matched on name/status/used alone.
+        approval_filters = {
+            "requested_by": frappe.session.user,
+            "status": "Approved",
+            "used": 0,
+        }
+        approval = None
         if free_sale_approval_name:
-            approval_name = frappe.db.get_value(
+            approval = frappe.db.get_value(
                 "CH Free Sale Approval",
-                {
-                    "name": free_sale_approval_name,
-                    "status": "Approved",
-                    "used": 0,
-                },
-                "name",
+                {**approval_filters, "name": free_sale_approval_name},
+                ["name", "customer", "cart_snapshot"],
+                as_dict=True,
             )
-        if not approval_name:
-            approval_name = frappe.db.get_value(
+        if not approval:
+            approval = frappe.db.get_value(
                 "CH Free Sale Approval",
-                {
-                    "requested_by": frappe.session.user,
-                    "status": "Approved",
-                    "used": 0,
-                },
-                "name",
+                approval_filters,
+                ["name", "customer", "cart_snapshot"],
+                as_dict=True,
                 order_by="modified desc",
             )
-        if not approval_name:
+        if not approval:
             frappe.throw(
-                frappe._("Free sale requires an approved CH Free Sale Approval. "
+                frappe._("Free sale requires an approved CH Free Sale Approval requested by you. "
                          "No unused approved request found for the current user."),
                 title=frappe._("Free Sale Not Approved"),
+            )
+        approval_name = approval.name
+
+        # Bind the approval to THIS cart so a low-value/different-item approval
+        # cannot be replayed onto another sale. Compare the sellable-item
+        # signature (item_code, qty) — robust against discount/tax recompute,
+        # and stronger than a monetary total match. Warranty/VAS lines are
+        # excluded on both sides, mirroring how the approval was requested.
+        def _cart_signature(rows):
+            sig = []
+            for _r in (rows or []):
+                if _r.get("is_warranty") or _r.get("is_vas"):
+                    continue
+                _code = (_r.get("item_code") or "").strip()
+                if _code:
+                    sig.append((_code, flt(_r.get("qty") or 1)))
+            return sorted(sig)
+
+        approved_cart = frappe.parse_json(approval.cart_snapshot or "[]")
+        if _cart_signature(approved_cart) != _cart_signature(items):
+            frappe.throw(
+                frappe._("Free Sale Approval {0} was granted for a different cart. "
+                         "Please request a fresh approval for the current items.").format(approval_name),
+                title=frappe._("Approval Cart Mismatch"),
+            )
+        if approval.customer and customer and approval.customer != customer:
+            frappe.throw(
+                frappe._("Free Sale Approval {0} was granted for a different customer.").format(approval_name),
+                title=frappe._("Approval Customer Mismatch"),
             )
         # P0 FIX: Atomic mark-as-used to prevent replay
         _rows = frappe.db.sql(
@@ -9872,6 +9904,10 @@ def get_pos_buyback_detail(assessment_name) -> dict:
 
     Called on every stage transition so the frontend always has fresh data.
     """
+    # Returns payout/KYC data and the customer approval URL — gate on
+    # Buyback Assessment read authority so an arbitrary authenticated user
+    # cannot pull another store's buyback detail by assessment name.
+    frappe.has_permission("Buyback Assessment", "read", throw=True)
     a = frappe.get_doc("Buyback Assessment", assessment_name)
 
     # Fix status stuck at Draft when already Frappe-submitted
@@ -9952,7 +9988,8 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "approved_by": o.approved_by or "",
             "approval_date": str(o.approval_date) if o.approval_date else "",
             "approval_remarks": o.approval_remarks or "",
-            "approval_token": o.approval_token or "",
+            # Raw approval_token is intentionally NOT exposed; the UI only
+            # needs the ready-to-share approval_url below.
             "approval_url": (
                 f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
                 if o.approval_token else ""
@@ -10229,6 +10266,7 @@ def pos_send_customer_otp(order_name) -> dict:
     """Generate and send an OTP to the customer's mobile for buyback price approval."""
     from buyback.api import _as_system_user
 
+    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", order_name)
     mobile_no = doc.mobile_no
     if not mobile_no:
@@ -10258,6 +10296,7 @@ def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
     """
     from buyback.api import _as_system_user
 
+    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", order_name)
     with _as_system_user():
         result = doc.verify_otp(otp_code=otp_code)
@@ -10277,6 +10316,7 @@ def pos_submit_assessment_imei_validation(assessment_name: str, status: str, scr
     isn't reported lost/stolen BEFORE an inspector spends time grading it.
     `create_inspection`/`pos_create_inspection` hard-block on this.
     """
+    frappe.has_permission("Buyback Assessment", "write", throw=True)
     doc = frappe.get_doc("Buyback Assessment", assessment_name)
     return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
 
@@ -10293,6 +10333,7 @@ def pos_submit_imei_validation(order_name: str, status: str, screenshot: str | N
     gate those screens based on `imei_validation_status` from
     `get_pos_buyback_detail()`.
     """
+    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", order_name)
     return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
 
@@ -10305,11 +10346,12 @@ def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
     (doctype method calls from POS require the standard frappe.call
     pattern, but xcall to a whitelisted function is simpler from JS).
     """
+    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", name)
     return doc.bypass_otp_instore(remarks=remarks)
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 @rate_limit(limit=20, seconds=300, ip_based=True)
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
                                  kyc_id_type=None, kyc_id_number=None,
@@ -10328,7 +10370,11 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
     kyc_id_type / kyc_id_number: optional KYC data saved on the order.
     """
     doc = frappe.get_doc("Buyback Order", order_name)
-    # Guest-accessible (customer-facing step); OTP/method check below is the auth gate
+    # Authenticated POS/staff action. Require Buyback Order write authority
+    # BEFORE bypassing doc-level perms for the payout/KYC field writes below.
+    # This endpoint was previously allow_guest=True, which let anyone with an
+    # order name approve an eligible buyback or rewrite its bank/UPI payout.
+    frappe.has_permission("Buyback Order", "write", throw=True)
     doc.flags.ignore_permissions = True
 
     def _normalize_kyc_type(id_type):

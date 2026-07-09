@@ -604,6 +604,7 @@ export class CartService {
 						if (values[`bundle_item_${i}`]) {
 							const free_item = {
 								...bi,
+								qty: 1,
 								selling_price: 0,
 								mrp: bi.mrp || 0,
 								ch_allow_zero_rate: 1,
@@ -613,6 +614,7 @@ export class CartService {
 							// Set rate to 0 for the just-added free item
 							const last = PosState.cart[PosState.cart.length - 1];
 							if (last && last.item_code === bi.item_code) {
+								last.qty = 1;
 								last.rate = 0;
 								last.is_free_bundle_item = true;
 								last.bundle_parent = item_data.item_code;

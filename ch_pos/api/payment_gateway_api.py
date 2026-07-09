@@ -89,6 +89,43 @@ def _get_machine(machine_name):
     return machine
 
 
+def _user_store_company_scope():
+    """Return ``(stores, companies)`` the current user is entitled to, or
+    ``None`` for unrestricted access (System Manager / bypass, or when the
+    ch_erp15 scope module is unavailable in a standalone/test env)."""
+    try:
+        from ch_erp15.ch_erp15.scope import get_user_scope
+    except ImportError:
+        return None
+    scope = get_user_scope()
+    if scope.get("bypass"):
+        return None
+    return (scope.get("stores") or set(), scope.get("companies") or set())
+
+
+def _assert_machine_in_scope(machine):
+    """Refuse a machine whose store/company is outside the caller's scope.
+
+    A live gateway order must be bound to the operator's authority — an
+    authenticated user cannot drive a terminal at a store they are not
+    entitled to."""
+    if frappe.session.user == "Guest":
+        frappe.throw(_("You must be signed in to use a payment machine."), frappe.PermissionError)
+    scoped = _user_store_company_scope()
+    if scoped is None:
+        return
+    stores, companies = scoped
+    if machine.store and machine.store in stores:
+        return
+    if machine.company and machine.company in companies:
+        return
+    frappe.throw(
+        _("You are not entitled to operate payment machine {0}.").format(
+            machine.machine_name or machine.name),
+        frappe.PermissionError,
+    )
+
+
 @frappe.whitelist()
 def get_payment_machines(company=None, store=None, pos_profile=None, payment_mode=None):
     filters = {"enabled": 1}
@@ -111,6 +148,17 @@ def get_payment_machines(company=None, store=None, pos_profile=None, payment_mod
         machines = [m for m in machines if not m.pos_profile or m.pos_profile == pos_profile]
     if payment_mode:
         machines = [m for m in machines if _machine_supported(frappe._dict(m), payment_mode)]
+
+    # Store-scope gate: a user only sees machines at stores/companies they are
+    # entitled to. Prevents enumerating another store's terminals.
+    scoped = _user_store_company_scope()
+    if scoped is not None:
+        stores, companies = scoped
+        machines = [
+            m for m in machines
+            if (m.get("store") and m["store"] in stores)
+            or (m.get("company") and m["company"] in companies)
+        ]
 
     providers = []
     seen = set()
@@ -236,6 +284,8 @@ def _build_test_order(machine, amount, payment_mode, merchant_order_reference, c
 def initiate_payment(machine_name, amount, payment_mode, customer=None, customer_name=None,
         customer_email=None, customer_phone=None, merchant_order_reference=None, notes=None):
     machine = _get_machine(machine_name)
+    # Bind the live gateway order to the operator's store authority.
+    _assert_machine_in_scope(machine)
     provider = (machine.provider or "").strip()
     amount = flt(amount)
     if amount <= 0:
@@ -299,25 +349,35 @@ def pine_labs_return(**kwargs):
     sig_header = frappe.get_request_header("X-PINELABS-SIGNATURE") or ""
 
     # Validate HMAC signature (H17)
-    settings = frappe.get_cached_doc("CH Payment Machine", frappe.form_dict.get("machine", "")) \
-        if frappe.form_dict.get("machine") else None
-    if settings:
-        secret = _safe_get_password("CH Payment Machine", settings.name, "client_secret")
-        if secret:
-            import hmac
-            import hashlib
-            expected_sig = hmac.new(
-                secret.encode(), body.encode(), hashlib.sha256
-            ).hexdigest()
-            if not hmac.compare_digest(expected_sig, sig_header):
-                frappe.log_error(
-                    title="Pine Labs Signature Mismatch",
-                    message=f"Signature validation failed on return callback. Expected: {expected_sig[:16]}..., got: {sig_header[:16]}...",
-                )
-                frappe.throw(
-                    _("Webhook signature validation failed"),
-                    frappe.AuthenticationError,
-                )
+    machine_param = frappe.form_dict.get("machine", "")
+    settings = frappe.get_cached_doc("CH Payment Machine", machine_param) if machine_param else None
+    secret = _safe_get_password("CH Payment Machine", settings.name, "client_secret") if settings else None
+    if secret:
+        import hmac
+        import hashlib
+        expected_sig = hmac.new(
+            secret.encode(), body.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected_sig, sig_header):
+            frappe.log_error(
+                title="Pine Labs Signature Mismatch",
+                message=f"Signature validation failed on return callback. Expected: {expected_sig[:16]}..., got: {sig_header[:16]}...",
+            )
+            frappe.throw(
+                _("Webhook signature validation failed"),
+                frappe.AuthenticationError,
+            )
+    else:
+        # Machine could not be identified (missing `machine` param) or has no
+        # secret — signature could NOT be verified. These handlers only log
+        # and never mutate financial state, so we don't reject (a real bank
+        # callback may not echo our machine param), but we record the gap so
+        # an unsigned/forged callback is auditable rather than silent.
+        frappe.log_error(
+            title="Pine Labs Return Unverified",
+            message=f"Return callback accepted WITHOUT signature verification "
+                    f"(machine={machine_param or 'missing'}, sig_present={bool(sig_header)}).",
+        )
 
     frappe.logger("ch_pos_payment_gateway").info("Pine Labs return: %s", json.dumps(kwargs, default=str))
     return kwargs
@@ -335,23 +395,35 @@ def pine_labs_webhook():
     machine_name = payload.get("machine") or frappe.form_dict.get("machine")
 
     # Validate HMAC signature (H17)
-    if machine_name and frappe.db.exists("CH Payment Machine", machine_name):
-        secret = _safe_get_password("CH Payment Machine", machine_name, "client_secret")
-        if secret:
-            import hmac
-            import hashlib
-            expected_sig = hmac.new(
-                secret.encode(), body.encode(), hashlib.sha256
-            ).hexdigest()
-            if not hmac.compare_digest(expected_sig, sig_header):
-                frappe.log_error(
-                    title="Pine Labs Signature Mismatch",
-                    message=f"Signature validation failed on webhook. Machine: {machine_name}",
-                )
-                frappe.throw(
-                    _("Webhook signature validation failed"),
-                    frappe.AuthenticationError,
-                )
+    secret = (
+        _safe_get_password("CH Payment Machine", machine_name, "client_secret")
+        if machine_name and frappe.db.exists("CH Payment Machine", machine_name)
+        else None
+    )
+    if secret:
+        import hmac
+        import hashlib
+        expected_sig = hmac.new(
+            secret.encode(), body.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected_sig, sig_header):
+            frappe.log_error(
+                title="Pine Labs Signature Mismatch",
+                message=f"Signature validation failed on webhook. Machine: {machine_name}",
+            )
+            frappe.throw(
+                _("Webhook signature validation failed"),
+                frappe.AuthenticationError,
+            )
+    else:
+        # Unidentifiable machine or no secret → signature NOT verified. Handler
+        # only logs (no state mutation), so we don't reject a possibly-genuine
+        # callback, but we record the unverified acceptance for audit.
+        frappe.log_error(
+            title="Pine Labs Webhook Unverified",
+            message=f"Webhook accepted WITHOUT signature verification "
+                    f"(machine={machine_name or 'missing'}, sig_present={bool(sig_header)}).",
+        )
 
     frappe.logger("ch_pos_payment_gateway").info("Pine Labs webhook: %s", body)
     return {"status": "ok"}
