@@ -84,6 +84,7 @@ def _get_service_item() -> str:
 def _seed_source_plan(
     plan_name: str, *, plan_type: str, price: float = 0.0,
     allow_external_device: int = 0, external_device_item: str | None = None,
+    pricing_mode: str = "Fixed", percentage_value: float = 0.0,
 ) -> str:
     """Create a CH Warranty Plan we can wrap with a VAS Plan below."""
     doc = frappe.new_doc("CH Warranty Plan")
@@ -91,9 +92,9 @@ def _seed_source_plan(
     doc.plan_type = plan_type
     doc.status = "Active"
     doc.duration_months = 12
-    doc.pricing_mode = "Fixed"
+    doc.pricing_mode = pricing_mode
     doc.price = price
-    doc.percentage_value = 0
+    doc.percentage_value = percentage_value
     doc.service_item = _get_service_item()
     doc.max_claims = 1
     doc.claims_per_year = 0
@@ -284,6 +285,59 @@ def test_v09_js_payload_shape_complete(ctx: dict) -> None:
     _pass("V09", "all JS-facing fields present in payload")
 
 
+def test_v10_vas_plan_percentage_pricing(ctx: dict) -> None:
+    """VAS Plan wrapper with list_price=0 whose source is on 'Percentage of
+    Device Price' must compute price from the cart device rate. This is the
+    exact scenario in the teammate's ADLD screenshot: source CH-WP-2026-00007
+    has pricing_mode='Percentage of Device Price' with percentage_value=10
+    and VAS Plan.list_price=0 — the payload was returning ₹0 which surfaced
+    in the cart as ADLD @ ₹0."""
+    plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
+    hit = next((p for p in plans if p.get("vas_plan") == ctx["vas_plan_percentage"]), None)
+    if not hit:
+        _fail("V10", "percentage-priced VAS Plan not returned")
+        return
+    # Cart has ₹29,000 device × 10% → ₹2,900.
+    expected = round(29000.0 * 10 / 100.0, 2)
+    if flt(hit["price"]) != expected:
+        _fail(
+            "V10",
+            f"expected ₹{expected} (10% of ₹29,000), got ₹{hit['price']}",
+        )
+        return
+    _pass(
+        "V10",
+        f"percentage pricing resolved: 10% of ₹29,000 = ₹{hit['price']}",
+    )
+
+
+def test_v11_legacy_plan_percentage_pricing(ctx: dict) -> None:
+    """Legacy CH Warranty Plan (plan_type=Value Added Service or Protection
+    Plan, no VAS Plan wrapper) with pricing_mode='Percentage of Device Price'
+    must also compute against cart device rate. Before the fix the legacy
+    branch only read the Fixed .price column."""
+    plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
+    hit = next((p for p in plans if p["name"] == ctx["source_legacy_pct"]), None)
+    if not hit:
+        _fail("V11", "legacy percentage-priced plan not returned")
+        return
+    if hit.get("vas_plan"):
+        _fail("V11", f"legacy plan wrongly flagged with vas_plan={hit['vas_plan']}")
+        return
+    # Cart has ₹29,000 device × 15% → ₹4,350.
+    expected = round(29000.0 * 15 / 100.0, 2)
+    if flt(hit["price"]) != expected:
+        _fail(
+            "V11",
+            f"expected ₹{expected} (15% of ₹29,000), got ₹{hit['price']}",
+        )
+        return
+    _pass(
+        "V11",
+        f"legacy percentage pricing resolved: 15% of ₹29,000 = ₹{hit['price']}",
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  DIAGNOSTICS
 # ═══════════════════════════════════════════════════════════════════
@@ -350,6 +404,21 @@ def _run_all_inner() -> None:
         plan_type="Protection Plan",
         price=799.0,
     )
+    # Percentage-of-device-price source, wrapped by a ₹0-list_price VAS
+    # Plan — mirrors the teammate's ADLD case.
+    source_percentage = _seed_source_plan(
+        f"{TAG} Percentage Source",
+        plan_type="Own Warranty",
+        pricing_mode="Percentage of Device Price",
+        percentage_value=10.0,
+    )
+    # Legacy VAS plan (no VAS Plan wrapper) on percentage pricing.
+    source_legacy_pct = _seed_source_plan(
+        f"{TAG} Legacy Percentage No Wrapper",
+        plan_type="Value Added Service",
+        pricing_mode="Percentage of Device Price",
+        percentage_value=15.0,
+    )
 
     # ── Seed VAS Plan wrappers (sellable-catalog layer) ──
     vas_plan_own = _seed_vas_wrapper(
@@ -367,6 +436,12 @@ def _run_all_inner() -> None:
         source_capped,
         list_price=499.0,
         max_device_price=20000.0,   # cart has ₹29,000 device — should block
+    )
+    # ₹0 list_price forces the endpoint to fall through to percentage math.
+    vas_plan_percentage = _seed_vas_wrapper(
+        f"{TAG} Percentage Wrapper",
+        source_percentage,
+        list_price=0.0,
     )
     # NOTE: source_legacy is intentionally NOT wrapped by a VAS Plan.
 
@@ -387,9 +462,12 @@ def _run_all_inner() -> None:
         "source_protection": source_protection,
         "source_capped": source_capped,
         "source_legacy": source_legacy,
+        "source_percentage": source_percentage,
+        "source_legacy_pct": source_legacy_pct,
         "vas_plan_own": vas_plan_own,
         "vas_plan_protection": vas_plan_protection,
         "vas_plan_capped": vas_plan_capped,
+        "vas_plan_percentage": vas_plan_percentage,
         "cart": cart,
     }
 
@@ -405,6 +483,8 @@ def _run_all_inner() -> None:
         test_v07_protection_plan_needs_device_in_cart,
         test_v08_broken_source_fk_is_skipped_not_crash,
         test_v09_js_payload_shape_complete,
+        test_v10_vas_plan_percentage_pricing,
+        test_v11_legacy_plan_percentage_pricing,
     ]
     for t in tests:
         try:

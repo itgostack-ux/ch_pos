@@ -8513,6 +8513,8 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             w.external_device_item  AS wp_external_device_item,
             w.fulfillment_type  AS wp_fulfillment_type,
             w.price             AS wp_price,
+            w.pricing_mode      AS wp_pricing_mode,
+            w.percentage_value  AS wp_percentage_value,
             w.duration_months   AS wp_duration_months
         FROM `tabVAS Plan` v
         LEFT JOIN `tabCH Warranty Plan` w ON w.name = v.source_warranty_plan
@@ -8520,6 +8522,22 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         """,
         as_dict=True,
     )
+
+    def _resolve_price(list_price, wp_price, pricing_mode, pct):
+        """Effective sellable rate for a plan.
+
+        VAS Plan.list_price overrides everything when > 0 — the catalog
+        SKU is what got quoted to the cashier. When it is 0 and the
+        source CH Warranty Plan is on 'Percentage of Device Price', we
+        compute rate against the cart's highest device price (same rule
+        the direct-attach flow uses in attach_api._get_warranty_plans).
+        Otherwise fall back to the governance Fixed price.
+        """
+        if flt(list_price) > 0:
+            return flt(list_price)
+        if pricing_mode == "Percentage of Device Price" and flt(pct) > 0 and max_device_price:
+            return round(max_device_price * flt(pct) / 100.0, 2)
+        return flt(wp_price or 0)
 
     plans: list[frappe._dict] = []
     wrapped_sources: set[str] = set()
@@ -8539,9 +8557,15 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             "duration_months": (
                 row.vas_duration_months or row.wp_duration_months or 0
             ),
-            # VAS Plan.list_price is the sellable rate; fall back to the
-            # governance-side price only if the catalog didn't set one.
-            "price": flt(row.vas_list_price or row.wp_price or 0),
+            # VAS Plan.list_price is the sellable rate; fall back to
+            # percentage-of-device-price math, then to the governance
+            # Fixed price. See _resolve_price above.
+            "price": _resolve_price(
+                row.vas_list_price, row.wp_price,
+                row.wp_pricing_mode, row.wp_percentage_value,
+            ),
+            "pricing_mode": row.wp_pricing_mode,
+            "percentage_value": flt(row.wp_percentage_value),
             "coverage_description": row.wp_coverage_description,
             "brand": row.wp_brand,
             "fulfillment_type": row.wp_fulfillment_type,
@@ -8563,12 +8587,20 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         },
         fields=[
             "name", "plan_name", "plan_type", "service_item",
-            "duration_months", "price", "coverage_description", "brand",
+            "duration_months", "price", "pricing_mode", "percentage_value",
+            "coverage_description", "brand",
             "fulfillment_type", "allow_external_device", "external_device_item",
             "valid_from", "valid_to",
         ],
     )
     for p in legacy:
+        # Same rate resolution as the VAS Plan branch — legacy plans
+        # with pricing_mode='Percentage of Device Price' were charging
+        # ₹0 before this because we only read the Fixed .price column.
+        p["price"] = _resolve_price(
+            0, p.get("price"),
+            p.get("pricing_mode"), p.get("percentage_value"),
+        )
         p["min_device_price"] = 0.0
         p["max_device_price"] = 0.0
         p["vas_plan"] = None
