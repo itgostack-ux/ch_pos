@@ -82,9 +82,6 @@ doc_events = {
             "ch_pos.overrides.cash_receipt_limit.validate_section_269st_cash_limit",
             "ch_pos.overrides.cutoff_time_guard.validate_pos_cutoff_time",
         ],
-        "after_insert": [
-            "ch_pos.overrides.pos_invoice.finalize_imported_sales_invoice",
-        ],
         "on_submit": [
             "ch_pos.overrides.pos_invoice.create_customer_device_records",
             "ch_pos.overrides.pos_invoice.update_serial_lifecycle",
