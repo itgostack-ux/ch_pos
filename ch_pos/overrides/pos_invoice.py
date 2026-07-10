@@ -153,14 +153,18 @@ class CustomPOSInvoice(SalesInvoice):
         """POS-17 fix: Validate that bundle/free items still have active pricing at submit time.
         Prevents stale bundle deals from being invoiced after pricing changes.
         """
+        from ch_pos.api.pos_api import resolve_bundle_parent
+
         for item in self.items:
             if not item.get("custom_is_free_bundle_item"):
                 continue
-            # Check that the Product Bundle is still active
+            # Check that the Product Bundle is still active. The frontend
+            # stamps ``custom_bundle_parent`` with the scanned variant's
+            # item_code; ``resolve_bundle_parent`` falls back to the
+            # template so a bundle defined on ``Apple iPhone 13 Pro``
+            # still validates when the invoice line is ``I02793`` etc.
             parent_item = item.get("custom_bundle_parent") or ""
-            if parent_item and not frappe.db.exists(
-                "Product Bundle", {"new_item_code": parent_item, "disabled": 0}
-            ):
+            if parent_item and not resolve_bundle_parent(parent_item):
                 frappe.throw(
                     _("Bundle offer for {0} is no longer active. "
                       "Please remove the free item {1} and re-add.").format(

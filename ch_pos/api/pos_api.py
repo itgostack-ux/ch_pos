@@ -11565,22 +11565,59 @@ def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_ser
 
 
 # ── Bundle / Free Items ──────────────────────────────────────────
+def resolve_bundle_parent(item_code: str) -> str | None:
+    """Return the Item code whose active Product Bundle applies to ``item_code``.
+
+    ERPNext lets retailers link a Product Bundle to either a specific SKU or
+    the parent template. Our catalogue models each colour/storage as a
+    separate variant Item (e.g. ``I02793 = Apple iPhone 13 Pro 512GB Silver``),
+    with the template (``Apple iPhone 13 Pro``, ``has_variants=1``) holding
+    the retail-side attributes. Cashiers scan the variant, so an exact
+    ``new_item_code = variant`` lookup misses when the bundle is defined
+    against the template.
+
+    Resolution order:
+      1. Direct: active Product Bundle whose ``new_item_code`` equals
+         ``item_code``.
+      2. Fallback: if the item is a variant (``variant_of`` is set), check
+         for an active bundle against the template.
+
+    Returns the matching parent item code, or None. Used by both
+    :func:`get_bundle_items` (client popup) and
+    ``pos_invoice._validate_bundle_pricing`` (submit-time guard) so the
+    fallback stays consistent across the read and validate paths.
+    """
+    if not item_code:
+        return None
+    if frappe.db.exists("Product Bundle", {"new_item_code": item_code, "disabled": 0}):
+        return item_code
+    variant_of = frappe.db.get_value("Item", item_code, "variant_of")
+    if variant_of and frappe.db.exists(
+        "Product Bundle", {"new_item_code": variant_of, "disabled": 0}
+    ):
+        return variant_of
+    return None
+
+
 @frappe.whitelist()
 def get_bundle_items(item_code, warehouse=None, channel="POS") -> list:
     """Return free/bundled accessory items for a parent item.
 
-    Looks up Product Bundle for ``item_code``.  Returns child items
-    (excluding the parent itself) with pricing and stock info so the
-    POS frontend can show a "Select free items" popup.
+    Looks up an active Product Bundle for ``item_code`` (with a variant ->
+    template fallback via :func:`resolve_bundle_parent`) and returns the
+    child items (excluding the parent itself) with pricing and stock info
+    so the POS frontend can show a "Select free items" popup.
     """
-    if not frappe.db.exists("Product Bundle", {"new_item_code": item_code, "disabled": 0}):
+    parent = resolve_bundle_parent(item_code)
+    if not parent:
         return []
 
-    bundle = frappe.get_doc("Product Bundle", {"new_item_code": item_code, "disabled": 0})
+    bundle = frappe.get_doc("Product Bundle", {"new_item_code": parent, "disabled": 0})
     result = []
     for row in bundle.items:
-        if row.item_code == item_code:
-            continue  # skip the parent item itself
+        # Skip either the scanned variant itself or the resolved template.
+        if row.item_code in (item_code, parent):
+            continue
 
         item_fields = ["item_name", "image", "item_group", "stock_uom", "has_serial_no"]
         if frappe.db.has_column("Item", "ch_item_type"):
