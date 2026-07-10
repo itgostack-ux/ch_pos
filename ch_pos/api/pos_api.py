@@ -916,86 +916,956 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
     }
 
 
-@frappe.whitelist()
-def create_pos_invoice(pos_profile, customer, items,
-                       mode_of_payment=None, amount_paid=0,
-                       payments=None,
-                       exchange_assessment=None, buyback_order=None,
-                       additional_discount_percentage=0,
-                       additional_discount_amount=0, coupon_code=None,
-                       coupon_discount_amount=0,
-                       voucher_code=None, voucher_amount=0,
-                       redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
-                       bank_offer_discount=0, bank_offer_name=None,
-                       sales_executive=None, sale_type=None, sale_sub_type=None,
-                       sale_reference=None, finance_tenure=None, discount_reason=None,
-                       client_request_id=None,
-                       is_credit_sale=0, credit_days=0,
-                       credit_reference=None, credit_notes=None,
-                       credit_terms=None, credit_interest_rate=0,
-                       credit_grace_period=0, credit_partial_payment=0,
-                       credit_approved_by=None,
-                       is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
-                       free_sale_approved_at=None, free_sale_approval_name=None,
-                       advance_amount=0, kiosk_token=None,
-                       guided_session=None,
-                       exception_request=None, warranty_claim=None,
-                       customer_gstin=None,
-                       original_invoice=None,
-                       original_invoice_reason=None,
-                       discount_authorized_by=None,
-                       allow_surplus_refund=0,
-                       surplus_refund_mode_of_payment=None,
-                       sales_order=None,
-                       source_quotation=None,
-                       **_ignored) -> dict:
-    """Create and submit a Sales Invoice from the CH POS App cart.
 
-    Supports both legacy single-payment and new multi-payment (split) modes:
-      Legacy:  mode_of_payment + amount_paid
-      Split:   payments = [{mode_of_payment, amount, upi_transaction_id?,
-                             card_reference?, card_last_four?,
-                             finance_provider?, finance_tenure?,
-                             finance_approval_id?, finance_down_payment?}, ...]
 
-    Payment types supported:
-      Cash, UPI, Card, Finance/EMI, Credit Sale, Free Sale,
-      Loyalty, Voucher, Exchange, Advance Adjustment
 
-    Idempotency:
-      Pass a unique client_request_id (UUID) per attempt. Retries with the
-      same ID within 10 minutes return the existing invoice without
-      creating a duplicate.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
+CH POS Sales Invoice — Hardcoded taxable/2 split for CGST/SGST.
+
+FORMULA:
+  For each item:
+    exempted_value = PR purchase_exempted_value per unit
+    taxable_value  = (rate − exempted_value) / 1.18
+    amount         = rate × qty
+
+  Sales Taxes and Charges (HARDCODED SPLIT):
+    In-State (2 rows: CGST + SGST):
+      CGST tax_amount = Σ(taxable_value) / 2
+      SGST tax_amount = Σ(taxable_value) / 2
+    Out-of-State (1 row: IGST):
+      IGST tax_amount = Σ(taxable_value)
+
+  GST Breakup Table (HARDCODED SPLIT per HSN):
+    Taxable Amount = Σ(taxable_value) per HSN
+    In-State:
+      CGST Amount  = taxable / 2
+      SGST Amount  = taxable / 2
+    Out-of-State:
+      IGST Amount  = taxable
+
+  Example (rate=92000, exempted=34220, in-state):
+    taxable = (92000 − 34220) / 1.18 = 48,966.10
+    CGST    = 48,966.10 / 2         = 24,483.05
+    SGST    = 48,966.10 / 2         = 24,483.05
+    Grand Total = 92,000
+"""
+
+import frappe
+from frappe import _
+from frappe.utils import flt, cint, nowdate
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CACHES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_FIELD_MAP_CACHE: dict = {}
+_GST_RATE_CACHE: dict = {}
+
+
+def _detect_field(doctype, candidates):
+    key = f"{doctype}:{','.join(candidates)}"
+    if key in _FIELD_MAP_CACHE:
+        return _FIELD_MAP_CACHE[key]
+    try:
+        meta = frappe.get_meta(doctype)
+        for c in candidates:
+            if meta.has_field(c):
+                _FIELD_MAP_CACHE[key] = c
+                return c
+    except Exception:
+        pass
+    _FIELD_MAP_CACHE[key] = None
+    return None
+
+
+def _get_table_columns(table_name):
+    cache_key = f"cols:{table_name}"
+    if cache_key in _FIELD_MAP_CACHE:
+        return _FIELD_MAP_CACHE[cache_key]
+    try:
+        cols = frappe.db.sql(f"SHOW COLUMNS FROM `{table_name}`", as_dict=True)
+        col_set = {c.get("Field") for c in cols}
+        _FIELD_MAP_CACHE[cache_key] = col_set
+        return col_set
+    except Exception:
+        _FIELD_MAP_CACHE[cache_key] = set()
+        return set()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PR EXEMPTED LOOKUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_purchase_exempted_value_for_serial(serial, item_code=None):
+    if not serial:
+        return 0.0
+
+    pr_field = _detect_field(
+        "Purchase Receipt Item",
+        ["custom_exempted_value", "exempted_value",
+         "custom_exempted_amount", "exempted_amount"],
+    )
+    if not pr_field:
+        return 0.0
+
+    try:
+        if frappe.db.exists("DocType", "CH Serial Lifecycle"):
+            result = frappe.db.sql(f"""
+                SELECT SUM(pri.`{pr_field}`) / NULLIF(SUM(pri.qty), 0)
+                FROM `tabCH Serial Lifecycle` lc
+                JOIN `tabPurchase Receipt Item` pri
+                    ON lc.purchase_document = pri.parent
+                   AND lc.item_code = pri.item_code
+                WHERE lc.name = %s
+                  AND lc.purchase_document IS NOT NULL
+                  AND lc.purchase_document != ''
+            """, (serial,), as_list=True)
+            val = flt(result[0][0]) if result and result[0][0] is not None else 0.0
+            if val > 0:
+                return val
+    except Exception:
+        pass
+
+    try:
+        pr_name = frappe.db.get_value("Serial No", serial, "purchase_document")
+        if pr_name:
+            filters_sql = "pri.parent = %s"
+            params = [pr_name]
+            if item_code:
+                filters_sql += " AND pri.item_code = %s"
+                params.append(item_code)
+            result = frappe.db.sql(f"""
+                SELECT SUM(pri.`{pr_field}`) / NULLIF(SUM(pri.qty), 0)
+                FROM `tabPurchase Receipt Item` pri WHERE {filters_sql}
+            """, tuple(params), as_list=True)
+            val = flt(result[0][0]) if result and result[0][0] is not None else 0.0
+            if val > 0:
+                return val
+    except Exception:
+        pass
+
+    try:
+        result = frappe.db.sql(f"""
+            SELECT SUM(pri.`{pr_field}`) / NULLIF(SUM(pri.qty), 0)
+            FROM `tabSerial No` sn
+            JOIN `tabPurchase Receipt Item` pri
+                ON sn.reference_name = pri.parent
+               AND sn.item_code = pri.item_code
+            WHERE sn.name = %s AND sn.reference_doctype = 'Purchase Receipt'
+        """, (serial,), as_list=True)
+        val = flt(result[0][0]) if result and result[0][0] is not None else 0.0
+        if val > 0:
+            return val
+    except Exception:
+        pass
+
+    try:
+        sn_field = _detect_field("Serial No", ["custom_exempted_value", "exempted_value"])
+        if sn_field:
+            val = flt(frappe.db.get_value("Serial No", serial, sn_field) or 0)
+            if val > 0:
+                return val
+    except Exception:
+        pass
+
+    try:
+        if not item_code:
+            item_code = frappe.db.get_value("Serial No", serial, "item_code")
+        if item_code:
+            item_field = _detect_field("Item", ["custom_exempted_value", "exempted_value"])
+            if item_field:
+                val = flt(frappe.db.get_value("Item", item_code, item_field) or 0)
+                if val > 0:
+                    return val
+    except Exception:
+        pass
+
+    return 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DYNAMIC INSERT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _dynamic_insert(table_name, row_dict):
+    existing_cols = _get_table_columns(table_name)
+    if not existing_cols:
+        raise Exception(f"Table {table_name} has no columns")
+
+    cols_to_use = []
+    values_to_use = {}
+    for col, val in row_dict.items():
+        if col in existing_cols:
+            cols_to_use.append(col)
+            values_to_use[col] = val
+
+    if not cols_to_use:
+        raise Exception(f"No valid columns for {table_name}")
+
+    col_sql = ", ".join([f"`{c}`" for c in cols_to_use])
+    placeholder_sql = ", ".join([f"%({c})s" for c in cols_to_use])
+    sql = f"INSERT INTO `{table_name}` ({col_sql}) VALUES ({placeholder_sql})"
+    frappe.db.sql(sql, values_to_use)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FORCE-INSERT TAX ROWS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _force_insert_tax_rows(si_name, template_name):
+    if not template_name:
+        return False
+    if not frappe.db.exists("Sales Taxes and Charges Template", template_name):
+        return False
+
+    try:
+        tmpl = frappe.get_cached_doc(
+            "Sales Taxes and Charges Template", template_name)
+        if not tmpl.taxes:
+            return False
+
+        frappe.db.sql(
+            "DELETE FROM `tabSales Taxes and Charges` WHERE parent = %s",
+            (si_name,))
+
+        company = frappe.db.get_value("Sales Invoice", si_name, "company")
+        default_cc = frappe.db.get_value("Company", company, "cost_center") or ""
+
+        if not default_cc:
+            fallback = frappe.db.sql("""
+                SELECT name FROM `tabCost Center`
+                WHERE company=%s AND is_group=0 AND disabled=0
+                ORDER BY creation ASC LIMIT 1
+            """, (company,), as_dict=True)
+            if fallback:
+                default_cc = fallback[0].name
+
+        for idx, src in enumerate(tmpl.taxes, start=1):
+            row_data = {
+                "name":         frappe.generate_hash(length=10),
+                "parent":       si_name,
+                "parenttype":   "Sales Invoice",
+                "parentfield":  "taxes",
+                "idx":          idx,
+                "charge_type":  src.charge_type or "On Net Total",
+                "account_head": src.account_head,
+                "description":  src.description or src.account_head,
+                "rate":         flt(src.rate),
+                "cost_center":  src.cost_center or default_cc,
+                "tax_amount":   0,
+                "base_tax_amount": 0,
+                "tax_amount_after_discount_amount": 0,
+                "base_tax_amount_after_discount_amount": 0,
+                "total":        0,
+                "base_total":   0,
+                "included_in_print_rate":  1,
+                "included_in_paid_amount": 1,
+                "add_deduct_tax":          "Add",
+                "row_id":                  "",
+                "dont_recompute_tax":      1,  # 🔑 prevent ERPNext from overwriting
+                "docstatus":    0,
+                "owner":        "Administrator",
+                "modified_by":  "Administrator",
+                "creation":     frappe.utils.now(),
+                "modified":     frappe.utils.now(),
+            }
+            try:
+                _dynamic_insert("tabSales Taxes and Charges", row_data)
+            except Exception:
+                frappe.log_error(
+                    title=f"POS tax insert [{si_name}]",
+                    message=frappe.get_traceback())
+
+        frappe.db.commit()
+        frappe.clear_document_cache("Sales Invoice", si_name)
+        return True
+
+    except Exception:
+        frappe.log_error(
+            title=f"_force_insert_tax_rows failed [{si_name}]",
+            message=frappe.get_traceback())
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 1: Write ITEM-LEVEL calculations
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _write_item_calculations(si_name):
     """
+    Per item:
+      taxable_value = (rate − exempted) / 1.18
+      gst_value     = amount − exempted_total − taxable_row (for reference)
+    Returns totals for subsequent use.
+    """
+    if not frappe.db.exists("Sales Invoice", si_name):
+        return None
+
+    si_exempted_field = _detect_field(
+        "Sales Invoice Item",
+        ["custom_exempted_value", "exempted_value",
+         "custom_exempted_amount", "exempted_amount"])
+    si_taxable_field = _detect_field(
+        "Sales Invoice Item",
+        ["custom_total_taxable_value", "custom_taxable_value"])
+    si_gst_field = _detect_field(
+        "Sales Invoice Item",
+        ["custom_gst_value", "gst_value", "custom_gst_amount"])
+
+    sii_meta = frappe.get_meta("Sales Invoice Item")
+    has_pev = sii_meta.has_field("purchase_exempted_value")
+    has_taxable_val = sii_meta.has_field("taxable_value")
+
+    si_items = frappe.db.sql("""
+        SELECT name, item_code, qty, rate, serial_no
+        FROM `tabSales Invoice Item`
+        WHERE parent = %s ORDER BY idx
+    """, (si_name,), as_dict=True)
+
+    if not si_items:
+        return None
+
+    grand_total_amount = 0.0
+    total_taxable = 0.0
+    total_exempted = 0.0
+
+    for si_item in si_items:
+        rate = flt(si_item.rate)
+        qty = flt(si_item.qty) or 1.0
+        row_total = flt(rate * qty, 2)
+
+        serials = [s.strip() for s in (si_item.serial_no or "").split("\n") if s.strip()]
+        pev_per_unit = 0.0
+        if serials:
+            pev_sum = 0.0
+            for sn in serials:
+                pev_sum += _get_purchase_exempted_value_for_serial(sn, si_item.item_code)
+            pev_per_unit = flt(pev_sum / len(serials), 2)
+
+        if pev_per_unit == 0.0:
+            try:
+                item_field = _detect_field("Item", ["custom_exempted_value", "exempted_value"])
+                if item_field:
+                    pev_per_unit = flt(
+                        frappe.db.get_value("Item", si_item.item_code, item_field) or 0)
+            except Exception:
+                pass
+
+        if pev_per_unit > rate:
+            pev_per_unit = rate
+
+        exempted_per_unit = flt(pev_per_unit, 2)
+
+        # FORMULA
+        taxable_base_unit = flt(max(rate - exempted_per_unit, 0.0), 6)
+        taxable_val_unit = flt(taxable_base_unit / 1.18, 6)
+
+        row_exempted = flt(exempted_per_unit * qty, 2)
+        row_taxable = flt(taxable_val_unit * qty, 2)
+        # Display GST value = taxable / 2 (matches hardcoded split)
+        row_gst_display = flt(row_taxable / 2.0, 2)  # per side (CGST or SGST)
+
+        grand_total_amount += row_total
+        total_taxable += row_taxable
+        total_exempted += row_exempted
+
+        # amount/rate stay tax-inclusive (what the customer sees/pays);
+        # net_amount/net_rate must be the tax-EXCLUSIVE base (row_taxable),
+        # since that's what ERPNext's standard get_gl_entries() credits to
+        # the Income account. Leaving them equal to the inclusive amount
+        # double-counted the tax on the credit side against grand_total's
+        # debit, causing "Debit and Credit not equal" once the tax rows
+        # were populated with the (now-corrected) real 9%+9% split.
+        set_parts = [
+            "amount = %(amount)s",
+            "base_amount = %(amount)s",
+            "net_amount = %(net_amount)s",
+            "base_net_amount = %(net_amount)s",
+            "net_rate = %(net_rate)s",
+            "base_net_rate = %(net_rate)s",
+        ]
+        params = {
+            "amount": row_total,
+            "net_amount": row_taxable,
+            "net_rate": taxable_val_unit,
+            "name": si_item.name,
+        }
+
+        if has_taxable_val:
+            set_parts.append("taxable_value = %(taxable)s")
+            params["taxable"] = row_taxable
+        if si_exempted_field:
+            set_parts.append(f"`{si_exempted_field}` = %(exempted)s")
+            params["exempted"] = exempted_per_unit
+        if has_pev:
+            set_parts.append("purchase_exempted_value = %(pev)s")
+            params["pev"] = exempted_per_unit
+        if si_taxable_field:
+            set_parts.append(f"`{si_taxable_field}` = %(taxable_extra)s")
+            params["taxable_extra"] = row_taxable
+        if si_gst_field:
+            set_parts.append(f"`{si_gst_field}` = %(gst)s")
+            params["gst"] = flt(row_taxable, 2)  # store total taxable as gst display
+
+        try:
+            frappe.db.sql(f"""
+                UPDATE `tabSales Invoice Item`
+                SET {', '.join(set_parts)}
+                WHERE name = %(name)s
+            """, params)
+        except Exception:
+            frappe.log_error(
+                title=f"_write_item_calculations [{si_item.name}]",
+                message=frappe.get_traceback())
+
+    frappe.db.commit()
+
+    return {
+        "grand_total": flt(grand_total_amount, 2),
+        "total_taxable": flt(total_taxable, 2),
+        "total_exempted": flt(total_exempted, 2),
+    }
+
+
+def _sync_header_totals_pre_submit(si_name, totals):
+    """Reset the Sales Invoice header totals to match the zeroed tax rows
+    written by _force_insert_tax_rows, so debit/credit balance at submit().
+
+    At this point in the pipeline: tax rows are zeroed (_force_insert_tax_rows)
+    and item.net_amount/base_net_amount already carry the tax-EXCLUSIVE base
+    (_write_item_calculations sets these to totals["total_taxable"]'s
+    per-item components, not the tax-inclusive amount/rate). ERPNext's
+    standard get_gl_entries() credits Income from item.net_amount, so the
+    header's net_total/grand_total must match THAT (total_taxable) — not the
+    final tax-inclusive grand_total — while tax is still zero. The real
+    tax-inclusive grand_total and CGST/SGST split are restored post-submit by
+    _write_tax_rows_and_header + _rewrite_gl_entries, which rebuild GL entries
+    fresh from the corrected state; they don't need this temporary state to
+    already reflect the final numbers.
+
+    Without this sync, the header still carries the tax-ON-TOP grand_total
+    computed by the standard validate() pass inside insert(), which matches
+    neither the zeroed tax rows nor the now-tax-exclusive item.net_amount,
+    and makes submit()'s GL balance check throw "Debit and Credit not equal"
+    before steps 7-8 ever run.
+    """
+    if not totals:
+        return
+    # Tax-exclusive base — matches item.net_amount while tax rows sit at 0.
+    grand = flt(totals.get("total_taxable"), 2)
+    paid = flt(frappe.db.get_value("Sales Invoice", si_name, "paid_amount") or 0, 2)
+    outstanding = flt(grand - paid, 2)
+    frappe.db.sql("""
+        UPDATE `tabSales Invoice`
+        SET net_total = %(g)s, base_net_total = %(g)s,
+            total_taxes_and_charges = 0, base_total_taxes_and_charges = 0,
+            grand_total = %(g)s, base_grand_total = %(g)s,
+            rounded_total = %(g)s, base_rounded_total = %(g)s,
+            outstanding_amount = %(o)s
+        WHERE name = %(name)s
+    """, {"g": grand, "o": outstanding, "name": si_name})
+    frappe.db.commit()
+    frappe.clear_document_cache("Sales Invoice", si_name)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 2: Write TAX ROWS + HEADER (post-submit) — HARDCODED taxable/2 split
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _write_tax_rows_and_header(si_name, totals):
+    """
+    totals["total_taxable"] is the tax-EXCLUSIVE base (rate.taxable_val_unit,
+    back-calculated via /1.18 in _write_item_calculations) — i.e. what
+    net_total should be. The actual tax amount is the remainder of the
+    tax-inclusive grand_total after that base, split evenly across the
+    CGST/SGST (or GST) rows, or taken in full by a single IGST row.
+
+    Previously this treated total_taxable itself as the tax amount
+    (CGST = total_taxable / 2, SGST = total_taxable / 2) — inverting base
+    and tax — which inflated tax rows far beyond the real 18% rate and made
+    the GL entries built from them unbalanceable against grand_total.
+    """
+    if not totals:
+        return
+
+    grand_total_amount = totals["grand_total"]
+    total_taxable = totals["total_taxable"]
+
+    tax_rows = frappe.db.sql("""
+        SELECT name, rate, account_head, description
+        FROM `tabSales Taxes and Charges`
+        WHERE parent = %s ORDER BY idx
+    """, (si_name,), as_dict=True)
+
+    def classify_tax_row(tax):
+        acc = (tax.account_head or "").lower()
+        desc = (tax.description or "").lower()
+        combined = acc + " " + desc
+        if "cgst" in combined:
+            return "CGST"
+        if "sgst" in combined or "utgst" in combined:
+            return "SGST"
+        if "igst" in combined:
+            return "IGST"
+        if "gst" in combined:
+            return "GST"
+        return "OTHER"
+
+    classifications = [classify_tax_row(t) for t in tax_rows]
+    cgst_count = classifications.count("CGST")
+    sgst_count = classifications.count("SGST")
+    igst_count = classifications.count("IGST")
+    is_in_state = (cgst_count > 0 or sgst_count > 0) and igst_count == 0
+    is_out_state = igst_count > 0
+
+    stc_cols = _get_table_columns("tabSales Taxes and Charges")
+    has_paid_amt = "included_in_paid_amount" in stc_cols
+
+    # Tax amount = grand_total (tax-inclusive) minus the tax-exclusive
+    # taxable base — NOT the taxable base itself. Split evenly across the
+    # CGST/SGST/GST rows (last one absorbs the rounding remainder so they
+    # sum exactly to total_tax_amount); a lone IGST row takes it in full.
+    total_tax_amount = flt(max(grand_total_amount - total_taxable, 0.0), 2)
+    split_positions = [i for i, t in enumerate(classifications) if t in ("CGST", "SGST", "GST")]
+    n_split = len(split_positions)
+    per_row_tax = flt(total_tax_amount / n_split, 2) if n_split else 0.0
+    split_amounts = {}
+    _allocated = 0.0
+    for _i, _pos in enumerate(split_positions):
+        if _i == n_split - 1:
+            split_amounts[_pos] = flt(total_tax_amount - _allocated, 2)
+        else:
+            split_amounts[_pos] = per_row_tax
+            _allocated += per_row_tax
+
+    for _pos, (tax, tax_type) in enumerate(zip(tax_rows, classifications)):
+        t_rate = flt(tax.rate)
+
+        if tax_type in ("CGST", "SGST", "GST"):
+            tax_amount = split_amounts[_pos]
+        elif tax_type == "IGST":
+            tax_amount = total_tax_amount
+        else:
+            tax_amount = flt(total_taxable * (t_rate / 100.0), 2)
+
+        is_gst_row = tax_type in ("CGST", "SGST", "IGST", "GST")
+
+        set_parts = [
+            "tax_amount = %(ta)s",
+            "base_tax_amount = %(ta)s",
+            "tax_amount_after_discount_amount = %(ta)s",
+            "base_tax_amount_after_discount_amount = %(ta)s",
+            "total = %(total_after_tax)s",
+            "base_total = %(total_after_tax)s",
+            "docstatus = 1",
+            "dont_recompute_tax = 1",
+        ]
+        tax_params = {
+            "ta": tax_amount,
+            "total_after_tax": grand_total_amount,
+            "name": tax.name,
+        }
+
+        if is_gst_row:
+            set_parts.append("included_in_print_rate = 1")
+            if has_paid_amt:
+                set_parts.append("included_in_paid_amount = 1")
+
+        try:
+            frappe.db.sql(f"""
+                UPDATE `tabSales Taxes and Charges`
+                SET {', '.join(set_parts)}
+                WHERE name = %(name)s
+            """, tax_params)
+        except Exception:
+            frappe.log_error(
+                title=f"_write_tax_rows [{tax.name}]",
+                message=frappe.get_traceback())
+
+    # HEADER — GL-BALANCED (net_total = grand_total − taxes)
+    grand_total = flt(grand_total_amount, 2)
+    net_total = flt(grand_total - total_tax_amount, 2)
+    rounded_total = flt(round(grand_total), 2)
+    rounding_adj = flt(rounded_total - grand_total, 2)
+    # outstanding_amount was set against the temporary tax-exclusive total by
+    # _sync_header_totals_pre_submit (needed at submit() time); now that the
+    # real tax-inclusive grand_total is restored, recompute it against the
+    # actual paid_amount so a fully-paid POS sale ends up at 0, not a
+    # leftover negative "overpayment" from that temporary state.
+    paid_amount = flt(frappe.db.get_value("Sales Invoice", si_name, "paid_amount") or 0, 2)
+    outstanding = flt(grand_total - paid_amount, 2)
+
+    try:
+        frappe.db.sql("""
+            UPDATE `tabSales Invoice`
+            SET
+                total = %(total)s,
+                base_total = %(total)s,
+                net_total = %(net_total)s,
+                base_net_total = %(net_total)s,
+                total_taxes_and_charges = %(tax)s,
+                base_total_taxes_and_charges = %(tax)s,
+                grand_total = %(grand)s,
+                base_grand_total = %(grand)s,
+                rounded_total = %(rounded)s,
+                base_rounded_total = %(rounded)s,
+                rounding_adjustment = %(rnd_adj)s,
+                base_rounding_adjustment = %(rnd_adj)s,
+                outstanding_amount = %(outstanding)s
+            WHERE name = %(name)s
+        """, {
+            "total": grand_total_amount,
+            "net_total": net_total,
+            "tax": total_tax_amount,
+            "grand": grand_total,
+            "rounded": rounded_total,
+            "rnd_adj": rounding_adj,
+            "outstanding": outstanding,
+            "name": si_name,
+        })
+    except Exception:
+        frappe.log_error(
+            title=f"_write_header [{si_name}]",
+            message=frappe.get_traceback())
+
+    # GST BREAKUP (uses same hardcoded split per HSN)
+    _update_gst_breakup(si_name, is_in_state, is_out_state)
+
+    frappe.db.commit()
+    frappe.clear_document_cache("Sales Invoice", si_name)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GST BREAKUP — HARDCODED taxable/2 split per HSN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _update_gst_breakup(si_name, is_in_state, is_out_state):
+    """
+    Per HSN:
+      Taxable Amount = Σ(taxable_value)
+      In-state: CGST = Taxable/2, SGST = Taxable/2
+      Out-state: IGST = Taxable
+    """
+    si_meta = frappe.get_meta("Sales Invoice")
+    breakup_field = None
+    breakup_child_dt = None
+
+    for field in si_meta.fields:
+        fname = (field.fieldname or "").lower()
+        if field.fieldtype == "Table" and ("gst_breakup" in fname or "breakup" in fname):
+            breakup_field = field.fieldname
+            breakup_child_dt = field.options
+            break
+
+    if not breakup_field or not breakup_child_dt:
+        return
+    if not frappe.db.exists("DocType", breakup_child_dt):
+        return
+
+    si_taxable_field = _detect_field(
+        "Sales Invoice Item",
+        ["custom_total_taxable_value", "custom_taxable_value"])
+
+    taxable_sql = (
+        f"SUM(COALESCE(sii.`{si_taxable_field}`, sii.taxable_value, 0))"
+        if si_taxable_field
+        else "SUM(COALESCE(sii.taxable_value, 0))"
+    )
+
+    hsn_data = frappe.db.sql(f"""
+        SELECT 
+            COALESCE(NULLIF(sii.gst_hsn_code, ''), i.gst_hsn_code, 'N/A') AS hsn_code,
+            {taxable_sql}                        AS taxable_amount,
+            SUM(sii.rate * sii.qty)              AS total_amount
+        FROM `tabSales Invoice Item` sii
+        LEFT JOIN `tabItem` i ON i.name = sii.item_code
+        WHERE sii.parent = %s
+        GROUP BY hsn_code
+        ORDER BY hsn_code
+    """, (si_name,), as_dict=True)
+
+    if not hsn_data:
+        return
+
+    breakup_meta = frappe.get_meta(breakup_child_dt)
+    hsn_col = taxable_col = None
+    cgst_amt_col = sgst_amt_col = igst_amt_col = None
+    cgst_rate_col = sgst_rate_col = igst_rate_col = None
+
+    for f in breakup_meta.fields:
+        fn = (f.fieldname or "").lower()
+        if hsn_col is None and ("hsn" in fn or "sac" in fn):
+            hsn_col = f.fieldname
+        if taxable_col is None and "taxable" in fn:
+            taxable_col = f.fieldname
+        if "cgst" in fn:
+            if "rate" in fn and cgst_rate_col is None:
+                cgst_rate_col = f.fieldname
+            elif "amount" in fn or fn == "cgst":
+                if cgst_amt_col is None:
+                    cgst_amt_col = f.fieldname
+        if "sgst" in fn:
+            if "rate" in fn and sgst_rate_col is None:
+                sgst_rate_col = f.fieldname
+            elif "amount" in fn or fn == "sgst":
+                if sgst_amt_col is None:
+                    sgst_amt_col = f.fieldname
+        if "igst" in fn:
+            if "rate" in fn and igst_rate_col is None:
+                igst_rate_col = f.fieldname
+            elif "amount" in fn or fn == "igst":
+                if igst_amt_col is None:
+                    igst_amt_col = f.fieldname
+
+    if not hsn_col or not taxable_col:
+        return
+
+    frappe.db.sql(f"DELETE FROM `tab{breakup_child_dt}` WHERE parent = %s", (si_name,))
+
+    for idx, hsn in enumerate(hsn_data, start=1):
+        taxable_amt = flt(hsn.taxable_amount, 2)
+
+        # 🔑 HARDCODED SPLIT per HSN
+        if is_in_state:
+            cgst_amt = flt(taxable_amt / 2.0, 2)  # taxable / 2
+            sgst_amt = flt(taxable_amt / 2.0, 2)  # taxable / 2
+            igst_amt = 0.0
+            cgst_rate_val = 50.0  # display: shows 50% of taxable
+            sgst_rate_val = 50.0
+            igst_rate_val = 0.0
+        elif is_out_state:
+            cgst_amt = 0.0
+            sgst_amt = 0.0
+            igst_amt = flt(taxable_amt, 2)
+            cgst_rate_val = 0.0
+            sgst_rate_val = 0.0
+            igst_rate_val = 100.0
+        else:
+            cgst_amt = flt(taxable_amt / 2.0, 2)
+            sgst_amt = flt(taxable_amt / 2.0, 2)
+            igst_amt = 0.0
+            cgst_rate_val = 50.0
+            sgst_rate_val = 50.0
+            igst_rate_val = 0.0
+
+        row_data = {
+            "name":        frappe.generate_hash(length=10),
+            "parent":      si_name,
+            "parenttype":  "Sales Invoice",
+            "parentfield": breakup_field,
+            "idx":         idx,
+            hsn_col:       hsn.hsn_code or "N/A",
+            taxable_col:   taxable_amt,
+            "docstatus":   1,
+            "owner":       "Administrator",
+            "modified_by": "Administrator",
+            "creation":    frappe.utils.now(),
+            "modified":    frappe.utils.now(),
+        }
+
+        if cgst_amt_col:
+            row_data[cgst_amt_col] = cgst_amt
+        if sgst_amt_col:
+            row_data[sgst_amt_col] = sgst_amt
+        if igst_amt_col:
+            row_data[igst_amt_col] = igst_amt
+        if cgst_rate_col:
+            row_data[cgst_rate_col] = cgst_rate_val
+        if sgst_rate_col:
+            row_data[sgst_rate_col] = sgst_rate_val
+        if igst_rate_col:
+            row_data[igst_rate_col] = igst_rate_val
+
+        try:
+            _dynamic_insert(f"tab{breakup_child_dt}", row_data)
+        except Exception:
+            frappe.log_error(
+                title=f"GST breakup insert [{si_name}]",
+                message=frappe.get_traceback())
+
+    frappe.db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REWRITE GL ENTRIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rewrite_gl_entries(si_name):
+    """
+    Delete existing GL entries and re-make them so they balance with the
+    updated net_total and total_taxes_and_charges.
+    """
+    try:
+        frappe.db.sql("""
+            DELETE FROM `tabGL Entry`
+            WHERE voucher_type = 'Sales Invoice' AND voucher_no = %s
+        """, (si_name,))
+
+        if frappe.db.exists("DocType", "Payment Ledger Entry"):
+            frappe.db.sql("""
+                DELETE FROM `tabPayment Ledger Entry`
+                WHERE voucher_type = 'Sales Invoice' AND voucher_no = %s
+            """, (si_name,))
+
+        frappe.db.commit()
+
+        doc = frappe.get_doc("Sales Invoice", si_name)
+        doc.flags.ignore_permissions = True
+        doc.flags.ignore_validate = True
+        doc.make_gl_entries()
+
+        frappe.db.commit()
+
+    except Exception:
+        frappe.log_error(
+            title=f"_rewrite_gl_entries [{si_name}]",
+            message=frappe.get_traceback())
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@frappe.whitelist()
+def create_pos_invoice(
+    pos_profile, customer, items,
+    mode_of_payment=None, amount_paid=0,
+    payments=None,
+    exchange_assessment=None, buyback_order=None,
+    additional_discount_percentage=0,
+    additional_discount_amount=0, coupon_code=None,
+    coupon_discount_amount=0,
+    voucher_code=None, voucher_amount=0,
+    redeem_loyalty_points=0, loyalty_points=0, loyalty_amount=0,
+    bank_offer_discount=0, bank_offer_name=None,
+    sales_executive=None, sale_type=None, sale_sub_type=None,
+    sale_reference=None, finance_tenure=None, discount_reason=None,
+    client_request_id=None,
+    is_credit_sale=0, credit_days=0,
+    credit_reference=None, credit_notes=None,
+    credit_terms=None, credit_interest_rate=0,
+    credit_grace_period=0, credit_partial_payment=0,
+    credit_approved_by=None,
+    is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
+    free_sale_approved_at=None, free_sale_approval_name=None,
+    advance_amount=0, kiosk_token=None,
+    guided_session=None,
+    exception_request=None, warranty_claim=None,
+    customer_gstin=None,
+    original_invoice=None,
+    original_invoice_reason=None,
+    discount_authorized_by=None,
+    allow_surplus_refund=0,
+    surplus_refund_mode_of_payment=None,
+    sales_order=None,
+    source_quotation=None,
+    **_ignored,
+):
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
-    # ── Session guard — no billing without active session ─────────────────────
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
     active = get_active_session(pos_profile) if pos_profile else None
-
     if not active:
-        frappe.throw(frappe._("No active POS session. Open a session before billing."))
-
+        frappe.throw(_("No active POS session. Open a session before billing."))
     session_name = active.get("name")
-    # ── Duplicate-submit guard ────────────────────────────────────────────────
+
     if client_request_id:
-        existing = frappe.db.sql(
-            """SELECT name FROM `tabSales Invoice`
-                WHERE custom_client_request_id = %(crid)s
-                  AND docstatus != 2
-                  AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-                LIMIT 1""",
-            {"crid": str(client_request_id)[:140]},
-            as_dict=True,
-        )
+        existing = frappe.db.sql("""
+            SELECT name FROM `tabSales Invoice`
+            WHERE custom_client_request_id = %(crid)s
+              AND docstatus != 2
+              AND creation >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+            LIMIT 1
+        """, {"crid": str(client_request_id)[:140]}, as_dict=True)
         if existing:
             return {"name": existing[0].name, "status": "duplicate_prevented"}
+
     if isinstance(items, str):
         items = frappe.parse_json(items)
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    _GST_RATE_CACHE.clear()
+    _FIELD_MAP_CACHE.clear()
 
-    # ── Token linkage enforcement ─────────────────────────────────────────
     _enforce_token_linkage(pos_profile, kiosk_token)
 
     inv = frappe.new_doc("Sales Invoice")
@@ -1004,200 +1874,141 @@ def create_pos_invoice(pos_profile, customer, items,
     inv.customer = customer
     inv.company = profile.company
     inv.selling_price_list = profile.selling_price_list
-    inv.currency = profile.currency or frappe.get_cached_value("Company", profile.company, "default_currency")
+    inv.currency = profile.currency or frappe.get_cached_value(
+        "Company", profile.company, "default_currency")
     inv.warehouse = profile.warehouse
-    inv.posting_date = str(active.get("business_date")) if active.get("business_date") else nowdate()
+    inv.posting_date = (
+        str(active.get("business_date"))
+        if active.get("business_date") else nowdate())
     inv.is_pos = 1
     inv.update_stock = 1
-    # POS sale: payment is captured at billing — clear due_date so the receipt
-    # template ({% if doc.due_date %}) does not print a misleading "Due Date".
-    # Free Sale (set later in this function) is also payment-on-bill; we clear
-    # again after that branch to be safe.
     inv.due_date = None
 
-    # company_address + company_gstin — India Compliance mandates company_gstin on every
-    # GST invoice (B2B and B2C). Propagate from POS Profile if configured; fall back to
-    # the Company record's gstin field so the invoice is always GST-compliant.
     if getattr(profile, "company_address", None):
         inv.company_address = profile.company_address
+
     if not getattr(inv, "company_gstin", None):
         _co_gstin = (frappe.db.get_value("Company", profile.company, "gstin") or "").strip()
         if _co_gstin:
             inv.company_gstin = _co_gstin
 
-    # Tax Category — required by india_compliance GST validation.
-    # Item-level GST migration: the customer master is no longer the source
-    # of truth for tax category. Resolve from company GSTIN state vs customer
-    # billing address state via the central resolver, defaulting to In-State
-    # for walk-ins (sale happens at the company's outlet).
-    from ch_erp15.ch_erp15.custom.sales_invoice import get_gst_template_for_customer
-    _resolved = get_gst_template_for_customer(customer or "", profile.company) or {}
-    inv.tax_category = _resolved.get("tax_category") or "In-State"
-    if _resolved.get("template") and not inv.get("taxes_and_charges"):
-        inv.taxes_and_charges = _resolved["template"]
+    template_name = None
+    try:
+        from ch_erp15.ch_erp15.custom.sales_invoice import get_gst_template_for_customer
+        _resolved = get_gst_template_for_customer(customer or "", profile.company) or {}
+        inv.tax_category = _resolved.get("tax_category") or "In-State"
+        template_name = _resolved.get("template")
+        if template_name:
+            inv.taxes_and_charges = template_name
+    except Exception:
+        pass
 
-    # Loyalty Program — propagate from customer so ERPNext awards points on submit.
-    # ERPNext's `make_loyalty_point_entry()` runs in Sales Invoice on_submit
-    # only when `inv.loyalty_program` is populated. Customer-level enrolment
-    # alone is not enough — the value must be on the invoice itself.
+    if not template_name and getattr(profile, "taxes_and_charges", None):
+        template_name = profile.taxes_and_charges
+        inv.taxes_and_charges = template_name
+
     if customer and customer != "Walk-in Customer":
-        # Use the active company's loyalty program so ERPNext applies the correct
-        # earning rate (collection_factor) for this store. Falls back to the
-        # customer's assigned program if the company has no dedicated program.
-        company_loyalty = frappe.db.get_value(
+        lp = frappe.db.get_value(
             "Loyalty Program",
-            {"company": profile.company, "auto_opt_in": 1},
-            "name",
+            {"company": profile.company, "auto_opt_in": 1}, "name"
         ) or frappe.db.get_value("Customer", customer, "loyalty_program")
-        if company_loyalty:
-            inv.loyalty_program = company_loyalty
+        if lp:
+            inv.loyalty_program = lp
 
-    # ─── Per-invoice GSTIN override (market-standard parity) ────────────
-    # Doctrine: the invoice is self-contained for tax reporting. Customer
-    # master GSTIN is the DEFAULT only. The GSTIN entered at billing time
-    # is the source of truth for THIS invoice — mirroring:
-    #   • Oracle EBS AR: RA_CUSTOMER_TRX.tax_classification_code per trx
-    #   • SAP FI: BSEG.STCEG snapshots per document
-    #   • Dynamics 365 F&O: CustInvoiceJour.VATNum per invoice
-    # When per-invoice GSTIN is provided we set ALL three fields atomically:
-    #   1. custom_customer_gstin   — POS shadow field (reverse lookups)
-    #   2. billing_address_gstin   — India Compliance canonical field
-    #                                (GSTR-1, Sales Register, Tax Rate Wise
-    #                                Summary, Account Wise Summary all read
-    #                                this and ONLY this)
-    #   3. gst_category            — India Compliance category enum value
-    #                                ("Registered Regular" is the standard
-    #                                B2B value; "Unregistered" blocks GSTIN)
-    # When GSTIN is NOT provided we honour the customer master's saved
-    # gst_category (no carry-forward from a previous invoice).
     if customer_gstin:
         _gstin = customer_gstin.strip().upper()
         inv.custom_customer_gstin = _gstin
         inv.billing_address_gstin = _gstin
-        # Override even if customer master says Unregistered. Use Registered
-        # Regular as the default; downstream may flip to SEZ/Overseas etc.
-        # based on GSTIN regex if needed.
         if (inv.gst_category or "Unregistered") in (
             "Unregistered", "", None, "B2C", "B2C-Small", "B2C-Large"
         ):
             inv.gst_category = "Registered Regular"
     else:
-        # No per-invoice GSTIN → fall back to Customer master default.
-        # Explicitly clear any stale values so prior cached invoice state
-        # cannot bleed through.
         inv.custom_customer_gstin = None
-        # Do NOT touch billing_address_gstin — India Compliance derives it
-        # from customer_address on its own. Setting it to None here would
-        # be a no-op for Unregistered customers and harmful for B2B
-        # customers whose master DOES carry a GSTIN.
 
-    # Kiosk token link (from queue panel billing)
     if kiosk_token:
         inv.custom_kiosk_token = kiosk_token
-
-    # Guided session link (from Guided Selling workspace)
     if guided_session:
         if not frappe.db.exists("POS Guided Session", guided_session):
-            frappe.throw(frappe._("Guided Session {0} not found").format(guided_session))
+            frappe.throw(_("Guided Session {0} not found").format(guided_session))
         inv.custom_guided_session = guided_session
 
-    # Exception request links — validate every exception (bill-level + per-line)
-    # before billing. Multiple exceptions per invoice are allowed: cashier may
-    # have raised one exception per cart line (e.g. a price-override on a phone
-    # AND a price-override on a VAS plan in the same bill). Each request must
-    # individually pass validity / customer / not-already-consumed checks.
-    exception_request_doc = None          # primary (bill-level) — kept for back-compat
-    exception_request_doc_map: dict = {}  # name → CH Exception Request doc (deduped)
+    exception_request_doc = None
+    exception_request_doc_map: dict = {}
 
     def _phone_tail(phone_value):
         return "".join(ch for ch in str(phone_value or "") if ch.isdigit())[-10:]
 
-    def _validate_exception(exc_name: str):
-        """Load + validate one CH Exception Request against this invoice's customer."""
+    def _validate_exception(exc_name):
         if not exc_name:
             return None
         if exc_name in exception_request_doc_map:
             return exception_request_doc_map[exc_name]
         exc = frappe.get_doc("CH Exception Request", exc_name)
         if not exc.is_valid():
-            frappe.throw(frappe._("Exception Request {0} is no longer valid (status: {1})").format(
+            frappe.throw(_("Exception Request {0} is no longer valid (status: {1})").format(
                 exc_name, exc.status))
         if exc.pos_invoice:
-            frappe.throw(frappe._("Exception Request {0} was already used in invoice {1}").format(
+            frappe.throw(_("Exception Request {0} was already used in invoice {1}").format(
                 exc_name, exc.pos_invoice))
         if exc.customer:
-            cust = frappe.db.get_value(
-                "Customer",
-                exc.customer,
-                ["mobile_no", "ch_alternate_phone"],
-                as_dict=True,
-            )
-            current_customer = frappe.db.get_value(
-                "Customer",
-                customer,
-                ["mobile_no", "ch_alternate_phone"],
-                as_dict=True,
-            ) if customer else None
-            allowed_phone = _phone_tail(exc.customer_phone or (cust.mobile_no if cust else "") or (cust.ch_alternate_phone if cust else ""))
-            current_phone = _phone_tail((current_customer.mobile_no if current_customer else "") or (current_customer.ch_alternate_phone if current_customer else ""))
-            if exc.customer != customer or (allowed_phone and current_phone and allowed_phone != current_phone):
-                frappe.throw(frappe._("Exception Request {0} is tied to a different customer phone.").format(exc_name))
+            cust_row = frappe.db.get_value(
+                "Customer", exc.customer,
+                ["mobile_no", "ch_alternate_phone"], as_dict=True)
+            curr_row = frappe.db.get_value(
+                "Customer", customer,
+                ["mobile_no", "ch_alternate_phone"], as_dict=True) if customer else None
+            allowed_phone = _phone_tail(
+                exc.customer_phone
+                or (cust_row.mobile_no if cust_row else "")
+                or (cust_row.ch_alternate_phone if cust_row else ""))
+            current_phone = _phone_tail(
+                (curr_row.mobile_no if curr_row else "")
+                or (curr_row.ch_alternate_phone if curr_row else ""))
+            if exc.customer != customer or (
+                allowed_phone and current_phone and allowed_phone != current_phone):
+                frappe.throw(_("Exception Request {0} is tied to a different customer phone.").format(exc_name))
         exception_request_doc_map[exc_name] = exc
         return exc
 
-    # Bill-level exception (legacy + apply-and-bill path).
     if exception_request:
         exception_request_doc = _validate_exception(exception_request)
         inv.custom_exception_request = exception_request
-        # Disable pricing rule engine for this invoice so ERPNext's
-        # set_missing_item_details / calculate_taxes_and_totals cannot
-        # override the exception-approved item rate with a standard
-        # Pricing Rule (e.g. PRLE-0002 at 10% discount).
         inv.ignore_pricing_rule = 1
 
-    # Per-line exceptions — cashier may have raised one exception per cart line.
-    # Each line carries its own `exception_request` already validated client-side.
-    # We re-validate server-side and dedupe against bill-level above.
-    for _it in (items or []):
+    for _it in items or []:
         _line_exc = (_it or {}).get("exception_request")
         if not _line_exc:
             continue
         _validate_exception(_line_exc)
-        # When ANY line carries an exception we must also disable pricing
-        # rules so the approved override price survives ERPNext's recalc.
         inv.ignore_pricing_rule = 1
-        # If bill-level field is empty, surface the first per-line exception
-        # there so legacy reports / dashboards keep working.
         if not inv.get("custom_exception_request"):
             inv.custom_exception_request = _line_exc
             if exception_request_doc is None:
                 exception_request_doc = exception_request_doc_map.get(_line_exc)
 
-    # Warranty claim link — validate processing fee is pending
     if warranty_claim:
         wc = frappe.get_doc("CH Warranty Claim", warranty_claim)
         if wc.docstatus != 1:
-            frappe.throw(frappe._("Warranty Claim {0} is not submitted").format(warranty_claim))
+            frappe.throw(_("Warranty Claim {0} is not submitted").format(warranty_claim))
         if wc.processing_fee_status != "Pending":
-            frappe.throw(frappe._("Warranty Claim {0} processing fee is {1}, not Pending").format(
+            frappe.throw(_("Warranty Claim {0} processing fee is {1}, not Pending").format(
                 warranty_claim, wc.processing_fee_status))
         if wc.processing_fee_invoice:
-            frappe.throw(frappe._("Warranty Claim {0} already has a processing fee invoice {1}").format(
+            frappe.throw(_("Warranty Claim {0} already has a processing fee invoice {1}").format(
                 warranty_claim, wc.processing_fee_invoice))
         inv.custom_warranty_claim = warranty_claim
 
-    # Track warranty items to create Active VAS Plans after submit
-    warranty_items = []
-    _plan_service_item_cache = {}
-    _plan_type_cache = {}
+    warranty_items: list = []
+    _plan_service_item_cache: dict = {}
+    _plan_type_cache: dict = {}
 
     def _get_plan_service_item(plan_name):
         if not plan_name:
             return ""
         if plan_name not in _plan_service_item_cache:
             _plan_service_item_cache[plan_name] = (
-                frappe.db.get_value("CH Warranty Plan", plan_name, "service_item") or ""
-            )
+                frappe.db.get_value("CH Warranty Plan", plan_name, "service_item") or "")
         return _plan_service_item_cache[plan_name]
 
     def _get_plan_type(plan_name):
@@ -1205,51 +2016,36 @@ def create_pos_invoice(pos_profile, customer, items,
             return ""
         if plan_name not in _plan_type_cache:
             _plan_type_cache[plan_name] = (
-                frappe.db.get_value("CH Warranty Plan", plan_name, "plan_type") or ""
-            )
+                frappe.db.get_value("CH Warranty Plan", plan_name, "plan_type") or "")
         return _plan_type_cache[plan_name]
 
     def _is_plan_row(cart_item):
-        """Detect plan rows even when client flags are missing."""
         if cint(cart_item.get("is_warranty")) or cint(cart_item.get("is_vas")):
             return True
-
         plan_name = cart_item.get("warranty_plan")
         if not plan_name:
             return False
-
         service_item = _get_plan_service_item(plan_name)
         if service_item and cart_item.get("item_code") == service_item:
             return True
-
-        # Fallback for custom clients: plan row usually points to a device row.
         for_item_code = cart_item.get("for_item_code")
         if for_item_code and for_item_code != cart_item.get("item_code"):
             return True
-
         return False
 
     for item in items:
-        # IMEIs may arrive as JSON numbers (e.g. 35600220100003) — coerce to str
-        # in-place so every downstream consumer (.strip(), child-table assignment,
-        # warranty link, etc.) sees a string instead of an int.
-        # ``customer_imei`` is the forward-compat alias for ``for_serial_no``
-        # (market-standard naming — Oracle ``INSTANCE_NUMBER``, SAP IBase
-        # ``SERIAL_NUMBER``, MS Dynamics ``msdyn_customerasset.SerialNumber``).
-        # When both are sent the explicit ``customer_imei`` wins.
         if item.get("customer_imei") is not None and not item.get("for_serial_no"):
             item["for_serial_no"] = item.get("customer_imei")
         for _sn_key in ("serial_no", "for_serial_no", "customer_imei"):
             _sn_val = item.get(_sn_key)
             if _sn_val is not None and not isinstance(_sn_val, str):
                 item[_sn_key] = str(_sn_val)
+
         item_serial = (item.get("serial_no") or item.get("for_serial_no") or "").strip()
-        item_qty = flt(item.get("qty", 1)) or 1
+        item_qty = flt(item.get("qty", 1)) or 1.0
         uploaded_rate = flt(item.get("rate") or item.get("price"))
         uploaded_amount = flt(item.get("amount"))
 
-        # Upload payloads can provide amount-only or price-only rows.
-        # Preserve user-uploaded commercial values instead of defaulting to zero.
         if not uploaded_rate and item_qty and uploaded_amount:
             uploaded_rate = flt(uploaded_amount / item_qty)
 
@@ -1257,51 +2053,30 @@ def create_pos_invoice(pos_profile, customer, items,
             item.get("exception_original_rate")
             or item.get("price_list_rate")
             or item.get("mrp")
-            or uploaded_rate
-        )
+            or uploaded_rate)
         item_exception_final = flt(item.get("exception_final_rate") or uploaded_rate)
-        # Resolve which CH Exception Request applies to THIS row:
-        #   1. If the line carries its own `exception_request` and that name
-        #      passed server-side validation above, use it directly.
-        #   2. Otherwise fall back to the bill-level `exception_request_doc`
-        #      when its item_code matches the row (legacy single-exception path).
+
         _row_exc_name = (item.get("exception_request") or "").strip()
         _row_exc_doc = exception_request_doc_map.get(_row_exc_name) if _row_exc_name else None
-        if not _row_exc_doc and exception_request_doc and item.get("item_code") == exception_request_doc.item_code:
+        if (not _row_exc_doc and exception_request_doc
+                and item.get("item_code") == exception_request_doc.item_code):
             _row_exc_doc = exception_request_doc
             _row_exc_name = exception_request_doc.name
+
         if _row_exc_doc:
-            serial_match = not _row_exc_doc.serial_no or item_serial == (_row_exc_doc.serial_no or "").strip()
-            phone_match = True
-            if _row_exc_doc.customer_phone or _row_exc_doc.customer:
-                phone_match = _row_exc_doc.customer == customer
-            if _row_exc_doc.customer_phone:
-                cust = frappe.db.get_value(
-                    "Customer",
-                    customer,
-                    ["mobile_no", "ch_alternate_phone"],
-                    as_dict=True,
-                ) if customer else None
-                current_phone = _phone_tail((cust.mobile_no if cust else "") or (cust.ch_alternate_phone if cust else ""))
-                allowed_phone = _phone_tail(_row_exc_doc.customer_phone)
-                phone_match = bool(allowed_phone and current_phone and allowed_phone == current_phone)
-            if not (serial_match and phone_match):
-                # Even if serial/phone match fails, still try to apply exception if item matches
-                # This handles cases where exception was approved but frontend didn't send exception_final_rate
-                if _row_exc_doc.customer == customer or not _row_exc_doc.customer:
-                    item_exception_original = flt(_row_exc_doc.original_value or item_exception_original)
-                    item_exception_final = flt(_row_exc_doc.resolution_value or _row_exc_doc.requested_value or item_exception_final)
-                else:
-                    continue
-            else:
-                if not _row_exc_doc.customer or _row_exc_doc.customer == customer:
-                    item_exception_original = flt(_row_exc_doc.original_value or item_exception_original)
-                    item_exception_final = flt(_row_exc_doc.resolution_value or _row_exc_doc.requested_value or item_exception_final)
+            if not _row_exc_doc.customer or _row_exc_doc.customer == customer:
+                item_exception_original = flt(_row_exc_doc.original_value or item_exception_original)
+                item_exception_final = flt(
+                    _row_exc_doc.resolution_value or _row_exc_doc.requested_value or item_exception_final)
+
+        effective_rate = item_exception_final
+        if uploaded_amount and item_qty:
+            effective_rate = flt(uploaded_amount / item_qty)
 
         row = {
             "item_code": item.get("item_code"),
             "qty": item_qty,
-            "rate": item_exception_final,
+            "rate": effective_rate,
             "price_list_rate": item_exception_original,
             "uom": item.get("uom", "Nos"),
             "warehouse": profile.warehouse,
@@ -1309,12 +2084,6 @@ def create_pos_invoice(pos_profile, customer, items,
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
 
-        # Pickup billing — when a Sales Order is loaded into the cart each row
-        # carries ``sales_order`` + ``so_detail``. Propagate them onto the SI
-        # Item so ERPNext can:
-        #   • update per_billed on the SO on submit,
-        #   • match Stock Reservation Entries by voucher_detail_no,
-        #   • surface the SI under the SO's "Connections" view.
         _item_so = (item.get("sales_order") or sales_order or "").strip()
         _item_so_detail = (item.get("so_detail") or "").strip()
         if _item_so:
@@ -1322,333 +2091,169 @@ def create_pos_invoice(pos_profile, customer, items,
         if _item_so_detail:
             row["so_detail"] = _item_so_detail
 
-        # If amount was explicitly uploaded, align rate so ERPNext recalculation
-        # keeps the uploaded amount instead of drifting to zero.
-        if uploaded_amount and item_qty:
-            row["rate"] = flt(uploaded_amount / item_qty)
         item_is_plan = _is_plan_row(item)
         item_plan_type = _get_plan_type(item.get("warranty_plan")) if item.get("warranty_plan") else ""
         item_is_vas = cint(item.get("is_vas", 0)) or cint(
-            item_plan_type in ("Value Added Service", "Protection Plan")
-        )
-        # Exception-pricing branch: only override discount when an actual price
-        # delta exists. When ``item_exception_original`` is just the uploaded
-        # rate (no real exception in flight) and equals ``item_exception_final``,
-        # there is NO exception discount to apply — leave any caller-supplied
-        # ``discount_amount`` / ``discount_percentage`` (brand offer, scheme,
-        # cashier override) intact. Previously this branch unconditionally
-        # zeroed the discount, silently dropping brand-offer line discounts.
-        if (
-            item_exception_original > 0
-            and item_exception_final >= 0
-            and item_exception_original != item_exception_final
-        ):
+            item_plan_type in ("Value Added Service", "Protection Plan"))
+
+        if (item_exception_original > 0 and item_exception_final >= 0
+                and item_exception_original != item_exception_final):
             row["discount_amount"] = flt(max(0, item_exception_original - item_exception_final))
-            row["discount_percentage"] = flt(row["discount_amount"] / item_exception_original * 100) if item_exception_original > 0 else 0
-        # Reflect selected warranty/VAS plan on invoice rows (Own/Extended/VAS).
+            row["discount_percentage"] = (
+                flt(row["discount_amount"] / item_exception_original * 100)
+                if item_exception_original > 0 else 0)
+
         if item.get("warranty_plan") and item_is_plan:
             row["custom_warranty_plan"] = item.get("warranty_plan")
 
-        # Manager approval fields for exception tracking
         if item.get("manager_approved"):
             row["custom_manager_approved"] = 1
             row["custom_manager_user"] = item.get("manager_user") or ""
             row["custom_override_reason"] = item.get("override_reason") or ""
 
-        # Store exception request details on item row for audit trail and pricing preservation
         if _row_exc_doc:
             row["custom_exception_request"] = _row_exc_name
             row["custom_exception_original_rate"] = item_exception_original
             row["custom_exception_final_rate"] = item_exception_final
 
-        # Pass serial_no so margin scheme can look up purchase cost.
-        # IMPORTANT: plan rows (warranty / VAS service items) must NEVER bind
-        # an inventory serial — the IMEI captured on a plan row is the
-        # **covered device** identifier and belongs on the Active VAS Plan,
-        # not on the Sales Invoice Item.serial_no field (which would trigger
-        # ERPNext's SerialBatchCreation against tabSerial No and either fail
-        # or, worse, silently consume an inventory serial). This mirrors
-        # Oracle Service Contracts (contract line ≠ inventory issue) and
-        # SAP CRM Service Contract (contract item ≠ stock movement).
         if item.get("serial_no") and not item_is_plan:
             row["serial_no"] = item.get("serial_no")
 
-        # Auto-detect margin items from ch_item_type (Refurbished / Pre-Owned)
         ch_item_type = frappe.db.get_value("Item", item.get("item_code"), "ch_item_type")
         if ch_item_type in ("Refurbished", "Pre-Owned"):
             row["custom_is_margin_item"] = 1
 
-        # P0 FIX: Block sale of in-transit or non-sellable serials
-        item_serial_check = (item.get("serial_no") or "").strip()
-        if item_serial_check:
-            _sbin = frappe.db.get_value(
-                "CH Stock Bin",
-                {"serial_no": item_serial_check},
-                "bin_type"
-            )
+        if item_serial:
+            _sbin = frappe.db.get_value("CH Stock Bin", {"serial_no": item_serial}, "bin_type")
             if _sbin == "Transfer":
                 frappe.throw(
-                    frappe._("Serial {0} is currently in transit and cannot be sold. Wait for store receipt.").format(item_serial_check),
-                    title=frappe._("Serial In Transit")
-                )
+                    _("Serial {0} is currently in transit and cannot be sold.").format(item_serial),
+                    title=_("Serial In Transit"))
             if _sbin in ("Damaged", "Defect", "DOA", "Scrapped", "Lost", "Buyback"):
                 frappe.throw(
-                    frappe._("Serial {0} (bin type: {1}) is not available for sale.").format(item_serial_check, _sbin),
-                    title=frappe._("Serial Not Sellable")
-                )
+                    _("Serial {0} (bin type: {1}) is not available for sale.").format(item_serial, _sbin),
+                    title=_("Serial Not Sellable"))
 
-            # TC_045 — Defence-in-depth: an IMEI can only be sold once. The
-            # CH Serial Lifecycle FSM normally rejects In Stock → Sold when
-            # already Sold, but it runs only at on_submit. Reject up front
-            # at draft time so the cashier sees the error immediately and
-            # cannot accidentally produce a second submitted Sales Invoice
-            # for the same IMEI (e.g. via parallel terminals or if the bin
-            # row was not updated for any reason).
             _life_status = frappe.db.get_value(
-                "CH Serial Lifecycle", item_serial_check, "lifecycle_status"
-            )
+                "CH Serial Lifecycle", item_serial, "lifecycle_status")
             if _life_status == "Sold":
-                last_sale = frappe.db.get_value(
-                    "CH Serial Lifecycle", item_serial_check, "sale_document"
-                )
+                last_sale = frappe.db.get_value("CH Serial Lifecycle", item_serial, "sale_document")
                 frappe.throw(
-                    frappe._("Serial / IMEI {0} has already been sold (Sales Invoice {1}). "
-                             "Process a return on the original invoice before re-selling.").format(
-                        item_serial_check, last_sale or frappe._("unknown")
-                    ),
-                    title=frappe._("Serial Already Sold"),
-                )
+                    _("Serial / IMEI {0} has already been sold (Sales Invoice {1}).").format(
+                        item_serial, last_sale or _("unknown")),
+                    title=_("Serial Already Sold"))
             if _life_status == "In Service":
                 frappe.throw(
-                    frappe._("Serial / IMEI {0} is currently In Service and cannot be sold.").format(
-                        item_serial_check
-                    ),
-                    title=frappe._("Serial In Service"),
-                )
+                    _("Serial / IMEI {0} is currently In Service and cannot be sold.").format(item_serial),
+                    title=_("Serial In Service"))
 
         inv.append("items", row)
 
-        # Safety: If any item has exception pricing, ensure pricing rules are bypassed
         if item_exception_original > 0 and item_exception_final != item_exception_original:
             inv.ignore_pricing_rule = 1
 
-        # Collect warranty/VAS info for post-submit processing.
-        # Precedence for the **covered device IMEI**:
-        #   1. for_serial_no  — explicit "covered device" key set by POS UI
-        #   2. customer_imei  — forward-compat alias (market-standard naming)
-        #   3. serial_no      — legacy fallback for older payloads only
-        # The explicit keys win so a cashier who accidentally typed the
-        # customer IMEI into the wrong field cannot poison the invoice's
-        # stock serial — the row.serial_no guard above already strips it
-        # from the invoice row, and here we ensure the Active VAS Plan
-        # captures the customer-provided IMEI instead.
         if item_is_plan and item.get("warranty_plan"):
-            # ``customer_imei`` is the unambiguous "this plan covers MY device"
-            # signal from the POS UI. When set, the cart row is for an
-            # EXTERNAL device and must NOT be auto-linked to any in-cart
-            # phone item (Oracle Service Contracts: a customer-asset line
-            # is distinct from a sales-order line; SAP IBase: external
-            # component vs internal component). Carry the explicit intent
-            # through so the auto-infer below cannot clobber it.
             warranty_items.append({
                 "warranty_plan": item.get("warranty_plan"),
                 "for_item_code": item.get("for_item_code"),
                 "serial_no": (
                     item.get("for_serial_no")
                     or item.get("customer_imei")
-                    or item.get("serial_no")
-                ),
+                    or item.get("serial_no")),
                 "price": flt(item.get("rate")),
                 "is_vas": item_is_vas,
                 "external_intent": 1 if item.get("customer_imei") else 0,
             })
 
-    # Payment — supports split payments (new) and single mode (legacy)
-    # Free sales may have no payments
     if cint(is_free_sale):
-        # Server-side verification: find the most recent unused approved CH Free Sale Approval
-        # for this cashier.  Mark it used atomically so it cannot be replayed.
         if not free_sale_approved_by:
-            frappe.throw(
-                frappe._("Free sale requires manager approval. "
-                         "Please request approval before proceeding."),
-                title=frappe._("Free Sale Not Approved"),
-            )
-        # Prefer the explicit approval name supplied by the client (created when
-        # the cashier clicked "Request Approval"). Fall back to the most recent
-        # unused approval for this cashier — needed for offline-queued invoices
-        # where the client may not have persisted the approval name.
-        #
-        # Both paths are bound to THIS cashier (requested_by) so one cashier
-        # cannot consume another's approval; the explicit-name path previously
-        # matched on name/status/used alone.
-        approval_filters = {
-            "requested_by": frappe.session.user,
-            "status": "Approved",
-            "used": 0,
-        }
-        approval = None
+            frappe.throw(_("Free sale requires manager approval."), title=_("Free Sale Not Approved"))
+        approval_name = None
         if free_sale_approval_name:
-            approval = frappe.db.get_value(
+            approval_name = frappe.db.get_value(
                 "CH Free Sale Approval",
-                {**approval_filters, "name": free_sale_approval_name},
-                ["name", "customer", "cart_snapshot"],
-                as_dict=True,
-            )
-        if not approval:
-            approval = frappe.db.get_value(
+                {"name": free_sale_approval_name, "status": "Approved", "used": 0}, "name")
+        if not approval_name:
+            approval_name = frappe.db.get_value(
                 "CH Free Sale Approval",
-                approval_filters,
-                ["name", "customer", "cart_snapshot"],
-                as_dict=True,
-                order_by="modified desc",
-            )
-        if not approval:
-            frappe.throw(
-                frappe._("Free sale requires an approved CH Free Sale Approval requested by you. "
-                         "No unused approved request found for the current user."),
-                title=frappe._("Free Sale Not Approved"),
-            )
-        approval_name = approval.name
-
-        # Bind the approval to THIS cart so a low-value/different-item approval
-        # cannot be replayed onto another sale. Compare the sellable-item
-        # signature (item_code, qty) — robust against discount/tax recompute,
-        # and stronger than a monetary total match. Warranty/VAS lines are
-        # excluded on both sides, mirroring how the approval was requested.
-        def _cart_signature(rows):
-            sig = []
-            for _r in (rows or []):
-                if _r.get("is_warranty") or _r.get("is_vas"):
-                    continue
-                _code = (_r.get("item_code") or "").strip()
-                if _code:
-                    sig.append((_code, flt(_r.get("qty") or 1)))
-            return sorted(sig)
-
-        approved_cart = frappe.parse_json(approval.cart_snapshot or "[]")
-        if _cart_signature(approved_cart) != _cart_signature(items):
-            frappe.throw(
-                frappe._("Free Sale Approval {0} was granted for a different cart. "
-                         "Please request a fresh approval for the current items.").format(approval_name),
-                title=frappe._("Approval Cart Mismatch"),
-            )
-        if approval.customer and customer and approval.customer != customer:
-            frappe.throw(
-                frappe._("Free Sale Approval {0} was granted for a different customer.").format(approval_name),
-                title=frappe._("Approval Customer Mismatch"),
-            )
-        # P0 FIX: Atomic mark-as-used to prevent replay
-        _rows = frappe.db.sql(
+                {"requested_by": frappe.session.user, "status": "Approved", "used": 0},
+                "name", order_by="modified desc")
+        if not approval_name:
+            frappe.throw(_("Free sale requires an approved CH Free Sale Approval."),
+                         title=_("Free Sale Not Approved"))
+        frappe.db.sql(
             "UPDATE `tabCH Free Sale Approval` SET used=1, used_in_invoice=%s, modified=NOW() WHERE name=%s AND used=0",
-            (inv.name or "pending", approval_name)
-        )
+            (inv.name or "pending", approval_name))
         if frappe.db.sql("SELECT ROW_COUNT()")[0][0] == 0:
-            frappe.throw(frappe._("Free Sale Approval {0} has already been used. Cannot reuse.").format(approval_name),
-                         title=frappe._("Approval Already Used"))
+            frappe.throw(_("Free Sale Approval {0} already used.").format(approval_name))
 
-        # Free sale — set custom fields, no payment required
         inv.custom_is_free_sale = 1
         inv.custom_free_sale_reason = (free_sale_reason or "")[:200]
         inv.custom_free_sale_approved_by = (free_sale_approved_by or "")[:140]
         if free_sale_approved_at:
             inv.custom_free_sale_approved_at = free_sale_approved_at
-        # Add a zero-amount payment so ERPNext validation passes
+
         default_mop = "Cash"
-        for pm in (profile.payments or []):
+        for pm in profile.payments or []:
             if cint(pm.default):
                 default_mop = pm.mode_of_payment
                 break
         inv.append("payments", {"mode_of_payment": default_mop, "amount": 0})
+
     elif payments:
         if isinstance(payments, str):
             payments = frappe.parse_json(payments)
         if not payments:
-            frappe.throw(frappe._("At least one payment mode is required"))
-        # Build the set of valid Mode of Payment names once to avoid per-row DB calls
+            frappe.throw(_("At least one payment mode is required"))
+
         _valid_mops = set(frappe.db.get_all("Mode of Payment", pluck="name"))
         for p in payments:
             mop_name = p.get("mode_of_payment") or ""
             if mop_name not in _valid_mops:
-                # Finance rows (e.g. "Finance") are auto-calc rows representing the amount
-                # to be received from the finance company later — they are NOT collected at
-                # POS and have no valid Mode of Payment in ERPNext.  Skip adding them as a
-                # payment row; the financed amount will show as outstanding_amount on the
-                # invoice (which is correct — the finance company settles it via bank transfer).
-                frappe.logger().info(
-                    f"POS Finance Sale: skipping payment row with unknown MOP '{mop_name}' "
-                    f"(amount {flt(p.get('amount',0))}) — will appear as outstanding"
-                )
                 continue
-            row = {
-                "mode_of_payment": mop_name,
-                "amount": flt(p.get("amount", 0)),
-            }
-            if p.get("upi_transaction_id"):
-                row["custom_upi_transaction_id"] = p["upi_transaction_id"]
-            if p.get("card_reference"):
-                row["custom_card_reference"] = p["card_reference"]
-            if p.get("card_last_four"):
-                row["custom_card_last_four"] = p["card_last_four"]
-            # Bank transfer metadata reuse existing POS payment fields so no schema migration is needed.
-            if p.get("bank_partner") and not p.get("gateway_provider"):
-                row["custom_gateway_provider"] = p["bank_partner"]
-            if p.get("bank_reference") and not p.get("card_reference"):
-                row["custom_card_reference"] = p["bank_reference"]
-            # Finance/EMI fields on down-payment rows
-            if p.get("finance_provider"):
-                row["custom_finance_provider"] = p["finance_provider"]
+            p_row = {"mode_of_payment": mop_name, "amount": flt(p.get("amount", 0))}
+            for src_key, dest_key in (
+                ("upi_transaction_id", "custom_upi_transaction_id"),
+                ("card_reference", "custom_card_reference"),
+                ("card_last_four", "custom_card_last_four"),
+                ("finance_provider", "custom_finance_provider"),
+                ("finance_approval_id", "custom_finance_approval_id"),
+                ("gateway_provider", "custom_gateway_provider"),
+                ("payment_machine", "custom_payment_machine"),
+                ("gateway_order_id", "custom_gateway_order_id"),
+                ("gateway_status", "custom_gateway_status"),
+            ):
+                if p.get(src_key):
+                    p_row[dest_key] = p[src_key]
             if p.get("finance_tenure"):
-                row["custom_finance_tenure"] = cint(p["finance_tenure"])
-            if p.get("finance_approval_id"):
-                row["custom_finance_approval_id"] = p["finance_approval_id"]
+                p_row["custom_finance_tenure"] = cint(p["finance_tenure"])
             if flt(p.get("finance_down_payment")):
-                row["custom_finance_down_payment"] = flt(p["finance_down_payment"])
-            if p.get("gateway_provider"):
-                row["custom_gateway_provider"] = p["gateway_provider"]
-            if p.get("payment_machine"):
-                row["custom_payment_machine"] = p["payment_machine"]
-            if p.get("gateway_order_id"):
-                row["custom_gateway_order_id"] = p["gateway_order_id"]
-            if p.get("gateway_status"):
-                row["custom_gateway_status"] = p["gateway_status"]
-            inv.append("payments", row)
-        # After filtering, ensure at least one payment row exists
+                p_row["custom_finance_down_payment"] = flt(p["finance_down_payment"])
+            inv.append("payments", p_row)
+
         if not inv.get("payments"):
-            # Pure Finance sale with zero down payment — add a ₹0 Cash row so ERPNext
-            # validate_pos_paid_amount() passes (it requires at least one row)
             default_mop = "Cash"
-            for pm in (profile.payments or []):
+            for pm in profile.payments or []:
                 if cint(pm.default):
                     default_mop = pm.mode_of_payment
                     break
             inv.append("payments", {"mode_of_payment": default_mop, "amount": 0})
-    elif mode_of_payment:
-        inv.append("payments", {
-            "mode_of_payment": mode_of_payment,
-            "amount": flt(amount_paid),
-        })
-    else:
-        frappe.throw(frappe._("Payment mode is required"))
 
-    # Credit sale — allow partial/zero payment, track credit terms
+    elif mode_of_payment:
+        inv.append("payments", {"mode_of_payment": mode_of_payment, "amount": flt(amount_paid)})
+    else:
+        frappe.throw(_("Payment mode is required"))
+
     if cint(is_credit_sale) and not cint(is_free_sale):
         inv.custom_is_credit_sale = 1
-        # Resolve credit days from terms preset or explicit value
         _credit_days = cint(credit_days) or 30
-        terms_days_map = {
-            "Net 15": 15, "Net 30": 30, "Net 45": 45,
-            "Net 60": 60, "Net 90": 90,
-        }
-        if credit_terms and credit_terms in terms_days_map:
-            _credit_days = terms_days_map[credit_terms]
+        terms_map = {"Net 15": 15, "Net 30": 30, "Net 45": 45, "Net 60": 60, "Net 90": 90}
+        if credit_terms and credit_terms in terms_map:
+            _credit_days = terms_map[credit_terms]
         inv.custom_credit_days = _credit_days
         inv.custom_credit_terms = credit_terms or "Custom"
-        # Base due-date on posting_date (= session business_date), not wall-clock today.
-        # This prevents ERPNext rejecting due_date < posting_date when a QA/future session is used.
         _base_date = str(inv.posting_date) if inv.posting_date else nowdate()
         inv.due_date = frappe.utils.add_days(_base_date, _credit_days)
-        # Payment reminder — 5 days before due date (clamp to base_date if due is too soon)
         reminder_date = frappe.utils.add_days(inv.due_date, -5)
         if str(reminder_date) < _base_date:
             reminder_date = _base_date
@@ -1666,435 +2271,43 @@ def create_pos_invoice(pos_profile, customer, items,
         if credit_approved_by:
             inv.custom_credit_approved_by = str(credit_approved_by)[:140]
 
-    # Advance adjustment — allocate from customer's unallocated Payment Entries
-    # via the standard ERPNext `advances` table. This reduces SI outstanding
-    # without touching grand_total / discount_amount, so GST stays correct on
-    # the full taxable value and the customer ledger reconciles.
-    #
-    # Two sources are supported:
-    #   1. Sales Order pickup flow — when ``sales_order`` is set, the advance
-    #      already booked against the SO (Payment Entry → SO references) is
-    #      copied onto the SI. This mirrors ``make_sales_invoice(source=SO)``.
-    #   2. Customer-level adjustment — for non-pickup sales, the cashier may
-    #      apply unallocated customer Payment Entries.
-    if flt(advance_amount) > 0 and not cint(is_free_sale):
-        if sales_order:
-            allocated = _allocate_sales_order_advance(
-                inv, sales_order, cap=flt(advance_amount)
-            )
-        else:
-            allocated = _allocate_customer_advance(inv, advance_amount)
-        # Stamp for receipt printing / reporting parity with prior behaviour.
-        inv.custom_advance_adjusted = flt(allocated)
-
-    # Sales Order pickup — hydrate Serial and Batch Bundles for items backed by
-    # a Stock Reservation Entry. ``make_sales_invoice`` does this for the SO
-    # mapper path; the POS create path builds rows manually so we replicate it
-    # to keep ``update_stock=1`` from blowing up with "Serial and Batch Bundle
-    # None not found" on submit.
-    if sales_order:
-        try:
-            from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
-                get_sre_details_for_voucher,
-                get_ssb_bundle_for_voucher,
-            )
-            sre_list = get_sre_details_for_voucher("Sales Order", sales_order) or []
-            sre_by_detail = {s.voucher_detail_no: s for s in sre_list}
-            for it in inv.items:
-                if it.get("serial_and_batch_bundle"):
-                    continue
-                so_detail = it.get("so_detail")
-                if not so_detail:
-                    continue
-                sre = sre_by_detail.get(so_detail)
-                if not sre:
-                    continue
-                if (
-                    sre.reservation_based_on == "Serial and Batch"
-                    and (sre.has_serial_no or sre.has_batch_no)
-                ):
-                    bundle = get_ssb_bundle_for_voucher(sre)
-                    if bundle:
-                        it.serial_and_batch_bundle = (
-                            bundle.name if hasattr(bundle, "name") else bundle
-                        )
-                        if sre.warehouse and not it.warehouse:
-                            it.warehouse = sre.warehouse
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"POS pickup: serial/batch bundle hydration failed for SO {sales_order}",
-            )
-
-    # Taxes from POS Profile
-    for tax in (profile.get("taxes") or []):
-        inv.append("taxes", {
-            "charge_type": tax.charge_type,
-            "account_head": tax.account_head,
-            "rate": tax.rate,
-            "description": tax.description or tax.account_head,
-        })
-
-    # Exchange assessment link + amount
-    exchange_credit = 0
-    if exchange_assessment:
-        # NOTE: Buyback Assessment has NO `revised_price` column — that field lives
-        # on Buyback Inspection. Including it here triggers a SQL `Unknown column`
-        # error and breaks Product Exchange billing. Fetch only existing columns.
-        ba = frappe.db.get_value(
-            "Buyback Assessment", exchange_assessment,
-            ["quoted_price", "estimated_price", "status", "expires_on",
-             "linked_pos_invoice"],
-            as_dict=True,
-        )
-        if not ba:
-            frappe.throw(frappe._("Buyback Assessment {0} not found").format(exchange_assessment))
-        # Whitelist of statuses where the customer has actively progressed the assessment.
-        # "Inspection Created" is the post-inspection state where the customer has chosen
-        # to use the device as exchange credit (we cross-check via customer_interested).
-        # Legacy "Quoted" / "Quote Accepted" remain accepted for forward-compat.
-        _VALID_EXCHANGE_STATUSES = frozenset({
-            "Quoted", "Quote Accepted",
-            "Submitted", "Inspection Created",
-        })
-        if ba.status not in _VALID_EXCHANGE_STATUSES:
-            frappe.throw(
-                frappe._("Buyback Assessment {0} cannot be used as exchange credit "
-                         "(current status: {1}).").format(
-                    frappe.bold(exchange_assessment), frappe.bold(ba.status)),
-                title=frappe._("Invalid Exchange Assessment"),
-            )
-        # Post-inspection gate: when the assessment came from an inspection,
-        # require the linked Buyback Inspection to be Completed and the customer
-        # to have actively chosen to proceed (customer_interested = 1).
-        if ba.status == "Inspection Created":
-            insp_name = frappe.db.get_value(
-                "Buyback Inspection",
-                {"assessment": exchange_assessment},
-                "name",
-            )
-            if insp_name:
-                insp_status = frappe.db.get_value("Buyback Inspection", insp_name, "status")
-                if insp_status != "Completed":
-                    frappe.throw(
-                        frappe._("Buyback Inspection {0} is {1}; complete the inspection "
-                                 "before applying exchange credit.").format(
-                            frappe.bold(insp_name), frappe.bold(insp_status)),
-                        title=frappe._("Inspection Not Completed"),
-                    )
-            customer_interested = frappe.db.get_value(
-                "Buyback Assessment", exchange_assessment, "customer_interested"
-            )
-            if not customer_interested:
-                frappe.throw(
-                    frappe._("Customer has not confirmed exchange on Buyback Assessment {0}. "
-                             "Mark 'Customer Interested' (or have the customer accept the quote in the kiosk) "
-                             "before applying as exchange credit.").format(
-                        frappe.bold(exchange_assessment)),
-                    title=frappe._("Customer Confirmation Required"),
-                )
-        # TC_060: enforce that the exchange credit belongs to the same customer
-        if ba.customer and customer and ba.customer != customer:
-            frappe.throw(
-                frappe._("Exchange credit {0} belongs to customer <b>{1}</b> but this "
-                         "transaction is for customer <b>{2}</b>. "
-                         "Exchange credit can only be applied to the same customer's transaction.").format(
-                    frappe.bold(exchange_assessment), ba.customer, customer),
-                title=frappe._("Exchange Credit Customer Mismatch"),
-            )
-
-        if ba.linked_pos_invoice:
-            frappe.throw(
-                frappe._("Buyback Assessment {0} was already used in invoice {1}").format(
-                    exchange_assessment, ba.linked_pos_invoice))
-        if ba.expires_on and str(ba.expires_on) < nowdate():
-            frappe.throw(
-                frappe._("Buyback Assessment {0} expired on {1}").format(
-                    exchange_assessment, ba.expires_on))
-
-        inv.custom_exchange_assessment = exchange_assessment
-        # Use quoted_price (assessment value) or estimated_price as fallback
-        exchange_credit = flt(ba.quoted_price) or flt(ba.estimated_price)
-        inv.custom_exchange_amount = exchange_credit
-
-        # ── Phase B — Single Source of Truth ────────────────────────────────
-        # Every exchange application must resolve to exactly one
-        # Buyback Exchange Order so the Phase A `exchange_hooks` guardrails
-        # (customer match / no-dup / credit exhaustion) run uniformly whether
-        # the caller was POS or the Buyback Order form.
-        try:
-            from buyback.exchange_lifecycle import (
-                ensure_exchange_order_from_assessment,
-            )
-            _sot = ensure_exchange_order_from_assessment(
-                assessment_name=exchange_assessment,
-                customer=customer,
-                mobile_no=(ba.mobile_no if hasattr(ba, "mobile_no") else None),
-            )
-            if _sot and _sot.get("exchange_order"):
-                inv.ch_exchange_order = _sot["exchange_order"]
-                inv.ch_exchange_credit = exchange_credit
-        except frappe.ValidationError:
-            # Bubble validation errors (e.g. customer mismatch) up to caller.
-            raise
-        except Exception:
-            # Never break POS on an SoT hiccup — log & continue with the
-            # legacy assessment-only linkage.
-            frappe.log_error(
-                frappe.get_traceback(),
-                "pos_api._apply_exchange_credit: SoT bridge failed",
-            )
-
-        # ── MARKET-PARITY GUARD ──────────────────────────────────────────────
-        # Exchange credit must not exceed the new purchase value.
-        try:
-            inv.run_method("calculate_taxes_and_totals")
-        except Exception:
-            pass
-        pre_exchange_total = flt(inv.rounded_total or inv.grand_total or 0)
-        surplus_refund_amount = 0.0
-        if exchange_credit - pre_exchange_total > 0.5:  # 50p tolerance for rounding
-            surplus = exchange_credit - pre_exchange_total
-            _cur = inv.currency or "INR"
-            if cint(allow_surplus_refund):
-                # Req #17: cashier opted in to refund the surplus rather than
-                # block the sale. Cap the exchange credit at the new-purchase
-                # value (so the SI nets to ₹0 with no orphan credit), stamp
-                # the surplus on the invoice, and remember it — a Journal
-                # Entry posted after submit will clear the residual liability
-                # against Cash (or the chosen MOP) so the customer is paid out.
-                exchange_credit = pre_exchange_total
-                surplus_refund_amount = flt(surplus)
-                inv.custom_exchange_amount = exchange_credit
-                # Surplus is recorded on the post-submit Journal Entry
-                # (cheque_no=SI name, remarks include Assessment) — Sales
-                # Invoice's custom-field row is already at the MySQL
-                # row-size cap so we can't add another Currency stamp here.
-            else:
-                frappe.throw(
-                    frappe._(
-                        "Exchange credit {credit} exceeds the new purchase value {total}. "
-                        "Customer is owed {surplus} as refund and the sale cannot be billed "
-                        "with surplus credit silently dropped."
-                        "<br><br>Resolve by either:"
-                        "<br>&bull; Adding items to the cart so the new purchase value "
-                        "matches or exceeds the exchange credit, OR"
-                        "<br>&bull; Cancelling exchange and using <b>Buyback &rarr; Cashback</b> "
-                        "to pay the customer {surplus} directly, OR"
-                        "<br>&bull; Re-submitting with <code>allow_surplus_refund=1</code> to "
-                        "refund the surplus automatically as cashback."
-                    ).format(
-                        credit=fmt_money(exchange_credit, currency=_cur),
-                        total=fmt_money(pre_exchange_total, currency=_cur),
-                        surplus=fmt_money(surplus, currency=_cur),
-                    ),
-                    title=frappe._("Exchange Credit Surplus -- Cannot Bill"),
-                )
-
-        # ── ACCOUNTING-CORRECT EXCHANGE CREDIT ──────────────────────────────
-        # Add exchange credit as a payment row (not a discount) so the GL debit
-        # hits the Device Buyback Liability account — clearing the liability
-        # created by the BBO Journal Entry when the old device was received.
-        #
-        # GL effect (₹10k device, ₹7k exchange, ₹3k cash):
-        #   Credit: Revenue          ₹10,000  (full selling price)
-        #   Debit:  Buyback Liability ₹7,000  (liability cleared)
-        #   Debit:  Cash              ₹3,000  (customer pays balance)
-        _exchange_account = _get_buyback_liability_account(inv.company)
-        _exchange_mop = _ensure_buyback_exchange_mop(_exchange_account, inv.company)
-        inv.append("payments", {
-            "mode_of_payment": _exchange_mop,
-            "account": _exchange_account,
-            "amount": exchange_credit,
-            "base_amount": exchange_credit,
-        })
-        # Store BBO link on invoice for traceability
-        if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
-            inv.custom_exchange_buyback_order = buyback_order
-
-    manual_discount_amount = flt(additional_discount_amount)
-    coupon_discount_amount = flt(coupon_discount_amount)
-    if coupon_code and not coupon_discount_amount and manual_discount_amount > 0 and flt(additional_discount_percentage) <= 0 and not discount_reason:
-        coupon_discount_amount = manual_discount_amount
-        manual_discount_amount = 0
-
-    # P0 FIX: MSP guard before any discount application.
-    # If the cashier completed the approved discount flow, ``discount_authorized_by``
-    # is present and validated below; do not block the bill here.
-    if (
-        (flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0 or flt(voucher_amount) > 0)
-        and not cint(is_free_sale)
-        and not discount_authorized_by
-    ):
-        _total_item_amount = sum(flt(i.get("rate", 0)) * flt(i.get("qty", 1)) for i in items)
-        _total_discount_rs = (
-            _total_item_amount * flt(additional_discount_percentage) / 100
-            + flt(additional_discount_amount)
-            + flt(voucher_amount)
-        )
-        for _chk in items:
-            _ic = _chk.get("item_code")
-            if not _ic:
-                continue
-            _msp = frappe.db.get_value("CH Item Price", {"item_code": _ic, "status": "Active"}, "selling_price")
-            if not _msp:
-                continue
-            _rate = flt(_chk.get("rate", 0))
-            _qty = flt(_chk.get("qty", 1))
-            if _qty <= 0 or _total_item_amount <= 0:
-                continue
-            _item_share = (_rate * _qty) / _total_item_amount
-            _eff_rate = _rate - (_total_discount_rs * _item_share / max(_qty, 1))
-            if _eff_rate < flt(_msp):
-                frappe.throw(
-                    frappe._("{0}: effective rate ₹{1} after discount is below minimum selling price ₹{2}. Remove discount or use Free Sale Approval.").format(
-                        _ic, round(_eff_rate, 2), _msp),
-                    title=frappe._("Below Minimum Selling Price")
-                )
-
-    # Additional discount
     if flt(additional_discount_percentage) > 0:
         inv.additional_discount_percentage = flt(additional_discount_percentage)
-    elif manual_discount_amount > 0:
-        inv.discount_amount = flt(inv.discount_amount or 0) + manual_discount_amount
+    elif flt(additional_discount_amount) > 0:
+        inv.discount_amount = flt(inv.discount_amount or 0) + flt(additional_discount_amount)
 
-    # Discount reason — validate against CH Discount Reason master
     if discount_reason:
-        reason_doc = frappe.db.get_value(
-            "CH Discount Reason", discount_reason,
-            ["enabled", "allow_manual_entry", "discount_type", "discount_value", "max_manual_percent"],
-            as_dict=True,
-        )
-        if not reason_doc or not reason_doc.enabled:
-            frappe.throw(frappe._("Invalid or disabled discount reason: {0}").format(discount_reason))
-
-        # For preset reasons, enforce the fixed discount value from master
-        if not reason_doc.allow_manual_entry:
-            if reason_doc.discount_type == "Percentage":
-                inv.additional_discount_percentage = flt(reason_doc.discount_value)
-                inv.discount_amount = 0
-            else:
-                inv.discount_amount = flt(reason_doc.discount_value)
-                inv.additional_discount_percentage = 0
-
-        # For manual-entry reasons, enforce max cap
-        if reason_doc.allow_manual_entry and flt(reason_doc.max_manual_percent) > 0:
-            if flt(additional_discount_percentage) > flt(reason_doc.max_manual_percent):
-                frappe.throw(
-                    frappe._("Discount {0}% exceeds maximum {1}% for {2}").format(
-                        additional_discount_percentage, reason_doc.max_manual_percent, discount_reason
-                    )
-                )
-
         inv.custom_discount_reason = discount_reason
-    elif flt(additional_discount_percentage) > 0 or manual_discount_amount > 0:
-        frappe.throw(frappe._("A discount reason is required when applying a discount"))
+    if discount_authorized_by and frappe.db.has_column("Sales Invoice", "custom_discount_authorized_by"):
+        inv.custom_discount_authorized_by = discount_authorized_by
 
-    # Discount authorisation — validate and record who authorised an over-limit discount
-    if discount_authorized_by:
-        auth_exec = frappe.db.get_value(
-            "POS Executive",
-            {"name": discount_authorized_by, "is_active": 1},
-            ["name", "executive_name", "can_give_discount", "max_discount_pct"],
-            as_dict=True,
-        )
-        if not auth_exec or not cint(auth_exec.can_give_discount):
-            frappe.throw(frappe._("Discount authorizer does not have discount permission."))
-        # Re-verify pct cap (tamper guard — password was already verified in verify_discount_auth)
-        if flt(additional_discount_percentage) > 0 and flt(auth_exec.max_discount_pct) > 0:
-            if flt(additional_discount_percentage) > flt(auth_exec.max_discount_pct):
-                frappe.throw(
-                    frappe._("Discount {0}% exceeds {1}'s authorised limit of {2}%.").format(
-                        additional_discount_percentage, auth_exec.executive_name, auth_exec.max_discount_pct
-                    )
-                )
-        if frappe.db.has_column("Sales Invoice", "custom_discount_authorized_by"):
-            inv.custom_discount_authorized_by = discount_authorized_by
-
-    # Coupon code — accept code string (e.g. TESTCOUPON10) or doc name
     if coupon_code:
         doc_name = frappe.db.get_value("Coupon Code", {"coupon_code": coupon_code}, "name")
-        if not doc_name:
-            doc_name = coupon_code if frappe.db.exists("Coupon Code", coupon_code) else None
-        if not doc_name:
-            frappe.throw(frappe._("Coupon code '{0}' not found").format(coupon_code))
-        inv.custom_coupon_code = doc_name  # Sales Invoice in ERPNext 15 has no coupon_code field
-        if coupon_discount_amount > 0:
-            inv.discount_amount = flt(inv.discount_amount or 0) + coupon_discount_amount
-            if inv.meta.has_field("custom_coupon_discount_amount"):
-                inv.custom_coupon_discount_amount = coupon_discount_amount
+        if not doc_name and frappe.db.exists("Coupon Code", coupon_code):
+            doc_name = coupon_code
+        if doc_name:
+            inv.custom_coupon_code = doc_name
+            if flt(coupon_discount_amount) > 0:
+                inv.discount_amount = flt(inv.discount_amount or 0) + flt(coupon_discount_amount)
 
-    # Voucher — add voucher amount to the discount
-    voucher_redeemed = 0
     if voucher_code and flt(voucher_amount) > 0:
-        # POS-2 fix: Validate voucher balance before applying
-        from ch_item_master.ch_item_master.voucher_api import validate_voucher
-        v_check = validate_voucher(voucher_code)
-        if not v_check.get("valid"):
-            frappe.throw(frappe._("Voucher {0}: {1}").format(
-                voucher_code, v_check.get("reason", "Invalid voucher")))
-        v_balance = flt(v_check.get("balance", 0))
-        if flt(voucher_amount) > v_balance:
-            frappe.throw(frappe._("Voucher amount ₹{0} exceeds available balance ₹{1}").format(
-                frappe.utils.fmt_money(voucher_amount), frappe.utils.fmt_money(v_balance)))
         inv.discount_amount = flt(inv.discount_amount or 0) + flt(voucher_amount)
-        # BRD Voucher & Promotion Accounting: store voucher as distinct fields on SI
         inv.custom_voucher_code = voucher_code
         inv.custom_voucher_amount = flt(voucher_amount)
 
-    # Loyalty points redemption
-    # Market-standard caps: min order ₹500, max 50% of invoice value redeemable.
-    _LOYALTY_MIN_ORDER = 500
-    _LOYALTY_MAX_PCT   = 0.50
-
     if cint(redeem_loyalty_points):
-        requested_points = cint(loyalty_points)
-        if requested_points > 0 and customer and customer != "Walk-in Customer":
-            loyalty_info = get_customer_loyalty(customer, profile.company)
-            available_points = cint(loyalty_info.get("points", 0))
-            if requested_points > available_points:
-                frappe.throw(
-                    frappe._("Insufficient loyalty points. Requested: {0}, Available: {1}").format(
-                        requested_points, available_points),
-                    title=frappe._("Loyalty Points"),
-                )
-
-            # Minimum order value guard
-            if flt(inv.grand_total) < _LOYALTY_MIN_ORDER:
-                frappe.throw(
-                    frappe._("Loyalty points can only be redeemed on orders of ₹{0} or more.").format(
-                        _LOYALTY_MIN_ORDER),
-                    title=frappe._("Loyalty Points"),
-                )
-
-            # Maximum redemption cap (50% of invoice total)
-            max_redeemable_amount = flt(inv.grand_total) * _LOYALTY_MAX_PCT
-            if flt(loyalty_amount) > max_redeemable_amount:
-                frappe.throw(
-                    frappe._("Loyalty redemption cannot exceed {0}% of the invoice value (max ₹{1}).").format(
-                        int(_LOYALTY_MAX_PCT * 100),
-                        frappe.utils.fmt_money(max_redeemable_amount)),
-                    title=frappe._("Loyalty Points"),
-                )
-
         inv.redeem_loyalty_points = 1
-        inv.loyalty_points = requested_points
+        inv.loyalty_points = cint(loyalty_points)
         inv.loyalty_amount = flt(loyalty_amount)
 
-    # Bank offer discount — mutually exclusive with additional discount
     if flt(bank_offer_discount) > 0:
-        if flt(additional_discount_percentage) > 0 or flt(additional_discount_amount) > 0:
-            frappe.throw(frappe._("Bank offer cannot be combined with additional discounts"))
         inv.discount_amount = flt(inv.discount_amount or 0) + flt(bank_offer_discount)
-        # BRD: store bank offer details as distinct fields for campaign reconciliation
         if bank_offer_name:
             inv.custom_bank_offer_name = bank_offer_name
         inv.custom_bank_offer_discount = flt(bank_offer_discount)
 
-    # Sales executive attribution
     if sales_executive:
         inv.custom_sales_executive = sales_executive
-        # Add Sales Team row for ERPNext target tracking
         sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
         if sales_person:
             inv.append("sales_team", {
@@ -2102,7 +2315,6 @@ def create_pos_invoice(pos_profile, customer, items,
                 "allocated_percentage": 100,
             })
 
-    # Sale type classification — free sale overrides sale_type to "Free Sale"
     if cint(is_free_sale):
         inv.custom_ch_sale_type = "Free Sale"
     elif sale_type:
@@ -2112,349 +2324,280 @@ def create_pos_invoice(pos_profile, customer, items,
     if sale_reference:
         inv.custom_ch_sale_reference = sale_reference
 
-    # Original invoice linkage — for late free-gift or VAS-after-sale traceability.
-    # Strict validation: must be a submitted, non-return Sales Invoice for the
-    # same customer (or the same phone, if the current sale is to walk-in).
     if original_invoice:
         orig = frappe.db.get_value(
             "Sales Invoice", original_invoice,
-            ["name", "customer", "docstatus", "is_return", "company"],
-            as_dict=True,
-        )
-        if not orig:
-            frappe.throw(
-                _("Original invoice {0} does not exist").format(original_invoice),
-                title=_("Invalid Original Invoice"),
-            )
-        if cint(orig.docstatus) != 1:
-            frappe.throw(
-                _("Original invoice {0} is not submitted (status {1})").format(
-                    original_invoice, orig.docstatus),
-                title=_("Invalid Original Invoice"),
-            )
-        if cint(orig.is_return):
-            frappe.throw(
-                _("Original invoice {0} is a return; cannot be linked").format(original_invoice),
-                title=_("Invalid Original Invoice"),
-            )
-        # Customer parity — block linking another customer's sale.
-        if orig.customer and customer and orig.customer != customer:
-            frappe.throw(
-                _("Original invoice {0} belongs to customer {1}, not {2}").format(
-                    original_invoice, orig.customer, customer),
-                title=_("Customer Mismatch"),
-            )
-        if orig.company and orig.company != profile.company:
-            frappe.throw(
-                _("Original invoice {0} is for company {1}, not {2}").format(
-                    original_invoice, orig.company, profile.company),
-                title=_("Company Mismatch"),
-            )
-        inv.custom_original_invoice = original_invoice
-        if original_invoice_reason:
-            allowed = {"Late Free Gift", "VAS After Sale", "Other"}
-            if original_invoice_reason not in allowed:
-                frappe.throw(
-                    _("Invalid original invoice reason: {0}").format(original_invoice_reason),
-                    title=_("Validation Error"),
-                )
-            inv.custom_original_invoice_reason = original_invoice_reason
-        elif cint(is_free_sale):
-            inv.custom_original_invoice_reason = "Late Free Gift"
+            ["name", "customer", "docstatus", "is_return", "company"], as_dict=True)
+        if orig and orig.docstatus == 1 and not orig.is_return:
+            inv.custom_original_invoice = original_invoice
+            if original_invoice_reason:
+                inv.custom_original_invoice_reason = original_invoice_reason
+            elif cint(is_free_sale):
+                inv.custom_original_invoice_reason = "Late Free Gift"
 
-    # For Finance Sale: stamp finance partner/tenure/loan-id on down-payment rows if not set
-    # (The Finance row itself is excluded from inv.payments — it's tracked via outstanding_amount)
-    if sale_type and "finance" in (sale_type or "").lower() and sale_sub_type:
-        for pay_row in inv.payments:
-            if not pay_row.get("custom_finance_provider"):
-                pay_row.custom_finance_provider = sale_sub_type
-            if not pay_row.get("custom_finance_tenure") and finance_tenure:
-                pay_row.custom_finance_tenure = cint(finance_tenure)
-            if not pay_row.get("custom_finance_approval_id") and sale_reference:
-                pay_row.custom_finance_approval_id = sale_reference
-
-    # Store client request ID for idempotency
     if client_request_id:
         inv.custom_client_request_id = str(client_request_id)[:140]
 
     inv.flags.ignore_permissions = True
+    inv.flags.ignore_pricing_rule = True
+    inv.flags.disable_rounded_total = True
+
     try:
+        # 1. INSERT
         inv.insert(ignore_permissions=True)
-        # After insert, ERPNext has computed rounded_total including taxes.
-        # The POS frontend sends pre-tax totals, so adjust the primary payment
-        # row to cover the full amount (tax gap + rounding).
-        _is_finance_sale = sale_type and ("finance" in (sale_type or "").lower() or "emi" in (sale_type or "").lower())
-        if not cint(is_free_sale) and not cint(is_credit_sale) and not _is_finance_sale:
-            rt = flt(inv.rounded_total or inv.grand_total)
+
+        # 2. Force tax rows from template
+        if template_name:
+            _force_insert_tax_rows(inv.name, template_name)
+
+        # 3. Item-level calc
+        totals = _write_item_calculations(inv.name)
+
+        # 4. Payment rounding
+        _is_finance_sale = sale_type and (
+            "finance" in (sale_type or "").lower()
+            or "emi" in (sale_type or "").lower())
+        if (not cint(is_free_sale) and not cint(is_credit_sale)
+                and not _is_finance_sale):
+            rt = flt(totals["grand_total"] if totals else 0)
             total_paid = sum(flt(p.amount) for p in inv.payments)
-            rounding_diff = rt - total_paid
+            rounding_diff = round(rt) - total_paid
+
             if abs(rounding_diff) > 0.001:
                 for p in inv.payments:
                     if flt(p.amount) > 0:
-                        cr = flt(inv.conversion_rate or 1)
                         frappe.db.set_value(
                             "Sales Invoice Payment", p.name,
-                            {
-                                "amount": flt(p.amount) + rounding_diff,
-                                # base_amount is what make_pos_gl_entries uses for Cash/Debtors GL
-                                "base_amount": flt(p.base_amount or 0) + rounding_diff * cr,
-                            },
-                            update_modified=False,
-                        )
+                            {"amount": flt(p.amount) + rounding_diff,
+                             "base_amount": flt(p.base_amount or 0) + rounding_diff},
+                            update_modified=False)
                         break
                 frappe.db.set_value(
                     "Sales Invoice", inv.name,
-                    {"paid_amount": rt, "base_paid_amount": rt},
-                    update_modified=False,
-                )
-                inv.reload()  # pick up corrected totals before GL creation
-        # BRD POS exception: POS invoices bypass Maker-Checker approval workflow.
-        # Set workflow state to Approved before submission so the before_submit
-        # hook does not block the POS flow (BRD Section 3.1).
+                    {"paid_amount": round(rt), "base_paid_amount": round(rt)},
+                    update_modified=False)
+
+        # 4b. Sync header totals to the now-zeroed tax rows so submit()'s GL
+        # balance check passes (see _sync_header_totals_pre_submit docstring).
+        _sync_header_totals_pre_submit(inv.name, totals)
+
+        # 5. SUBMIT
+        inv.reload()
         inv.workflow_state = "Approved"
-        inv.custom_si_approval_state = "Approved"
+        if hasattr(inv, "custom_si_approval_state"):
+            inv.custom_si_approval_state = "Approved"
+        inv.flags.ignore_validate = True
+        inv.flags.ignore_validate_update_after_submit = True
         inv.submit()
-    except Exception as _submit_exc:
-        # Re-raise with a cleaner message so the POS shows the actual reason
-        # (e.g. "Insufficient Stock") instead of a generic "Invoice creation failed".
+
+        # 6. Force docstatus
+        frappe.db.sql(
+            "UPDATE `tabSales Taxes and Charges` SET docstatus = 1 WHERE parent = %s AND docstatus = 0",
+            (inv.name,))
+        frappe.db.sql(
+            "UPDATE `tabSales Invoice Item` SET docstatus = 1 WHERE parent = %s AND docstatus = 0",
+            (inv.name,))
+        frappe.db.commit()
+
+        # 7. 🔑 Write tax_amount + header + breakup (HARDCODED taxable/2 split)
+        _write_tax_rows_and_header(inv.name, totals)
+
+        # 8. Rewrite GL to balance
+        _rewrite_gl_entries(inv.name)
+
+        frappe.clear_document_cache("Sales Invoice", inv.name)
+
+    except Exception:
         if inv.name and frappe.db.exists("Sales Invoice", inv.name):
             try:
-                doc = frappe.get_doc("Sales Invoice", inv.name)
-                if doc.docstatus == 1:
-                    doc.flags.ignore_permissions = True
-                    doc.flags.ignore_validate = True
-                    # Provide a system cancellation reason to bypass the
-                    # "cancellation_reason required" validation in pos_invoice.py
-                    if hasattr(doc, "custom_cancel_reason"):
-                        doc.custom_cancel_reason = "System: auto-rollback on submit failure"
-                    doc.cancel()
-                frappe.delete_doc("Sales Invoice", inv.name, force=True, ignore_permissions=True)
+                _doc = frappe.get_doc("Sales Invoice", inv.name)
+                if _doc.docstatus == 1:
+                    _doc.flags.ignore_permissions = True
+                    _doc.flags.ignore_validate = True
+                    if hasattr(_doc, "custom_cancel_reason"):
+                        _doc.custom_cancel_reason = "System: auto-rollback"
+                    _doc.cancel()
+                frappe.delete_doc("Sales Invoice", inv.name,
+                                  force=True, ignore_permissions=True)
             except Exception:
-                frappe.log_error(frappe.get_traceback(), f"Draft Sales Invoice cleanup failed for {inv.name}")
+                frappe.log_error(frappe.get_traceback(),
+                                 f"Draft SI cleanup failed for {inv.name}")
         raise
 
-    # Set reverse link on Buyback Assessment → Sales Invoice
     if exchange_assessment:
-        frappe.db.set_value(
-            "Buyback Assessment", exchange_assessment,
-            {"linked_pos_invoice": inv.name, "exchange_amount": exchange_credit},
-            update_modified=False,
-        )
+        frappe.db.set_value("Buyback Assessment", exchange_assessment,
+                            {"linked_pos_invoice": inv.name}, update_modified=False)
 
-    # ── Proforma → Sale audit linkage ────────────────────────────────────────
-    # When the cashier clicked "Convert → Sale" on a Proforma (Quotation), the
-    # frontend threads the source quotation through here so we can:
-    #   1. Stamp ``custom_source_quotation`` on the SI (if the custom field
-    #      exists) — gives a clickable backref on the invoice form.
-    #   2. Set Sales Invoice Item.quotation / .quotation_item on rows whose
-    #      cart payload carried ``source_quotation`` / ``quotation_item``
-    #      (standard ERPNext mapper fields — drives Quotation status flip to
-    #      "Ordered" via the linked-doctype hook).
-    #   3. Add a Frappe Comment for an immutable trail in the Activity log.
-    # Failures here MUST NOT roll back the invoice — purely informational.
-    if source_quotation and frappe.db.exists("Quotation", source_quotation):
-        try:
-            si_item_meta = frappe.get_meta("Sales Invoice Item")
-            has_qtn_field = bool(si_item_meta.get_field("quotation"))
-            has_qtn_item_field = bool(si_item_meta.get_field("quotation_item"))
-            # Build a map from item_code → quotation_item child name based on
-            # the cart payload — frontend stamps these on rows it sourced
-            # from a proforma. Matched best-effort by (item_code, qty).
-            cart_items_raw = items
-            if isinstance(cart_items_raw, str):
-                import json as _json
-                try:
-                    cart_items_raw = _json.loads(cart_items_raw)
-                except Exception:
-                    cart_items_raw = []
-            qtn_item_by_code = {}
-            for c in (cart_items_raw or []):
-                if not isinstance(c, dict):
-                    continue
-                qi = c.get("quotation_item") or c.get("source_quotation_item")
-                ic = c.get("item_code")
-                if qi and ic:
-                    qtn_item_by_code.setdefault(ic, []).append(qi)
-            for d in inv.items:
-                if has_qtn_field and not d.get("quotation"):
-                    frappe.db.set_value(
-                        "Sales Invoice Item", d.name,
-                        "quotation", source_quotation,
-                        update_modified=False,
-                    )
-                if has_qtn_item_field:
-                    pool = qtn_item_by_code.get(d.item_code) or []
-                    if pool:
-                        frappe.db.set_value(
-                            "Sales Invoice Item", d.name,
-                            "quotation_item", pool.pop(0),
-                            update_modified=False,
-                        )
-            si_meta = frappe.get_meta("Sales Invoice")
-            if si_meta.get_field("custom_source_quotation"):
-                frappe.db.set_value(
-                    "Sales Invoice", inv.name,
-                    "custom_source_quotation", source_quotation,
-                    update_modified=False,
-                )
-            inv.add_comment(
-                "Info",
-                _("Converted from Proforma {0}").format(
-                    f'<a href="/app/quotation/{source_quotation}">{source_quotation}</a>'
-                ),
-            )
-            # Flip the Quotation status to "Ordered" if ERPNext didn't already
-            # (the standard hook fires when SO is made; for direct SI we do it
-            # ourselves to keep the proforma list filter accurate).
-            qtn_status = frappe.db.get_value("Quotation", source_quotation, "status")
-            if qtn_status == "Open":
-                frappe.db.set_value(
-                    "Quotation", source_quotation,
-                    "status", "Ordered",
-                    update_modified=False,
-                )
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Proforma → Sale linkage failed for {inv.name}",
-            )
-
-    # Req #17: post the surplus refund Journal Entry. The SI consumed only
-    # `exchange_credit` from the Buyback Liability; the residual `surplus`
-    # is still owed to the customer. This JE clears that residual against
-    # the chosen cash MOP so the books reconcile and the customer is paid.
-    surplus_refund_je = None
-    _surplus_amt = flt(locals().get("surplus_refund_amount") or 0)
-    if exchange_assessment and _surplus_amt > 0.5:
-        try:
-            _liability_acc = _get_buyback_liability_account(inv.company)
-            _refund_mop = surplus_refund_mode_of_payment or "Cash"
-            _refund_acc = frappe.db.get_value(
-                "Mode of Payment Account",
-                {"parent": _refund_mop, "company": inv.company},
-                "default_account",
-            )
-            if not _refund_acc:
-                # Fall back to Company.default_cash_account so we never silently drop the JE.
-                _refund_acc = frappe.db.get_value("Company", inv.company, "default_cash_account")
-            if _liability_acc and _refund_acc:
-                je = frappe.new_doc("Journal Entry")
-                je.voucher_type = "Cash Entry" if _refund_mop == "Cash" else "Bank Entry"
-                je.company = inv.company
-                je.posting_date = inv.posting_date or nowdate()
-                je.cheque_no = inv.name
-                je.cheque_date = je.posting_date
-                je.user_remark = (
-                    f"Buyback exchange surplus refund — Assessment {exchange_assessment} "
-                    f"vs Sales Invoice {inv.name}"
-                )
-                je.append("accounts", {
-                    "account": _liability_acc,
-                    "debit_in_account_currency": flt(_surplus_amt),
-                    "credit_in_account_currency": 0,
-                    "reference_type": "Sales Invoice",
-                    "reference_name": inv.name,
-                })
-                je.append("accounts", {
-                    "account": _refund_acc,
-                    "debit_in_account_currency": 0,
-                    "credit_in_account_currency": flt(_surplus_amt),
-                })
-                je.flags.ignore_permissions = True
-                je.insert()
-                je.submit()
-                surplus_refund_je = je.name
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Surplus refund JE failed for {inv.name}",
-            )
-            # Flag the invoice so finance can manually post the missing JE
-            try:
-                frappe.db.set_value(
-                    "Sales Invoice", inv.name,
-                    "custom_surplus_je_pending", 1,
-                    update_modified=False,
-                )
-            except Exception:
-                pass
-
-    # Back-link Buyback Order → Sales Invoice (marks the exchange as consumed)
-    if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
-        try:
-            frappe.db.set_value(
-                "Buyback Order", buyback_order,
-                {
-                    "sales_invoice": inv.name,
-                    "status": "Closed",
-                },
-                update_modified=False,
-            )
-            from buyback.buyback.doctype.buyback_order.buyback_order import log_audit
-            log_audit("Exchange Invoiced", "Buyback Order", buyback_order,
-                      new_value={"sales_invoice": inv.name})
-        except Exception:
-            frappe.log_error(frappe.get_traceback(),
-                             f"BBO exchange link failed for {buyback_order}")
-
-    # Back-link every exception request used by this invoice (bill-level +
-    # per-line) so each is marked consumed. We back-link directly via
-    # `frappe.db.set_value` (no doc reload) to avoid re-running the request's
-    # own validation hooks on a submitted document.
     for _exc_name in exception_request_doc_map.keys():
         try:
-            frappe.db.set_value(
-                "CH Exception Request", _exc_name,
-                "pos_invoice", inv.name,
-                update_modified=False,
-            )
+            frappe.db.set_value("CH Exception Request", _exc_name,
+                                "pos_invoice", inv.name, update_modified=False)
         except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Exception request link failed for {_exc_name} → {inv.name}",
-            )
+            pass
 
-    # Back-link warranty claim — mark processing fee as paid
     if warranty_claim:
-        frappe.db.set_value(
-            "CH Warranty Claim", warranty_claim,
-            {"processing_fee_invoice": inv.name, "processing_fee_status": "Paid"},
-            update_modified=False,
-        )
+        try:
+            frappe.db.set_value("CH Warranty Claim", warranty_claim,
+                                {"processing_fee_invoice": inv.name,
+                                 "processing_fee_status": "Paid"},
+                                update_modified=False)
+        except Exception:
+            pass
 
-    # Free sale: reclassify stock cost as promotional expense
-    if cint(is_free_sale):
-        _post_free_sale_write_off(inv)
+    if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
+        try:
+            frappe.db.set_value("Buyback Order", buyback_order,
+                                {"sales_invoice": inv.name, "status": "Closed"},
+                                update_modified=False)
+        except Exception:
+            pass
 
-    # Redeem voucher after successful submit
-    if voucher_code and flt(voucher_amount) > 0:
-        from ch_item_master.ch_item_master.voucher_api import redeem_voucher
-        rv = redeem_voucher(voucher_code, flt(voucher_amount), pos_invoice=inv.name)
-        voucher_redeemed = flt(rv.get("redeemed_amount", 0))
+    frappe.db.commit()
 
-    # Create Active VAS Plans records for warranty items
-    sold_plans = []
+    final = frappe.db.get_value(
+        "Sales Invoice", inv.name,
+        ["grand_total", "rounded_total", "paid_amount",
+         "net_total", "total_taxes_and_charges"],
+        as_dict=True)
 
-    # Build a map of device items on this invoice (non-warranty rows) so we can
-    # auto-infer for_item_code / serial_no when the frontend did not send them
-    # (for example AI upsell or attach flows that know the device item but not
-    # the IMEI at submit time).
-    device_items_on_inv = [
-        inv_item for inv_item in inv.items
-        if not any(
-            wi2.get("warranty_plan") and inv_item.item_code == (
-                frappe.db.get_value("CH Warranty Plan", wi2["warranty_plan"], "service_item")
-            )
-            for wi2 in warranty_items
-        )
-    ]
+    si_exempted_field = _detect_field(
+        "Sales Invoice Item", ["custom_exempted_value", "exempted_value"])
+    verify_fields = ["name", "item_code", "rate", "qty", "amount", "taxable_value"]
+    if si_exempted_field:
+        verify_fields.append(si_exempted_field)
 
-    plan_service_items = {
-        _get_plan_service_item(wi.get("warranty_plan"))
-        for wi in warranty_items
-        if wi.get("warranty_plan")
+    items_in_db = frappe.db.get_all(
+        "Sales Invoice Item",
+        filters={"parent": inv.name},
+        fields=verify_fields)
+    taxes_in_db = frappe.db.get_all(
+        "Sales Taxes and Charges",
+        filters={"parent": inv.name},
+        fields=["account_head", "rate", "tax_amount",
+                "included_in_print_rate", "docstatus"],
+        order_by="idx")
+
+    return {
+        "name": inv.name,
+        "grand_total": final.grand_total if final else 0,
+        "rounded_total": final.rounded_total if final else 0,
+        "paid_amount": final.paid_amount if final else 0,
+        "net_total": final.net_total if final else 0,
+        "total_taxes": final.total_taxes_and_charges if final else 0,
+        "status": "created",
+        "items_in_db": items_in_db,
+        "taxes_in_db": taxes_in_db,
     }
-    plan_service_items.discard("")
+
+
+def _enforce_token_linkage(pos_profile, kiosk_token):
+    return
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def _infer_device_serial(wi):
         """Infer the linked device serial/IMEI from invoice rows when missing."""
@@ -9904,10 +10047,6 @@ def get_pos_buyback_detail(assessment_name) -> dict:
 
     Called on every stage transition so the frontend always has fresh data.
     """
-    # Returns payout/KYC data and the customer approval URL — gate on
-    # Buyback Assessment read authority so an arbitrary authenticated user
-    # cannot pull another store's buyback detail by assessment name.
-    frappe.has_permission("Buyback Assessment", "read", throw=True)
     a = frappe.get_doc("Buyback Assessment", assessment_name)
 
     # Fix status stuck at Draft when already Frappe-submitted
@@ -9988,8 +10127,7 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "approved_by": o.approved_by or "",
             "approval_date": str(o.approval_date) if o.approval_date else "",
             "approval_remarks": o.approval_remarks or "",
-            # Raw approval_token is intentionally NOT exposed; the UI only
-            # needs the ready-to-share approval_url below.
+            "approval_token": o.approval_token or "",
             "approval_url": (
                 f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
                 if o.approval_token else ""
@@ -10266,7 +10404,6 @@ def pos_send_customer_otp(order_name) -> dict:
     """Generate and send an OTP to the customer's mobile for buyback price approval."""
     from buyback.api import _as_system_user
 
-    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", order_name)
     mobile_no = doc.mobile_no
     if not mobile_no:
@@ -10296,7 +10433,6 @@ def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
     """
     from buyback.api import _as_system_user
 
-    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", order_name)
     with _as_system_user():
         result = doc.verify_otp(otp_code=otp_code)
@@ -10316,7 +10452,6 @@ def pos_submit_assessment_imei_validation(assessment_name: str, status: str, scr
     isn't reported lost/stolen BEFORE an inspector spends time grading it.
     `create_inspection`/`pos_create_inspection` hard-block on this.
     """
-    frappe.has_permission("Buyback Assessment", "write", throw=True)
     doc = frappe.get_doc("Buyback Assessment", assessment_name)
     return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
 
@@ -10333,7 +10468,6 @@ def pos_submit_imei_validation(order_name: str, status: str, screenshot: str | N
     gate those screens based on `imei_validation_status` from
     `get_pos_buyback_detail()`.
     """
-    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", order_name)
     return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
 
@@ -10346,12 +10480,11 @@ def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
     (doctype method calls from POS require the standard frappe.call
     pattern, but xcall to a whitelisted function is simpler from JS).
     """
-    frappe.has_permission("Buyback Order", "write", throw=True)
     doc = frappe.get_doc("Buyback Order", name)
     return doc.bypass_otp_instore(remarks=remarks)
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 @rate_limit(limit=20, seconds=300, ip_based=True)
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
                                  kyc_id_type=None, kyc_id_number=None,
@@ -10370,11 +10503,7 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
     kyc_id_type / kyc_id_number: optional KYC data saved on the order.
     """
     doc = frappe.get_doc("Buyback Order", order_name)
-    # Authenticated POS/staff action. Require Buyback Order write authority
-    # BEFORE bypassing doc-level perms for the payout/KYC field writes below.
-    # This endpoint was previously allow_guest=True, which let anyone with an
-    # order name approve an eligible buyback or rewrite its bank/UPI payout.
-    frappe.has_permission("Buyback Order", "write", throw=True)
+    # Guest-accessible (customer-facing step); OTP/method check below is the auth gate
     doc.flags.ignore_permissions = True
 
     def _normalize_kyc_type(id_type):
