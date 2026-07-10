@@ -162,14 +162,27 @@ def pos_item_search(
         filters["in_stock_only"] = 1
 
     if filters.get("in_stock_only") and warehouse:
-        # For serial-tracked items check Active serials; for others check Bin qty
+        # Availability rules by item shape:
+        #   * Non-stock items (services / warranty SKUs / digital
+        #     activations) never have Bin rows because they aren't
+        #     tracked in inventory — they are ALWAYS available for sale.
+        #   * Serial-tracked stock items require an Active serial in the
+        #     current warehouse.
+        #   * Regular stock items require Bin.actual_qty > 0 in the
+        #     current warehouse.
         conditions.append(
-            "(CASE WHEN i.has_serial_no = 1 THEN"
-            " EXISTS (SELECT 1 FROM `tabSerial No` sn"
-            "   WHERE sn.item_code = i.name AND sn.warehouse = %(wh)s AND sn.status = 'Active')"
-            " ELSE"
-            " EXISTS (SELECT 1 FROM `tabBin` b"
-            "   WHERE b.item_code = i.name AND b.warehouse = %(wh)s AND b.actual_qty > 0)"
+            "(CASE"
+            " WHEN i.is_stock_item = 0 THEN 1"
+            " WHEN i.has_serial_no = 1 THEN EXISTS ("
+            "   SELECT 1 FROM `tabSerial No` sn"
+            "     WHERE sn.item_code = i.name"
+            "       AND sn.warehouse = %(wh)s"
+            "       AND sn.status = 'Active')"
+            " ELSE EXISTS ("
+            "   SELECT 1 FROM `tabBin` b"
+            "     WHERE b.item_code = i.name"
+            "       AND b.warehouse = %(wh)s"
+            "       AND b.actual_qty > 0)"
             " END)"
         )
         values["wh"] = warehouse
@@ -683,3 +696,52 @@ def get_item_detail_for_pos(item_code, warehouse=None, price_list=None) -> dict:
         "offers": _get_item_offers(item_code),
         "warranty_plans": warranty_plans,
     }
+
+
+@frappe.whitelist()
+def get_external_imei_plan_for_item(item_code) -> dict:
+    """Return the sellable warranty plan an ``allow_external_device=1``
+    Item is the service_item for, or ``{}`` when the Item is not backing
+    an external-IMEI plan.
+
+    Called by the POS cart-service when a warranty / VAS service SKU is
+    added directly from the walk-up item bin (rather than through the
+    "Add VAS" flow). If the returned plan supports customer-provided
+    IMEIs, the frontend opens the same device-source prompt as the
+    modal — a bare warranty line with no IMEI would be
+    non-attributable and rejected at billing time.
+
+    Returns a dict with at least ``plan``, ``plan_name``,
+    ``allow_external_device``, ``external_device_item``,
+    ``fulfillment_type``, ``duration_months``, ``price``,
+    ``plan_type``. Empty ``{}`` when the item is not a
+    warranty/VAS service_item or the linked plan is not sellable /
+    does not allow external devices.
+    """
+    if not item_code:
+        return {}
+
+    # Governance surface: only Active + sellable plans. A plan that
+    # exists but isn't published to POS must not auto-prompt.
+    plan = frappe.db.get_value(
+        "CH Warranty Plan",
+        {
+            "service_item": item_code,
+            "status": "Active",
+            "is_sellable": 1,
+            "allow_external_device": 1,
+        },
+        [
+            "name", "plan_name", "plan_type", "service_item",
+            "duration_months", "price", "pricing_mode",
+            "percentage_value", "fulfillment_type",
+            "allow_external_device", "external_device_item",
+        ],
+        as_dict=True,
+    )
+    if not plan or not plan.get("external_device_item"):
+        # No plan, or the plan doesn't have an external-device Item
+        # configured — cannot auto-open the IMEI prompt safely.
+        return {}
+    return plan
+
