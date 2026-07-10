@@ -116,9 +116,47 @@ def test_import_insert_path_populates_defaults():
         frappe.db.rollback()
 
 
+def test_imported_submitted_pos_invoice_has_pos_tax_behavior_and_single_sle():
+    doc = _make_import_invoice()
+    doc.docstatus = 1
+    doc.is_pos = 1
+    doc.taxes_and_charges = TAX_TEMPLATE
+
+    try:
+        with _data_import_flags(doc):
+            doc.insert(ignore_permissions=True)
+
+        invoice = frappe.get_doc("Sales Invoice", doc.name)
+        assert invoice.docstatus == 1
+        assert invoice.taxes
+        assert flt(invoice.total_taxes_and_charges) > 0
+        assert flt(invoice.grand_total) > flt(invoice.net_total)
+
+        if hasattr(invoice, "workflow_state"):
+            assert invoice.workflow_state == "Approved"
+        if hasattr(invoice, "custom_si_approval_state"):
+            assert invoice.custom_si_approval_state == "Approved"
+
+        sle_count = frappe.db.sql(
+            "SELECT COUNT(*) FROM `tabStock Ledger Entry` WHERE voucher_type=%s AND voucher_no=%s",
+            ("Sales Invoice", invoice.name),
+        )[0][0]
+        assert int(sle_count) == 1
+
+        sle_sum = flt(frappe.db.sql(
+            "SELECT IFNULL(SUM(actual_qty), 0) FROM `tabStock Ledger Entry` "
+            "WHERE voucher_type=%s AND voucher_no=%s",
+            ("Sales Invoice", invoice.name),
+        )[0][0] or 0)
+        assert abs(sle_sum + flt(invoice.items[0].qty)) < 0.0001
+    finally:
+        frappe.db.rollback()
+
+
 def run():
     test_import_fetches_item_price_amount_and_taxes()
     test_import_preserves_explicit_rate_and_calculates_amount_and_taxes()
     test_import_derives_rate_from_amount_when_rate_missing()
     test_import_insert_path_populates_defaults()
-    return {"status": "ok", "tests": 4}
+    test_imported_submitted_pos_invoice_has_pos_tax_behavior_and_single_sle()
+    return {"status": "ok", "tests": 5}

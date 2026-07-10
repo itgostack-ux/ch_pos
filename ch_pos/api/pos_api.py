@@ -13015,3 +13015,68 @@ def get_customer_full_details(customer, **kwargs):
         result["ship_to_same_as_billing"] = 1
 
     return result
+
+
+
+
+
+    # ── Existing helpers from your file (keep them as-is) ──
+    # _force_insert_tax_rows, _write_item_calculations,
+    # _sync_header_totals_pre_submit, _write_tax_rows_and_header,
+    # _rewrite_gl_entries, _update_gst_breakup
+
+    def apply_pos_gst_pipeline(si_name, template_name, submit_if_draft=False):
+        """
+        Idempotent GST + GL pipeline for CH POS Sales Invoices.
+        Works for:
+        • Invoices created via create_pos_invoice()
+        • Invoices imported via Data Import (Draft → pipeline → Submit)
+        • Invoices created via REST/API that carry taxes_and_charges
+        """
+        if not frappe.db.exists("Sales Invoice", si_name):
+            frappe.throw(_("Sales Invoice {0} not found").format(si_name))
+
+        doc = frappe.get_doc("Sales Invoice", si_name)
+
+        # ── 1. Force zeroed tax rows from template ─────────────────────
+        if template_name:
+            _force_insert_tax_rows(si_name, template_name)
+
+        # ── 2. Item-level taxable / exempted calculations ──────────────
+        totals = _write_item_calculations(si_name)
+        if not totals:
+            frappe.log_error(f"POS GST pipeline: no items to calculate for {si_name}")
+            return None
+
+        # ── 3. Sync header to tax-exclusive base so submit() balances ──
+        _sync_header_totals_pre_submit(si_name, totals)
+
+        # ── 4. Submit if still Draft (Data Import safety) ──────────────
+        if submit_if_draft and doc.docstatus == 0:
+            doc.reload()
+            doc.workflow_state = "Approved"
+            if hasattr(doc, "custom_si_approval_state"):
+                doc.custom_si_approval_state = "Approved"
+            doc.flags.ignore_permissions = True
+            doc.flags.ignore_validate = True
+            doc.submit()
+
+        # ── 5. Force child docstatus = 1 (ERPNext sometimes leaves 0) ──
+        frappe.db.sql(
+            "UPDATE `tabSales Taxes and Charges` SET docstatus = 1 WHERE parent = %s AND docstatus = 0",
+            (si_name,)
+        )
+        frappe.db.sql(
+            "UPDATE `tabSales Invoice Item` SET docstatus = 1 WHERE parent = %s AND docstatus = 0",
+            (si_name,)
+        )
+        frappe.db.commit()
+
+        # ── 6. Write real tax rows + header (hardcoded taxable/2) ──────
+        _write_tax_rows_and_header(si_name, totals)
+
+        # ── 7. Delete old GL and rebuild from corrected state ──────────
+        _rewrite_gl_entries(si_name)
+
+        frappe.clear_document_cache("Sales Invoice", si_name)
+        return totals
