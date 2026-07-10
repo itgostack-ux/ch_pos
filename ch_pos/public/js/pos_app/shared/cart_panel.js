@@ -910,7 +910,15 @@ export class CartPanel {
 		// #7: jump to the Pre-Book screen carrying the current cart + customer.
 		// The cart lives on PosState, which persists across modes, so the
 		// prebook workspace renders it pre-filled (no re-entry).
-		w.on("click", ".ch-pos-btn-prebook", () => EventBus.emit("mode:set", "prebook"));
+		// Fire BOTH events (same pattern as buyback/returns/queue/etc.):
+		//   `mode:set`    — updates sidebar highlight + PosState.active_mode
+		//   `mode:switch` — LayoutManager mounts the target workspace
+		// Emitting only `mode:set` here previously left the content panel
+		// stuck on Sell while the sidebar row for Prebook lit up.
+		w.on("click", ".ch-pos-btn-prebook", () => {
+			EventBus.emit("mode:set", "prebook");
+			EventBus.emit("mode:switch", "prebook");
+		});
 
 		// Keep held-bills badge current whenever any held bill changes
 		EventBus.on("held_bills:updated", () => this._refresh_held_count(w));
