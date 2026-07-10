@@ -164,15 +164,25 @@ def pos_item_search(
     if filters.get("in_stock_only") and warehouse:
         # Availability rules by item shape:
         #   * Non-stock items (services / warranty SKUs / digital
-        #     activations) never have Bin rows because they aren't
-        #     tracked in inventory — they are ALWAYS available for sale.
-        #   * Serial-tracked stock items require an Active serial in the
-        #     current warehouse.
+        #     activations) never carry Bin rows. Only surface them in
+        #     the walk-up bin when they back a customer-facing
+        #     external-IMEI plan — i.e. they are the ``service_item``
+        #     of an Active CH Warranty Plan with ``is_sellable=1`` AND
+        #     ``allow_external_device=1``. Everything else (in-store-
+        #     only plans, governance/bundle-only SKUs, external-device
+        #     Item placeholders) stays hidden from direct walk-up sale.
+        #   * Serial-tracked stock items require an Active serial in
+        #     the current warehouse.
         #   * Regular stock items require Bin.actual_qty > 0 in the
         #     current warehouse.
         conditions.append(
             "(CASE"
-            " WHEN i.is_stock_item = 0 THEN 1"
+            " WHEN i.is_stock_item = 0 THEN EXISTS ("
+            "   SELECT 1 FROM `tabCH Warranty Plan` wp"
+            "     WHERE wp.service_item = i.name"
+            "       AND wp.status = 'Active'"
+            "       AND wp.is_sellable = 1"
+            "       AND wp.allow_external_device = 1)"
             " WHEN i.has_serial_no = 1 THEN EXISTS ("
             "   SELECT 1 FROM `tabSerial No` sn"
             "     WHERE sn.item_code = i.name"

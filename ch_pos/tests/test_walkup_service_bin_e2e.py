@@ -154,9 +154,10 @@ def _purge() -> None:
 # ─── Tests ─────────────────────────────────────────────────────────────
 
 def test_w01_non_stock_service_item_visible_in_walkup_bin(ctx: dict) -> None:
-    """A non-stock service SKU (no Bin row) must surface in
-    pos_item_search under usage_context='sale' with a warehouse — the
-    walk-up bin path."""
+    """A non-stock service SKU that backs an external-IMEI sellable
+    plan (is_sellable=1 AND allow_external_device=1) must surface in
+    pos_item_search under usage_context='sale' — this is the whole
+    reason for the walk-up bin fix."""
     pos_profile = ctx.get("pos_profile")
     if not pos_profile:
         _skip("W01", "no POS Profile on bench")
@@ -174,11 +175,11 @@ def test_w01_non_stock_service_item_visible_in_walkup_bin(ctx: dict) -> None:
     if not hit:
         _fail(
             "W01",
-            f"non-stock service SKU {service_item!r} did NOT surface — "
+            f"external-IMEI plan's service SKU {service_item!r} did NOT surface — "
             f"in-stock gate is still blocking it",
         )
         return
-    _pass("W01", f"non-stock service SKU {service_item} surfaced (walk-up visible)")
+    _pass("W01", f"external-IMEI service SKU {service_item} surfaced (walk-up visible)")
 
 
 def test_w02_non_stock_flag_on_returned_payload(ctx: dict) -> None:
@@ -323,6 +324,94 @@ def test_w08_mapper_handles_empty_input(_ctx: dict) -> None:
     _pass("W08", "empty/None inputs return {} without error")
 
 
+def test_w09_in_store_only_service_hidden_from_walkup(ctx: dict) -> None:
+    """A non-stock service SKU that backs an in-store-only plan (i.e.
+    allow_external_device=0) must NOT appear in the walk-up bin —
+    those plans are sold through the 'Add VAS' selector against a
+    device already in the cart, never as a bare walk-up line."""
+    pos_profile = ctx.get("pos_profile")
+    if not pos_profile:
+        _skip("W09", "no POS Profile on bench")
+        return
+
+    service_item = ctx["service_instore"]
+    res = pos_item_search(
+        pos_profile=pos_profile,
+        search_term=service_item,
+        filters={},
+        usage_context="sale",
+    )
+    items = (res or {}).get("items", []) if isinstance(res, dict) else []
+    hit = next((i for i in items if i.get("item_code") == service_item), None)
+    if hit:
+        _fail(
+            "W09",
+            f"in-store-only plan's service SKU {service_item!r} leaked into "
+            f"the walk-up bin — must only appear via the Add VAS selector",
+        )
+        return
+    _pass("W09", "in-store-only service SKU correctly hidden from walk-up bin")
+
+
+def test_w10_governance_only_service_hidden_from_walkup(ctx: dict) -> None:
+    """A non-stock service SKU that backs a governance-only plan
+    (is_sellable=0) must NOT appear in the walk-up bin, regardless of
+    allow_external_device — governance surfaces are for bundling /
+    warranty on device sales, not direct sale."""
+    pos_profile = ctx.get("pos_profile")
+    if not pos_profile:
+        _skip("W10", "no POS Profile on bench")
+        return
+
+    service_item = ctx["service_gov"]
+    res = pos_item_search(
+        pos_profile=pos_profile,
+        search_term=service_item,
+        filters={},
+        usage_context="sale",
+    )
+    items = (res or {}).get("items", []) if isinstance(res, dict) else []
+    hit = next((i for i in items if i.get("item_code") == service_item), None)
+    if hit:
+        _fail(
+            "W10",
+            f"governance-only plan's service SKU {service_item!r} leaked into "
+            f"the walk-up bin — is_sellable=0 must gate walk-up visibility",
+        )
+        return
+    _pass("W10", "governance-only service SKU correctly hidden from walk-up bin")
+
+
+def test_w11_unrelated_non_stock_item_hidden_from_walkup(ctx: dict) -> None:
+    """A non-stock Item that is not the service_item of any plan
+    (e.g. an external_device_item placeholder, an unbound service
+    stub) must NOT appear in the walk-up bin. Only plan-backed
+    external-IMEI service SKUs qualify."""
+    pos_profile = ctx.get("pos_profile")
+    if not pos_profile:
+        _skip("W11", "no POS Profile on bench")
+        return
+
+    for item_code in (ctx["unrelated_svc"], ctx["external_device"]):
+        res = pos_item_search(
+            pos_profile=pos_profile,
+            search_term=item_code,
+            filters={},
+            usage_context="sale",
+        )
+        items = (res or {}).get("items", []) if isinstance(res, dict) else []
+        hit = next((i for i in items if i.get("item_code") == item_code), None)
+        if hit:
+            _fail(
+                "W11",
+                f"unrelated non-stock item {item_code!r} leaked into the "
+                f"walk-up bin — walk-up is restricted to external-IMEI "
+                f"plan service_items",
+            )
+            return
+    _pass("W11", "unrelated non-stock items (external device, unbound svc) correctly hidden")
+
+
 # ─── Runner ────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -396,6 +485,9 @@ def _run_all_inner() -> None:
         test_w06_mapper_ignores_in_store_only_plan,
         test_w07_mapper_ignores_unrelated_item,
         test_w08_mapper_handles_empty_input,
+        test_w09_in_store_only_service_hidden_from_walkup,
+        test_w10_governance_only_service_hidden_from_walkup,
+        test_w11_unrelated_non_stock_item_hidden_from_walkup,
     ]
 
     print("─── Test Run ────────────────────────────────────────────")
