@@ -1946,28 +1946,57 @@ def create_pos_invoice(
             return exception_request_doc_map[exc_name]
         exc = frappe.get_doc("CH Exception Request", exc_name)
         if not exc.is_valid():
-            frappe.throw(_("Exception Request {0} is no longer valid (status: {1})").format(
-                exc_name, exc.status))
+            # is_valid() folds in status / expiry / same-day guards; surface the
+            # underlying reason so the cashier sees WHY the approval can't be used.
+            reason = "expired or not approved"
+            try:
+                from frappe.utils import getdate as _gd
+                if exc.pos_profile and exc.raised_at and _gd(exc.raised_at) != _gd():
+                    reason = "raised on a previous day (approvals are same-day only)"
+            except Exception:
+                pass
+            frappe.throw(_("Exception Request {0} is no longer valid ({1}).").format(exc_name, reason))
         if exc.pos_invoice:
             frappe.throw(_("Exception Request {0} was already used in invoice {1}").format(
                 exc_name, exc.pos_invoice))
-        if exc.customer:
-            cust_row = frappe.db.get_value(
-                "Customer", exc.customer,
-                ["mobile_no", "ch_alternate_phone"], as_dict=True)
-            curr_row = frappe.db.get_value(
-                "Customer", customer,
-                ["mobile_no", "ch_alternate_phone"], as_dict=True) if customer else None
-            allowed_phone = _phone_tail(
-                exc.customer_phone
-                or (cust_row.mobile_no if cust_row else "")
-                or (cust_row.ch_alternate_phone if cust_row else ""))
-            current_phone = _phone_tail(
-                (curr_row.mobile_no if curr_row else "")
-                or (curr_row.ch_alternate_phone if curr_row else ""))
-            if exc.customer != customer or (
-                allowed_phone and current_phone and allowed_phone != current_phone):
-                frappe.throw(_("Exception Request {0} is tied to a different customer phone.").format(exc_name))
+        # ── Customer identity is mandatory on the exception AND must match
+        #    the invoice customer. Enterprise POS parity (Oracle Xstore /
+        #    SAP CAR-POS / Dynamics 365 Commerce): a manager approval is
+        #    granted to a specific customer for a specific bill on a
+        #    specific day. It is NOT a bearer token that any subsequent
+        #    walk-in can consume. See prod incident 2026-07-10 where an
+        #    exception raised without a customer was reused across bills.
+        walk_in_customer = None
+        if pos_profile:
+            walk_in_customer = frappe.db.get_value("POS Profile", pos_profile, "customer")
+        if not exc.customer or (walk_in_customer and exc.customer == walk_in_customer):
+            frappe.throw(_(
+                "Exception Request {0} is not tied to a real customer and cannot be consumed. "
+                "Re-raise the request after selecting the customer on the bill."
+            ).format(exc_name))
+        if not customer or (walk_in_customer and customer == walk_in_customer):
+            frappe.throw(_(
+                "Select a real customer on the bill before consuming Exception Request {0}."
+            ).format(exc_name))
+        cust_row = frappe.db.get_value(
+            "Customer", exc.customer,
+            ["mobile_no", "ch_alternate_phone"], as_dict=True)
+        curr_row = frappe.db.get_value(
+            "Customer", customer,
+            ["mobile_no", "ch_alternate_phone"], as_dict=True) if customer else None
+        allowed_phone = _phone_tail(
+            exc.customer_phone
+            or (cust_row.mobile_no if cust_row else "")
+            or (cust_row.ch_alternate_phone if cust_row else ""))
+        current_phone = _phone_tail(
+            (curr_row.mobile_no if curr_row else "")
+            or (curr_row.ch_alternate_phone if curr_row else ""))
+        if exc.customer != customer:
+            frappe.throw(_(
+                "Exception Request {0} was approved for customer {1} and cannot be applied to {2}."
+            ).format(exc_name, exc.customer, customer))
+        if allowed_phone and current_phone and allowed_phone != current_phone:
+            frappe.throw(_("Exception Request {0} is tied to a different customer phone.").format(exc_name))
         exception_request_doc_map[exc_name] = exc
         return exc
 
@@ -2073,6 +2102,20 @@ def create_pos_invoice(
         if uploaded_amount and item_qty:
             effective_rate = flt(uploaded_amount / item_qty)
 
+        # Free-bundle accessory: pin to qty=1 / rate=0 server-side so a
+        # hand-crafted payload (or a stale client that missed the merge-guard
+        # fix in cart_service.add_to_cart) cannot bill 8 headphones at ₹0
+        # against a single device. Extra units of the accessory must come in
+        # as separate PAID lines. `is_free_item` is the ERPNext-standard flag
+        # already consumed by `_post_free_sale_write_off` and
+        # `free_item_return_guard`, so stamping it here keeps the row
+        # consistent with the Pricing-Rule free-item path.
+        is_free_bundle_row = cint(item.get("is_free_bundle_item"))
+        if is_free_bundle_row:
+            item_qty = 1.0
+            effective_rate = 0.0
+            item_exception_original = flt(item.get("price_list_rate") or item.get("mrp") or 0)
+
         row = {
             "item_code": item.get("item_code"),
             "qty": item_qty,
@@ -2083,6 +2126,11 @@ def create_pos_invoice(
             "discount_percentage": flt(item.get("discount_percentage", 0)),
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
+
+        if is_free_bundle_row:
+            row["is_free_item"] = 1
+            row["discount_percentage"] = 100
+            row["discount_amount"] = flt(item_exception_original)
 
         _item_so = (item.get("sales_order") or sales_order or "").strip()
         _item_so_detail = (item.get("so_detail") or "").strip()
@@ -8381,60 +8429,169 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7) -> dict:
 # ── VAS Eligibility ──────────────────────────────────────────
 @frappe.whitelist()
 def get_vas_plans_with_rules(cart_items=None) -> dict:
-    """Return active VAS plans with device-dependency enforcement.
+    """Return active VAS plans (both catalog SKUs and legacy plans) with
+    device-dependency enforcement.
 
-    If a plan has requires_device=1 (or plan_type is 'Protection Plan'),
-    it can only be added when the cart has at least one device item.
-    Plans with applicable_categories are restricted to matching device categories.
+    Two catalog surfaces feed this list:
+
+      A. ``VAS Plan`` — the sellable-catalog SKU wrapper introduced in
+         ch_item_master. Each VAS Plan has ``source_warranty_plan``
+         (Link → CH Warranty Plan, ``reqd=1 unique=1``) and owns its
+         own ``list_price``, ``duration_months`` and price-band
+         (``min_device_price`` / ``max_device_price``). This is what
+         cashiers see under ``/desk/vas-plan`` and what POS should
+         primarily return.
+      B. ``CH Warranty Plan`` with ``plan_type IN (Value Added Service,
+         Protection Plan)`` — the legacy shape from before the VAS Plan
+         catalog existed. Kept here so pre-migration test fixtures
+         (``test_vas_external_imei_pos_e2e``) and any hand-created
+         governance plans still show up, but skipped when already
+         wrapped by a VAS Plan (dedup on source_warranty_plan).
+
+    Payload contract (JS-facing — cart_service.js::_render_vas_selector
+    and ``_add_vas_to_cart`` consume these):
+        name, plan_name, plan_type, service_item, duration_months,
+        price, coverage_description, brand, fulfillment_type,
+        allow_external_device, external_device_item,
+        requires_device, allows_external_device,
+        blocked, blocked_reason, applicable_categories
+
+    ``name`` is always the underlying CH Warranty Plan name — the cart
+    line's ``warranty_plan`` field is a Link to CH Warranty Plan and
+    ``pos_invoice.py`` looks it up via ``frappe.get_cached_doc("CH
+    Warranty Plan", ...)``, so surfacing the VAS Plan name here would
+    break submit-time enrichment.
     """
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
     cart_items = cart_items or []
 
-    # Check if cart has any device (non-service, non-warranty item)
+    # ── Cart-shape summary — device presence, categories, and the
+    #    max device price for band filtering.
     has_device = False
-    device_item_codes = []
-    device_categories = set()
+    device_categories: set[str] = set()
+    max_device_price = 0.0
     for ci in cart_items:
         if ci.get("is_warranty") or ci.get("is_vas"):
             continue
         has_device = True
         ic = ci.get("item_code")
-        device_item_codes.append(ic)
         ch_category = frappe.db.get_value("Item", ic, "ch_category")
         if ch_category:
             device_categories.add(ch_category)
+        # ``rate`` may be missing on the freshly-added cart entry; fall
+        # back to price_list_rate/mrp so band checks stay meaningful.
+        line_rate = flt(ci.get("rate") or ci.get("price_list_rate") or ci.get("mrp"))
+        if line_rate > max_device_price:
+            max_device_price = line_rate
 
     today = nowdate()
-    plans = frappe.get_all(
+
+    # ── Catalog surface A — VAS Plan (sellable SKU wrappers).
+    #    Left-join to source CH Warranty Plan for governance fields the
+    #    POS payload needs. ``VAS Plan.source_warranty_plan`` is reqd,
+    #    but LEFT JOIN keeps us defensive against stale FKs.
+    vas_rows = frappe.db.sql(
+        """
+        SELECT
+            v.name              AS vas_plan_name,
+            v.plan_name         AS vas_plan_label,
+            v.status            AS vas_status,
+            v.list_price        AS vas_list_price,
+            v.duration_months   AS vas_duration_months,
+            v.min_device_price,
+            v.max_device_price,
+            v.source_warranty_plan AS wp_name,
+            w.plan_name         AS wp_plan_name,
+            w.plan_type         AS wp_plan_type,
+            w.service_item      AS wp_service_item,
+            w.brand             AS wp_brand,
+            w.coverage_description AS wp_coverage_description,
+            w.valid_from        AS wp_valid_from,
+            w.valid_to          AS wp_valid_to,
+            w.allow_external_device AS wp_allow_external_device,
+            w.external_device_item  AS wp_external_device_item,
+            w.fulfillment_type  AS wp_fulfillment_type,
+            w.price             AS wp_price,
+            w.duration_months   AS wp_duration_months
+        FROM `tabVAS Plan` v
+        LEFT JOIN `tabCH Warranty Plan` w ON w.name = v.source_warranty_plan
+        WHERE v.status = 'Active'
+        """,
+        as_dict=True,
+    )
+
+    plans: list[frappe._dict] = []
+    wrapped_sources: set[str] = set()
+    for row in vas_rows:
+        if not row.wp_name:
+            # Broken FK — the source CH Warranty Plan was deleted out
+            # from under this VAS Plan. Skip: downstream code needs a
+            # valid CH Warranty Plan link on the cart line.
+            continue
+        wrapped_sources.add(row.wp_name)
+        plans.append(frappe._dict({
+            "name": row.wp_name,                                   # link target
+            "vas_plan": row.vas_plan_name,                         # catalog SKU
+            "plan_name": row.vas_plan_label or row.wp_plan_name,
+            "plan_type": row.wp_plan_type or "Value Added Service",
+            "service_item": row.wp_service_item,
+            "duration_months": (
+                row.vas_duration_months or row.wp_duration_months or 0
+            ),
+            # VAS Plan.list_price is the sellable rate; fall back to the
+            # governance-side price only if the catalog didn't set one.
+            "price": flt(row.vas_list_price or row.wp_price or 0),
+            "coverage_description": row.wp_coverage_description,
+            "brand": row.wp_brand,
+            "fulfillment_type": row.wp_fulfillment_type,
+            "allow_external_device": cint(row.wp_allow_external_device),
+            "external_device_item": row.wp_external_device_item,
+            "valid_from": row.wp_valid_from,
+            "valid_to": row.wp_valid_to,
+            "min_device_price": flt(row.min_device_price),
+            "max_device_price": flt(row.max_device_price),
+        }))
+
+    # ── Catalog surface B — legacy CH Warranty Plan direct entries.
+    legacy = frappe.get_all(
         "CH Warranty Plan",
         filters={
             "status": "Active",
             "plan_type": ["in", ["Value Added Service", "Protection Plan"]],
+            "name": ["not in", list(wrapped_sources) or ["__none__"]],
         },
         fields=[
             "name", "plan_name", "plan_type", "service_item",
             "duration_months", "price", "coverage_description", "brand",
             "fulfillment_type", "allow_external_device", "external_device_item",
+            "valid_from", "valid_to",
         ],
     )
+    for p in legacy:
+        p["min_device_price"] = 0.0
+        p["max_device_price"] = 0.0
+        p["vas_plan"] = None
+        plans.append(frappe._dict(p))
 
-    applicable = []
+    # ── Rule application — validity, device dependency, price band,
+    #    and category applicability. Same semantics for both surfaces.
+    applicable: list[dict] = []
     for plan in plans:
-        valid_from = frappe.db.get_value("CH Warranty Plan", plan.name, "valid_from")
-        valid_to = frappe.db.get_value("CH Warranty Plan", plan.name, "valid_to")
-        if valid_from and str(valid_from) > today:
+        # Validity window (dates from CH Warranty Plan).
+        if plan.valid_from and str(plan.valid_from) > today:
             continue
-        if valid_to and str(valid_to) < today:
+        if plan.valid_to and str(plan.valid_to) < today:
             continue
 
-        # Device dependency: Protection Plans always require a device
+        # Device dependency: Protection Plans always require a device.
         requires_device = plan.plan_type == "Protection Plan"
-        allows_external_device = cint(plan.get("allow_external_device")) and bool(
-            plan.get("external_device_item")
+        allows_external_device = bool(
+            cint(plan.get("allow_external_device"))
+            and plan.get("external_device_item")
         )
         plan["requires_device"] = requires_device
-        plan["allows_external_device"] = bool(allows_external_device)
+        plan["allows_external_device"] = allows_external_device
 
         if requires_device and not has_device and not allows_external_device:
             plan["blocked"] = True
@@ -8447,7 +8604,24 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             plan["blocked"] = False
             plan["blocked_reason"] = ""
 
-        # Category filtering: if plan has applicable_categories, only show if cart has matching category
+        # Price band (VAS Plan surface only — legacy plans have both = 0).
+        min_dp = flt(plan.get("min_device_price"))
+        max_dp = flt(plan.get("max_device_price"))
+        if not plan.get("blocked") and (min_dp or max_dp) and max_device_price:
+            if min_dp and max_device_price < min_dp:
+                plan["blocked"] = True
+                plan["blocked_reason"] = frappe._(
+                    "Device price ₹{0} below plan minimum ₹{1}"
+                ).format(max_device_price, min_dp)
+            elif max_dp and max_device_price > max_dp:
+                plan["blocked"] = True
+                plan["blocked_reason"] = frappe._(
+                    "Device price ₹{0} above plan maximum ₹{1}"
+                ).format(max_device_price, max_dp)
+
+        # Category filtering (CH Warranty Plan child table — same on
+        # both surfaces because ``plan.name`` is always the CH Warranty
+        # Plan name).
         if not plan.get("blocked"):
             plan_categories = frappe.get_all(
                 "CH Warranty Plan Category",
@@ -8459,13 +8633,16 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
                 if device_categories:
                     if not device_categories.intersection(set(plan_categories)):
                         plan["blocked"] = True
-                        plan["blocked_reason"] = frappe._("Not applicable for {0}").format(
-                            ", ".join(device_categories)
-                        )
-                if not device_categories and not allows_external_device:
+                        plan["blocked_reason"] = frappe._(
+                            "Not applicable for {0}"
+                        ).format(", ".join(device_categories))
+                elif not allows_external_device:
                     plan["blocked"] = True
-                    plan["blocked_reason"] = frappe._("Requires an eligible device in cart")
-                # External-allowed plans stay unblocked; manual IMEI is validated before billing.
+                    plan["blocked_reason"] = frappe._(
+                        "Requires an eligible device in cart"
+                    )
+                # External-allowed plans stay unblocked; manual IMEI is
+                # validated at billing time.
 
         applicable.append(plan)
 
