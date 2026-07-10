@@ -134,19 +134,45 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
 @frappe.whitelist()
 def log_attach_event(pos_invoice=None, pos_profile=None, item_code=None,
                      attach_type=None, action=None, skip_reason=None,
-                     plan_code=None) -> dict:
-    """Log an attach offer event (Offered/Accepted/Skipped) to CH Attach Log."""
+                     plan_code=None, serial_no=None) -> dict:
+    """Log an attach offer event (Offered/Accepted/Skipped) to CH Attach Log.
+
+    Timing model (SAP CRM upsell events / Oracle Retail POS attach
+    telemetry parity):
+      * "Offered"  — logged when the attach panel opens for a device.
+                     No POS Invoice exists yet. ``pos_invoice`` stays
+                     blank; it is back-filled by ``create_pos_invoice``
+                     when the sale is booked.
+      * "Accepted" — logged when the cashier clicks Add on a suggestion.
+      * "Skipped"  — logged when the cashier dismisses a suggestion;
+                     ``skip_reason`` becomes mandatory via
+                     ``mandatory_depends_on`` when the rule has
+                     ``skip_reason_required=1``.
+
+    ``serial_no`` captures the covered device's IMEI (in-store serial
+    for cart devices, customer-provided IMEI for external-device VAS)
+    so the log answers "what plan attached to what IMEI".
+
+    Empty strings on Link fields are coerced to ``None`` — passing
+    ``""`` on a Link would trip Frappe's mandatory check as if the
+    field were unset.
+    """
     if not attach_type or not action:
         frappe.throw(_("attach_type and action are required"), title=_("API Error"))
 
+    def _link(v):
+        v = (v or "").strip() if isinstance(v, str) else v
+        return v or None
+
     log = frappe.new_doc("CH Attach Log")
-    log.pos_invoice = pos_invoice or ""
-    log.pos_profile = pos_profile or ""
-    log.item_code = item_code or ""
+    log.pos_invoice = _link(pos_invoice)
+    log.pos_profile = _link(pos_profile)
+    log.item_code = _link(item_code)
     log.attach_type = attach_type
     log.action = action
     log.skip_reason = (str(skip_reason)[:200]) if skip_reason else ""
-    log.plan_code = plan_code or ""
+    log.plan_code = _link(plan_code)
+    log.serial_no = (str(serial_no).strip()[:140]) if serial_no else ""
     log.offered_by = frappe.session.user
     log.offered_at = now_datetime()
     log.flags.ignore_permissions = True

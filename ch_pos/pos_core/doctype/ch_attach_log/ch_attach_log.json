@@ -15,6 +15,7 @@
   "skip_reason",
   "section_break_2",
   "plan_code",
+  "serial_no",
   "offered_by",
   "column_break_3",
   "offered_at"
@@ -26,7 +27,7 @@
    "in_list_view": 1,
    "label": "POS Invoice",
    "options": "Sales Invoice",
-   "reqd": 1
+   "description": "Populated on POS Invoice submit. Pre-invoice attach offers leave this blank until the sale is booked."
   },
   {
    "fieldname": "pos_profile",
@@ -40,7 +41,7 @@
    "in_list_view": 1,
    "label": "Item Code",
    "options": "Item",
-   "reqd": 1
+   "description": "The device / trigger Item the attach offer was made against."
   },
   {
    "fieldname": "column_break_1",
@@ -77,6 +78,13 @@
    "fieldtype": "Link",
    "label": "Plan Code",
    "options": "CH Warranty Plan"
+  },
+  {
+   "fieldname": "serial_no",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Serial / IMEI",
+   "description": "IMEI (or serial) of the covered device. In-store devices show the inventory serial; external-IMEI plans store the customer-provided IMEI here."
   },
   {
    "fieldname": "offered_by",

@@ -1134,6 +1134,11 @@ export class CartService {
 	}
 
 	_show_attach_panel(plans, rules, item_data, cart_item) {
+		// IMEI / serial of the covered device — captured once and threaded
+		// through every _log_attach call so the CH Attach Log row answers
+		// "what plan attached to what IMEI" (in-store serial or, for
+		// external-IMEI VAS, the customer-provided IMEI).
+		const covered_serial = cart_item.serial_no || "";
 		const vas_rules = rules.filter(r => r.attach_type === "VAS");
 		const acc_rules = rules.filter(r => r.attach_type === "Accessory");
 		const item_name = frappe.utils.escape_html(cart_item.item_name);
@@ -1242,7 +1247,7 @@ export class CartService {
 				EventBus.emit("cart:updated");
 				frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
 				$row.addClass("ch-attach-done");
-				this._log_attach("Warranty", "Accepted", item_data.item_code, plan.name);
+				this._log_attach("Warranty", "Accepted", item_data.item_code, plan.name, null, covered_serial);
 			} else {
 				// VAS or Accessory — add item to cart
 				const attach_item_code = $btn.data("item");
@@ -1257,7 +1262,7 @@ export class CartService {
 						});
 					}
 					$row.addClass("ch-attach-done");
-					this._log_attach(type, "Accepted", item_data.item_code, attach_item_code);
+					this._log_attach(type, "Accepted", item_data.item_code, attach_item_code, null, covered_serial);
 				});
 			}
 		});
@@ -1276,29 +1281,29 @@ export class CartService {
 					{ fieldname: "reason", fieldtype: "Small Text", label: __("Skip Reason"), reqd: 1 },
 					(values) => {
 						$row.addClass("ch-attach-skipped");
-						this._log_attach(type, "Skipped", item_data.item_code, plan_code, values.reason);
+						this._log_attach(type, "Skipped", item_data.item_code, plan_code, values.reason, covered_serial);
 					},
 					__("Reason for Skipping"),
 					__("Submit")
 				);
 			} else {
 				$row.addClass("ch-attach-skipped");
-				this._log_attach(type, "Skipped", item_data.item_code, plan_code);
+				this._log_attach(type, "Skipped", item_data.item_code, plan_code, null, covered_serial);
 			}
 		});
 
 		dialog.show();
 
 		// Also log all offers as "Offered"
-		plans.forEach(p => this._log_attach("Warranty", "Offered", item_data.item_code, p.name));
+		plans.forEach(p => this._log_attach("Warranty", "Offered", item_data.item_code, p.name, null, covered_serial));
 		[...vas_rules, ...acc_rules].forEach(r => {
 			(r.attach_items || []).forEach(ai => {
-				this._log_attach(r.attach_type, "Offered", item_data.item_code, ai.item_code);
+				this._log_attach(r.attach_type, "Offered", item_data.item_code, ai.item_code, null, covered_serial);
 			});
 		});
 	}
 
-	_log_attach(attach_type, action, item_code, plan_code, skip_reason) {
+	_log_attach(attach_type, action, item_code, plan_code, skip_reason, serial_no) {
 		frappe.xcall("ch_pos.api.attach_api.log_attach_event", {
 			pos_profile: PosState.pos_profile,
 			item_code: item_code,
@@ -1306,6 +1311,7 @@ export class CartService {
 			action: action,
 			plan_code: plan_code || "",
 			skip_reason: skip_reason || "",
+			serial_no: serial_no || "",
 		}).catch(() => {});  // Non-blocking
 	}
 

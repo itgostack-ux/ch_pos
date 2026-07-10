@@ -2798,6 +2798,33 @@ def _enforce_token_linkage(pos_profile, kiosk_token):
             )
             raise
 
+        # ── Authoritative attach log (plan ↔ IMEI ↔ invoice) ──────────
+        # Write a definitive "Accepted" CH Attach Log entry for every
+        # warranty / VAS plan actually booked on this invoice. This is
+        # the SoR the analytics reports read from and it answers "what
+        # plan is attached to what IMEI on which invoice" — even when
+        # the pre-invoice "Offered" xcall was silently dropped (offline
+        # POS) or lost its ``pos_invoice`` back-fill. Non-fatal on
+        # failure — the sale is already booked.
+        try:
+            _log = frappe.new_doc("CH Attach Log")
+            _log.pos_invoice = inv.name
+            _log.pos_profile = profile.name
+            _log.item_code = wi.get("for_item_code") or None
+            _log.attach_type = "VAS" if wi.get("is_vas") else "Warranty"
+            _log.action = "Accepted"
+            _log.plan_code = wi["warranty_plan"]
+            _log.serial_no = (wi.get("serial_no") or "").strip()
+            _log.offered_by = frappe.session.user
+            _log.offered_at = now_datetime()
+            _log.flags.ignore_permissions = True
+            _log.insert()
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"CH Attach Log write failed for {inv.name} / {wi.get('warranty_plan')}"
+            )
+
     # ── VAS Voucher Generation ────────────────────────────────────────────────
     # Read voucher rules from CH VAS Settings (configurable face value, validity,
     # item-group restriction, etc.)  Each VAS item generates
