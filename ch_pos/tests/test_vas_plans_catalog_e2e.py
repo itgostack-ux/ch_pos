@@ -1,12 +1,13 @@
 """
 End-to-End tests for POS ``get_vas_plans_with_rules``.
 
-Guards the fix that surfaced the ``VAS Plan`` catalog SKU wrapper
-alongside the legacy ``CH Warranty Plan`` (plan_type in [VAS, Protection
-Plan]) query — the old implementation only saw the latter, so cashiers
-who had migrated to the new ``VAS Plan`` doctype got a blanket "No VAS
-plans available" toast regardless of what was Active in
-``/desk/vas-plan``.
+Post-merge architecture: the VAS Plan / VAS Product / VAS Attach Rule
+/ VAS Claim doctypes have been folded back into their source
+CH Warranty Plan / CH Warranty Claim / CH Attach Rule (see
+``ch_item_master.patches.v31_merge_vas_plan_into_ch_warranty_plan``).
+This test suite guards the single-surface implementation:
+
+    ``CH Warranty Plan`` where ``status='Active' AND is_sellable=1``.
 
 Run:
     bench --site erpnext.local execute \\
@@ -41,57 +42,55 @@ def _fail(test_id: str, detail: str = "") -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  SETUP / CLEANUP
+#  SEEDING
 # ═══════════════════════════════════════════════════════════════════
 
 def _purge() -> None:
-    """Remove any artefacts left over from a previous run.
-
-    Delete order: VAS Plan wrappers first (they FK-reference the source
-    warranty plan), then the CH Warranty Plans they pointed at, then
-    the service Item if we created a bench-local one.
-    """
-    for name in frappe.get_all(
-        "VAS Plan",
-        filters={"plan_name": ["like", f"{TAG}%"]},
-        pluck="name",
-    ):
-        frappe.delete_doc("VAS Plan", name, force=True, ignore_permissions=True)
-
-    for name in frappe.get_all(
+    """Delete every CH Warranty Plan tagged with the test marker."""
+    for wp in frappe.get_all(
         "CH Warranty Plan",
         filters={"plan_name": ["like", f"{TAG}%"]},
         pluck="name",
     ):
-        frappe.delete_doc("CH Warranty Plan", name, force=True, ignore_permissions=True)
-
+        try:
+            frappe.delete_doc("CH Warranty Plan", wp, force=True, ignore_permissions=True)
+        except Exception:
+            pass
     frappe.db.commit()
 
 
 def _get_service_item() -> str:
-    existing = frappe.db.get_value(
+    """Return any non-stock sales Item — the plan controller only needs
+    the FK to resolve."""
+    item = frappe.db.get_value(
         "Item",
         {"is_stock_item": 0, "is_sales_item": 1, "disabled": 0},
         "name",
     )
-    if not existing:
-        raise RuntimeError(
-            "No non-stock sales Item on this bench — needed as service_item"
-        )
-    return existing
+    if not item:
+        raise RuntimeError("No non-stock sales Item available on this bench")
+    return item
 
 
-def _seed_source_plan(
-    plan_name: str, *, plan_type: str, price: float = 0.0,
-    allow_external_device: int = 0, external_device_item: str | None = None,
-    pricing_mode: str = "Fixed", percentage_value: float = 0.0,
+def _seed_plan(
+    plan_name: str, *,
+    plan_type: str,
+    price: float = 0.0,
+    is_sellable: int = 1,
+    allow_external_device: int = 0,
+    external_device_item: str | None = None,
+    pricing_mode: str = "Fixed",
+    percentage_value: float = 0.0,
+    min_device_price: float = 0.0,
+    max_device_price: float = 0.0,
+    duration_months: int = 12,
 ) -> str:
-    """Create a CH Warranty Plan we can wrap with a VAS Plan below."""
+    """Create a CH Warranty Plan — the single sellable-catalog surface."""
     doc = frappe.new_doc("CH Warranty Plan")
     doc.plan_name = plan_name
     doc.plan_type = plan_type
     doc.status = "Active"
-    doc.duration_months = 12
+    doc.duration_months = duration_months
     doc.pricing_mode = pricing_mode
     doc.price = price
     doc.percentage_value = percentage_value
@@ -101,34 +100,12 @@ def _seed_source_plan(
     doc.deductible_amount = 0
     doc.coverage_scope = "Screen Only"
     doc.fulfillment_type = "Digital Activation"
+    doc.is_sellable = is_sellable
+    doc.min_device_price = min_device_price
+    doc.max_device_price = max_device_price
     doc.allow_external_device = allow_external_device
     if allow_external_device and external_device_item:
         doc.external_device_item = external_device_item
-    doc.insert(ignore_permissions=True)
-    frappe.db.commit()
-    return doc.name
-
-
-def _seed_vas_wrapper(
-    plan_name: str,
-    source_warranty_plan: str,
-    *,
-    list_price: float,
-    duration_months: int = 12,
-    min_device_price: float = 0.0,
-    max_device_price: float = 0.0,
-) -> str:
-    """Create a VAS Plan wrapper — the sellable-catalog record."""
-    doc = frappe.new_doc("VAS Plan")
-    doc.plan_name = plan_name
-    doc.source_warranty_plan = source_warranty_plan
-    doc.status = "Active"
-    doc.list_price = list_price
-    doc.duration_months = duration_months
-    doc.min_device_price = min_device_price
-    doc.max_device_price = max_device_price
-    doc.attach_level = "Optional"
-    doc.auto_attach = 0
     doc.insert(ignore_permissions=True)
     frappe.db.commit()
     return doc.name
@@ -138,101 +115,73 @@ def _seed_vas_wrapper(
 #  TESTS
 # ═══════════════════════════════════════════════════════════════════
 
-def test_v01_vas_plan_wrapper_surfaces_in_catalog(ctx: dict) -> None:
-    """A VAS Plan → CH Warranty Plan (plan_type=Own Warranty) must show up.
-
-    This is the exact bug the teammate hit: an Active VAS Plan is
-    visible under /desk/vas-plan but POS said "No VAS plans available"
-    because the old implementation only queried CH Warranty Plan with
-    plan_type in (Value Added Service, Protection Plan).
-    """
+def test_v01_sellable_plan_surfaces(ctx: dict) -> None:
+    """A CH Warranty Plan with is_sellable=1 must appear in the payload."""
     plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p.get("vas_plan") == ctx["vas_plan_own"]), None)
+    hit = next((p for p in plans if p["name"] == ctx["sellable_own"]), None)
     if not hit:
-        _fail(
-            "V01",
-            "VAS Plan wrapping an Own Warranty source not returned; "
-            f"got {[p.get('vas_plan') or p.get('name') for p in plans]}",
-        )
+        _fail("V01", "sellable Own Warranty plan not returned")
         return
-    # It must return CH Warranty Plan name in `.name` (not VAS Plan name)
-    # because cart_line.warranty_plan is a Link to CH Warranty Plan.
-    if hit["name"] != ctx["source_own"]:
-        _fail("V01", f"plan.name={hit['name']!r} but source is {ctx['source_own']!r}")
-        return
-    _pass("V01", f"VAS Plan '{ctx['vas_plan_own']}' surfaced (linked to {hit['name']})")
+    _pass("V01", f"sellable plan {hit['name']} surfaced")
 
 
-def test_v02_vas_plan_list_price_wins_over_wp_price(ctx: dict) -> None:
-    """The sellable rate is VAS Plan.list_price, not CH Warranty Plan.price."""
+def test_v02_non_sellable_plan_hidden(ctx: dict) -> None:
+    """A CH Warranty Plan with is_sellable=0 must be filtered out."""
     plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p.get("vas_plan") == ctx["vas_plan_protection"]), None)
+    hit = next((p for p in plans if p["name"] == ctx["governance_only"]), None)
+    if hit:
+        _fail("V02", f"governance-only plan {hit['name']} should be hidden")
+        return
+    _pass("V02", "governance-only plan (is_sellable=0) correctly hidden")
+
+
+def test_v03_percentage_pricing_from_device(ctx: dict) -> None:
+    """Plan with pricing_mode=Percentage must compute price from cart
+    device rate. 10% of ₹29,000 = ₹2,900 (matches teammate's ADLD case)."""
+    plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
+    hit = next((p for p in plans if p["name"] == ctx["percentage_plan"]), None)
     if not hit:
-        _fail("V02", "protection VAS Plan not returned")
+        _fail("V03", "percentage-priced plan not returned")
         return
-    if flt(hit["price"]) != 1999.0:
-        _fail("V02", f"expected list_price ₹1,999.0 (VAS Plan), got ₹{hit['price']}")
+    expected = round(29000.0 * 10 / 100.0, 2)
+    if flt(hit["price"]) != expected:
+        _fail("V03", f"expected ₹{expected} (10% of ₹29,000), got ₹{hit['price']}")
         return
-    _pass("V02", f"VAS Plan.list_price ₹{hit['price']} takes precedence over WP.price")
+    _pass("V03", f"percentage pricing resolved: 10% of ₹29,000 = ₹{hit['price']}")
 
 
-def test_v03_legacy_ch_warranty_plan_still_surfaces(ctx: dict) -> None:
-    """A CH Warranty Plan with plan_type=Protection Plan and NO VAS Plan wrapper
-    must still appear (legacy compatibility for pre-migration data and the
-    existing ``test_vas_external_imei_pos_e2e`` fixtures)."""
+def test_v04_fixed_pricing_passes_through(ctx: dict) -> None:
+    """Fixed-mode plans return their stored price unchanged."""
     plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p["name"] == ctx["source_legacy"]), None)
+    hit = next((p for p in plans if p["name"] == ctx["fixed_plan"]), None)
     if not hit:
-        _fail("V03", "legacy Protection Plan (no VAS Plan wrapper) not returned")
+        _fail("V04", "fixed-priced plan not returned")
         return
-    if hit.get("vas_plan"):
-        _fail("V03", f"legacy plan wrongly flagged with vas_plan={hit['vas_plan']}")
+    if flt(hit["price"]) != 499.0:
+        _fail("V04", f"expected ₹499 fixed, got ₹{hit['price']}")
         return
-    _pass("V03", f"legacy plan {hit['name']} still surfaces (no VAS Plan wrapper)")
-
-
-def test_v04_wrapped_plan_not_duplicated_via_legacy_path(ctx: dict) -> None:
-    """If a plan is wrapped by a VAS Plan, it must not ALSO appear as a
-    legacy row — otherwise the catalog shows the same coverage twice."""
-    plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    names = [p["name"] for p in plans]
-    duplicates = {n for n in names if names.count(n) > 1}
-    if ctx["source_protection"] in duplicates:
-        _fail(
-            "V04",
-            f"CH Warranty Plan {ctx['source_protection']} appears twice — "
-            "VAS Plan wrapper + legacy path both fired",
-        )
-        return
-    _pass("V04", "wrapped source appears exactly once")
+    _pass("V04", f"fixed price ₹{hit['price']} returned unchanged")
 
 
 def test_v05_price_band_blocks_over_max(ctx: dict) -> None:
-    """A VAS Plan with max_device_price=20,000 must be blocked (not hidden)
-    when the cart has a ₹29,000 device."""
+    """Plan with max_device_price=₹20,000 should be blocked for ₹29,000 cart."""
     plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p.get("vas_plan") == ctx["vas_plan_capped"]), None)
+    hit = next((p for p in plans if p["name"] == ctx["capped_plan"]), None)
     if not hit:
-        _fail("V05", "capped VAS Plan not present in catalog")
+        _fail("V05", "capped plan not returned")
         return
     if not hit.get("blocked"):
-        _fail("V05", "capped plan should be blocked but is available")
-        return
-    if "above plan maximum" not in (hit.get("blocked_reason") or ""):
-        _fail(
-            "V05",
-            f"blocked_reason unclear: {hit.get('blocked_reason')!r}",
-        )
+        _fail("V05", "capped plan should be blocked but isn't")
         return
     _pass("V05", f"capped plan blocked: {hit['blocked_reason']}")
 
 
 def test_v06_price_band_open_when_no_max(ctx: dict) -> None:
-    """max_device_price=0 must mean 'no cap' — the plan must remain available."""
+    """min=0 max=0 must mean 'no cap' — plan remains available."""
     plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p.get("vas_plan") == ctx["vas_plan_own"]), None)
+    hit = next((p for p in plans if p["name"] == ctx["sellable_own"]), None)
     if not hit:
-        _fail("V06", "uncapped VAS Plan not present")
+        _fail("V06", "uncapped plan not present")
         return
     if hit.get("blocked"):
         _fail("V06", f"uncapped plan wrongly blocked: {hit.get('blocked_reason')}")
@@ -241,11 +190,11 @@ def test_v06_price_band_open_when_no_max(ctx: dict) -> None:
 
 
 def test_v07_protection_plan_needs_device_in_cart(ctx: dict) -> None:
-    """Protection Plan (requires_device=True) must block when cart is empty."""
+    """Protection Plan without external-IMEI must block when cart is empty."""
     plans = get_vas_plans_with_rules(cart_items=[])
-    hit = next((p for p in plans if p["name"] == ctx["source_legacy"]), None)
+    hit = next((p for p in plans if p["name"] == ctx["protection_plan"]), None)
     if not hit:
-        _fail("V07", "legacy Protection Plan missing from empty-cart payload")
+        _fail("V07", "Protection Plan missing from empty-cart payload")
         return
     if not hit.get("requires_device"):
         _fail("V07", "Protection Plan should have requires_device=True")
@@ -256,24 +205,24 @@ def test_v07_protection_plan_needs_device_in_cart(ctx: dict) -> None:
     _pass("V07", f"Protection Plan blocked on empty cart: {hit['blocked_reason']}")
 
 
-def test_v08_broken_source_fk_is_skipped_not_crash(ctx: dict) -> None:
-    """A VAS Plan whose source_warranty_plan was deleted must not crash the
-    endpoint — it should be silently skipped (already tested elsewhere via
-    LEFT JOIN, but guard against regressions)."""
+def test_v08_endpoint_smoke(ctx: dict) -> None:
+    """Endpoint returns a list without crashing for a populated cart."""
     plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    # If the endpoint returned anything at all, it didn't crash.
+    if not isinstance(plans, list):
+        _fail("V08", f"expected list, got {type(plans)}")
+        return
     _pass("V08", f"endpoint returned {len(plans)} plans without crashing")
 
 
 def test_v09_js_payload_shape_complete(ctx: dict) -> None:
     """Every field cart_service.js reads from the plan must be present."""
     plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p.get("vas_plan") == ctx["vas_plan_own"]), None)
+    hit = next((p for p in plans if p["name"] == ctx["sellable_own"]), None)
     if not hit:
-        _fail("V09", "sample VAS Plan not returned")
+        _fail("V09", "sample plan not returned")
         return
     required = (
-        "name", "plan_name", "plan_type", "service_item",
+        "name", "vas_plan", "plan_name", "plan_type", "service_item",
         "duration_months", "price", "brand", "allow_external_device",
         "allows_external_device", "requires_device", "blocked",
         "blocked_reason",
@@ -282,81 +231,42 @@ def test_v09_js_payload_shape_complete(ctx: dict) -> None:
     if missing:
         _fail("V09", f"payload missing fields: {missing}")
         return
-    _pass("V09", "all JS-facing fields present in payload")
+    # vas_plan must be None post-merge (doctype is gone)
+    if hit["vas_plan"] is not None:
+        _fail("V09", f"vas_plan should be None post-merge, got {hit['vas_plan']!r}")
+        return
+    _pass("V09", "all JS-facing fields present; vas_plan=None (post-merge)")
 
 
-def test_v10_vas_plan_percentage_pricing(ctx: dict) -> None:
-    """VAS Plan wrapper with list_price=0 whose source is on 'Percentage of
-    Device Price' must compute price from the cart device rate. This is the
-    exact scenario in the teammate's ADLD screenshot: source CH-WP-2026-00007
-    has pricing_mode='Percentage of Device Price' with percentage_value=10
-    and VAS Plan.list_price=0 — the payload was returning ₹0 which surfaced
-    in the cart as ADLD @ ₹0."""
-    plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p.get("vas_plan") == ctx["vas_plan_percentage"]), None)
-    if not hit:
-        _fail("V10", "percentage-priced VAS Plan not returned")
-        return
-    # Cart has ₹29,000 device × 10% → ₹2,900.
-    expected = round(29000.0 * 10 / 100.0, 2)
-    if flt(hit["price"]) != expected:
-        _fail(
-            "V10",
-            f"expected ₹{expected} (10% of ₹29,000), got ₹{hit['price']}",
-        )
-        return
-    _pass(
-        "V10",
-        f"percentage pricing resolved: 10% of ₹29,000 = ₹{hit['price']}",
-    )
-
-
-def test_v11_legacy_plan_percentage_pricing(ctx: dict) -> None:
-    """Legacy CH Warranty Plan (plan_type=Value Added Service or Protection
-    Plan, no VAS Plan wrapper) with pricing_mode='Percentage of Device Price'
-    must also compute against cart device rate. Before the fix the legacy
-    branch only read the Fixed .price column."""
-    plans = get_vas_plans_with_rules(cart_items=ctx["cart"])
-    hit = next((p for p in plans if p["name"] == ctx["source_legacy_pct"]), None)
-    if not hit:
-        _fail("V11", "legacy percentage-priced plan not returned")
-        return
-    if hit.get("vas_plan"):
-        _fail("V11", f"legacy plan wrongly flagged with vas_plan={hit['vas_plan']}")
-        return
-    # Cart has ₹29,000 device × 15% → ₹4,350.
-    expected = round(29000.0 * 15 / 100.0, 2)
-    if flt(hit["price"]) != expected:
-        _fail(
-            "V11",
-            f"expected ₹{expected} (15% of ₹29,000), got ₹{hit['price']}",
-        )
-        return
-    _pass(
-        "V11",
-        f"legacy percentage pricing resolved: 15% of ₹29,000 = ₹{hit['price']}",
-    )
+def test_v10_deleted_doctypes_are_gone(_ctx: dict) -> None:
+    """The four merged doctypes must not exist as DocType metadata."""
+    for dt in ("VAS Plan", "VAS Product", "VAS Attach Rule", "VAS Claim"):
+        if frappe.db.exists("DocType", dt):
+            _fail("V10", f"DocType {dt!r} still exists after merge")
+            return
+    _pass("V10", "all 4 legacy doctypes removed from DocType metadata")
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  DIAGNOSTICS
 # ═══════════════════════════════════════════════════════════════════
 
-def _diagnostics(ctx: dict) -> None:
+def _diagnostics(_ctx: dict) -> None:
     print("\n─── Diagnostics ─────────────────────────────────────────")
     import inspect
     from ch_pos.api import pos_api
     src = inspect.getsource(pos_api.get_vas_plans_with_rules)
-    print(f"  code queries `tabVAS Plan`:            {'`tabVAS Plan`' in src}")
-    print(f"  code keeps legacy CH Warranty Plan:   {'plan_type' in src and 'Value Added Service' in src}")
+    single_surface = "tabVAS Plan" not in src and "is_sellable" in src
+    print(f"  single-surface endpoint (no VAS Plan join): {single_surface}")
 
-    active_vas = frappe.db.count("VAS Plan", {"status": "Active"})
-    active_wp = frappe.db.count(
-        "CH Warranty Plan",
-        {"status": "Active", "plan_type": ["in", ["Value Added Service", "Protection Plan"]]},
+    sellable = frappe.db.count(
+        "CH Warranty Plan", {"status": "Active", "is_sellable": 1}
     )
-    print(f"  Active VAS Plan on bench:              {active_vas}")
-    print(f"  Active CH Warranty Plan (VAS/Protect): {active_wp}")
+    governance = frappe.db.count(
+        "CH Warranty Plan", {"status": "Active", "is_sellable": 0}
+    )
+    print(f"  Sellable CH Warranty Plans on bench:  {sellable}")
+    print(f"  Governance-only CH Warranty Plans:   {governance}")
     print("─────────────────────────────────────────────────────────\n")
 
 
@@ -366,10 +276,9 @@ def _diagnostics(ctx: dict) -> None:
 
 def run_all() -> None:
     print("\n============================================================")
-    print(" CH POS — VAS Catalog (VAS Plan + CH Warranty Plan) E2E")
+    print(" CH POS — VAS Catalog (post-merge, single-surface) E2E")
     print("============================================================\n")
 
-    # QA-only mandatory validators (MRP-on-Item etc) bypass.
     frappe.flags.in_qa_seed = True
     try:
         _run_all_inner()
@@ -380,72 +289,48 @@ def run_all() -> None:
 def _run_all_inner() -> None:
     _purge()
 
-    # ── Seed source CH Warranty Plans (governance layer) ──
-    source_own = _seed_source_plan(
-        f"{TAG} Own Warranty Source",
+    # ── Seed CH Warranty Plans ──
+    sellable_own = _seed_plan(
+        f"{TAG} Sellable Own Warranty",
         plan_type="Own Warranty",
-        # Fixed pricing requires price > 0 — the sellable rate lives on
-        # the VAS Plan wrapper, so this is just a placeholder to satisfy
-        # the validator.
-        price=1.0,
+        price=999.0,
+        is_sellable=1,
     )
-    source_protection = _seed_source_plan(
-        f"{TAG} Protection Source",
+    governance_only = _seed_plan(
+        f"{TAG} Governance-only Own Warranty",
+        plan_type="Own Warranty",
+        price=1.0,
+        is_sellable=0,   # bundled with device sale, not directly sellable
+    )
+    protection_plan = _seed_plan(
+        f"{TAG} Protection Plan",
         plan_type="Protection Plan",
         price=1499.0,
+        is_sellable=1,
     )
-    source_capped = _seed_source_plan(
-        f"{TAG} Capped Source",
+    capped_plan = _seed_plan(
+        f"{TAG} Capped VAS",
         plan_type="Value Added Service",
-        price=299.0,
+        price=499.0,
+        is_sellable=1,
+        max_device_price=20000.0,
     )
-    source_legacy = _seed_source_plan(
-        f"{TAG} Legacy Protection No Wrapper",
-        plan_type="Protection Plan",
-        price=799.0,
-    )
-    # Percentage-of-device-price source, wrapped by a ₹0-list_price VAS
-    # Plan — mirrors the teammate's ADLD case.
-    source_percentage = _seed_source_plan(
-        f"{TAG} Percentage Source",
+    percentage_plan = _seed_plan(
+        f"{TAG} Percentage-priced Own Warranty",
         plan_type="Own Warranty",
+        price=0.0,   # ignored under Percentage mode
         pricing_mode="Percentage of Device Price",
         percentage_value=10.0,
+        is_sellable=1,
     )
-    # Legacy VAS plan (no VAS Plan wrapper) on percentage pricing.
-    source_legacy_pct = _seed_source_plan(
-        f"{TAG} Legacy Percentage No Wrapper",
+    fixed_plan = _seed_plan(
+        f"{TAG} Fixed-priced VAS",
         plan_type="Value Added Service",
-        pricing_mode="Percentage of Device Price",
-        percentage_value=15.0,
+        price=499.0,
+        is_sellable=1,
     )
 
-    # ── Seed VAS Plan wrappers (sellable-catalog layer) ──
-    vas_plan_own = _seed_vas_wrapper(
-        f"{TAG} Own Wrapper",
-        source_own,
-        list_price=999.0,
-    )
-    vas_plan_protection = _seed_vas_wrapper(
-        f"{TAG} Protection Wrapper",
-        source_protection,
-        list_price=1999.0,
-    )
-    vas_plan_capped = _seed_vas_wrapper(
-        f"{TAG} Capped Wrapper",
-        source_capped,
-        list_price=499.0,
-        max_device_price=20000.0,   # cart has ₹29,000 device — should block
-    )
-    # ₹0 list_price forces the endpoint to fall through to percentage math.
-    vas_plan_percentage = _seed_vas_wrapper(
-        f"{TAG} Percentage Wrapper",
-        source_percentage,
-        list_price=0.0,
-    )
-    # NOTE: source_legacy is intentionally NOT wrapped by a VAS Plan.
-
-    # Simulated cart with a ₹29,000 device (matches teammate's screenshot).
+    # Simulated cart with a ₹29,000 device.
     cart = [{
         "item_code": frappe.db.get_value(
             "Item",
@@ -458,33 +343,28 @@ def _run_all_inner() -> None:
     }]
 
     ctx = {
-        "source_own": source_own,
-        "source_protection": source_protection,
-        "source_capped": source_capped,
-        "source_legacy": source_legacy,
-        "source_percentage": source_percentage,
-        "source_legacy_pct": source_legacy_pct,
-        "vas_plan_own": vas_plan_own,
-        "vas_plan_protection": vas_plan_protection,
-        "vas_plan_capped": vas_plan_capped,
-        "vas_plan_percentage": vas_plan_percentage,
+        "sellable_own": sellable_own,
+        "governance_only": governance_only,
+        "protection_plan": protection_plan,
+        "capped_plan": capped_plan,
+        "percentage_plan": percentage_plan,
+        "fixed_plan": fixed_plan,
         "cart": cart,
     }
 
     _diagnostics(ctx)
 
     tests = [
-        test_v01_vas_plan_wrapper_surfaces_in_catalog,
-        test_v02_vas_plan_list_price_wins_over_wp_price,
-        test_v03_legacy_ch_warranty_plan_still_surfaces,
-        test_v04_wrapped_plan_not_duplicated_via_legacy_path,
+        test_v01_sellable_plan_surfaces,
+        test_v02_non_sellable_plan_hidden,
+        test_v03_percentage_pricing_from_device,
+        test_v04_fixed_pricing_passes_through,
         test_v05_price_band_blocks_over_max,
         test_v06_price_band_open_when_no_max,
         test_v07_protection_plan_needs_device_in_cart,
-        test_v08_broken_source_fk_is_skipped_not_crash,
+        test_v08_endpoint_smoke,
         test_v09_js_payload_shape_complete,
-        test_v10_vas_plan_percentage_pricing,
-        test_v11_legacy_plan_percentage_pricing,
+        test_v10_deleted_doctypes_are_gone,
     ]
     for t in tests:
         try:

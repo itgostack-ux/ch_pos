@@ -8429,38 +8429,34 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7) -> dict:
 # ── VAS Eligibility ──────────────────────────────────────────
 @frappe.whitelist()
 def get_vas_plans_with_rules(cart_items=None) -> dict:
-    """Return active VAS plans (both catalog SKUs and legacy plans) with
-    device-dependency enforcement.
+    """Return sellable CH Warranty Plans with device-dependency rules.
 
-    Two catalog surfaces feed this list:
+    Single catalog surface: ``CH Warranty Plan`` where ``is_sellable=1``
+    AND ``status='Active'``.
 
-      A. ``VAS Plan`` — the sellable-catalog SKU wrapper introduced in
-         ch_item_master. Each VAS Plan has ``source_warranty_plan``
-         (Link → CH Warranty Plan, ``reqd=1 unique=1``) and owns its
-         own ``list_price``, ``duration_months`` and price-band
-         (``min_device_price`` / ``max_device_price``). This is what
-         cashiers see under ``/desk/vas-plan`` and what POS should
-         primarily return.
-      B. ``CH Warranty Plan`` with ``plan_type IN (Value Added Service,
-         Protection Plan)`` — the legacy shape from before the VAS Plan
-         catalog existed. Kept here so pre-migration test fixtures
-         (``test_vas_external_imei_pos_e2e``) and any hand-created
-         governance plans still show up, but skipped when already
-         wrapped by a VAS Plan (dedup on source_warranty_plan).
+    Before the ``VAS Plan`` / ``VAS Product`` / ``VAS Attach Rule`` /
+    ``VAS Claim`` doctypes were merged back into CH Warranty Plan
+    (see ``ch_item_master.patches.v31_merge_vas_plan_into_ch_warranty_plan``),
+    this endpoint had to join a sellable-catalog wrapper on top of the
+    governance plan. Now the plan itself owns everything — sellable
+    price bands, auto_attach, partner, min/max device price.
 
     Payload contract (JS-facing — cart_service.js::_render_vas_selector
-    and ``_add_vas_to_cart`` consume these):
-        name, plan_name, plan_type, service_item, duration_months,
-        price, coverage_description, brand, fulfillment_type,
+    and ``_add_vas_to_cart`` consume these). ``vas_plan`` is retained
+    as ``None`` so the front-end can still branch on it if needed, but
+    it is always None now (the wrapper doctype is gone):
+        name, vas_plan (=None), plan_name, plan_type, service_item,
+        duration_months, price, pricing_mode, percentage_value,
+        coverage_description, brand, fulfillment_type,
         allow_external_device, external_device_item,
+        valid_from, valid_to, min_device_price, max_device_price,
         requires_device, allows_external_device,
         blocked, blocked_reason, applicable_categories
 
-    ``name`` is always the underlying CH Warranty Plan name — the cart
-    line's ``warranty_plan`` field is a Link to CH Warranty Plan and
-    ``pos_invoice.py`` looks it up via ``frappe.get_cached_doc("CH
-    Warranty Plan", ...)``, so surfacing the VAS Plan name here would
-    break submit-time enrichment.
+    ``name`` is the CH Warranty Plan name — the cart line's
+    ``warranty_plan`` field is a Link to CH Warranty Plan and
+    ``pos_invoice.py`` looks it up via
+    ``frappe.get_cached_doc("CH Warranty Plan", ...)``.
     """
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
@@ -8487,130 +8483,69 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
 
     today = nowdate()
 
-    # ── Catalog surface A — VAS Plan (sellable SKU wrappers).
-    #    Left-join to source CH Warranty Plan for governance fields the
-    #    POS payload needs. ``VAS Plan.source_warranty_plan`` is reqd,
-    #    but LEFT JOIN keeps us defensive against stale FKs.
-    vas_rows = frappe.db.sql(
-        """
-        SELECT
-            v.name              AS vas_plan_name,
-            v.plan_name         AS vas_plan_label,
-            v.status            AS vas_status,
-            v.list_price        AS vas_list_price,
-            v.duration_months   AS vas_duration_months,
-            v.min_device_price,
-            v.max_device_price,
-            v.source_warranty_plan AS wp_name,
-            w.plan_name         AS wp_plan_name,
-            w.plan_type         AS wp_plan_type,
-            w.service_item      AS wp_service_item,
-            w.brand             AS wp_brand,
-            w.coverage_description AS wp_coverage_description,
-            w.valid_from        AS wp_valid_from,
-            w.valid_to          AS wp_valid_to,
-            w.allow_external_device AS wp_allow_external_device,
-            w.external_device_item  AS wp_external_device_item,
-            w.fulfillment_type  AS wp_fulfillment_type,
-            w.price             AS wp_price,
-            w.pricing_mode      AS wp_pricing_mode,
-            w.percentage_value  AS wp_percentage_value,
-            w.duration_months   AS wp_duration_months
-        FROM `tabVAS Plan` v
-        LEFT JOIN `tabCH Warranty Plan` w ON w.name = v.source_warranty_plan
-        WHERE v.status = 'Active'
-        """,
-        as_dict=True,
-    )
-
-    def _resolve_price(list_price, wp_price, pricing_mode, pct):
-        """Effective sellable rate for a plan.
-
-        VAS Plan.list_price overrides everything when > 0 — the catalog
-        SKU is what got quoted to the cashier. When it is 0 and the
-        source CH Warranty Plan is on 'Percentage of Device Price', we
-        compute rate against the cart's highest device price (same rule
-        the direct-attach flow uses in attach_api._get_warranty_plans).
-        Otherwise fall back to the governance Fixed price.
-        """
-        if flt(list_price) > 0:
-            return flt(list_price)
-        if pricing_mode == "Percentage of Device Price" and flt(pct) > 0 and max_device_price:
-            return round(max_device_price * flt(pct) / 100.0, 2)
-        return flt(wp_price or 0)
-
-    plans: list[frappe._dict] = []
-    wrapped_sources: set[str] = set()
-    for row in vas_rows:
-        if not row.wp_name:
-            # Broken FK — the source CH Warranty Plan was deleted out
-            # from under this VAS Plan. Skip: downstream code needs a
-            # valid CH Warranty Plan link on the cart line.
-            continue
-        wrapped_sources.add(row.wp_name)
-        plans.append(frappe._dict({
-            "name": row.wp_name,                                   # link target
-            "vas_plan": row.vas_plan_name,                         # catalog SKU
-            "plan_name": row.vas_plan_label or row.wp_plan_name,
-            "plan_type": row.wp_plan_type or "Value Added Service",
-            "service_item": row.wp_service_item,
-            "duration_months": (
-                row.vas_duration_months or row.wp_duration_months or 0
-            ),
-            # VAS Plan.list_price is the sellable rate; fall back to
-            # percentage-of-device-price math, then to the governance
-            # Fixed price. See _resolve_price above.
-            "price": _resolve_price(
-                row.vas_list_price, row.wp_price,
-                row.wp_pricing_mode, row.wp_percentage_value,
-            ),
-            "pricing_mode": row.wp_pricing_mode,
-            "percentage_value": flt(row.wp_percentage_value),
-            "coverage_description": row.wp_coverage_description,
-            "brand": row.wp_brand,
-            "fulfillment_type": row.wp_fulfillment_type,
-            "allow_external_device": cint(row.wp_allow_external_device),
-            "external_device_item": row.wp_external_device_item,
-            "valid_from": row.wp_valid_from,
-            "valid_to": row.wp_valid_to,
-            "min_device_price": flt(row.min_device_price),
-            "max_device_price": flt(row.max_device_price),
-        }))
-
-    # ── Catalog surface B — legacy CH Warranty Plan direct entries.
-    legacy = frappe.get_all(
+    plan_rows = frappe.get_all(
         "CH Warranty Plan",
-        filters={
-            "status": "Active",
-            "plan_type": ["in", ["Value Added Service", "Protection Plan"]],
-            "name": ["not in", list(wrapped_sources) or ["__none__"]],
-        },
+        filters={"status": "Active", "is_sellable": 1},
         fields=[
             "name", "plan_name", "plan_type", "service_item",
             "duration_months", "price", "pricing_mode", "percentage_value",
-            "coverage_description", "brand",
-            "fulfillment_type", "allow_external_device", "external_device_item",
+            "coverage_description", "brand", "fulfillment_type",
+            "allow_external_device", "external_device_item",
             "valid_from", "valid_to",
+            "min_device_price", "max_device_price",
+            "partner", "auto_attach",
         ],
     )
-    for p in legacy:
-        # Same rate resolution as the VAS Plan branch — legacy plans
-        # with pricing_mode='Percentage of Device Price' were charging
-        # ₹0 before this because we only read the Fixed .price column.
-        p["price"] = _resolve_price(
-            0, p.get("price"),
-            p.get("pricing_mode"), p.get("percentage_value"),
-        )
-        p["min_device_price"] = 0.0
-        p["max_device_price"] = 0.0
-        p["vas_plan"] = None
-        plans.append(frappe._dict(p))
+
+    def _resolve_price(fixed_price, pricing_mode, pct):
+        """Effective sellable rate for a plan.
+
+        Percentage-of-device-price plans compute rate against the cart's
+        highest device price (same rule the direct-attach flow uses in
+        ``attach_api._get_warranty_plans``). Fixed-mode plans return
+        the stored governance price. Falls back to 0 if neither yields
+        a positive number — the caller can decide whether to hide it.
+        """
+        if pricing_mode == "Percentage of Device Price" and flt(pct) > 0 and max_device_price:
+            return round(max_device_price * flt(pct) / 100.0, 2)
+        return flt(fixed_price or 0)
+
+    plans: list[frappe._dict] = []
+    for row in plan_rows:
+        plans.append(frappe._dict({
+            "name": row["name"],
+            # VAS Plan doctype no longer exists; keep the key for JS
+            # backward-compat but leave it None.
+            "vas_plan": None,
+            "plan_name": row.get("plan_name"),
+            "plan_type": row.get("plan_type") or "Value Added Service",
+            "service_item": row.get("service_item"),
+            "duration_months": row.get("duration_months") or 0,
+            "price": _resolve_price(
+                row.get("price"),
+                row.get("pricing_mode"),
+                row.get("percentage_value"),
+            ),
+            "pricing_mode": row.get("pricing_mode"),
+            "percentage_value": flt(row.get("percentage_value")),
+            "coverage_description": row.get("coverage_description"),
+            "brand": row.get("brand"),
+            "fulfillment_type": row.get("fulfillment_type"),
+            "allow_external_device": cint(row.get("allow_external_device")),
+            "external_device_item": row.get("external_device_item"),
+            "valid_from": row.get("valid_from"),
+            "valid_to": row.get("valid_to"),
+            "min_device_price": flt(row.get("min_device_price")),
+            "max_device_price": flt(row.get("max_device_price")),
+            "partner": row.get("partner"),
+            "auto_attach": cint(row.get("auto_attach")),
+        }))
 
     # ── Rule application — validity, device dependency, price band,
-    #    and category applicability. Same semantics for both surfaces.
+    #    and category applicability.
     applicable: list[dict] = []
     for plan in plans:
-        # Validity window (dates from CH Warranty Plan).
+        # Validity window.
         if plan.valid_from and str(plan.valid_from) > today:
             continue
         if plan.valid_to and str(plan.valid_to) < today:
@@ -8636,7 +8571,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             plan["blocked"] = False
             plan["blocked_reason"] = ""
 
-        # Price band (VAS Plan surface only — legacy plans have both = 0).
+        # Price band.
         min_dp = flt(plan.get("min_device_price"))
         max_dp = flt(plan.get("max_device_price"))
         if not plan.get("blocked") and (min_dp or max_dp) and max_device_price:
@@ -8651,9 +8586,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
                     "Device price ₹{0} above plan maximum ₹{1}"
                 ).format(max_device_price, max_dp)
 
-        # Category filtering (CH Warranty Plan child table — same on
-        # both surfaces because ``plan.name`` is always the CH Warranty
-        # Plan name).
+        # Category filtering (CH Warranty Plan Category child table).
         if not plan.get("blocked"):
             plan_categories = frappe.get_all(
                 "CH Warranty Plan Category",
@@ -10258,6 +10191,17 @@ def get_pos_buyback_detail(assessment_name) -> dict:
     """
     a = frappe.get_doc("Buyback Assessment", assessment_name)
 
+    # SECURITY: this payload carries KYC (ID numbers/images) + payout bank
+    # details. Raw frappe.get_doc does NOT enforce doctype permissions, so gate
+    # explicitly on read permission AND the caller's store scope — an
+    # authenticated user must not read buybacks belonging to another store.
+    a.check_permission("read")
+    from ch_pos.api.scope_guard import assert_store_scope
+    assert_store_scope(
+        store=a.store, warehouse=a.store, company=a.company,
+        msg=frappe._("You are not entitled to view this buyback."),
+    )
+
     # Fix status stuck at Draft when already Frappe-submitted
     if a.docstatus == 1 and a.status == "Draft":
         a.db_set("status", "Submitted")
@@ -10336,11 +10280,12 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "approved_by": o.approved_by or "",
             "approval_date": str(o.approval_date) if o.approval_date else "",
             "approval_remarks": o.approval_remarks or "",
-            "approval_token": o.approval_token or "",
-            "approval_url": (
-                f"{frappe.utils.get_url()}/buyback-approval?token={o.approval_token}"
-                if o.approval_token else ""
-            ),
+            # SECURITY: the raw approval_token (and the /buyback-approval URL
+            # that embeds it) are deliberately NOT returned here — a detail
+            # payload must not leak a bearer credential that lets anyone
+            # approve the order. Staff share the link via the dedicated
+            # pos_send_approval_link endpoint instead.
+            "has_approval_link": bool(o.approval_token),
             # Phase B — market-standard compliance state
             "indemnity_signed": cint(getattr(o, "indemnity_signed", 0)),
             "indemnity_signed_at": (
@@ -10693,7 +10638,7 @@ def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
     return doc.bypass_otp_instore(remarks=remarks)
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 @rate_limit(limit=20, seconds=300, ip_based=True)
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
                                  kyc_id_type=None, kyc_id_number=None,
@@ -10710,9 +10655,24 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
     method: "In-Store Signature" | "OTP" | "Token Link"
     If method == "OTP", otp_code is verified first.
     kyc_id_type / kyc_id_number: optional KYC data saved on the order.
+
+    SECURITY: staff-only, store-scoped. This endpoint writes KYC + payout bank
+    details onto the order, so it must never be guest-reachable — an
+    unauthenticated caller could otherwise approve any order and inject a
+    fraudulent payout account by passing an arbitrary ``order_name``. The
+    customer-facing consent path is the separate, token-bound
+    ``buyback.api.customer_approve_via_token`` / ``verify_otp`` flow.
     """
     doc = frappe.get_doc("Buyback Order", order_name)
-    # Guest-accessible (customer-facing step); OTP/method check below is the auth gate
+
+    # Bind the operator to this order's store — a POS user may only approve
+    # buybacks at a store/warehouse within their CH User Scope.
+    from ch_pos.api.scope_guard import assert_store_scope
+    assert_store_scope(
+        store=doc.store, warehouse=doc.store, company=doc.company,
+        msg=frappe._("You are not entitled to approve buybacks at this store."),
+    )
+
     doc.flags.ignore_permissions = True
 
     def _normalize_kyc_type(id_type):
