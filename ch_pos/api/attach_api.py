@@ -61,23 +61,36 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
     no longer exist. The previous filter shape referenced fields that
     haven't been on the plan for two schema revisions, which effectively
     hid every plan from the attach panel.
+
+    Pricing modes:
+      * ``Fixed`` — return the plan's ``price`` (Standard Price) as-is.
+      * ``Percentage of Device Price`` — plan.price on the doc is 0; we
+        compute the effective price as ``device_price * percentage_value /
+        100`` using the active POS CH Item Price for ``item_code``. This
+        mirrors the computation in ``pos_api.get_warranty_plans`` so the
+        cashier-facing attach panel and the standalone plan resolver
+        agree on the rendered rate.
     """
-    if not frappe.db.table_exists("tabCH Warranty Plan"):
+    # NOTE: `frappe.db.table_exists` accepts the DocType name and prepends
+    # `tab` internally — passing `tabCH Warranty Plan` here looks up
+    # `tabtabCH Warranty Plan` and always returns False, which silently
+    # emptied the attach panel's warranty section on every request.
+    if not frappe.db.table_exists("CH Warranty Plan"):
         return []
 
     today = nowdate()
 
-    filters = {"status": "Active"}
-    if brand:
-        # Plan.brand is optional — a NULL/empty means "applies to any brand",
-        # so match either the exact brand or a catch-all plan.
-        filters["brand"] = ["in", [brand, "", None]]
-
+    # NOTE on brand filtering: `brand` on CH Warranty Plan is a nullable Link,
+    # and a NULL brand means "applies to every brand" (catch-all). SQL `IN`
+    # does not match NULLs, so we can't push the OR-with-NULL down as a
+    # ``["in", [brand, "", None]]`` filter — that quietly drops every
+    # catch-all plan. Fetch the whole Active set and filter brand in Python.
     plans = frappe.get_all(
         "CH Warranty Plan",
-        filters=filters,
+        filters={"status": "Active"},
         fields=[
             "name", "plan_name", "plan_type", "duration_months", "price",
+            "pricing_mode", "percentage_value",
             "service_item", "brand", "valid_from", "valid_to",
         ],
         order_by="price asc",
@@ -87,7 +100,7 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
     # single query so we do not re-hit the DB per plan.
     plan_names = [p.name for p in plans]
     ig_map: dict[str, set[str]] = {}
-    if plan_names and frappe.db.table_exists("tabCH Warranty Plan Item Group"):
+    if plan_names and frappe.db.table_exists("CH Warranty Plan Item Group"):
         for row in frappe.get_all(
             "CH Warranty Plan Item Group",
             filters={"parent": ["in", plan_names], "parenttype": "CH Warranty Plan"},
@@ -97,8 +110,20 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
             if row.item_group:
                 ig_map.setdefault(row.parent, set()).add(row.item_group)
 
+    # Look up the device selling price once — needed only if we hit a
+    # percentage-priced plan, but a single get_value is cheaper than the
+    # branch overhead per plan.
+    device_price = flt(frappe.db.get_value(
+        "CH Item Price",
+        {"item_code": item_code, "channel": "POS", "status": "Active"},
+        "selling_price",
+    ))
+
     matched = []
     for p in plans:
+        # Brand match: catch-all when the plan has no brand set.
+        if p.brand and brand and p.brand != brand:
+            continue
         # Validity window (either bound optional).
         if p.valid_from and str(p.valid_from) > today:
             continue
@@ -108,6 +133,11 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
         applicable_groups = ig_map.get(p.name)
         if applicable_groups and item_group and item_group not in applicable_groups:
             continue
+        # Resolve percentage pricing to an actual rate. Without this the
+        # attach panel adds the plan to the cart at Rs.0 because the plan's
+        # ``price`` column stays 0 whenever ``pricing_mode`` is percentage.
+        if p.pricing_mode == "Percentage of Device Price":
+            p.price = flt(device_price * flt(p.percentage_value) / 100.0, 2)
         matched.append(p)
 
     return matched
