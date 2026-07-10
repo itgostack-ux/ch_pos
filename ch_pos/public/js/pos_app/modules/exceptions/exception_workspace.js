@@ -511,11 +511,72 @@ ExceptionWorkspace.prototype._apply_and_bill = function (exception_name) {
 		PosState.active_mode = "sell";
 		EventBus.emit("mode:set", "sell");
 		EventBus.emit("mode:switch", "sell");
-		// 3. Tell cart_panel to refresh its banner once it mounts.
+		// 3. Tell cart_panel/cart_service to apply pricing + refresh banner.
+		//    cart_service.exception:applied is synchronous, so cart state reflects
+		//    the outcome immediately after emit returns.
 		EventBus.emit("exception:applied", { name: exception_name, data: r });
+
+		// 4. Confirm whether ANY cart line actually accepted the exception —
+		//    previously we blindly showed "billing mode active", which caused the
+		//    cashier to think the discount was live when the per-item guards in
+		//    cart_service._apply_exception_pricing_to_item had silently dropped it
+		//    (mismatched item_code / serial / customer, or bill-level exception
+		//    with no item_code).
+		const applied_line = (PosState.cart || []).find(
+			(it) => (it && it.exception_request) === exception_name
+		);
+		if (applied_line) {
+			frappe.show_alert({
+				message: __("Exception {0} applied to {1} — billing mode active",
+					[exception_name, applied_line.item_name || applied_line.item_code || ""]),
+				indicator: "green",
+			});
+			return;
+		}
+		const reason = ExceptionWorkspace.prototype._diagnose_apply_skip(r, PosState.cart || []);
 		frappe.show_alert({
-			message: __("Exception {0} applied — billing mode active", [exception_name]),
-			indicator: "green",
-		});
+			message: __("Exception {0} could not be applied: {1}", [exception_name, reason]),
+			indicator: "orange",
+		}, 10);
 	});
+};
+
+// Explain WHY an approved exception failed to attach to any cart line so the
+// cashier can act (add the item, scan the right IMEI, switch customer, or ask
+// the approver to re-raise the exception with the correct scope).
+ExceptionWorkspace.prototype._diagnose_apply_skip = function (data, cart) {
+	if (!data) return __("no exception data");
+	if (!data.item_code) {
+		return __("this exception has no item linked. Raise it against a specific item, or apply it as a line-level exception from the cart.");
+	}
+	const match = (cart || []).find((c) => c && c.item_code === data.item_code);
+	if (!match) {
+		return __("item {0} is not in the cart. Add it, then apply the exception.", [data.item_code]);
+	}
+	if (!data.customer) {
+		return __("exception has no customer on record and cannot be applied. Re-raise it after selecting the customer on the cart.");
+	}
+	if (!PosState.customer) {
+		return __("select a customer on the bill before applying the exception (the exception was approved for {0}).", [data.customer]);
+	}
+	if (data.customer !== PosState.customer) {
+		return __("exception is tied to customer {0}; current cart customer is {1}.",
+			[data.customer, PosState.customer]);
+	}
+	if (data.serial_no) {
+		const cart_serial = (match.serial_no || "").trim();
+		if (!cart_serial) {
+			return __("exception requires IMEI {0}; the cart line has no serial scanned yet.", [data.serial_no]);
+		}
+		if (cart_serial !== (data.serial_no || "").trim()) {
+			return __("exception is tied to IMEI {0}; cart line has {1}.", [data.serial_no, cart_serial]);
+		}
+	}
+	if (flt(data.original_value) <= 0) {
+		return __("exception has no original value on record — cannot compute discount.");
+	}
+	if (flt(data.resolution_value || data.requested_value) < 0) {
+		return __("exception has an invalid resolution value.");
+	}
+	return __("cart line rejected the exception (check customer/phone/IMEI match).");
 };

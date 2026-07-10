@@ -35,6 +35,87 @@ def _ensure_can_operate_token() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Store-scope guards (queue / token reads + actions)
+# ---------------------------------------------------------------------------
+
+def _scoped_warehouses_companies():
+    """Return ``(warehouses, companies, bypass)`` for the current user.
+
+    ``bypass`` is True for unrestricted users (System Manager / Administrator)
+    or when ch_erp15 is unavailable (standalone test env) — callers then skip
+    scoping. Otherwise the two sets constrain queue/token access to the
+    caller's allowed stores.
+    """
+    try:
+        from ch_erp15.ch_erp15.scope import get_user_scope
+    except ImportError:
+        return None, None, True
+    scope = get_user_scope()
+    if scope.get("bypass"):
+        return None, None, True
+    return (scope.get("warehouses") or set()), (scope.get("companies") or set()), False
+
+
+def _assert_pos_profile_scope(pos_profile: str) -> None:
+    """Refuse a pos_profile whose warehouse/company is outside the caller's scope."""
+    if not pos_profile:
+        return
+    warehouses, companies, bypass = _scoped_warehouses_companies()
+    if bypass:
+        return
+    profile = _resolve_pos_profile(pos_profile)
+    wh = profile.get("warehouse") if profile else None
+    comp = profile.get("company") if profile else None
+    if wh and warehouses and wh in warehouses:
+        return
+    if comp and companies and comp in companies:
+        return
+    frappe.throw(_("This store is outside your scope."), frappe.PermissionError, title=_("API Error"))
+
+
+def _apply_token_scope_filters(filters: dict) -> dict:
+    """Constrain a POS Kiosk Token query to the caller's allowed stores.
+
+    Used when no explicit pos_profile is supplied so a scoped manager cannot
+    pull every store's queue (which carries customer name + phone). Fail
+    CLOSED: an empty scope matches nothing.
+    """
+    warehouses, companies, bypass = _scoped_warehouses_companies()
+    if bypass:
+        return filters
+    if warehouses:
+        filters["store"] = ("in", list(warehouses))
+    elif companies:
+        filters["company"] = ("in", list(companies))
+    else:
+        filters["name"] = ("in", ["__none__"])
+    return filters
+
+
+def _assert_token_scope(token_name: str) -> None:
+    """Refuse operating on a token whose store/company is outside scope.
+
+    ``_ensure_can_operate_token`` proves the user MAY operate tokens; this
+    proves they may operate THIS store's token.
+    """
+    if not token_name:
+        return
+    warehouses, companies, bypass = _scoped_warehouses_companies()
+    if bypass:
+        return
+    tok = frappe.db.get_value(
+        "POS Kiosk Token", token_name, ["store", "company"], as_dict=True
+    )
+    if not tok:
+        return
+    if tok.store and warehouses and tok.store in warehouses:
+        return
+    if tok.company and companies and tok.company in companies:
+        return
+    frappe.throw(_("This token is outside your store scope."), frappe.PermissionError, title=_("API Error"))
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -417,7 +498,12 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
     """
     filters = {}
     if pos_profile:
+        _assert_pos_profile_scope(pos_profile)
         filters["pos_profile"] = pos_profile
+    else:
+        # No explicit store → narrow to the caller's allowed stores so a
+        # scoped manager can't pull every store's queue (customer PII).
+        _apply_token_scope_filters(filters)
     if status and status != "All":
         filters["status"] = status
 
@@ -476,6 +562,7 @@ def get_store_users(pos_profile: str = None, role: str = None) -> dict:
     """
     users = []
     if pos_profile:
+        _assert_pos_profile_scope(pos_profile)
         # Find the CH Store linked to this POS Profile
         store_name = frappe.db.get_value("CH Store", {"pos_profile": pos_profile, "disabled": 0}, "name")
         if store_name:
@@ -513,6 +600,7 @@ def get_store_users(pos_profile: str = None, role: str = None) -> dict:
 def assign_token(token_name: str, technician: str) -> dict:
     """Assign a technician to a token. Status → In Progress."""
     _ensure_can_operate_token()
+    _assert_token_scope(token_name)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     updates = {"technician": technician, "assigned_at": now_datetime()}
     if doc.status == "Waiting":
@@ -525,6 +613,7 @@ def assign_token(token_name: str, technician: str) -> dict:
 def start_token(token_name: str) -> dict:
     """Mark service as started."""
     _ensure_can_operate_token()
+    _assert_token_scope(token_name)
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "started_at": now_datetime(),
         "status": "In Progress",
@@ -536,6 +625,7 @@ def start_token(token_name: str) -> dict:
 def complete_token(token_name: str) -> dict:
     """Mark token as completed."""
     _ensure_can_operate_token()
+    _assert_token_scope(token_name)
     frappe.db.set_value("POS Kiosk Token", token_name, {
         "completed_at": now_datetime(),
         "status": "Completed",
@@ -547,6 +637,7 @@ def complete_token(token_name: str) -> dict:
 def cancel_token(token_name: str) -> dict:
     """Cancel a token (typically Waiting status)."""
     _ensure_can_operate_token()
+    _assert_token_scope(token_name)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted"):
         frappe.throw(_("Cannot cancel a {0} token").format(doc.status), title=_("API Error"))
@@ -565,6 +656,7 @@ def drop_token(token_name: str, drop_reason: str = "", drop_sub_reason: str = ""
     user_roles = frappe.get_roles()
     if "POS User" not in user_roles and "POS Manager" not in user_roles:
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
+    _assert_token_scope(token_name)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status in ("Completed", "Cancelled", "Converted", "Dropped"):
         frappe.throw(_("Cannot withdraw a {0} token").format(doc.status), title=_("API Error"))
@@ -588,6 +680,7 @@ def engage_token(token_name: str, sales_executive: str = "") -> dict:
     user_roles = frappe.get_roles()
     if "POS User" not in user_roles and "POS Manager" not in user_roles:
         frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
+    _assert_token_scope(token_name)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
     if doc.status not in ("Waiting",):
         frappe.throw(_("Can only engage a Waiting token, current status is {0}").format(doc.status), title=_("API Error"))
@@ -611,6 +704,7 @@ def start_pos_billing(token_name: str, pos_profile: str, sales_executive: str = 
     Hold and must wait until the active billing completes or is released.
     """
     _ensure_can_operate_token()
+    _assert_token_scope(token_name)
 
     def _claim_slot():
         doc = frappe.get_doc("POS Kiosk Token", token_name)
@@ -653,6 +747,7 @@ def start_pos_billing(token_name: str, pos_profile: str, sales_executive: str = 
 def release_pos_billing(token_name: str = "", pos_profile: str = "", revert_current: int = 0) -> dict:
     """Release the active billing slot and return held customers to Waiting."""
     _ensure_can_operate_token()
+    _assert_token_scope(token_name)
 
     if token_name and not pos_profile:
         pos_profile = frappe.db.get_value("POS Kiosk Token", token_name, "pos_profile")
@@ -1160,7 +1255,10 @@ def get_dashboard_stats(pos_profile: str = None, date_filter: str = "today") -> 
     """
     filters = {}
     if pos_profile:
+        _assert_pos_profile_scope(pos_profile)
         filters["pos_profile"] = pos_profile
+    else:
+        _apply_token_scope_filters(filters)
 
     today = frappe.utils.today()
     if date_filter == "today":
@@ -1267,7 +1365,10 @@ def get_reports(pos_profile: str = None, days: int = 7) -> dict:
 
     base_filters = {"creation": [">=", start_date + " 00:00:00"]}
     if pos_profile:
+        _assert_pos_profile_scope(pos_profile)
         base_filters["pos_profile"] = pos_profile
+    else:
+        _apply_token_scope_filters(base_filters)
 
     all_tokens = frappe.get_all(
         "POS Kiosk Token",
@@ -1411,6 +1512,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     Returns waiting/in-progress tokens for the given POS store.
     Called by the POS Queue panel on load and after each action.
     """
+    _assert_pos_profile_scope(pos_profile)
     today = frappe.utils.today()
     tokens = frappe.db.sql(
         """SELECT name, token_display, customer_name, customer_phone,
@@ -1445,6 +1547,7 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
     Returns the new Service Request name.
     """
     _ensure_can_operate_token()
+    _assert_token_scope(token_name)
     token = frappe.get_doc("POS Kiosk Token", token_name)
     if token.status == "Converted":
         frappe.throw(_("This token has already been converted to a GoFix request."), title=_("API Error"))

@@ -432,6 +432,19 @@ export class CartPanel {
 			}
 			EventBus.emit("customer:info_loaded", info);
 			this._render_customer_info(info);
+
+			// CH Loyalty engine — richer tier snapshot (multi-company wallet,
+			// next-tier progress, expiring points). Non-blocking: failure just
+			// leaves the standard loyalty badge in place.
+			frappe.xcall("ch_erp15.loyalty.api.get_customer_loyalty_status", {
+				customer: val,
+				company: PosState.company,
+			}).then((status) => {
+				PosState.customer_loyalty_status = status;
+				if (status && status.enrolled) {
+					this._render_ch_loyalty_pill(status);
+				}
+			}).catch(() => {});
 		});
 	}
 
@@ -1233,8 +1246,7 @@ export class CartPanel {
 	}
 
 	/** Render customer info badges (B2B/B2C, loyalty tier, credit) */
-	_render_customer_info(info) {
-		const row = this.wrapper.find(".ch-pos-customer-info");
+	_render_customer_info(info) {		const row = this.wrapper.find(".ch-pos-customer-info");
 		const badges = row.find(".ch-pos-cust-badges");
 		const warning = this.wrapper.find(".ch-pos-credit-warning");
 		let html = "";
@@ -1305,6 +1317,60 @@ export class CartPanel {
 		const tag = this.wrapper.find(".ch-pos-customer-tag");
 		if (info.loyalty && info.loyalty.points > 0) {
 			tag.addClass("loyalty");
+		}
+	}
+
+	/**
+	 * Render the CH Loyalty tier pill next to the customer name.
+	 * Called after the customer-info fetch settles with the CH engine's
+	 * enriched status (multi-company wallet, next-tier progress).
+	 *
+	 * Reason to keep this separate from `_render_customer_info`: the
+	 * standard info payload only knows the current tier + points; the
+	 * CH engine also resolves next-tier gap, currency equivalent, and
+	 * expiring-soon points from the aggregated shared wallet.
+	 */
+	_render_ch_loyalty_pill(status) {
+		const badges = this.wrapper.find(".ch-pos-cust-badges");
+		if (!badges.length || !status || !status.enrolled) {
+			return;
+		}
+		// Colour map by tier — Silver / Gold / Platinum are the industry
+		// baseline (Croma, Reliance Digital, Vijay Sales, Poorvika all
+		// use the same triad). Unknown tier falls back to a neutral pill.
+		const tier_key = (status.tier_name || "").toLowerCase();
+		let bg = "#607d8b";  // slate default
+		let fg = "#fff";
+		if (tier_key.includes("platinum")) { bg = "#5c6bc0"; }
+		else if (tier_key.includes("gold")) { bg = "#f5b301"; fg = "#3a2a00"; }
+		else if (tier_key.includes("silver")) { bg = "#b0bec5"; fg = "#212121"; }
+
+		const tier = status.tier_name || __("Member");
+		const pts = format_number(status.loyalty_points || 0);
+		const worth = status.loyalty_amount
+			? ` (₹${format_number(status.loyalty_amount)})`
+			: "";
+		const shared = status.shared_wallet
+			? ` <i class="fa fa-link" title="${__("Shared wallet across companies")}" style="font-size:8px;opacity:0.8"></i>`
+			: "";
+
+		let tooltip = `${status.program_name || status.program} — ${tier} · ${pts} pts${worth}`;
+		if (status.next_tier && status.amount_to_next_tier > 0) {
+			tooltip += `\n${__("Spend ₹{0} more to reach {1}", [format_number(status.amount_to_next_tier), status.next_tier])}`;
+		}
+		if (status.expiring_soon > 0) {
+			tooltip += `\n${__("{0} pts expiring in 30 days", [format_number(status.expiring_soon)])}`;
+		}
+
+		const pill = `<span class="ch-pos-badge ch-loyalty-tier-pill" title="${frappe.utils.escape_html(tooltip)}" style="background:${bg};color:${fg};font-weight:600"><i class="fa fa-trophy" style="font-size:9px"></i> ${frappe.utils.escape_html(tier)} · ${pts}${shared}</span>`;
+
+		// Replace any prior pill; otherwise prepend so the tier is
+		// the first thing the cashier sees after the customer name.
+		const existing = badges.find(".ch-loyalty-tier-pill");
+		if (existing.length) {
+			existing.replaceWith(pill);
+		} else {
+			badges.prepend(pill);
 		}
 	}
 

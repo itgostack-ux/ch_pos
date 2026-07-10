@@ -172,6 +172,7 @@ def test_03_raise_discount_override_exception():
             return
 
         from ch_item_master.ch_item_master.exception_api import raise_exception
+        _cust = _get_or_create_test_customer(profile.company)
         result = raise_exception(
             exception_type="Discount Override",
             company=profile.company,
@@ -180,6 +181,7 @@ def test_03_raise_discount_override_exception():
             original_value=1000.0,
             store_warehouse=profile.warehouse,
             pos_profile=profile.name,
+            customer=_cust,
         )
         exc_name = result.get("name")
 
@@ -513,6 +515,7 @@ def test_11_price_override_exception_type():
             _get_or_create_exception_type("Price Override")
 
         from ch_item_master.ch_item_master.exception_api import raise_exception
+        _cust = _get_or_create_test_customer(profile.company)
         result = raise_exception(
             exception_type=exc_type_name,
             company=profile.company,
@@ -521,6 +524,7 @@ def test_11_price_override_exception_type():
             original_value=55000.0,
             store_warehouse=profile.warehouse,
             pos_profile=profile.name,
+            customer=_cust,
         )
         exc_name = result.get("name")
 
@@ -595,6 +599,7 @@ def test_13_return_over_limit_exception_type():
             return_type = "Return Override" if _exception_type_exists("Return Override") else "Discount Override"
 
         from ch_item_master.ch_item_master.exception_api import raise_exception
+        _cust = _get_or_create_test_customer(profile.company)
         result = raise_exception(
             exception_type=return_type,
             company=profile.company,
@@ -603,6 +608,7 @@ def test_13_return_over_limit_exception_type():
             original_value=25000.0,
             store_warehouse=profile.warehouse,
             pos_profile=profile.name,
+            customer=_cust,
         )
         exc_name = result.get("name")
         assert exc_name, "Should raise return override exception"

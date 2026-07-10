@@ -54,6 +54,47 @@ def _rate_limit_token_attempt(token: str) -> None:
     frappe.cache().set_value(cache_key, int(attempts) + 1, expires_in_sec=900)
 
 
+def compute_cart_hash(customer, items) -> str:
+    """Return a stable SHA-256 over the cart's identity.
+
+    Covers the customer and each non-VAS / non-warranty line's
+    ``(item_code, qty, rate)`` — which together determine the cart total.
+    Bound into the approval at request time and re-checked at invoice creation
+    so an approval issued for one cart cannot be replayed on a different
+    cart/invoice.
+
+    grand_total is deliberately NOT part of the hash: at request time it may be
+    tax-inclusive and is not reliably reproducible from the invoice pipeline,
+    whereas the per-line ``rate`` already pins the economic value.
+    """
+    from frappe.utils import flt
+
+    norm_items = sorted(
+        (
+            {
+                "item_code": str(i.get("item_code") or ""),
+                "qty": round(flt(i.get("qty") or 1), 3),
+                "rate": round(
+                    flt(i.get("rate") if i.get("rate") is not None else i.get("price")),
+                    2,
+                ),
+            }
+            for i in items
+            if not i.get("is_warranty") and not i.get("is_vas")
+        ),
+        key=lambda x: (x["item_code"], x["qty"], x["rate"]),
+    )
+    payload = json.dumps(
+        {
+            "customer": str(customer or ""),
+            "items": norm_items,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 @frappe.whitelist()
 def get_category_managers_for_cart(items) -> list:
     """Given cart items, return the unique category managers required.
@@ -150,6 +191,7 @@ def request_free_sale_approval(reason, customer, items, grand_total,
         "reason": reason,
         "grand_total": frappe.utils.flt(grand_total),
         "cart_snapshot": json.dumps(items, default=str),
+        "cart_hash": compute_cart_hash(customer, items),
         "approval_token": token,
         "approvals": [
             {

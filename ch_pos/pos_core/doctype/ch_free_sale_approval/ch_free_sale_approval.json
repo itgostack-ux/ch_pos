@@ -20,6 +20,7 @@
   "grand_total",
   "column_break_2",
   "cart_snapshot",
+  "cart_hash",
   "approval_token",
   "section_approvals",
   "approvals",
@@ -120,6 +121,14 @@
    "label": "Cart Snapshot (JSON)",
    "read_only": 1,
    "hidden": 1
+  },
+  {
+   "fieldname": "cart_hash",
+   "fieldtype": "Data",
+   "label": "Cart Hash",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "SHA-256 of the normalized cart (customer + item lines + total). Validated at consumption so an approval cannot be replayed on a different cart."
   },
   {
    "fieldname": "approval_token",

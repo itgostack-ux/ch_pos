@@ -1805,6 +1805,29 @@ def _rewrite_gl_entries(si_name):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _get_item_floor_price(item_code, company=None) -> float:
+    """Server-side Minimum Operating Price (MOP / floor) for an item.
+
+    Returns the LOWEST active configured MOP (>0) from CH Item Price, or 0.0
+    when none is configured. Using the lowest active floor avoids false-positive
+    blocks on legitimate POS sales (a stricter non-POS channel MOP won't wrongly
+    reject) while still catching egregious below-floor manipulation. The client
+    cannot be trusted to supply this — it is looked up fresh on the server.
+    """
+    if not item_code:
+        return 0.0
+    filters = {"item_code": item_code}
+    if company:
+        filters["company"] = ["in", [company, "", None]]
+    rows = frappe.get_all(
+        "CH Item Price", filters=filters, fields=["mop", "status"], limit=50)
+    mops = [
+        flt(r.mop) for r in rows
+        if flt(r.mop) > 0 and (r.get("status") or "").lower() in ("active", "approved", "")
+    ]
+    return min(mops) if mops else 0.0
+
+
 @frappe.whitelist()
 def create_pos_invoice(
     pos_profile, customer, items,
@@ -2116,6 +2139,30 @@ def create_pos_invoice(
             row["custom_exception_original_rate"] = item_exception_original
             row["custom_exception_final_rate"] = item_exception_final
 
+        # ── Minimum Selling Price floor (server-side, TC_002) ──────────────
+        # A sale below the item's configured MOP requires an authorized
+        # override. The client cannot enforce this — a crafted payload could
+        # otherwise bill below floor. An override is present when the header
+        # carries discount_authorized_by, or the row is manager-approved, or it
+        # is backed by a CH Exception Request.
+        if (not item_is_plan and not item_is_vas and not is_free_bundle_row
+                and flt(effective_rate) > 0):
+            floor_price = _get_item_floor_price(item.get("item_code"), profile.company)
+            row_authorized = bool(
+                item.get("manager_approved")
+                or (item.get("exception_request") or "").strip()
+                or _row_exc_doc)
+            if (floor_price and flt(effective_rate) < floor_price
+                    and not discount_authorized_by
+                    and not row_authorized):
+                frappe.throw(
+                    _("Below Minimum Selling Price: {0} at {1} is under the floor "
+                      "of {2}. Manager authorization is required.").format(
+                        item.get("item_code"),
+                        frappe.utils.fmt_money(flt(effective_rate)),
+                        frappe.utils.fmt_money(floor_price)),
+                    title=_("Below Minimum Selling Price"))
+
         if item.get("serial_no") and not item_is_plan:
             row["serial_no"] = item.get("serial_no")
 
@@ -2168,19 +2215,46 @@ def create_pos_invoice(
     if cint(is_free_sale):
         if not free_sale_approved_by:
             frappe.throw(_("Free sale requires manager approval."), title=_("Free Sale Not Approved"))
-        approval_name = None
+
+        # Bind the approval to THIS cart: recompute the hash from the live cart
+        # and only accept an approval whose stored cart_hash matches. Without
+        # this, an approved free-sale request (single-use, but not cart-bound)
+        # could be replayed on a *different* invoice/cart.
+        from ch_pos.api.free_sale_api import compute_cart_hash
+        expected_hash = compute_cart_hash(customer, items)
+
+        candidates = []
         if free_sale_approval_name:
-            approval_name = frappe.db.get_value(
+            candidates = frappe.get_all(
                 "CH Free Sale Approval",
-                {"name": free_sale_approval_name, "status": "Approved", "used": 0}, "name")
-        if not approval_name:
-            approval_name = frappe.db.get_value(
+                filters={"name": free_sale_approval_name, "status": "Approved", "used": 0},
+                fields=["name", "cart_hash", "customer"], limit=1)
+        if not candidates:
+            candidates = frappe.get_all(
                 "CH Free Sale Approval",
-                {"requested_by": frappe.session.user, "status": "Approved", "used": 0},
-                "name", order_by="modified desc")
+                filters={"requested_by": frappe.session.user, "status": "Approved", "used": 0},
+                fields=["name", "cart_hash", "customer"],
+                order_by="modified desc", limit=20)
+
+        approval_name = None
+        for c in candidates:
+            # cart_hash is the authoritative binding. Legacy approvals created
+            # before this field existed carry an empty hash — accept those only
+            # when the customer matches (they still burn via the used flag).
+            if c.cart_hash:
+                if c.cart_hash == expected_hash:
+                    approval_name = c.name
+                    break
+            elif (c.customer or "") == (customer or ""):
+                approval_name = c.name
+                break
+
         if not approval_name:
-            frappe.throw(_("Free sale requires an approved CH Free Sale Approval."),
-                         title=_("Free Sale Not Approved"))
+            frappe.throw(
+                _("No approved free-sale authorization matches this cart. "
+                  "Please re-request approval for the current items."),
+                title=_("Free Sale Not Approved"))
+
         frappe.db.sql(
             "UPDATE `tabCH Free Sale Approval` SET used=1, used_in_invoice=%s, modified=NOW() WHERE name=%s AND used=0",
             (inv.name or "pending", approval_name))

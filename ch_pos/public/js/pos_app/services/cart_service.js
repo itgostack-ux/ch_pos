@@ -147,6 +147,13 @@ export class CartService {
 				});
 				return;
 			}
+			if (item.is_free_bundle_item) {
+				frappe.show_alert({
+					message: __("Free accessory is limited to 1 per device. Add another unit separately to bill it."),
+					indicator: "orange",
+				});
+				return;
+			}
 			const next_qty = this._normalize_qty(flt(item.qty) + 1, item.must_be_whole_number);
 			if (!this._can_set_qty(item, next_qty)) {
 				return;
@@ -427,7 +434,12 @@ export class CartService {
 	}
 
 	add_to_cart(item_data) {
-		if (item_data.stock_qty <= 0) {
+		// ── Availability gate ────────────────────────────────────────────
+		// Only STOCK items go through the "out of stock" check. Non-stock
+		// service SKUs (warranty / VAS / activations) never have Bin rows
+		// and are always available for walk-up sale — the server-side
+		// ``pos_item_search`` mirrors this.
+		if (cint(item_data.is_stock_item) && item_data.stock_qty <= 0) {
 			frappe.show_alert({
 				message: __("Item {0} is out of stock", [item_data.item_name]),
 				indicator: "red",
@@ -462,8 +474,42 @@ export class CartService {
 			return;
 		}
 
+		// ── External-IMEI plan intercept ─────────────────────────────────
+		// If this item_code is the service_item for a sellable warranty /
+		// VAS plan with ``allow_external_device=1`` (e.g. External IMEI
+		// ADLD, off-network protection), don't add it as a bare service
+		// line — open the IMEI prompt so the plan can be attached to a
+		// customer-provided device. A warranty line without an IMEI is
+		// non-attributable and would be rejected at claim time.
+		if (!item_data.is_warranty && !item_data.is_vas && !cint(item_data.is_stock_item)) {
+			frappe.xcall("ch_pos.api.search.get_external_imei_plan_for_item", {
+				item_code: item_data.item_code,
+			}).then((plan) => {
+				if (plan && plan.name && cint(plan.allow_external_device)) {
+					this._prompt_external_imei_for_plan(plan);
+					return;
+				}
+				this._merge_or_add_cart_item(item_data);
+			}).catch(() => {
+				// On any lookup error, fall back to the plain add path so
+				// the sale is never blocked by an infrastructure hiccup.
+				this._merge_or_add_cart_item(item_data);
+			});
+			return;
+		}
+
+		this._merge_or_add_cart_item(item_data);
+	}
+
+	_merge_or_add_cart_item(item_data) {
+		// Free-bundle rows (accessory attached to a device via Product Bundle) are
+		// pinned at qty=1 / rate=0. Re-scanning the same accessory must NOT merge
+		// into that row — otherwise the second unit rides along at ₹0 (bug: 1
+		// device + 8 headphones all free). Exclude free-bundle rows from the merge
+		// lookup so the second unit creates a new PAID line at selling_price.
 		const existing = PosState.cart.find(
-			(c) => c.item_code === item_data.item_code && !c.is_warranty && !c.is_vas
+			(c) => c.item_code === item_data.item_code
+				&& !c.is_warranty && !c.is_vas && !c.is_free_bundle_item
 		);
 
 		if (existing) {
@@ -479,9 +525,81 @@ export class CartService {
 		}
 	}
 
+	_prompt_external_imei_for_plan(plan) {
+		// Minimal IMEI capture for an already-known external-device
+		// warranty / VAS plan. Reused whenever the cashier adds the
+		// plan's service_item directly from the item bin (rather than
+		// through the "Add VAS" flow which renders _show_vas_dialog).
+		//
+		// The dialog is deliberately narrow — plan is known, so no
+		// selector is needed. On submit we call the same server-side
+		// validator used by _render_vas_selector's customer mode
+		// (``validate_vas_category``) and then delegate to
+		// ``_add_vas_to_cart`` so the resulting cart line carries the
+		// full ``warranty_plan`` / ``for_serial_no`` metadata.
+		const dialog = new frappe.ui.Dialog({
+			title: __("Attach {0}", [plan.plan_name || plan.name]),
+			fields: [
+				{
+					fieldname: "intro",
+					fieldtype: "HTML",
+					options: `
+						<div style="background:#f1f5f9;border:1px solid #cbd5e1;padding:10px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;color:#334155">
+							<div style="font-weight:600;margin-bottom:4px"><i class="fa fa-info-circle"></i> ${__("Customer Device Coverage")}</div>
+							<div>${__("This plan can cover a customer-provided device. Enter the IMEI of the phone this plan should protect.")}</div>
+							<div style="margin-top:4px"><b>${__("The IMEI is stored on the plan only — it is never written to this invoice as a stock serial.")}</b></div>
+						</div>
+					`,
+				},
+				{
+					fieldname: "customer_imei",
+					fieldtype: "Data",
+					label: __("Customer Device IMEI"),
+					reqd: 1,
+					description: __("15-digit IMEI of the customer's phone (dial *#06# to display)."),
+				},
+			],
+			size: "small",
+			primary_action_label: __("Attach & Add"),
+			primary_action: (values) => {
+				const imei = (values.customer_imei || "").trim();
+				if (!/^\d{14,17}$/.test(imei)) {
+					frappe.show_alert({
+						message: __("Customer Device IMEI must be 14–17 digits"),
+						indicator: "red",
+					});
+					return;
+				}
+				frappe.xcall(
+					"ch_item_master.ch_item_master.warranty_api.validate_vas_category",
+					{ serial_no: imei, warranty_plan: plan.name }
+				).then((res) => {
+					if (!res.valid) {
+						frappe.msgprint({
+							title: __("Coverage Not Allowed"),
+							message: res.message,
+							indicator: "red",
+						});
+						return;
+					}
+					const for_item_code = res.item_code || plan.external_device_item || null;
+					this._add_vas_to_cart(dialog, plan, for_item_code, imei);
+				});
+			},
+		});
+		dialog.show();
+	}
+
 	set_cart_qty(idx, qty) {
 		const item = PosState.cart[idx];
 		if (!item || item.has_serial_no || item.is_warranty || item.is_vas) return;
+		if (item.is_free_bundle_item) {
+			frappe.show_alert({
+				message: __("Free accessory is limited to 1 per device. Add another unit separately to bill it."),
+				indicator: "orange",
+			});
+			return;
+		}
 
 		const next_qty = this._normalize_qty(qty, item.must_be_whole_number);
 		if (!(next_qty > 0)) {
@@ -980,10 +1098,25 @@ export class CartService {
 
 	_apply_exception_pricing_to_item(cart_item, exception_data) {
 		const data = exception_data || PosState.exception_request_data;
-		if (!cart_item || !data) return;
-		if (!data.item_code || cart_item.item_code !== data.item_code) return;
-		const customer_name_confirmed = data.customer && PosState.customer && data.customer === PosState.customer;
-		if (data.customer && PosState.customer && data.customer !== PosState.customer) return;
+		if (!cart_item || !data) return { applied: false, reason: "no_data" };
+		if (!data.item_code) return { applied: false, reason: "no_item_code" };
+		if (cart_item.item_code !== data.item_code) return { applied: false, reason: "item_mismatch" };
+		// Customer identity guard — enterprise POS parity (Oracle Xstore /
+		// SAP CAR-POS / Dynamics 365): an exception is a customer-scoped
+		// approval. Reject when:
+		//   • exception has no customer at all (should have been blocked
+		//     server-side, but defense-in-depth), OR
+		//   • exception's customer differs from the bill's current customer, OR
+		//   • the bill has no customer while the exception is customer-scoped.
+		const exc_customer = (data.customer || "").trim();
+		const bill_customer = (PosState.customer || "").trim();
+		if (!exc_customer) {
+			return { applied: false, reason: "exception_customer_missing" };
+		}
+		if (!bill_customer || exc_customer !== bill_customer) {
+			return { applied: false, reason: "customer_mismatch" };
+		}
+		const customer_name_confirmed = true;
 		// Phone guard is a fallback identity check for when customer name is inconclusive
 		// (one side null/empty). Skip it when the customer name already confirmed a match
 		// to avoid a race condition where PosState.customer_info hasn't loaded yet.
@@ -992,16 +1125,20 @@ export class CartService {
 				.replace(/\D/g, "")
 				.slice(-10);
 			const allowed_phone = ((data.customer_phone || "") + "").replace(/\D/g, "").slice(-10);
-			if (!current_phone || !allowed_phone || current_phone !== allowed_phone) return;
+			if (!current_phone || !allowed_phone || current_phone !== allowed_phone) {
+				return { applied: false, reason: "phone_mismatch" };
+			}
 		}
 		if (data.serial_no) {
 			const current_serial = (cart_item.serial_no || "").trim();
-			if (!current_serial || current_serial !== (data.serial_no || "").trim()) return;
+			if (!current_serial || current_serial !== (data.serial_no || "").trim()) {
+				return { applied: false, reason: "serial_mismatch" };
+			}
 		}
 
 		const original_rate = flt(data.original_value || cart_item.price_list_rate || cart_item.mrp || cart_item.rate || 0);
 		const resolved_rate = flt(data.resolution_value || data.requested_value || cart_item.rate || 0);
-		if (original_rate <= 0 || resolved_rate < 0) return;
+		if (original_rate <= 0 || resolved_rate < 0) return { applied: false, reason: "bad_values" };
 		if (cart_item.pre_exception_rate == null) {
 			cart_item.pre_exception_rate = flt(cart_item.rate || 0);
 		}
@@ -1026,6 +1163,7 @@ export class CartService {
 		cart_item.discount_percentage = original_rate > 0 ? flt(cart_item.discount_amount / original_rate * 100) : 0;
 		cart_item.applied_offer = null;
 		cart_item.offers = [];
+		return { applied: true, reason: null };
 	}
 
 	_apply_exception_pricing_to_cart(exception_data) {
@@ -1033,9 +1171,18 @@ export class CartService {
 		// Bill-level exception (legacy "Apply & Bill" path): apply to every
 		// cart line — the per-item filter inside _apply_exception_pricing_to_item
 		// will only override the matching item_code.
+		const summary = { applied_count: 0, reasons: {}, applied_items: [] };
 		if (data) {
 			PosState.exception_request_data = data;
-			PosState.cart.forEach((cart_item) => this._apply_exception_pricing_to_item(cart_item, data));
+			PosState.cart.forEach((cart_item) => {
+				const res = this._apply_exception_pricing_to_item(cart_item, data) || {};
+				if (res.applied) {
+					summary.applied_count += 1;
+					summary.applied_items.push(cart_item.item_name || cart_item.item_code);
+				} else if (res.reason) {
+					summary.reasons[res.reason] = (summary.reasons[res.reason] || 0) + 1;
+				}
+			});
 		}
 		// Per-line exceptions: each cart line may carry its OWN exception_request_data
 		// (raised from the line-level Exception button). Apply each one independently
@@ -1045,6 +1192,7 @@ export class CartService {
 				this._apply_exception_pricing_to_item(cart_item, cart_item.exception_request_data);
 			}
 		});
+		return summary;
 	}
 
 	_remove_exception_from_item(cart_item) {
@@ -1134,14 +1282,15 @@ export class CartService {
 	}
 
 	_show_attach_panel(plans, rules, item_data, cart_item) {
-		// IMEI / serial of the covered device — captured once and threaded
-		// through every _log_attach call so the CH Attach Log row answers
-		// "what plan attached to what IMEI" (in-store serial or, for
-		// external-IMEI VAS, the customer-provided IMEI).
-		const covered_serial = cart_item.serial_no || "";
 		const vas_rules = rules.filter(r => r.attach_type === "VAS");
 		const acc_rules = rules.filter(r => r.attach_type === "Accessory");
 		const item_name = frappe.utils.escape_html(cart_item.item_name);
+
+		// Serial / IMEI of the device the offer is being made against.
+		// Captured on every attach log row so the "what plan attached to
+		// what IMEI" question is answerable even before the invoice is
+		// booked (Offered / Skipped events).
+		const covered_serial = cart_item.serial_no || "";
 
 		// Build sections
 		let sections_html = `<p class="text-muted" style="margin-bottom:12px">${__("Offers for")} <b>${item_name}</b></p>`;
