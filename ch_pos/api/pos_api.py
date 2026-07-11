@@ -1882,6 +1882,23 @@ def create_pos_invoice(
         if existing:
             return {"name": existing[0].name, "status": "duplicate_prevented"}
 
+    # CSV import dedup guard — prevent double-entry from re-import of same batch
+    if frappe.flags.in_import and not cint(kwargs.get("ignore_dedup", 0)):
+        from ch_pos.api.import_dedup import check_import_dedup_sales_invoice
+        if isinstance(items, str):
+            items_list = frappe.parse_json(items)
+        else:
+            items_list = items or []
+        
+        dedup_result = check_import_dedup_sales_invoice(
+            customer=customer,
+            items=items_list,
+            posting_date=kwargs.get("posting_date") or nowdate(),
+            company=kwargs.get("company") or frappe.db.get_value("POS Profile", pos_profile, "company"),
+        )
+        if dedup_result:
+            return dedup_result
+
     if isinstance(items, str):
         items = frappe.parse_json(items)
 
@@ -2546,6 +2563,17 @@ def create_pos_invoice(
             pass
 
     frappe.db.commit()
+
+    # Stamp CSV import batch hash for dedup on re-import
+    if frappe.flags.in_import and isinstance(items, (list, tuple)):
+        try:
+            from ch_pos.api.import_dedup import stamp_import_batch_hash
+            stamp_import_batch_hash(inv.name, items)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Failed to stamp import batch hash on {inv.name}",
+            )
 
     final = frappe.db.get_value(
         "Sales Invoice", inv.name,
