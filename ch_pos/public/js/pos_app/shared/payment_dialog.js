@@ -480,6 +480,20 @@ export class PaymentDialog {
 					<i class="fa fa-gift"></i> ${__("FREE SALE — CATEGORY MANAGER APPROVAL REQUIRED")}
 				</div>
 				<div class="ch-pay-free-body">
+					<!-- Spin-wheel gift shortcut — no approval needed for pre-issued gifts -->
+					<div class="ch-pay-gift-shortcut" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:10px 12px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+						<div style="flex:1;min-width:200px;font-size:12px;color:#78350f;line-height:1.5">
+							<b><i class="fa fa-magic"></i> ${__("Customer has a Spin & Win code?")}</b><br>
+							${__("Redeem it directly — no category-manager approval needed. A ₹0 invoice linked to the original sale is created automatically.")}
+						</div>
+						<div style="display:flex;gap:6px;align-items:center">
+							<input type="text" class="form-control form-control-sm ch-pay-gift-code-input"
+								placeholder="GIFT-XXXX" style="width:130px;text-transform:uppercase;font-family:monospace">
+							<button class="btn btn-sm btn-warning ch-pay-gift-redeem-btn" type="button">
+								<i class="fa fa-gift"></i> ${__("Redeem")}
+							</button>
+						</div>
+					</div>
 					<div class="ch-pay-free-field">
 						<label>${__("Reason")} <span class="text-danger">*</span></label>
 						<input type="text" class="form-control form-control-sm" id="ch-pay-free-reason"
@@ -1096,6 +1110,34 @@ placeholder="${__("Enter code...")}">
 		});
 		ov.on("click", "#ch-pay-free-request-btn", () => {
 			this._request_free_sale_approval();
+		});
+
+		// ── Spin-wheel gift shortcut inside Free Sale panel ────
+		// Cashiers land in Free Sale by mistake when a customer arrives
+		// with a redemption code; this shortcut closes the overlay and
+		// jumps straight to the gift-redemption dialog. No category-
+		// manager approval is required — the offer is pre-approved.
+		ov.on("input", ".ch-pay-gift-code-input", e => {
+			const v = $(e.currentTarget).val().toUpperCase();
+			$(e.currentTarget).val(v);
+		});
+		ov.on("keydown", ".ch-pay-gift-code-input", e => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				ov.find(".ch-pay-gift-redeem-btn").trigger("click");
+			}
+		});
+		ov.on("click", ".ch-pay-gift-redeem-btn", () => {
+			const code = (ov.find(".ch-pay-gift-code-input").val() || "").trim().toUpperCase();
+			if (!code) {
+				frappe.show_alert({
+					message: __("Enter the customer's redemption code (e.g. GIFT-A7X2)."),
+					indicator: "orange",
+				});
+				return;
+			}
+			this._close();
+			EventBus.emit("gift:open", code);
 		});
 
 		// ── Advance adjustment toggle ─────────────────

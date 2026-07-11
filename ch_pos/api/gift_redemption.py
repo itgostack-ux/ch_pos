@@ -313,6 +313,53 @@ def _send_gift_email(gift, spin_url: str) -> None:
 # Public (customer-facing) endpoints — used by /spin page
 # ---------------------------------------------------------------------------
 
+def _get_wheel_candidate_items(gift, limit: int = 8) -> list[str]:
+	"""Return up to `limit` reward names for the wheel slices.
+
+	Slot 0 is the actual winner (the reward the customer will receive).
+	Remaining slots are filled with other Active gamified Freebie offers
+	from the same company — real alternative prizes the customer *could*
+	have won on a different invoice. If fewer than `limit` distinct
+	alternatives exist, remaining slots repeat the winner so the wheel
+	still renders with `limit` labelled wedges (Cashify-style).
+	"""
+	winner_name = (gift.reward_item_name or gift.reward_item or "").strip()
+	winner_item = gift.reward_item
+
+	labels: list[str] = [winner_name or "Your Gift"]
+	seen: set[str] = {winner_item} if winner_item else set()
+
+	try:
+		others = frappe.get_all(
+			"CH Item Offer",
+			filters={
+				"offer_type": "Freebie",
+				"is_gamified": 1,
+				"status": "Active",
+				"approval_status": "Approved",
+				"company": gift.company,
+			},
+			fields=["reward_item", "reward_item_name"],
+			order_by="modified desc",
+			limit=limit * 2,
+		)
+	except Exception:
+		# Do not block the /spin page on a schema hiccup.
+		others = []
+
+	for row in others:
+		if not row.get("reward_item") or row["reward_item"] in seen:
+			continue
+		seen.add(row["reward_item"])
+		labels.append((row.get("reward_item_name") or row["reward_item"]).strip())
+		if len(labels) >= limit:
+			break
+
+	while len(labels) < limit:
+		labels.append(labels[0])
+	return labels
+
+
 @frappe.whitelist(allow_guest=True)
 @rate_limit(limit=60, seconds=60, ip_based=True)
 def get_gift_details(token: str) -> dict:
@@ -335,6 +382,9 @@ def get_gift_details(token: str) -> dict:
 		"expires_at": str(gift.expires_at) if gift.expires_at else None,
 		"already_revealed": gift.status in ("Revealed", "Redeemed", "Expired"),
 		"parent_sales_invoice": gift.parent_sales_invoice,
+		# Wheel-slice labels — index 0 is the guaranteed winner. Client
+		# aligns this slice under the pointer at the end of the spin.
+		"wheel_items": _get_wheel_candidate_items(gift),
 	}
 
 

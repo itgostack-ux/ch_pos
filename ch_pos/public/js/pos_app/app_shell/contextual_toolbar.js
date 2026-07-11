@@ -126,6 +126,14 @@ export class ContextualToolbar {
 			panel.find(".ch-pos-search").val("");
 		});
 
+		// Allow any other module (e.g. the Free Sale panel in the payment
+		// dialog) to open the gift-redemption dialog. Prevents cashiers
+		// from booking a spin-wheel reward through the category-manager
+		// approval flow by mistake.
+		EventBus.on("gift:open", (prefill_code) => {
+			this._open_redeem_gift_dialog(prefill_code);
+		});
+
 		// Stock toggle
 		panel.on("change", ".ch-pos-stock-check", function () {
 			const checked = $(this).is(":checked");
@@ -222,7 +230,7 @@ export class ContextualToolbar {
 	//
 	// The button lives in the sell-mode toolbar; it does not require the
 	// cart to be empty because the reward is booked as its own invoice.
-	_open_redeem_gift_dialog() {
+	_open_redeem_gift_dialog(prefill_code) {
 		if (!PosState.pos_profile) {
 			frappe.show_alert({ message: __("No active POS profile."), indicator: "orange" });
 			return;
@@ -236,6 +244,7 @@ export class ContextualToolbar {
 					fieldname: "code",
 					label: __("Redemption Code"),
 					reqd: 1,
+					default: (prefill_code || "").toString().trim().toUpperCase(),
 					description: __("Enter the code the customer received (e.g. GIFT-A7X2)."),
 				},
 			],
@@ -255,6 +264,14 @@ export class ContextualToolbar {
 			},
 		});
 		d.show();
+		// Auto-run lookup when a prefill code is supplied — saves the
+		// cashier a click when they arrived via the Free Sale shortcut.
+		if (prefill_code) {
+			setTimeout(() => {
+				const btn = d.get_primary_btn && d.get_primary_btn();
+				if (btn && btn.length) btn.trigger("click");
+			}, 120);
+		}
 	}
 
 	_confirm_redeem_gift(gift) {
