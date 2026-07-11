@@ -177,6 +177,45 @@ def _ensure_test_fixtures():
         frappe.db.commit()
 
 
+def test_import_missing_price_raises():
+    """An import must use the price from the uploaded file — the code never
+    fabricates a price from the Item master. A line with neither rate nor amount
+    after hydration means the CSV omitted the price for that row; the guard must
+    raise (naming the row) instead of silently booking a zero-value, zero-tax
+    invoice that posts nothing to the GL (the reported bug)."""
+    from ch_pos.overrides.pos_invoice import _guard_imported_line_has_price
+
+    doc = _make_import_invoice()  # no rate, no amount → nothing from the "file"
+    doc.items[0].rate = 0
+    doc.items[0].amount = 0
+    raised = False
+    try:
+        _guard_imported_line_has_price(doc)
+    except frappe.ValidationError:
+        raised = True
+    assert raised, "import line with no price must raise, not book a ₹0 invoice"
+
+
+def test_import_priced_line_passes_guard():
+    """A line whose price came from the file must pass the guard untouched."""
+    from ch_pos.overrides.pos_invoice import _guard_imported_line_has_price
+
+    doc = _make_import_invoice(rate=100)
+    _guard_imported_line_has_price(doc)  # must NOT raise
+    assert flt(doc.items[0].rate) == 100
+
+
+def test_import_free_line_skips_price_guard():
+    """Free / free-bundle lines legitimately have rate 0 and must be exempt."""
+    from ch_pos.overrides.pos_invoice import _guard_imported_line_has_price
+
+    doc = _make_import_invoice()
+    doc.items[0].rate = 0
+    doc.items[0].amount = 0
+    doc.items[0].is_free_item = 1
+    _guard_imported_line_has_price(doc)  # must NOT raise
+
+
 def run():
     _ensure_test_fixtures()
     test_import_fetches_item_price_amount_and_taxes()
@@ -185,4 +224,7 @@ def run():
     test_import_insert_path_populates_defaults()
     test_import_sets_ignore_pricing_rule()
     test_non_import_does_not_force_ignore_pricing_rule()
-    return {"status": "ok", "tests": 6}
+    test_import_missing_price_raises()
+    test_import_priced_line_passes_guard()
+    test_import_free_line_skips_price_guard()
+    return {"status": "ok", "tests": 9}

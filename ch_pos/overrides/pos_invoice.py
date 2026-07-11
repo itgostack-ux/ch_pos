@@ -707,7 +707,37 @@ def _hydrate_imported_sales_invoice_defaults(doc):
         doc.ignore_pricing_rule = 1
 
     _hydrate_imported_item_prices(doc)
+    _guard_imported_line_has_price(doc)
     _hydrate_imported_tax_rows(doc)
+
+
+def _guard_imported_line_has_price(doc):
+    """Fail loud when an imported sale line carries no price.
+
+    An import must use the price from the uploaded file exactly — we never
+    fabricate a price from the Item master / CH Item Price (historical sales
+    need the ORIGINAL price, not a current one). So a line that still has
+    neither rate nor amount after file hydration means the CSV was missing the
+    price for that row. Surface it (naming the row) rather than silently booking
+    a zero-value, zero-tax invoice that posts nothing to the GL. Free /
+    free-bundle lines are exempt — rate 0 is legitimate there.
+
+    Data Import runs each row in its own savepoint and records the raised
+    message against that row, so the rest of the file still imports.
+    """
+    for item in doc.get("items") or []:
+        if cint(item.get("is_free_item")) or cint(item.get("custom_is_free_bundle_item")):
+            continue
+        if flt(item.get("rate")) or flt(item.get("amount")):
+            continue
+        frappe.throw(
+            frappe._(
+                "Import row for item {0} has no price. Provide the Rate (or Amount) "
+                "in the uploaded file — imported sales must use the price from the "
+                "file, so the line, tax and ledger postings match the original sale."
+            ).format(frappe.bold(item.get("item_code") or item.get("idx"))),
+            title=frappe._("Missing Price in Import"),
+        )
 
 
 def _hydrate_imported_item_prices(doc):
@@ -791,9 +821,14 @@ def _apply_import_item_details(doc, item, details):
     rate = flt(item.get("rate")) or flt(details.get("rate")) or price_list_rate
     qty = flt(item.get("qty"))
 
-    # Data Import frequently provides amount-only rows (rate column left blank).
-    # ERPNext recalculates amount from rate during validation, so infer rate from
-    # the imported amount to avoid resetting the line to zero.
+    # The uploaded file's own price is authoritative: the file's rate column
+    # wins (resolved above), else the line amount / qty. We deliberately do NOT
+    # fabricate a POS price from CH Item Price here — historical sales must keep
+    # the ORIGINAL price from the file, not a current one. (`details.rate` /
+    # `price_list_rate` may still fill from the configured selling price list via
+    # get_item_details — pre-existing behaviour — but when the file gives neither
+    # rate nor amount and no price list applies, the line stays 0 and
+    # _guard_imported_line_has_price() rejects the row instead of booking ₹0.)
     if not rate and qty and imported_amount:
         rate = flt(imported_amount / qty, item.precision("rate"))
 
