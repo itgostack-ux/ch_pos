@@ -690,8 +690,13 @@ def get_item_detail_for_pos(item_code, warehouse=None, price_list=None) -> dict:
             "brand": item.brand,
             "plan_type": ["in", ["Own Warranty", "Extended Warranty"]],
         },
-        fields=["name", "plan_name", "price", "duration_months"],
+        fields=["name", "plan_name", "price", "duration_months", "service_item"],
     )
+    # Drop plans whose service_item is not a Live (Active-lifecycle) Item — they
+    # are unsellable and would be rejected at Sales Invoice.
+    from ch_item_master.ch_item_master.governance import filter_sellable_items
+    _live = filter_sellable_items([p.service_item for p in warranty_plans])
+    warranty_plans = [p for p in warranty_plans if not p.service_item or p.service_item in _live]
 
     return {
         "item_code": item_code,

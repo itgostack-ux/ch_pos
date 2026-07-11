@@ -84,6 +84,13 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
         order_by="price asc",
     )
 
+    # Only surface plans whose service_item is a Live (Active-lifecycle) Item —
+    # an Active plan pointing at a Draft/Blocked service Item is unsellable and
+    # would fail at Sales Invoice ("Activate the item first").
+    from ch_item_master.ch_item_master.governance import filter_sellable_items
+    _live = filter_sellable_items([p.service_item for p in plans])
+    plans = [p for p in plans if not p.service_item or p.service_item in _live]
+
     # Pre-load item-group applicability rows for the fetched plan set in a
     # single query so we do not re-hit the DB per plan.
     plan_names = [p.name for p in plans]

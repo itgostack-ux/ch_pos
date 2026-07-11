@@ -3263,6 +3263,12 @@ def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
         ],
     )
 
+    # Only offer plans whose service_item is a Live (Active-lifecycle) Item —
+    # otherwise the sale is blocked at Sales Invoice ("Activate the item first").
+    from ch_item_master.ch_item_master.governance import filter_sellable_items
+    _live = filter_sellable_items([p.service_item for p in plans])
+    plans = [p for p in plans if not p.service_item or p.service_item in _live]
+
     applicable = []
     for plan in plans:
         # Filter by brand if plan specifies one
@@ -3500,6 +3506,11 @@ def get_vas_plans() -> dict:
             "duration_months", "price", "coverage_description",
         ],
     )
+
+    # Only offer plans whose service_item is a Live (Active-lifecycle) Item.
+    from ch_item_master.ch_item_master.governance import filter_sellable_items
+    _live = filter_sellable_items([p.service_item for p in plans])
+    plans = [p for p in plans if not p.service_item or p.service_item in _live]
 
     applicable = []
     for plan in plans:
@@ -8083,6 +8094,8 @@ def get_comparison_filters() -> dict:
 @frappe.whitelist()
 def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, pos_profile=None, in_stock_only=None) -> list:
     """Return items matching filters with specs, prices, stock and active offers."""
+    from ch_item_master.ch_item_master.governance import filter_sellable_items
+
     today = frappe.utils.today()
 
     # Build item filters
@@ -8168,6 +8181,15 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
             filters={"variant_of": item.name, "disabled": 0},
             fields=["name", "item_name"],
         )
+        # Only surface sellable variants: Active, or Obsolete-with-stock
+        # (sell-down of old inventory). Draft / Pending Review / Blocked variants
+        # are rejected at Sales Invoice ("Activate the item first"), so they must
+        # not appear as sellable comparison rows. variant_count below then
+        # reflects only sellable SKUs, so a template whose variants are all
+        # non-sellable is skipped like an empty one.
+        if variants:
+            _sellable_v = filter_sellable_items([v.name for v in variants])
+            variants = [v for v in variants if v.name in _sellable_v]
 
         min_price = 0
         max_price = 0
@@ -8562,10 +8584,15 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         cart_items = frappe.parse_json(cart_items)
     cart_items = cart_items or []
 
-    # Check if cart has any device (non-service, non-warranty item)
+    # Check if cart has any device (non-service, non-warranty item) and track
+    # the highest device price in the cart. ``max_device_price`` drives both the
+    # percentage-of-device-price rate (``_resolve_price``) and the min/max
+    # device-price band filter further below; prefer the actual cart line rate
+    # and fall back to the item's active POS selling price.
     has_device = False
     device_item_codes = []
     device_categories = set()
+    max_device_price = 0.0
     for ci in cart_items:
         if ci.get("is_warranty") or ci.get("is_vas"):
             continue
@@ -8575,6 +8602,15 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         ch_category = frappe.db.get_value("Item", ic, "ch_category")
         if ch_category:
             device_categories.add(ch_category)
+        rate = flt(ci.get("rate") or ci.get("price") or ci.get("selling_price") or ci.get("amount"))
+        if not rate and ic:
+            rate = flt(frappe.db.get_value(
+                "CH Item Price",
+                {"item_code": ic, "channel": "POS", "status": "Active"},
+                "selling_price",
+            ))
+        if rate > max_device_price:
+            max_device_price = rate
 
     today = nowdate()
 
@@ -8591,6 +8627,15 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             "partner", "auto_attach",
         ],
     )
+
+    # Only offer plans whose backing service_item is a Live (Active-lifecycle)
+    # Item. A plan can be status='Active' while its service_item Item is still
+    # Draft/Pending Review/Blocked — selling it would fail at Sales Invoice with
+    # "Activate the item first". Hide those here so POS never shows an
+    # unsellable plan. (Governance is the single source of truth for the rule.)
+    from ch_item_master.ch_item_master.governance import filter_sellable_items
+    _live = filter_sellable_items([r.get("service_item") for r in plan_rows])
+    plan_rows = [r for r in plan_rows if not r.get("service_item") or r.get("service_item") in _live]
 
     def _resolve_price(fixed_price, pricing_mode, pct):
         """Effective sellable rate for a plan.
@@ -8643,7 +8688,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         # Validity window.
         if plan.valid_from and str(plan.valid_from) > today:
             continue
-        if valid_to and str(valid_to) < today:
+        if plan.valid_to and str(plan.valid_to) < today:
             continue
 
         # Device dependency: Protection Plans always require a device

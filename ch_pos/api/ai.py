@@ -381,6 +381,12 @@ def _match_warranty_plans(item, device_price, cart_codes):
 				"brand", "coverage_description", "service_item"],
 	)
 
+	# Never recommend a plan whose service_item is not a Live (Active-lifecycle)
+	# Item — it would be blocked at Sales Invoice ("Activate the item first").
+	from ch_item_master.ch_item_master.governance import filter_sellable_items
+	_live = filter_sellable_items([p.service_item for p in plans])
+	plans = [p for p in plans if not p.service_item or p.service_item in _live]
+
 	if not plans:
 		return []
 
