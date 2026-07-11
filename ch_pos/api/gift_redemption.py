@@ -168,6 +168,11 @@ def _find_matching_gamified_offer(sales_invoice):
 	if not item_codes:
 		return None
 
+	# NOTE: `start_date`/`end_date` on CH Item Offer are Datetime fields.
+	# `frappe.get_all` mishandles date-only strings ("YYYY-MM-DD") against
+	# Datetime columns and returns empty. Always pass a full datetime.
+	now = now_datetime()
+
 	rows = frappe.get_all(
 		"CH Item Offer",
 		filters={
@@ -176,10 +181,10 @@ def _find_matching_gamified_offer(sales_invoice):
 			"status": "Active",
 			"approval_status": "Approved",
 			"trigger_item": ("in", item_codes),
-			"start_date": ("<=", sales_invoice.posting_date),
-			"end_date": (">=", sales_invoice.posting_date),
+			"start_date": ("<=", now),
+			"end_date": (">=", now),
+			"company": sales_invoice.company,
 		},
-		or_filters={"company": sales_invoice.company},
 		fields=[
 			"name", "company", "reward_item", "reward_qty",
 			"wheel_style", "redemption_ttl_hours", "priority",
