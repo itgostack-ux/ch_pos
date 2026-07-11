@@ -2096,6 +2096,20 @@ def create_pos_invoice(
         if uploaded_amount and item_qty:
             effective_rate = flt(uploaded_amount / item_qty)
 
+        # Free-bundle accessory: pin to qty=1 / rate=0 server-side so a
+        # hand-crafted payload (or a stale client that missed the merge-guard
+        # fix in cart_service.add_to_cart) cannot bill 8 headphones at ₹0
+        # against a single device. Extra units of the accessory must come in
+        # as separate PAID lines. `is_free_item` is the ERPNext-standard flag
+        # already consumed by `_post_free_sale_write_off` and
+        # `free_item_return_guard`, so stamping it here keeps the row
+        # consistent with the Pricing-Rule free-item path.
+        is_free_bundle_row = cint(item.get("is_free_bundle_item"))
+        if is_free_bundle_row:
+            item_qty = 1.0
+            effective_rate = 0.0
+            item_exception_original = flt(item.get("price_list_rate") or item.get("mrp") or 0)
+
         row = {
             "item_code": item.get("item_code"),
             "qty": item_qty,
@@ -2106,6 +2120,11 @@ def create_pos_invoice(
             "discount_percentage": flt(item.get("discount_percentage", 0)),
             "discount_amount": flt(item.get("discount_amount", 0)),
         }
+
+        if is_free_bundle_row:
+            row["is_free_item"] = 1
+            row["discount_percentage"] = 100
+            row["discount_amount"] = flt(item_exception_original)
 
         _item_so = (item.get("sales_order") or sales_order or "").strip()
         _item_so_detail = (item.get("so_detail") or "").strip()

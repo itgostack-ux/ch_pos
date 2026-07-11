@@ -694,6 +694,18 @@ def _hydrate_imported_sales_invoice_defaults(doc):
     if not _is_data_import_context(doc):
         return
 
+    # Historic data import must reflect the imported file EXACTLY. Pricing
+    # Rules — in particular "free item" product-discount rules — otherwise
+    # fire during validate() and inject an EXTRA item line (e.g. a free
+    # accessory). With update_stock=1 that extra line posts its own Stock
+    # Ledger Entry, so a single imported invoice line shows up as TWO stock
+    # movements. Suppress rule application on import so lines/amounts stay as
+    # supplied. Import-only (guarded by _is_data_import_context above) — live
+    # POS sales still apply pricing rules normally. Set here, before
+    # super().validate() runs the pricing-rule engine.
+    if doc.meta.has_field("ignore_pricing_rule"):
+        doc.ignore_pricing_rule = 1
+
     _hydrate_imported_item_prices(doc)
     _hydrate_imported_tax_rows(doc)
 
