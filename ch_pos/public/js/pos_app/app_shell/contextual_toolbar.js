@@ -43,21 +43,21 @@ export class ContextualToolbar {
 					<label class="ch-pos-stock-toggle${PosState.in_stock_only ? " active" : ""}">
 						<input type="checkbox" class="ch-pos-stock-check"
 							${PosState.in_stock_only ? "checked" : ""}>
-						<i class="fa fa-check-circle" style="font-size:11px"></i>
+						<i class="fa fa-check-circle"></i>
 						<span>${__("In Stock")}</span>
 					</label>
-					<button class="btn btn-xs btn-default ch-pos-btn-reprint" title="${__("Reprint today\'s invoices")}">
+					<button class="btn btn-default ch-pos-btn-reprint" title="${__("Reprint today\'s invoices")}">
 						<i class="fa fa-print"></i> ${__("Reprint")}
 					</button>
-					<button class="btn btn-xs btn-default ch-pos-btn-redeem-gift" title="${__("Redeem a spin-wheel gift code")}">
+					<button class="btn btn-default ch-pos-btn-redeem-gift" title="${__("Redeem a spin-wheel gift code")}">
 						<i class="fa fa-gift"></i> ${__("Redeem Gift")}
 					</button>
 					<div class="btn-group ch-pos-view-toggle">
-						<button class="btn btn-xs ch-pos-view-card
+						<button class="btn ch-pos-view-card
 							${PosState.view_mode === "card" ? "btn-primary active" : "btn-default"}">
 							<i class="fa fa-th-large"></i>
 						</button>
-						<button class="btn btn-xs ch-pos-view-list
+						<button class="btn ch-pos-view-list
 							${PosState.view_mode === "list" ? "btn-primary active" : "btn-default"}">
 							<i class="fa fa-list"></i>
 						</button>

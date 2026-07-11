@@ -10,8 +10,11 @@
   display: flex;
   align-items: center;
   gap: var(--pos-space-md);
-  padding: var(--pos-space-md) 0;
+  padding: var(--pos-space-sm) 0 var(--pos-space-md);
   flex-shrink: 0;
+  flex-wrap: nowrap;
+  --pos-toolbar-control-h: 44px;
+  --pos-toolbar-font-size: var(--pos-fs-md);
 }
 .ch-pos-toolbar-left {
   display: flex;
@@ -26,12 +29,31 @@
   gap: var(--pos-space-sm);
   flex-shrink: 0;
 }
+.ch-pos-toolbar .form-control,
+.ch-pos-toolbar .btn,
+.ch-pos-toolbar label {
+  font-family: var(--pos-font);
+  font-size: var(--pos-toolbar-font-size, var(--pos-fs-md)) !important;
+  line-height: 1 !important;
+}
+.ch-pos-toolbar .btn,
+.ch-pos-stock-toggle {
+  margin: 0 !important;
+  white-space: nowrap;
+}
+.ch-pos-toolbar i {
+  line-height: 1;
+}
 
 /* Search Bar — prominent, scan-first */
 .ch-pos-search-wrap {
   position: relative;
-  flex: 1;
-  max-width: 480px;
+  display: flex;
+  align-items: center;
+  flex: 1 1 520px;
+  max-width: 640px;
+  height: var(--pos-toolbar-control-h, 44px);
+  min-width: 260px;
 }
 .ch-pos-search-icon {
   position: absolute;
@@ -44,13 +66,15 @@
 }
 .ch-pos-search {
   width: 100%;
-  height: 40px !important;
+  height: var(--pos-toolbar-control-h, 44px) !important;
+  min-height: var(--pos-toolbar-control-h, 44px) !important;
   padding: 0 16px 0 40px !important;
   border: 2px solid var(--pos-border) !important;
   border-radius: var(--pos-radius) !important;
   background: var(--pos-surface) !important;
-  font-size: var(--pos-fs-md) !important;
+  font-size: var(--pos-toolbar-font-size, var(--pos-fs-md)) !important;
   font-weight: 500;
+  line-height: var(--pos-toolbar-control-h, 44px) !important;
   transition: all var(--pos-transition);
   box-shadow: var(--pos-shadow-xs);
 }
@@ -58,6 +82,10 @@
   border-color: var(--pos-primary) !important;
   box-shadow: 0 0 0 3px rgba(79,110,247,0.12) !important;
   outline: none;
+}
+.ch-pos-search::placeholder {
+  color: var(--pos-text-muted);
+  opacity: 1;
 }
 
 /* Category chips */
@@ -110,8 +138,17 @@
   font-weight: 600;
   cursor: pointer;
   transition: all var(--pos-transition);
-  height: 40px;
+  height: var(--pos-toolbar-control-h, 44px);
+  min-height: var(--pos-toolbar-control-h, 44px);
   user-select: none;
+}
+.ch-pos-stock-toggle i {
+  width: 14px;
+  font-size: 13px !important;
+  text-align: center;
+}
+.ch-pos-stock-toggle span {
+  line-height: 1;
 }
 .ch-pos-stock-toggle input { display: none; }
 .ch-pos-stock-toggle.active {
@@ -120,27 +157,45 @@
   color: var(--pos-success-dark);
 }
 
-/* Reprint toolbar button */
-.ch-pos-btn-reprint {
-  padding: 0 12px;
-  font-size: 12px;
+/* Toolbar action buttons */
+.ch-pos-btn-reprint,
+.ch-pos-btn-redeem-gift {
+  padding: 0 14px !important;
+  font-size: var(--pos-toolbar-font-size, var(--pos-fs-md)) !important;
+  font-weight: 600;
   border-radius: var(--pos-radius-sm) !important;
   white-space: nowrap;
-  height: 40px;
-  display: inline-flex;
+  height: var(--pos-toolbar-control-h, 44px) !important;
+  min-height: var(--pos-toolbar-control-h, 44px) !important;
+  display: inline-flex !important;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  gap: 6px;
+  line-height: 1 !important;
+}
+.ch-pos-btn-reprint i,
+.ch-pos-btn-redeem-gift i {
+  width: 14px;
+  text-align: center;
 }
 
 /* View toggle */
+.ch-pos-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  height: var(--pos-toolbar-control-h, 44px);
+}
 .ch-pos-view-toggle .btn {
-  min-width: 40px;
-  height: 40px;
-  padding: 0 10px;
+  min-width: var(--pos-toolbar-control-h, 44px);
+  height: var(--pos-toolbar-control-h, 44px) !important;
+  min-height: var(--pos-toolbar-control-h, 44px) !important;
+  padding: 0 12px !important;
   border-radius: var(--pos-radius-sm) !important;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: var(--pos-toolbar-font-size, var(--pos-fs-md)) !important;
+  line-height: 1 !important;
 }
 
 /* ══════════════════════════════════════════
@@ -5269,13 +5324,18 @@ body > .desk-alert-container,
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-width: 240px;
-  max-width: 300px;
+  gap: 8px;
+  flex: 0 1 360px;
+  min-width: 280px;
+  max-width: 360px;
+  height: var(--pos-toolbar-control-h, 44px);
 }
 .ch-pos-imei-wrap .ch-pos-imei-input-box {
   position: relative;
+  display: flex;
+  align-items: center;
   flex: 1;
+  height: 100%;
   min-width: 0;
 }
 .ch-pos-imei-icon {
@@ -5285,18 +5345,22 @@ body > .desk-alert-container,
   transform: translateY(-50%);
   color: var(--pos-warning);
   font-size: 14px;
+  line-height: 1;
   z-index: 1;
   pointer-events: none;
 }
 .ch-pos-imei-input {
   width: 100%;
-  padding-left: 36px !important;
-  height: 40px !important;
+  height: var(--pos-toolbar-control-h, 44px) !important;
+  min-height: var(--pos-toolbar-control-h, 44px) !important;
+  padding: 0 14px 0 38px !important;
   border: 2px solid var(--pos-warning) !important;
   border-radius: var(--pos-radius-sm) !important;
-  font-size: var(--pos-fs-md) !important;
-  font-weight: 600;
-  font-family: var(--pos-font-mono);
+  font-size: var(--pos-toolbar-font-size, var(--pos-fs-md)) !important;
+  font-weight: 500;
+  font-family: var(--pos-font);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--pos-toolbar-control-h, 44px) !important;
   background: #fffbeb !important;
   transition: all var(--pos-transition);
 }
@@ -5308,11 +5372,15 @@ body > .desk-alert-container,
 .ch-pos-imei-input::placeholder {
   font-family: var(--pos-font);
   font-weight: 400;
+  color: var(--pos-text-muted);
+  opacity: 1;
 }
 .ch-pos-cam-scan {
   flex-shrink: 0;
-  height: 40px !important;
-  width: 40px !important;
+  height: var(--pos-toolbar-control-h, 44px) !important;
+  min-height: var(--pos-toolbar-control-h, 44px) !important;
+  width: var(--pos-toolbar-control-h, 44px) !important;
+  min-width: var(--pos-toolbar-control-h, 44px) !important;
   padding: 0 !important;
   margin: 0 !important;
   display: inline-flex !important;
@@ -5341,6 +5409,7 @@ body > .desk-alert-container,
   gap: 8px;
   align-items: center;
   flex: 1;
+  min-width: 0;
 }
 
 /* ═══════════════════════════════════════════════════════════
