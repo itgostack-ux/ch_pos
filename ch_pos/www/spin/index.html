@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Spin & Win — Your Gift Awaits</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0f172a;
+    --card:      #1e293b;
+    --border:    #334155;
+    --text:      #f1f5f9;
+    --muted:     #94a3b8;
+    --primary:   #4f46e5;
+    --success:   #16a34a;
+    --danger:    #dc2626;
+    --gold:      #fbbf24;
+  }
+
+  html, body {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #4c1d95 0%, #1e40af 50%, #0f172a 100%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px 48px;
+  }
+
+  h1 {
+    font-size: clamp(24px, 6vw, 34px);
+    font-weight: 700;
+    margin-bottom: 8px;
+    text-align: center;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    text-align: center;
+    max-width: 520px;
+    margin-bottom: 28px;
+    padding: 0 8px;
+  }
+
+  .error-card {
+    background: var(--card);
+    border: 1px solid var(--danger);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 420px;
+    text-align: center;
+    color: #fecaca;
+  }
+
+  /* ── Wheel ─────────────────────────────────────────────────── */
+  .wheel-wrap {
+    position: relative;
+    width: min(340px, 90vw);
+    aspect-ratio: 1;
+    margin: 8px 0 24px;
+  }
+
+  .pointer {
+    position: absolute;
+    top: -8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 18px solid transparent;
+    border-right: 18px solid transparent;
+    border-top: 30px solid var(--gold);
+    filter: drop-shadow(0 4px 6px rgba(0,0,0,0.35));
+    z-index: 5;
+  }
+
+  .wheel {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: conic-gradient(
+      #ef4444   0deg  45deg,
+      #f59e0b  45deg  90deg,
+      #10b981  90deg 135deg,
+      #06b6d4 135deg 180deg,
+      #3b82f6 180deg 225deg,
+      #8b5cf6 225deg 270deg,
+      #ec4899 270deg 315deg,
+      #f43f5e 315deg 360deg
+    );
+    border: 8px solid var(--gold);
+    box-shadow: 0 0 0 4px rgba(0,0,0,0.3), 0 12px 40px rgba(0,0,0,0.5);
+    transition: transform 4.5s cubic-bezier(0.17, 0.67, 0.34, 1);
+  }
+
+  .wheel-hub {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--gold);
+    border: 4px solid #78350f;
+    z-index: 4;
+  }
+
+  /* ── Buttons + cards ───────────────────────────────────────── */
+  .btn {
+    display: inline-block;
+    padding: 14px 36px;
+    border: none;
+    border-radius: 10px;
+    font-size: 17px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .btn-primary { background: var(--success); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #15803d; box-shadow: 0 6px 20px rgba(22,163,74,0.35); }
+
+  .reveal-card {
+    display: none;
+    background: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 16px;
+    padding: 28px 24px;
+    text-align: center;
+    max-width: 460px;
+    width: 100%;
+    margin-top: 8px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }
+  .reveal-card.show { display: block; animation: pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
+  .reveal-label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .reveal-item { font-size: 22px; font-weight: 700; margin-bottom: 18px; color: var(--gold); }
+  .code-box {
+    background: #0f172a;
+    border: 2px dashed var(--gold);
+    border-radius: 10px;
+    padding: 18px;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    color: var(--gold);
+    margin: 12px 0 6px;
+    user-select: all;
+  }
+  .expiry {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 12px;
+  }
+  .instructions {
+    background: rgba(0,0,0,0.25);
+    border-radius: 10px;
+    padding: 14px;
+    font-size: 14px;
+    color: var(--text);
+    margin-top: 16px;
+    text-align: left;
+    line-height: 1.6;
+  }
+
+  @keyframes pop {
+    0% { transform: scale(0.8); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+
+  /* ── Confetti ──────────────────────────────────────────────── */
+  .confetti {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 20;
+    display: none;
+  }
+  .confetti.show { display: block; }
+  .confetti span {
+    position: absolute;
+    top: -20px;
+    width: 10px;
+    height: 14px;
+    opacity: 0.9;
+    animation: fall 3.5s linear forwards;
+  }
+  @keyframes fall {
+    to { transform: translateY(110vh) rotate(720deg); opacity: 0; }
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    {% if error %}
+      <h1>🎁 Surprise Gift</h1>
+      <div class="error-card">
+        <p><strong>Sorry.</strong></p>
+        <p style="margin-top:8px">{{ error }}</p>
+      </div>
+    {% else %}
+      <h1>🎉 You've Won a Surprise!</h1>
+      <p class="subtitle">
+        Hi {{ gift.customer_name or "there" }} — spin the wheel to reveal your
+        gift for invoice <b>{{ gift.parent_sales_invoice }}</b>.
+      </p>
+
+      <div class="wheel-wrap">
+        <div class="pointer"></div>
+        <div class="wheel" id="wheel"></div>
+        <div class="wheel-hub"></div>
+      </div>
+
+      <button id="spinBtn" class="btn btn-primary">🎡 Spin the Wheel</button>
+
+      <div class="reveal-card" id="revealCard">
+        <div class="reveal-label">You've won</div>
+        <div class="reveal-item" id="rewardItem">—</div>
+        <div class="reveal-label">Your redemption code</div>
+        <div class="code-box" id="codeBox">GIFT-XXXX</div>
+        <div class="expiry" id="expiry"></div>
+        <div class="instructions">
+          <b>How to claim:</b> Visit any of our stores before the code expires
+          and show this screen (or read out the code) to the cashier along with
+          your original invoice. Your gift will be handed over on the spot.
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="confetti" id="confetti"></div>
+
+  {% if not error %}
+  <script>
+  (function() {
+    var TOKEN = {{ (token or "") | tojson }};
+    var STYLE = {{ (gift.wheel_style or "Prize Wheel") | tojson }};
+    var ALREADY = {{ (gift.already_revealed and "true" or "false") }};
+
+    var wheel     = document.getElementById("wheel");
+    var spinBtn   = document.getElementById("spinBtn");
+    var reveal    = document.getElementById("revealCard");
+    var rewardEl  = document.getElementById("rewardItem");
+    var codeEl    = document.getElementById("codeBox");
+    var expiryEl  = document.getElementById("expiry");
+    var confetti  = document.getElementById("confetti");
+
+    function fmtExpiry(iso) {
+      if (!iso) return "";
+      try {
+        var d = new Date(iso.replace(" ", "T"));
+        return "Redeem by " + d.toLocaleString(undefined, {
+          day: "2-digit", month: "short", year: "numeric",
+          hour: "2-digit", minute: "2-digit"
+        });
+      } catch (e) { return "Valid until " + iso; }
+    }
+
+    function launchConfetti() {
+      confetti.classList.add("show");
+      var colors = ["#fbbf24", "#ef4444", "#10b981", "#3b82f6", "#ec4899", "#8b5cf6"];
+      for (var i = 0; i < 80; i++) {
+        var s = document.createElement("span");
+        s.style.left = (Math.random() * 100) + "vw";
+        s.style.background = colors[Math.floor(Math.random() * colors.length)];
+        s.style.animationDelay = (Math.random() * 0.8) + "s";
+        s.style.transform = "rotate(" + (Math.random() * 360) + "deg)";
+        confetti.appendChild(s);
+      }
+      setTimeout(function() {
+        confetti.classList.remove("show");
+        confetti.innerHTML = "";
+      }, 4500);
+    }
+
+    function showReward(data) {
+      rewardEl.textContent = (data.reward_qty > 1 ? data.reward_qty + " × " : "")
+                             + (data.reward_item_name || "your gift");
+      codeEl.textContent = data.redemption_code;
+      expiryEl.textContent = fmtExpiry(data.expires_at);
+      reveal.classList.add("show");
+      if (STYLE !== "Simple") launchConfetti();
+    }
+
+    function spin() {
+      spinBtn.disabled = true;
+      spinBtn.textContent = "Spinning…";
+
+      // Animate the wheel: many full rotations + random final angle.
+      var extra = 1440 + Math.floor(Math.random() * 720);   // 4–6 rotations
+      var target = extra + Math.floor(Math.random() * 360);
+      if (STYLE === "Simple") target = 0;                    // no animation
+      wheel.style.transform = "rotate(" + target + "deg)";
+
+      // Call the reveal endpoint (independent of animation).
+      fetch("/api/method/ch_pos.api.gift_redemption.spin_wheel", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Frappe-CSRF-Token": "guest"
+        },
+        body: "token=" + encodeURIComponent(TOKEN)
+      })
+      .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); })
+      .then(function(res) {
+        var wait = (STYLE === "Simple") ? 400 : 4600;
+        setTimeout(function() {
+          if (!res.ok || !res.body || !res.body.message) {
+            var msg = (res.body && res.body._server_messages)
+              ? "Unable to reveal — please refresh and try again."
+              : "Something went wrong.";
+            spinBtn.textContent = msg;
+            return;
+          }
+          spinBtn.style.display = "none";
+          showReward(res.body.message);
+        }, wait);
+      })
+      .catch(function() {
+        spinBtn.disabled = false;
+        spinBtn.textContent = "🎡 Try Again";
+      });
+    }
+
+    spinBtn.addEventListener("click", spin);
+
+    // Auto-reveal if the customer already spun on a previous visit.
+    if (ALREADY) {
+      spinBtn.textContent = "Show My Code";
+    }
+  })();
+  </script>
+  {% endif %}
+</body>
+</html>

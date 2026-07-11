@@ -49,6 +49,9 @@ export class ContextualToolbar {
 					<button class="btn btn-xs btn-default ch-pos-btn-reprint" title="${__("Reprint today\'s invoices")}">
 						<i class="fa fa-print"></i> ${__("Reprint")}
 					</button>
+					<button class="btn btn-xs btn-default ch-pos-btn-redeem-gift" title="${__("Redeem a spin-wheel gift code")}">
+						<i class="fa fa-gift"></i> ${__("Redeem Gift")}
+					</button>
 					<div class="btn-group ch-pos-view-toggle">
 						<button class="btn btn-xs ch-pos-view-card
 							${PosState.view_mode === "card" ? "btn-primary active" : "btn-default"}">
@@ -135,6 +138,9 @@ export class ContextualToolbar {
 		// Reprint button
 		panel.on("click", ".ch-pos-btn-reprint", () => EventBus.emit("reprint:open"));
 
+		// Redeem Gift button — spin-wheel gift redemption flow.
+		panel.on("click", ".ch-pos-btn-redeem-gift", () => this._open_redeem_gift_dialog());
+
 		// View toggle
 		panel.on("click", ".ch-pos-view-card", function () {
 			PosState.view_mode = "card";
@@ -203,5 +209,93 @@ export class ContextualToolbar {
 
 	destroy() {
 		$(document).off("keydown.ch_pos_scanner");
+	}
+
+	// ── Spin-wheel gift redemption ────────────────────────────────────
+	//
+	// Two-step flow:
+	//   1. Cashier enters the customer's redemption code.
+	//   2. Server returns metadata (customer, parent invoice, reward item,
+	//      status). We show a confirmation modal — cashier hits "Redeem"
+	//      and we call `redeem_gift_code` which creates a ₹0 Sales Invoice
+	//      linked back to the original invoice.
+	//
+	// The button lives in the sell-mode toolbar; it does not require the
+	// cart to be empty because the reward is booked as its own invoice.
+	_open_redeem_gift_dialog() {
+		if (!PosState.pos_profile) {
+			frappe.show_alert({ message: __("No active POS profile."), indicator: "orange" });
+			return;
+		}
+
+		const d = new frappe.ui.Dialog({
+			title: __("Redeem Gift Code"),
+			fields: [
+				{
+					fieldtype: "Data",
+					fieldname: "code",
+					label: __("Redemption Code"),
+					reqd: 1,
+					description: __("Enter the code the customer received (e.g. GIFT-A7X2)."),
+				},
+			],
+			primary_action_label: __("Lookup"),
+			primary_action: (values) => {
+				const code = (values.code || "").trim().toUpperCase();
+				if (!code) return;
+				frappe.call({
+					method: "ch_pos.api.gift_redemption.lookup_gift_code",
+					args: { code },
+					callback: (r) => {
+						if (!r.message) return;
+						d.hide();
+						this._confirm_redeem_gift(r.message);
+					},
+				});
+			},
+		});
+		d.show();
+	}
+
+	_confirm_redeem_gift(gift) {
+		const html = `
+			<div style="font-size:14px;line-height:1.7">
+				<div><b>${__("Customer")}:</b> ${frappe.utils.escape_html(gift.customer_name || gift.customer || "-")}</div>
+				<div><b>${__("Original Invoice")}:</b> ${frappe.utils.escape_html(gift.parent_sales_invoice || "-")}</div>
+				<div><b>${__("Reward")}:</b> ${gift.reward_qty || 1} × ${frappe.utils.escape_html(gift.reward_item_name || gift.reward_item || "-")}</div>
+				<div><b>${__("Status")}:</b> <span style="color:${gift.status === "Revealed" ? "#16a34a" : "#dc2626"}">${gift.status}</span></div>
+				<div style="color:#6b7280;font-size:12px;margin-top:4px">
+					${__("Expires")}: ${gift.expires_at || "-"}
+				</div>
+			</div>`;
+
+		const can_redeem = gift.status === "Revealed";
+		const dlg = new frappe.ui.Dialog({
+			title: __("Confirm Gift Redemption"),
+			fields: [{ fieldtype: "HTML", fieldname: "info", options: html }],
+			primary_action_label: can_redeem ? __("Redeem & Create Invoice") : __("Close"),
+			primary_action: () => {
+				if (!can_redeem) { dlg.hide(); return; }
+				frappe.call({
+					method: "ch_pos.api.gift_redemption.redeem_gift_code",
+					args: {
+						code: gift.redemption_code,
+						pos_profile: PosState.pos_profile,
+					},
+					freeze: true,
+					freeze_message: __("Booking free-gift invoice..."),
+					callback: (r) => {
+						if (!r.message) return;
+						dlg.hide();
+						frappe.show_alert({
+							message: __("Gift booked as invoice {0}", [r.message.redeemed_invoice]),
+							indicator: "green",
+						});
+						EventBus.emit("invoice:submitted", r.message.redeemed_invoice);
+					},
+				});
+			},
+		});
+		dlg.show();
 	}
 }

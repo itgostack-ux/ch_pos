@@ -1,0 +1,298 @@
+{
+ "actions": [],
+ "allow_import": 0,
+ "allow_rename": 0,
+ "autoname": "naming_series:",
+ "creation": "2026-07-11 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "status",
+  "redemption_code",
+  "spin_token",
+  "column_break_hdr",
+  "parent_sales_invoice",
+  "offer",
+  "company",
+  "store",
+  "customer_section",
+  "customer",
+  "customer_name",
+  "customer_email",
+  "column_break_cust",
+  "customer_mobile",
+  "reward_section",
+  "reward_item",
+  "reward_item_name",
+  "reward_qty",
+  "wheel_style",
+  "lifecycle_section",
+  "issued_at",
+  "revealed_at",
+  "redeemed_at",
+  "column_break_life",
+  "expires_at",
+  "redeemed_invoice",
+  "notification_section",
+  "email_sent_at",
+  "whatsapp_sent_at",
+  "notification_error"
+ ],
+ "fields": [
+  {
+   "default": "GIFT-.####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "GIFT-.####"
+  },
+  {
+   "default": "Issued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Issued\nRevealed\nRedeemed\nExpired\nCancelled",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "description": "Short human-friendly code the customer takes to the store. Revealed only after the wheel is spun.",
+   "fieldname": "redemption_code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Redemption Code",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "description": "Long random URL token used in the spin-wheel link (/spin?token=...). Never shown to the cashier.",
+   "fieldname": "spin_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Spin Token",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "column_break_hdr",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "parent_sales_invoice",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Parent Sales Invoice",
+   "options": "Sales Invoice",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "offer",
+   "fieldtype": "Link",
+   "label": "Offer",
+   "options": "CH Item Offer",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fetch_from": "parent_sales_invoice.company",
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "label": "Store",
+   "options": "CH Store",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer_section",
+   "fieldtype": "Section Break",
+   "label": "Customer"
+  },
+  {
+   "fetch_from": "parent_sales_invoice.customer",
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fetch_from": "customer.customer_name",
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Customer Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer_email",
+   "fieldtype": "Data",
+   "label": "Customer Email",
+   "options": "Email",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_cust",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "customer_mobile",
+   "fieldtype": "Data",
+   "options": "Phone",
+   "label": "Customer Mobile",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reward_section",
+   "fieldtype": "Section Break",
+   "label": "Reward"
+  },
+  {
+   "fetch_from": "offer.reward_item",
+   "fieldname": "reward_item",
+   "fieldtype": "Link",
+   "label": "Reward Item",
+   "options": "Item",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fetch_from": "reward_item.item_name",
+   "fieldname": "reward_item_name",
+   "fieldtype": "Data",
+   "label": "Reward Item Name",
+   "read_only": 1
+  },
+  {
+   "default": "1",
+   "fetch_from": "offer.reward_qty",
+   "fieldname": "reward_qty",
+   "fieldtype": "Int",
+   "label": "Reward Qty",
+   "read_only": 1
+  },
+  {
+   "fetch_from": "offer.wheel_style",
+   "fieldname": "wheel_style",
+   "fieldtype": "Data",
+   "label": "Wheel Style",
+   "read_only": 1
+  },
+  {
+   "fieldname": "lifecycle_section",
+   "fieldtype": "Section Break",
+   "label": "Lifecycle"
+  },
+  {
+   "fieldname": "issued_at",
+   "fieldtype": "Datetime",
+   "label": "Issued At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "revealed_at",
+   "fieldtype": "Datetime",
+   "label": "Revealed At (Wheel Spun)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "redeemed_at",
+   "fieldtype": "Datetime",
+   "label": "Redeemed At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_life",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires At",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "redeemed_invoice",
+   "fieldtype": "Link",
+   "label": "Redeemed Invoice",
+   "options": "Sales Invoice",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "notification_section",
+   "fieldtype": "Section Break",
+   "label": "Notifications"
+  },
+  {
+   "fieldname": "email_sent_at",
+   "fieldtype": "Datetime",
+   "label": "Email Sent At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "whatsapp_sent_at",
+   "fieldtype": "Datetime",
+   "label": "WhatsApp Sent At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "notification_error",
+   "fieldtype": "Small Text",
+   "label": "Notification Error",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-07-11 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH Gift Redemption",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Sales Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Sales User"
+  }
+ ],
+ "search_fields": "redemption_code,customer_name,parent_sales_invoice",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

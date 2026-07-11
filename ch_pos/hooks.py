@@ -87,6 +87,7 @@ doc_events = {
             "ch_pos.overrides.pos_invoice.update_serial_lifecycle",
             "ch_pos.overrides.pos_invoice.update_kiosk_token_status",
             "ch_pos.overrides.pos_invoice.increment_coupon_usage",
+            "ch_pos.api.gift_redemption.issue_gift_for_invoice_hook",
         ],
         "on_cancel": [
             "ch_pos.overrides.pos_invoice.reverse_serial_lifecycle",
@@ -102,6 +103,7 @@ scheduler_events = {
     "hourly": [
         "ch_pos.pos_kiosk.doctype.pos_kiosk_token.pos_kiosk_token.expire_old_tokens",
         "ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session.auto_close_stale_sessions",
+        "ch_pos.api.gift_redemption.expire_stale_gift_redemptions",
     ],
     "daily": [
         # Release IMEIs whose pre-booking validity has lapsed (back to sellable).
