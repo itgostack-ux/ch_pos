@@ -169,7 +169,16 @@ export class PrebookWorkspace {
 			);
 			const rate = flt(detail?.selling_price || detail?.mrp || 0);
 			if (rate > 0 || flt(detail?.mrp) > 0) {
-				return { rate: flt(detail.selling_price || detail.mrp), mrp: flt(detail.mrp), stock_uom: null };
+				return {
+					rate: flt(detail.selling_price || detail.mrp),
+					mrp: flt(detail.mrp),
+					stock_uom: null,
+					item_name: detail.item_name || "",
+				};
+			}
+			// No CH price but we still have item_name — fall through with it.
+			if (detail?.item_name) {
+				return { rate: 0, mrp: 0, stock_uom: null, item_name: detail.item_name };
 			}
 		} catch (e) {
 			// fall through to Item Price / standard_rate
@@ -182,16 +191,17 @@ export class PrebookWorkspace {
 				{ item_code, price_list, selling: 1 },
 				"price_list_rate");
 			if (ip && flt(ip.message?.price_list_rate) > 0) {
-				return { rate: flt(ip.message.price_list_rate), mrp: 0, stock_uom: null };
+				return { rate: flt(ip.message.price_list_rate), mrp: 0, stock_uom: null, item_name: "" };
 			}
 		} catch (e) { /* ignore */ }
 		try {
 			const item = await frappe.db.get_value("Item", item_code,
-				["standard_rate", "stock_uom"]);
+				["standard_rate", "stock_uom", "item_name"]);
 			return {
 				rate: flt(item?.message?.standard_rate || 0),
 				mrp: 0,
 				stock_uom: item?.message?.stock_uom || null,
+				item_name: item?.message?.item_name || "",
 			};
 		} catch (e) {
 			return {};
@@ -211,36 +221,33 @@ export class PrebookWorkspace {
 	_make_item_code_onchange(get_dlg, items_fieldname) {
 		const workspace = this;
 		return function () {
-			// `this` = the item_code cell control; this.doc = row plain obj
+			// `this` = item_code cell control; this.doc = row plain obj (same reference
+			// as grid.df.data[i] and grid_rows_by_docname[row.name].doc)
 			const row = this.doc;
 			if (!row || !row.item_code) return;
-			// Snapshot the item we are resolving so stale async responses
-			// from a rapidly changed item do not overwrite a newer selection.
-			const resolved_for = row.item_code;
+			const resolved_for = row.item_code; // snapshot for stale-async guard
 			workspace._resolve_item_price(row.item_code).then((info) => {
-				if (row.item_code !== resolved_for) return; // item changed again
+				// If the user changed item again before this resolved, discard.
+				if (row.item_code !== resolved_for) return;
 				const dlg = get_dlg();
 				const grid = dlg?.fields_dict?.[items_fieldname]?.grid;
-				const grid_row = grid?.grid_rows_by_docname?.[row.name];
-				if (!grid_row) return;
-				const patch = {};
-				// Always overwrite rate and warehouse when item changes —
-				// a stale rate from the previous item must not be carried over.
-				if (info.rate > 0) patch.rate = info.rate;
-				else if (!flt(row.rate)) patch.rate = 0; // clear stale rate
-				if (info.stock_uom) patch.uom = info.stock_uom;
-				// Reset warehouse to store default on item change so the row
-				// doesn't inherit the warehouse from the previously selected item.
-				const default_wh = PosState.warehouse || "";
-				if (default_wh) patch.warehouse = default_wh;
-				Object.entries(patch).forEach(([field, value]) => {
-					row[field] = value;
-					grid.set_value(field, value, row);
-				});
+				if (!grid) return;
+
+				// Write directly into the row doc (same object the grid reads on submit).
+				// grid.set_value() checks display_status which may be 'None' for
+				// in_place_edit Dialog tables — avoid it entirely.
+				row.rate      = info.rate > 0 ? info.rate : 0;
+				row.warehouse = PosState.warehouse || row.warehouse || "";
+				if (info.stock_uom) row.uom = info.stock_uom;
+				if (info.item_name) row.item_name = info.item_name;
+
+				// Re-render the row to reflect new doc values.
+				grid.refresh_row(row.name);
+
 				workspace._refresh_dialog_total(dlg, items_fieldname);
 				if (!info.rate) {
 					frappe.show_alert({
-						message: __("No selling price configured for {0}. Enter rate manually.", [row.item_code]),
+						message: __("No selling price for {0}. Enter rate manually.", [row.item_code]),
 						indicator: "orange",
 					}, 5);
 				}
@@ -636,6 +643,7 @@ export class PrebookWorkspace {
 	_proforma_flow(cart, customer) {
 		let seed_items = (cart || []).map((it) => ({
 			item_code: it.item_code,
+			item_name: it.item_name || "",
 			qty: flt(it.qty || 1),
 			rate: flt(it.rate || 0),
 			uom: it.uom || "Nos",
@@ -644,6 +652,7 @@ export class PrebookWorkspace {
 		if (!seed_items.length) {
 			seed_items = [{
 				item_code: "",
+				item_name: "",
 				qty: 1,
 				rate: 0,
 				uom: "Nos",
@@ -692,17 +701,21 @@ export class PrebookWorkspace {
 							onchange: this._make_item_code_onchange(get_dlg, "proforma_items"),
 						},
 						{
+							fieldname: "item_name", fieldtype: "Data", label: __("Item Name"),
+							in_list_view: 1, read_only: 1, columns: 3,
+						},
+						{
 							fieldname: "qty", fieldtype: "Float", label: __("Qty"),
-							reqd: 1, in_list_view: 1, default: 1,
+							reqd: 1, in_list_view: 1, default: 1, columns: 1,
 							onchange: () => this._refresh_dialog_total(get_dlg(), "proforma_items"),
 						},
 						{
 							fieldname: "rate", fieldtype: "Currency", label: __("Rate"),
-							reqd: 1, in_list_view: 1, default: 0,
+							reqd: 1, in_list_view: 1, default: 0, columns: 2,
 							onchange: () => this._refresh_dialog_total(get_dlg(), "proforma_items"),
 						},
-						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos" },
-						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 1 },
+						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos", columns: 1 },
+						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 0 },
 					],
 				},
 				{ fieldname: "section_break_b", fieldtype: "Section Break" },
@@ -784,6 +797,7 @@ export class PrebookWorkspace {
 	_prebook_flow(cart, customer, total) {
 		let seed_items = (cart || []).map((it) => ({
 			item_code: it.item_code,
+			item_name: it.item_name || "",
 			qty: flt(it.qty || 1),
 			rate: flt(it.rate || 0),
 			uom: it.uom || "Nos",
@@ -793,6 +807,7 @@ export class PrebookWorkspace {
 		if (!seed_items.length) {
 			seed_items = [{
 				item_code: "",
+				item_name: "",
 				qty: 1,
 				rate: 0,
 				uom: "Nos",
@@ -850,17 +865,21 @@ export class PrebookWorkspace {
 							onchange: this._make_item_code_onchange(get_dlg, "prebook_items"),
 						},
 						{
+							fieldname: "item_name", fieldtype: "Data", label: __("Item Name"),
+							in_list_view: 1, read_only: 1, columns: 3,
+						},
+						{
 							fieldname: "qty", fieldtype: "Float", label: __("Qty"),
-							reqd: 1, in_list_view: 1, default: 1,
+							reqd: 1, in_list_view: 1, default: 1, columns: 1,
 							onchange: () => this._refresh_dialog_total(get_dlg(), "prebook_items"),
 						},
 						{
 							fieldname: "rate", fieldtype: "Currency", label: __("Rate"),
-							reqd: 1, in_list_view: 1, default: 0,
+							reqd: 1, in_list_view: 1, default: 0, columns: 2,
 							onchange: () => this._refresh_dialog_total(get_dlg(), "prebook_items"),
 						},
-						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos" },
-						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 1 },
+						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos", columns: 1 },
+						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 0 },
 						{ fieldname: "serial_no", fieldtype: "Data", label: __("IMEI / Serial"), in_list_view: 1 },
 					],
 				},
