@@ -2802,8 +2802,18 @@ def create_pos_invoice(
         # payload could otherwise bill below floor. An override is present when
         # the header carries discount_authorized_by, or the row is
         # manager-approved, or it is backed by a CH Exception Request.
+        #
+        # Rows loaded from a submitted Sales Order (pre-booking pickup) are
+        # exempt: the price was contracted with the customer at SO submit
+        # time — the customer accepted the rate, an advance was collected,
+        # and ERPNext's make_sales_invoice mapper copies the SO rate as-is.
+        # Re-gating at billing would block a legitimate handover and force
+        # the cashier to fight a floor check that no longer applies. If MSP
+        # needs to be enforced for pre-bookings, gate it in create_pre_booking
+        # before the SO is submitted, not here.
         if (not item_is_plan and not item_is_vas and not is_free_bundle_row
-                and flt(effective_rate) > 0):
+                and flt(effective_rate) > 0
+                and not _item_so):
             floor_price = _get_item_floor_price(item.get("item_code"), profile.company)
             row_authorized = bool(
                 item.get("manager_approved")
