@@ -200,11 +200,16 @@ export class PaymentDialog {
 			PosState.voucher_code = null;
 			PosState.voucher_amount = 0;
 
-			// Pre-seed with default MOP covering full amount
+			// Pre-seed with default MOP covering the remaining balance —
+			// i.e. grand total minus any pre-applied SO advance. Seeding
+			// the full grand total here silently over-tenders whenever an
+			// advance is auto-applied (the cashier would then hand back
+			// the advance as change).
 			const total = this._calc_grand_total();
+			const seed_due = Math.max(0, total - flt(this._advance_amount));
 			const def_mop = PosState.payment_modes.find(p => p.default) || PosState.payment_modes[0];
 			if (def_mop) {
-				this._payments = [{ mode: def_mop.mode_of_payment, amount: total, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
+				this._payments = [{ mode: def_mop.mode_of_payment, amount: seed_due, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0 }];
 			}
 		}
 
@@ -823,6 +828,15 @@ placeholder="${__("Enter code...")}">
 		// Update the Grand Total bar below commercial controls too
 		const net_after_loyalty = Math.max(0, grand - loyalty_redeemed);
 		this._overlay?.find("#ch-pay-commercials-grand-value").text(`₹${format_number(net_after_loyalty)}`);
+		// Sales-Order advance carried into this pickup — echo it on the
+		// bill panel so the left and right totals reconcile visually
+		// (cart panel already shows this line).
+		const so_advance = PosState.sales_order_reference ? flt(this._advance_amount) : 0;
+		if (so_advance > 0) {
+			const net_to_collect = Math.max(0, net_after_loyalty - so_advance);
+			rows += `<div class="ch-pay-total-row ch-pay-deduct" style="color:var(--pos-success,#16a34a)"><span><i class="fa fa-bookmark"></i> ${__("Advance (Sales Order)")}</span><span>-₹${format_number(so_advance)}</span></div>`;
+			rows += `<div class="ch-pay-total-row" style="font-weight:600;border-top:1px dashed var(--pos-border);padding-top:4px;margin-top:2px;"><span>${__("Net to Collect")}</span><span>₹${format_number(net_to_collect)}</span></div>`;
+		}
 		return rows;
 	}
 
