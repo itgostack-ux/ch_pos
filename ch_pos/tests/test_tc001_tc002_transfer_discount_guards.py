@@ -28,6 +28,8 @@ def run() -> dict:
         "and not discount_authorized_by",
         "Below Minimum Selling Price",
         "custom_discount_authorized_by",
+        "fields=[\"selling_price\", \"mop\", \"status\", \"channel\"]",
+        "price_floor_candidates.append(min(selling_price, mop))",
     ]
     missing_tc002 = [n for n in tc002_needles if n not in api_src]
     if missing_tc002:

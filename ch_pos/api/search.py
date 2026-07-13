@@ -534,6 +534,13 @@ def get_available_serials(item_code, warehouse) -> list:
     Reserved, or Transfer bins are excluded from POS availability.
     (Serial with no CH Stock Bin record defaults to Sellable.)
 
+    Serials reserved on any open (submitted, non-Closed/Cancelled/Completed)
+    Sales Order with ``reserve_stock=1`` are also excluded — market-standard
+    behavior matching SAP/Oracle/Zoho: reserved stock is not part of on-hand
+    available quantity. Cashiers must release the reservation via
+    Pickup / Bill → Reserved IMEIs (manager action) before selling to a
+    walk-in customer.
+
     Each row includes:
       - serial_no            : the IMEI / serial number
       - warranty_expiry_date : for the WE chip in UI
@@ -592,6 +599,22 @@ def get_available_serials(item_code, warehouse) -> list:
             sb.bin_type
         ORDER BY inward_date ASC, sn.name ASC
     """, {"item_code": item_code, "warehouse": warehouse}, as_dict=True)
+
+    # Exclude serials currently reserved on an open pre-booking. Done in Python
+    # (not SQL) so we reuse the single source of truth in
+    # `pos_api._get_open_reserved_sales_order_for_serial` which honors the
+    # pre-booking validity grace window and warehouse scoping.
+    if rows:
+        try:
+            from ch_pos.api.pos_api import _get_open_reserved_sales_order_for_serial
+            rows = [
+                r for r in rows
+                if not _get_open_reserved_sales_order_for_serial(r["serial_no"], warehouse)
+            ]
+        except Exception:
+            # If the helper is unavailable (edge case), fall back to unfiltered
+            # list rather than blocking the picker entirely.
+            pass
 
     # Tag the first (oldest) serial so the UI can show the yellow "Sell First" badge.
     # Also normalize inward_date to ISO string for the JS Date() constructor.

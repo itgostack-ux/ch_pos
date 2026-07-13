@@ -22,6 +22,11 @@
   "customer_email",
   "column_break_cust",
   "customer_mobile",
+  "trigger_section",
+  "trigger_item",
+  "trigger_item_name",
+  "column_break_trigger",
+  "trigger_serial_no",
   "reward_section",
   "reward_item",
   "reward_item_name",
@@ -34,6 +39,9 @@
   "column_break_life",
   "expires_at",
   "redeemed_invoice",
+  "redeemed_store",
+  "redeemed_pos_profile",
+  "redeemed_by",
   "notification_section",
   "email_sent_at",
   "whatsapp_sent_at",
@@ -161,6 +169,35 @@
    "read_only": 1
   },
   {
+   "fieldname": "trigger_section",
+   "fieldtype": "Section Break",
+   "label": "Trigger Purchase",
+   "description": "The purchased line that earned this gift, captured at issuance."
+  },
+  {
+   "fieldname": "trigger_item",
+   "fieldtype": "Link",
+   "label": "Trigger Item",
+   "options": "Item",
+   "read_only": 1
+  },
+  {
+   "fieldname": "trigger_item_name",
+   "fieldtype": "Data",
+   "label": "Trigger Item Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_trigger",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "trigger_serial_no",
+   "fieldtype": "Small Text",
+   "label": "Trigger Serial / IMEI",
+   "read_only": 1
+  },
+  {
    "fieldname": "reward_section",
    "fieldtype": "Section Break",
    "label": "Reward"
@@ -238,6 +275,27 @@
    "read_only": 1
   },
   {
+   "fieldname": "redeemed_store",
+   "fieldtype": "Link",
+   "label": "Redeemed At Store",
+   "options": "CH Store",
+   "read_only": 1
+  },
+  {
+   "fieldname": "redeemed_pos_profile",
+   "fieldtype": "Link",
+   "label": "Redeemed POS Profile",
+   "options": "POS Profile",
+   "read_only": 1
+  },
+  {
+   "fieldname": "redeemed_by",
+   "fieldtype": "Link",
+   "label": "Redeemed By (Cashier)",
+   "options": "User",
+   "read_only": 1
+  },
+  {
    "collapsible": 1,
    "fieldname": "notification_section",
    "fieldtype": "Section Break",
@@ -264,7 +322,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-11 12:00:00.000000",
+ "modified": "2026-07-13 11:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "CH Gift Redemption",

@@ -203,19 +203,34 @@ def check_attachment_offers(cart_items, company=None) -> dict:
         cart_items = frappe.parse_json(cart_items)
 
     today = frappe.utils.today()
-    cart_item_codes = {item.get("item_code") for item in cart_items}
+    cart_item_codes = {item.get("item_code") for item in cart_items if item.get("item_code")}
+
+    # An offer may target either the exact variant sold or its template
+    # (= all variants). Variant-specific offers override template-level
+    # ones for that cart line — SAP free-goods "most specific wins".
+    template_of = {
+        code: frappe.get_cached_value("Item", code, "variant_of")
+        for code in cart_item_codes
+    }
+    trigger_candidates = cart_item_codes | {t for t in template_of.values() if t}
+    if not trigger_candidates:
+        return []
 
     filters = {
         "offer_type": ["in", ["Attachment", "Freebie"]],
+        # Spin Wheel freebies (is_gamified=1) are issued post-sale as a
+        # CH Gift Redemption — surfacing them here would add the gift to
+        # the cart too and the customer would receive it twice.
+        "is_gamified": 0,
         "status": "Active",
         "start_date": ["<=", today],
         "end_date": [">=", today],
-        "trigger_item": ["in", list(cart_item_codes)],
+        "trigger_item": ["in", list(trigger_candidates)],
     }
     if company:
         filters["company"] = company
 
-    offers = frappe.get_all(
+    all_offers = frappe.get_all(
         "CH Item Offer",
         filters=filters,
         fields=[
@@ -224,7 +239,20 @@ def check_attachment_offers(cart_items, company=None) -> dict:
             "reward_item", "reward_item_name",
             "reward_price", "reward_qty",
         ],
+        order_by="priority desc, modified desc",
     )
+
+    offers, seen = [], set()
+    for code in cart_item_codes:
+        variant_hits = [o for o in all_offers if o.trigger_item == code]
+        template_hits = [
+            o for o in all_offers
+            if template_of.get(code) and o.trigger_item == template_of[code]
+        ]
+        for offer in variant_hits or template_hits:
+            if offer.name not in seen:
+                seen.add(offer.name)
+                offers.append(offer)
 
     result = []
     for offer in offers:

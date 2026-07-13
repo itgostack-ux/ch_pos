@@ -162,7 +162,7 @@ export class BinManagerWorkspace {
 					<div class="ch-bm-card">
 						<div class="ch-bm-card-head">
 							<i class="fa fa-list" style="color:#475569"></i>
-							<h5 class="ch-bm-list-title">${__("Items in {0} Bin", [this._active_bin])}</h5>
+							<h5 class="ch-bm-list-title">${__("Serials in {0} Bin", [this._active_bin])}</h5>
 							<span class="sub ch-bm-warehouse" data-role="warehouse">—</span>
 						</div>
 						<div class="ch-bm-toolbar">
@@ -170,6 +170,9 @@ export class BinManagerWorkspace {
 							<button class="btn btn-default btn-sm ch-bm-refresh" title="${__("Refresh")}">
 								<i class="fa fa-refresh"></i>
 							</button>
+						</div>
+						<div class="ch-bm-scope-note" style="padding:8px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#6b7280;">
+							${__("Tab count is total warehouse quantity. Table lists serial-tracked rows.")}
 						</div>
 						<div class="ch-bm-list" style="max-height:520px;overflow:auto;"></div>
 					</div>
@@ -189,6 +192,11 @@ export class BinManagerWorkspace {
 	_apply_readonly_state() {
 		const ro = IS_READONLY_BIN(this._active_bin);
 		this.panel.find("#ch-bm-move-card").toggle(!ro);
+		this.panel.find(".ch-bm-scope-note").text(
+			ro
+				? __("Tab count and table both reflect in-transit rows from active manifests.")
+				: __("Tab count is total warehouse quantity. Table lists serial-tracked rows.")
+		);
 		// List spans full width when the move card is hidden (read-only view).
 		this.panel.find(".ch-bm-grid").css(
 			"grid-template-columns",
@@ -231,7 +239,7 @@ export class BinManagerWorkspace {
 			this._active_bin = bin;
 			panel.find(".ch-bm-tab").removeClass("active");
 			$(e.currentTarget).addClass("active");
-			panel.find(".ch-bm-list-title").text(__("Items in {0} Bin", [bin]));
+			panel.find(".ch-bm-list-title").text(__("Serials in {0} Bin", [bin]));
 			panel.find(".ch-bm-meta-hint").text(BIN_META[bin].hint);
 			panel.find(".ch-bm-move").html(`<i class="fa fa-arrow-right"></i> ${__("Move to {0}", [bin])}`);
 			this._update_dest_pill();
@@ -303,7 +311,7 @@ export class BinManagerWorkspace {
 					const info = data[bin] || {};
 					const qty = info.qty != null ? info.qty : (info.items || 0);
 					this.panel.find(`[data-bin-count="${bin}"]`).text(
-						qty ? __("{0} units", [qty]) : __("Empty")
+						qty ? __("{0} qty", [qty]) : __("Empty")
 					);
 				});
 			},

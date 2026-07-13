@@ -3,3 +3,4 @@ ch_pos.patches.v1_0.migrate_pos_invoice_to_sales_invoice
 ch_pos.patches.v1_0.add_coupon_discount_amount_field
 ch_pos.patches.v1_0.rename_ch_manager_pin_to_ch_pos_password
 ch_pos.patches.v1_0.ensure_pos_payment_modes
+ch_pos.patches.v1_0.backfill_gift_redemption_history

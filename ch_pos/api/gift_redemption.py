@@ -128,10 +128,19 @@ def issue_gift_for_invoice(sales_invoice) -> str | None:
 
 	ttl_hours = cint(offer.get("redemption_ttl_hours")) or _DEFAULT_TTL_HOURS
 
+	# History captures the concrete line sold — when the offer targets a
+	# template, this is the actual variant (and its IMEI), not the template.
+	matched_rows = _matching_trigger_rows(sales_invoice, offer.trigger_item)
+	concrete_trigger = matched_rows[0].item_code if matched_rows else offer.trigger_item
+
 	gift = frappe.get_doc({
 		"doctype": "CH Gift Redemption",
 		"parent_sales_invoice": sales_invoice.name,
 		"offer": offer.name,
+		"trigger_item": concrete_trigger,
+		"trigger_item_name": frappe.db.get_value("Item", concrete_trigger, "item_name")
+			or offer.trigger_item_name,
+		"trigger_serial_no": _collect_trigger_serials(sales_invoice, offer.trigger_item),
 		"reward_item": offer.reward_item,
 		"reward_qty": cint(offer.reward_qty) or 1,
 		"wheel_style": offer.wheel_style or "Prize Wheel",
@@ -161,12 +170,22 @@ def issue_gift_for_invoice(sales_invoice) -> str | None:
 
 
 def _find_matching_gamified_offer(sales_invoice):
-	"""Return the highest-priority active gamified Freebie offer matching any
-	line item on the invoice; else None.
+	"""Return the best active gamified Freebie offer matching any line item
+	on the invoice; else None.
+
+	An offer's trigger_item may be the exact variant sold or its template
+	(= all variants). Specificity wins first (variant-level offer beats
+	template-level — SAP free-goods style), then priority, then recency.
 	"""
 	item_codes = [i.item_code for i in (sales_invoice.items or []) if i.item_code]
 	if not item_codes:
 		return None
+
+	template_of = {
+		code: frappe.get_cached_value("Item", code, "variant_of")
+		for code in item_codes
+	}
+	templates = {t for t in template_of.values() if t}
 
 	# NOTE: `start_date`/`end_date` on CH Item Offer are Datetime fields.
 	# `frappe.get_all` mishandles date-only strings ("YYYY-MM-DD") against
@@ -180,7 +199,7 @@ def _find_matching_gamified_offer(sales_invoice):
 			"is_gamified": 1,
 			"status": "Active",
 			"approval_status": "Approved",
-			"trigger_item": ("in", item_codes),
+			"trigger_item": ("in", list(set(item_codes) | templates)),
 			"start_date": ("<=", now),
 			"end_date": (">=", now),
 			"company": sales_invoice.company,
@@ -188,11 +207,44 @@ def _find_matching_gamified_offer(sales_invoice):
 		fields=[
 			"name", "company", "reward_item", "reward_qty",
 			"wheel_style", "redemption_ttl_hours", "priority",
+			"trigger_item", "trigger_item_name",
 		],
 		order_by="priority desc, modified desc",
-		limit=1,
 	)
-	return rows[0] if rows else None
+	if not rows:
+		return None
+
+	variant_level = [r for r in rows if r.trigger_item in set(item_codes)]
+	template_level = [r for r in rows if r.trigger_item in templates]
+	candidates = variant_level or template_level
+	return candidates[0] if candidates else None
+
+
+def _matching_trigger_rows(sales_invoice, trigger_item: str) -> list:
+	"""Invoice lines covered by the trigger — exact item or, when the
+	trigger is a template, any of its variants.
+	"""
+	rows = []
+	for row in (sales_invoice.items or []):
+		if not row.item_code:
+			continue
+		if row.item_code == trigger_item or (
+			frappe.get_cached_value("Item", row.item_code, "variant_of") == trigger_item
+		):
+			rows.append(row)
+	return rows
+
+
+def _collect_trigger_serials(sales_invoice, trigger_item: str) -> str:
+	"""Newline-joined serials/IMEIs of the invoice line(s) that earned the
+	gift. POS invoices keep serials in the legacy newline-joined
+	``serial_no`` field on Sales Invoice Item.
+	"""
+	serials: list[str] = []
+	for row in _matching_trigger_rows(sales_invoice, trigger_item):
+		blob = getattr(row, "serial_no", None) or ""
+		serials.extend(s.strip() for s in blob.replace(",", "\n").split("\n") if s.strip())
+	return "\n".join(dict.fromkeys(serials))
 
 
 def _resolve_customer_email(sales_invoice) -> str | None:
@@ -484,6 +536,13 @@ def redeem_gift_code(code: str, pos_profile: str) -> dict:
 	gift.db_set("status", "Redeemed", update_modified=False)
 	gift.db_set("redeemed_at", now_datetime(), update_modified=False)
 	gift.db_set("redeemed_invoice", inv_name, update_modified=False)
+	gift.db_set("redeemed_pos_profile", pos_profile, update_modified=False)
+	gift.db_set("redeemed_by", frappe.session.user, update_modified=False)
+	redeemed_store = frappe.db.get_value(
+		"POS Profile Extension", {"pos_profile": pos_profile}, "store"
+	)
+	if redeemed_store:
+		gift.db_set("redeemed_store", redeemed_store, update_modified=False)
 
 	return {
 		"redeemed_invoice": inv_name,
@@ -591,6 +650,11 @@ def lookup_gift_code(code: str) -> dict:
 		"parent_sales_invoice": gift.parent_sales_invoice,
 		"customer": gift.customer,
 		"customer_name": gift.customer_name,
+		"trigger_item": gift.trigger_item,
+		"trigger_item_name": gift.trigger_item_name,
+		"trigger_serial_no": gift.trigger_serial_no,
+		"store": gift.store,
+		"issued_at": str(gift.issued_at) if gift.issued_at else None,
 		"reward_item": gift.reward_item,
 		"reward_item_name": gift.reward_item_name,
 		"reward_qty": cint(gift.reward_qty) or 1,

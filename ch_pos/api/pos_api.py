@@ -13,6 +13,89 @@ except ImportError:
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
 
+PREBOOK_REASSIGN_ALLOWED_ROLES = {"Store Manager", "Stock Manager", "System Manager", "Administrator"}
+
+
+def _ensure_prebook_reassign_access() -> None:
+    roles = set(frappe.get_roles(frappe.session.user))
+    if roles.intersection(PREBOOK_REASSIGN_ALLOWED_ROLES):
+        return
+    frappe.throw(
+        _("Only Manager and above can reassign reserved IMEI/serial on pre-bookings."),
+        frappe.PermissionError,
+        title=_("Not Permitted"),
+    )
+
+
+def _open_prebook_for_serial_edit(sales_order):
+    so = frappe.get_doc("Sales Order", sales_order)
+    if so.docstatus != 1:
+        frappe.throw(_("Only submitted pre-bookings can be edited for IMEI changes."))
+    if so.status in ("Closed", "Cancelled", "Completed", "On Hold"):
+        frappe.throw(_("Cannot update IMEI on a {0} Sales Order.").format(so.status))
+    if flt(so.per_billed) > 0 or flt(so.per_delivered) > 0:
+        frappe.throw(_("Cannot update IMEI after billing or delivery has started."))
+    soi_meta = frappe.get_meta("Sales Order Item")
+    if not soi_meta.has_field("custom_serial_no"):
+        frappe.throw(_("Reserved IMEI field is not available on this site."))
+    return so
+
+
+def _split_serial_blob(raw) -> list[str]:
+    if not raw:
+        return []
+    serials = []
+    for token in str(raw).replace("\r", "").replace(",", "\n").split("\n"):
+        token = token.strip()
+        if token:
+            serials.append(token)
+    return serials
+
+
+def _pick_available_serials_for_prebooking(
+    item_code: str,
+    warehouse: str,
+    needed: int,
+    exclude: set[str] | None = None,
+) -> list[str]:
+    """Pick up to ``needed`` free serials from one warehouse for reserve flow.
+
+    Filters out serials already reserved by another open pre-booking and any
+    serials passed in ``exclude`` (already consumed in this cart payload).
+    """
+    needed = cint(needed)
+    if needed <= 0 or not item_code or not warehouse:
+        return []
+
+    exclude = exclude or set()
+    rows = frappe.db.sql(
+        """
+        SELECT name
+        FROM `tabSerial No`
+        WHERE item_code = %(item_code)s
+          AND warehouse = %(warehouse)s
+          AND status IN ('Active', 'Inactive')
+        ORDER BY modified ASC, creation ASC
+        LIMIT 500
+        """,
+        {"item_code": item_code, "warehouse": warehouse},
+        as_dict=True,
+    )
+
+    picked = []
+    for row in rows:
+        sn = (row.get("name") or "").strip()
+        if not sn or sn in exclude:
+            continue
+        reserved_so = _get_open_reserved_sales_order_for_serial(sn, warehouse)
+        if reserved_so:
+            continue
+        picked.append(sn)
+        if len(picked) >= needed:
+            break
+    return picked
+
+
 def _normalize_customer_approval_method(method: str | None) -> str:
     """Normalize POS method values to Buyback's canonical approval methods."""
     method = (method or "In-Store Signature").strip()
@@ -478,43 +561,158 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
     # on another open Sales Order. We check submitted, non-Closed/Cancelled
     # SOs only; cancelled rows free their IMEI naturally on cancel.
     seen_in_cart: dict[str, str] = {}
+    item_serial_flags: dict[str, int] = {}
+    serial_pending_rows: list[dict] = []
+    # Market-standard backorder rows: items (typically non-serialized SKUs
+    # like accessories, VAS packs) whose warehouse actual_qty is short of
+    # the requested qty. In SAP/Oracle/Zoho these become backorder lines
+    # on the SO — the order is accepted, no Stock Reservation is created,
+    # and fulfilment resumes when stock lands.
+    qty_pending_rows: list[dict] = []
     so_item_meta = frappe.get_meta("Sales Order Item")
     has_custom_serial = so_item_meta.has_field("custom_serial_no")
-    for item in items:
-        serial = (item.get("serial_no") or "").strip()
-        if not serial:
-            continue
-        # Cross-row uniqueness within the same cart
-        if serial in seen_in_cart and seen_in_cart[serial] != item.get("item_code"):
-            frappe.throw(
-                frappe._("IMEI {0} appears on more than one item in the cart.")
-                .format(serial),
-                title=frappe._("Duplicate IMEI"),
-            )
-        seen_in_cart[serial] = item.get("item_code")
 
-        if has_custom_serial:
-            dup = frappe.db.sql(
-                """
-                SELECT soi.parent
-                FROM `tabSales Order Item` soi
-                JOIN `tabSales Order` so ON so.name = soi.parent
-                WHERE soi.custom_serial_no LIKE %(needle)s
-                  AND so.docstatus = 1
-                  AND so.status NOT IN ('Closed', 'Cancelled', 'Completed')
-                LIMIT 1
-                """,
-                {"needle": f"%{serial}%"},
+    def _item_requires_serial(item_code: str) -> bool:
+        if item_code not in item_serial_flags:
+            item_serial_flags[item_code] = cint(
+                frappe.db.get_value("Item", item_code, "has_serial_no") or 0
             )
-            if dup:
+        return bool(item_serial_flags[item_code])
+
+    for item in items:
+        item_code = (item.get("item_code") or "").strip()
+        serials = _split_serial_blob(item.get("serial_no") or "")
+        qty = cint(flt(item.get("qty") or 0))
+
+        if cint(reserve_stock) and item_code and _item_requires_serial(item_code):
+            if qty <= 0:
                 frappe.throw(
-                    frappe._("IMEI {0} is already reserved on Sales Order {1}.")
-                    .format(serial, dup[0][0]),
-                    title=frappe._("Duplicate IMEI"),
+                    frappe._("Serialized item {0} must have qty greater than zero.").format(item_code)
+                )
+            if len(serials) > qty:
+                frappe.throw(
+                    frappe._("Serialized item {0}: IMEI count {1} cannot exceed qty {2}.").format(
+                        item_code, len(serials), qty
+                    ),
+                    title=frappe._("Invalid IMEI Count"),
                 )
 
+            missing = qty - len(serials)
+            if missing > 0:
+                source_wh = (item.get("warehouse") or profile.warehouse or "").strip()
+                if not source_wh:
+                    frappe.throw(
+                        frappe._("Warehouse is required to auto-allocate IMEI for item {0}.").format(item_code),
+                        title=frappe._("Warehouse Required"),
+                    )
+                auto_serials = _pick_available_serials_for_prebooking(
+                    item_code=item_code,
+                    warehouse=source_wh,
+                    needed=missing,
+                    exclude=set(seen_in_cart.keys()) | set(serials),
+                )
+                serials.extend(auto_serials)
+                item["serial_no"] = "\n".join(serials)
+
+                pending_qty = qty - len(serials)
+                if pending_qty > 0:
+                    serial_pending_rows.append({
+                        "item_code": item_code,
+                        "item_name": frappe.db.get_value("Item", item_code, "item_name") or item_code,
+                        "qty": qty,
+                        "assigned": len(serials),
+                        "pending": pending_qty,
+                        "warehouse": source_wh,
+                    })
+
+        for serial in serials:
+            # Cross-row uniqueness within the same cart
+            if serial in seen_in_cart and seen_in_cart[serial] != item_code:
+                frappe.throw(
+                    frappe._("IMEI {0} appears on more than one item in the cart.")
+                    .format(serial),
+                    title=frappe._("Duplicate IMEI"),
+                )
+            seen_in_cart[serial] = item_code
+
+            if has_custom_serial:
+                dup = frappe.db.sql(
+                    """
+                    SELECT soi.parent
+                    FROM `tabSales Order Item` soi
+                    JOIN `tabSales Order` so ON so.name = soi.parent
+                    WHERE soi.custom_serial_no LIKE %(needle)s
+                      AND so.docstatus = 1
+                      AND so.status NOT IN ('Closed', 'Cancelled', 'Completed')
+                    LIMIT 1
+                    """,
+                    {"needle": f"%{serial}%"},
+                )
+                if dup:
+                    frappe.throw(
+                        frappe._("IMEI {0} is already reserved on Sales Order {1}.")
+                        .format(serial, dup[0][0]),
+                        title=frappe._("Duplicate IMEI"),
+                    )
+
+    # ── Market-standard backorder pre-flight ────────────────────────────
+    # Mirror ERPNext's own `get_available_qty_to_reserve` (actual_qty minus
+    # open Stock Reservation Entries) so we catch qty shortfalls BEFORE
+    # calling so.submit(). If any row is short, we mark it as a backorder
+    # line and turn off qty reservation for the whole SO — matching how
+    # SAP MTO, Oracle ATP promise-date and Zoho backorder mode behave:
+    # the customer commitment (Sales Order) is always accepted; hard
+    # stock reservation only happens when supply actually exists.
+    if cint(reserve_stock):
+        try:
+            from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
+                get_available_qty_to_reserve,
+            )
+        except Exception:
+            get_available_qty_to_reserve = None  # type: ignore[assignment]
+
+        if get_available_qty_to_reserve:
+            # Aggregate demand per (item, warehouse) so multi-row carts are
+            # checked against a single pool.
+            demand: dict[tuple[str, str], float] = {}
+            for it in items:
+                ic = (it.get("item_code") or "").strip()
+                wh = (it.get("warehouse") or profile.warehouse or "").strip()
+                q = flt(it.get("qty") or 0)
+                if not ic or not wh or q <= 0:
+                    continue
+                # Serialized rows are already covered by serial_pending_rows;
+                # here we only need the non-serialized qty backorder path
+                # because the SRE engine also runs a qty check on those.
+                # We still include serialized rows so the aggregate demand
+                # matches what ERPNext will validate.
+                demand[(ic, wh)] = demand.get((ic, wh), 0.0) + q
+
+            already_pending_serials = {
+                (r["item_code"], r["warehouse"]) for r in serial_pending_rows
+            }
+            for (ic, wh), need_qty in demand.items():
+                try:
+                    avail = flt(get_available_qty_to_reserve(ic, wh))
+                except Exception:
+                    avail = 0.0
+                if avail + 0.0001 < need_qty:
+                    # Skip serialized rows already captured — avoids double
+                    # reporting the same item as both IMEI-pending and
+                    # qty-pending in the response payload.
+                    if (ic, wh) in already_pending_serials:
+                        continue
+                    qty_pending_rows.append({
+                        "item_code": ic,
+                        "item_name": frappe.db.get_value("Item", ic, "item_name") or ic,
+                        "warehouse": wh,
+                        "qty": need_qty,
+                        "available": max(avail, 0.0),
+                        "pending": max(need_qty - max(avail, 0.0), 0.0),
+                    })
+
     for item in items:
-        serial = (item.get("serial_no") or "").strip()
+        serial = "\n".join(_split_serial_blob(item.get("serial_no") or ""))
         row = {
             "item_code": item.get("item_code"),
             "qty": flt(item.get("qty", 1)),
@@ -535,24 +733,106 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
     if client_request_id and so.meta.has_field("custom_client_request_id"):
         so.custom_client_request_id = str(client_request_id)[:140]
 
+    # Market-standard launch / pre-order / backorder mode: if ANY row is
+    # short — serialized IMEI missing OR non-serialized qty short — keep
+    # the SO creatable by switching off qty reservation for this SO.
+    # Stock will be reserved later (either by tagging IMEI at pickup for
+    # serialized rows or by a follow-up "Reserve Now" once supply lands
+    # for non-serialized rows).
+    reserve_relaxed_for_launch = False
+    if (serial_pending_rows or qty_pending_rows) and so.meta.has_field("reserve_stock") and cint(so.reserve_stock):
+        so.reserve_stock = 0
+        reserve_relaxed_for_launch = True
+
     so.flags.ignore_permissions = True
+    # POS pre-booking already enforces practical store availability; skip
+    # desk-style ATP advisory popup for this API flow to avoid cashier noise.
+    so.flags.ch_skip_atp_warning = True
     so.insert(ignore_permissions=True)
 
     submit_warning = None
     try:
         so.submit()
-    except Exception:
-        # Keep the order saved even if stock reservation cannot fully complete yet.
-        submit_warning = frappe.get_traceback()
-        frappe.log_error(submit_warning, f"Pre-booking submit failed for {so.name}")
-        so.reload()
+    except Exception as first_err:
+        # Safety net for the "Stock not available to reserve" path — if the
+        # pre-flight missed a race (e.g. a Batch/Serial reservation landed
+        # between our qty check and submit), auto-fallback to backorder
+        # mode and retry once. Matches the SAP MTO fallback pattern where
+        # the SO is always accepted even if reservation isn't possible.
+        err_txt = str(first_err) or ""
+        looks_like_reserve_error = (
+            "Stock not available to reserve" in err_txt
+            or "not available to reserve" in err_txt.lower()
+        )
+        retried = False
+        if (
+            looks_like_reserve_error
+            and so.meta.has_field("reserve_stock")
+            and cint(getattr(so, "reserve_stock", 0))
+        ):
+            try:
+                so.reload()
+                so.db_set("reserve_stock", 0, update_modified=False)
+                so.reload()
+                so.submit()
+                reserve_relaxed_for_launch = True
+                retried = True
+                # Record every impacted line as a backorder row for the
+                # response payload so the UI can show it in the pending
+                # section.
+                for it in items:
+                    ic = (it.get("item_code") or "").strip()
+                    wh = (it.get("warehouse") or profile.warehouse or "").strip()
+                    q = flt(it.get("qty") or 0)
+                    if not ic or q <= 0:
+                        continue
+                    already = any(
+                        r["item_code"] == ic and r["warehouse"] == wh
+                        for r in qty_pending_rows + serial_pending_rows
+                    )
+                    if already:
+                        continue
+                    qty_pending_rows.append({
+                        "item_code": ic,
+                        "item_name": frappe.db.get_value("Item", ic, "item_name") or ic,
+                        "warehouse": wh,
+                        "qty": q,
+                        "available": 0.0,
+                        "pending": q,
+                        "reason": "reservation_race",
+                    })
+            except Exception:
+                submit_warning = frappe.get_traceback()
+                frappe.log_error(
+                    submit_warning,
+                    f"Pre-booking submit retry (backorder) failed for {so.name}",
+                )
+                so.reload()
+        if not retried and not submit_warning:
+            submit_warning = frappe.get_traceback()
+            frappe.log_error(submit_warning, f"Pre-booking submit failed for {so.name}")
+            so.reload()
 
-    if flt(advance_amount) > 0 or notes:
+    if flt(advance_amount) > 0 or notes or serial_pending_rows or qty_pending_rows:
         comment = _("Pre-booking created")
         if flt(advance_amount) > 0:
             comment += _(" with advance of {0}").format(fmt_money(advance_amount, currency=so.currency))
         if notes:
             comment += _(". Notes: {0}").format(notes)
+        if serial_pending_rows:
+            pending_bits = ", ".join(
+                "{0} (pending {1})".format(r["item_code"], cint(r["pending"]))
+                for r in serial_pending_rows
+            )
+            comment += _(". IMEI pending for launch/backorder items: {0}").format(pending_bits)
+        if qty_pending_rows:
+            qty_bits = ", ".join(
+                "{0} (need {1}, on-hand {2})".format(
+                    r["item_code"], cint(r["qty"]), cint(r["available"])
+                )
+                for r in qty_pending_rows
+            )
+            comment += _(". Backorder qty pending for: {0}").format(qty_bits)
         try:
             so.add_comment("Comment", comment)
         except Exception:
@@ -624,12 +904,38 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
 
     advance_pe_name = advance_pe_names[0] if advance_pe_names else None
 
+    prebook_warning = None
+    warning_bits = []
+    if serial_pending_rows:
+        pending_txt = ", ".join(
+            "{0} (need {1}, assigned {2})".format(r["item_code"], cint(r["qty"]), cint(r["assigned"]))
+            for r in serial_pending_rows
+        )
+        warning_bits.append(_(
+            "IMEI not available yet for {0} — tag IMEI later before billing."
+        ).format(pending_txt))
+    if qty_pending_rows:
+        qty_txt = ", ".join(
+            "{0} (need {1}, on-hand {2})".format(
+                r["item_code"], cint(r["qty"]), cint(r["available"])
+            )
+            for r in qty_pending_rows
+        )
+        warning_bits.append(_(
+            "Backorder: qty short for {0} — no stock reservation yet, fulfilment will resume when supply arrives."
+        ).format(qty_txt))
+    if warning_bits:
+        prebook_warning = _("Created as backorder pre-booking. ") + " ".join(warning_bits)
+
     return {
         "doctype": "Sales Order",
         "name": so.name,
         "docstatus": so.docstatus,
         "status": so.status,
         "reserve_stock": cint(getattr(so, "reserve_stock", 0)),
+        "reserve_relaxed_for_launch": cint(reserve_relaxed_for_launch),
+        "serial_pending_rows": serial_pending_rows,
+        "qty_pending_rows": qty_pending_rows,
         "advance_amount": flt(advance_amount),
         "advance_payment_entry": advance_pe_name,
         "advance_payment_entries": advance_pe_names,
@@ -637,7 +943,7 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         "delivery_date": requested_delivery,
         "warning": _("Saved as draft") if so.docstatus == 0 and submit_warning else (
             _("Advance recorded but Payment Entry could not be created — please raise it manually")
-            if advance_pe_warning else None
+            if advance_pe_warning else prebook_warning
         ),
     }
 
@@ -770,6 +1076,301 @@ def cancel_pre_booking(sales_order, action="refund",
 
     return {"status": "cancelled", "name": so.name, "action": action,
             "refunded": round(refunded, 2), "retained": round(retained, 2)}
+
+
+@frappe.whitelist()
+def reassign_prebook_reserved_serial(
+    sales_order,
+    old_serial,
+    new_serial,
+    item_code=None,
+    reason=None,
+) -> dict:
+    """Manager-only: replace reserved IMEI/serial on an open pre-booking row.
+
+    Use case: free the currently reserved unit for a walk-in sale and reserve
+    another matching serial for the same Sales Order line.
+    """
+    _ensure_prebook_reassign_access()
+
+    sales_order = (sales_order or "").strip()
+    old_serial = (old_serial or "").strip()
+    new_serial = (new_serial or "").strip()
+    item_code = (item_code or "").strip() or None
+
+    if not sales_order or not old_serial or not new_serial:
+        frappe.throw(_("Sales Order, old IMEI/serial, and new IMEI/serial are required."))
+
+    so = _open_prebook_for_serial_edit(sales_order)
+
+    matches = []
+    for row in so.items:
+        if item_code and row.item_code != item_code:
+            continue
+        serials = _split_serial_blob(row.get("custom_serial_no"))
+        if old_serial in serials:
+            matches.append((row, serials))
+
+    if not matches:
+        frappe.throw(_("Old IMEI/serial {0} is not tagged on this pre-booking.").format(old_serial))
+    if len(matches) > 1:
+        frappe.throw(_("Ambiguous mapping: IMEI/serial appears on multiple rows."))
+
+    target_row, current_serials = matches[0]
+    target_wh = (target_row.warehouse or so.get("set_warehouse") or "").strip() or None
+
+    # Same serial requested: treat as no-op success for operator convenience.
+    if old_serial == new_serial:
+        return {
+            "status": "no_change",
+            "sales_order": so.name,
+            "item_code": target_row.item_code,
+            "old_serial": old_serial,
+            "new_serial": new_serial,
+            "warehouse": target_wh,
+        }
+
+    # New serial must exist and belong to the same item.
+    sn = frappe.db.get_value(
+        "Serial No",
+        new_serial,
+        ["name", "item_code", "warehouse", "status"],
+        as_dict=True,
+    )
+    if not sn:
+        frappe.throw(_("New IMEI/serial {0} does not exist.").format(new_serial))
+    if sn.item_code != target_row.item_code:
+        frappe.throw(
+            _("IMEI/serial {0} belongs to item {1}, expected {2}.").format(
+                new_serial, sn.item_code, target_row.item_code
+            )
+        )
+    if target_wh and (sn.warehouse or "") != target_wh:
+        frappe.throw(
+            _("IMEI/serial {0} is in warehouse {1}, expected {2}.").format(
+                new_serial,
+                sn.warehouse or _("(no warehouse)"),
+                target_wh,
+            )
+        )
+    if (sn.status or "").lower() not in ("", "active", "inactive"):
+        frappe.throw(
+            _("IMEI/serial {0} status is {1}; cannot reserve.").format(
+                new_serial,
+                sn.status or _("Unknown"),
+            )
+        )
+
+    # Block if reserved by another open pre-booking.
+    reserved_so = _get_open_reserved_sales_order_for_serial(new_serial, target_wh)
+    if reserved_so and reserved_so != so.name:
+        frappe.throw(
+            _("IMEI/serial {0} is already reserved on Sales Order {1}.").format(
+                new_serial, reserved_so
+            )
+        )
+
+    # Block duplicate serial assignment inside the same SO on a different row.
+    all_so_serials = set(_reserved_serials_on_so(so))
+    if new_serial in all_so_serials and new_serial not in current_serials:
+        frappe.throw(
+            _("IMEI/serial {0} is already tagged on another row in this pre-booking.").format(
+                new_serial
+            )
+        )
+
+    replaced = False
+    updated_serials = []
+    for serial in current_serials:
+        if serial == old_serial and not replaced:
+            updated_serials.append(new_serial)
+            replaced = True
+        else:
+            updated_serials.append(serial)
+
+    if not replaced:
+        frappe.throw(_("Could not replace old IMEI/serial in the target row."))
+
+    target_row.custom_serial_no = "\n".join(updated_serials)
+    so.flags.ignore_permissions = True
+    # Reservation-ledger edit on a submitted SO — skip the desk ATP advisory
+    # popup (already vetted at pre-book time) and let allow_on_submit=1 on
+    # the custom_serial_no field carry the save through.
+    so.flags.ch_skip_atp_warning = True
+    so.save(ignore_permissions=True)
+
+    note = _("Reserved IMEI reassigned on {0}: {1} → {2} for item {3} by {4}.").format(
+        so.name,
+        old_serial,
+        new_serial,
+        target_row.item_code,
+        frappe.session.user,
+    )
+    if reason:
+        note += " " + _("Reason: {0}").format(reason)
+    try:
+        so.add_comment("Comment", note)
+    except Exception:
+        pass
+
+    frappe.db.commit()
+    return {
+        "status": "ok",
+        "sales_order": so.name,
+        "item_code": target_row.item_code,
+        "old_serial": old_serial,
+        "new_serial": new_serial,
+        "warehouse": target_wh,
+    }
+
+
+@frappe.whitelist()
+def release_prebook_reserved_serial(sales_order, serial_no, item_code=None, reason=None) -> dict:
+    """Manager-only: unreserve one IMEI/serial from a pre-booking row."""
+    _ensure_prebook_reassign_access()
+
+    sales_order = (sales_order or "").strip()
+    serial_no = (serial_no or "").strip()
+    item_code = (item_code or "").strip() or None
+    if not sales_order or not serial_no:
+        frappe.throw(_("Sales Order and IMEI/serial are required."))
+
+    so = _open_prebook_for_serial_edit(sales_order)
+    target_row = None
+    serials = []
+    for row in so.items:
+        if item_code and row.item_code != item_code:
+            continue
+        cur = _split_serial_blob(row.get("custom_serial_no"))
+        if serial_no in cur:
+            target_row = row
+            serials = cur
+            break
+
+    if not target_row:
+        frappe.throw(_("IMEI/serial {0} is not reserved on this pre-booking.").format(serial_no))
+
+    new_serials = [s for s in serials if s != serial_no]
+    target_row.custom_serial_no = "\n".join(new_serials)
+    so.flags.ignore_permissions = True
+    so.flags.ch_skip_atp_warning = True
+    so.save(ignore_permissions=True)
+
+    # Market-standard reminder — the SO qty commitment stands; only the IMEI
+    # allocation has been cleared. Store should re-tag before pickup/billing.
+    row_qty = cint(flt(target_row.qty))
+    still_tagged = len(new_serials)
+    pending = max(row_qty - still_tagged, 0)
+
+    note = _("Reserved IMEI released on {0}: {1} (item {2}) by {3}.").format(
+        so.name, serial_no, target_row.item_code, frappe.session.user
+    )
+    if reason:
+        note += " " + _("Reason: {0}").format(reason)
+    try:
+        so.add_comment("Comment", note)
+    except Exception:
+        pass
+
+    frappe.db.commit()
+    # Market-standard reminder text (SAP/Oracle nudge equivalent) so the UI
+    # can show a yellow "action needed" toast right after Unreserve.
+    reminder = None
+    if pending > 0:
+        reminder = _(
+            "IMEI released. Row still needs {0} IMEI to be tagged before pickup/billing. "
+            "Use \u2018Add IMEI\u2019 in Pending Pickups when supply arrives."
+        ).format(pending)
+    return {
+        "status": "ok",
+        "sales_order": so.name,
+        "item_code": target_row.item_code,
+        "released_serial": serial_no,
+        "row_qty": row_qty,
+        "still_tagged": still_tagged,
+        "pending_imei": pending,
+        "reminder": reminder,
+    }
+
+
+@frappe.whitelist()
+def tag_prebook_reserved_serial(sales_order, item_code, serial_no, reason=None) -> dict:
+    """Manager-only: tag a new IMEI/serial on a pre-booking item row."""
+    _ensure_prebook_reassign_access()
+
+    sales_order = (sales_order or "").strip()
+    item_code = (item_code or "").strip()
+    serial_no = (serial_no or "").strip()
+    if not sales_order or not item_code or not serial_no:
+        frappe.throw(_("Sales Order, item, and IMEI/serial are required."))
+
+    so = _open_prebook_for_serial_edit(sales_order)
+
+    sn = frappe.db.get_value(
+        "Serial No",
+        serial_no,
+        ["name", "item_code", "warehouse", "status"],
+        as_dict=True,
+    )
+    if not sn:
+        frappe.throw(_("IMEI/serial {0} does not exist.").format(serial_no))
+    if sn.item_code != item_code:
+        frappe.throw(_("IMEI/serial {0} belongs to item {1}, expected {2}.").format(
+            serial_no, sn.item_code, item_code
+        ))
+
+    all_so_serials = set(_reserved_serials_on_so(so))
+    if serial_no in all_so_serials:
+        frappe.throw(_("IMEI/serial {0} is already tagged on this pre-booking.").format(serial_no))
+
+    reserved_so = _get_open_reserved_sales_order_for_serial(serial_no, sn.warehouse)
+    if reserved_so and reserved_so != so.name:
+        frappe.throw(_("IMEI/serial {0} is already reserved on Sales Order {1}.").format(
+            serial_no, reserved_so
+        ))
+
+    target_row = None
+    target_serials = []
+    for row in so.items:
+        if row.item_code != item_code:
+            continue
+        expected_wh = (row.warehouse or so.get("set_warehouse") or "").strip() or None
+        if expected_wh and (sn.warehouse or "") != expected_wh:
+            continue
+        cur = _split_serial_blob(row.get("custom_serial_no"))
+        if len(cur) < cint(flt(row.qty)):
+            target_row = row
+            target_serials = cur
+            break
+
+    if not target_row:
+        frappe.throw(
+            _("No eligible row found to tag IMEI for item {0}. Check qty/warehouse.").format(item_code)
+        )
+
+    target_serials.append(serial_no)
+    target_row.custom_serial_no = "\n".join(target_serials)
+    so.flags.ignore_permissions = True
+    so.flags.ch_skip_atp_warning = True
+    so.save(ignore_permissions=True)
+
+    note = _("Reserved IMEI tagged on {0}: {1} for item {2} by {3}.").format(
+        so.name, serial_no, item_code, frappe.session.user
+    )
+    if reason:
+        note += " " + _("Reason: {0}").format(reason)
+    try:
+        so.add_comment("Comment", note)
+    except Exception:
+        pass
+
+    frappe.db.commit()
+    return {
+        "status": "ok",
+        "sales_order": so.name,
+        "item_code": item_code,
+        "serial_no": serial_no,
+    }
 
 
 def _create_on_account_advance_pe(so, mode_of_payment, amount, reference_no=None):
@@ -1805,27 +2406,47 @@ def _rewrite_gl_entries(si_name):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _get_item_floor_price(item_code, company=None) -> float:
-    """Server-side Minimum Operating Price (MOP / floor) for an item.
+def _get_item_floor_price(item_code, company=None, channel="POS") -> float:
+    """Server-side approved POS price floor for an item.
 
-    Returns the LOWEST active configured MOP (>0) from CH Item Price, or 0.0
-    when none is configured. Using the lowest active floor avoids false-positive
-    blocks on legitimate POS sales (a stricter non-POS channel MOP won't wrongly
-    reject) while still catching egregious below-floor manipulation. The client
-    cannot be trusted to supply this — it is looked up fresh on the server.
+    CH Item Price.selling_price is the approved rate that syncs to ERPNext Item
+    Price for the channel. MOP is Market Operating Price and may be higher than
+    selling_price when pricing has already approved a markdown from MRP/MOP, so
+    it must not make an approved selling price look like a below-floor sale.
     """
     if not item_code:
         return 0.0
-    filters = {"item_code": item_code}
-    if company:
-        filters["company"] = ["in", [company, "", None]]
-    rows = frappe.get_all(
-        "CH Item Price", filters=filters, fields=["mop", "status"], limit=50)
-    mops = [
-        flt(r.mop) for r in rows
-        if flt(r.mop) > 0 and (r.get("status") or "").lower() in ("active", "approved", "")
-    ]
-    return min(mops) if mops else 0.0
+
+    def _fetch_price_rows(preferred_channel=None):
+        filters = {"item_code": item_code, "status": "Active"}
+        if preferred_channel:
+            filters["channel"] = preferred_channel
+        if company:
+            filters["company"] = ["in", [company, "", None]]
+        return frappe.get_all(
+            "CH Item Price",
+            filters=filters,
+            fields=["selling_price", "mop", "status", "channel"],
+            limit=50,
+        )
+
+    rows = _fetch_price_rows(channel)
+    if not rows and channel:
+        rows = _fetch_price_rows()
+
+    price_floor_candidates = []
+    for row in rows:
+        selling_price = flt(row.get("selling_price"))
+        mop = flt(row.get("mop"))
+        if selling_price > 0 and mop > 0:
+            price_floor_candidates.append(min(selling_price, mop))
+        elif selling_price > 0:
+            price_floor_candidates.append(selling_price)
+        elif mop > 0:
+            # Legacy fallback for old rows that pre-date required selling_price.
+            price_floor_candidates.append(mop)
+
+    return min(price_floor_candidates) if price_floor_candidates else 0.0
 
 
 @frappe.whitelist()
@@ -2176,11 +2797,11 @@ def create_pos_invoice(
             row["custom_exception_final_rate"] = item_exception_final
 
         # ── Minimum Selling Price floor (server-side, TC_002) ──────────────
-        # A sale below the item's configured MOP requires an authorized
-        # override. The client cannot enforce this — a crafted payload could
-        # otherwise bill below floor. An override is present when the header
-        # carries discount_authorized_by, or the row is manager-approved, or it
-        # is backed by a CH Exception Request.
+        # A sale below the item's approved channel selling price requires an
+        # authorized override. The client cannot enforce this — a crafted
+        # payload could otherwise bill below floor. An override is present when
+        # the header carries discount_authorized_by, or the row is
+        # manager-approved, or it is backed by a CH Exception Request.
         if (not item_is_plan and not item_is_vas and not is_free_bundle_row
                 and flt(effective_rate) > 0):
             floor_price = _get_item_floor_price(item.get("item_code"), profile.company)
@@ -7425,11 +8046,8 @@ def _reserved_serials_on_so(so) -> set:
     """All IMEIs reserved across a Sales Order's rows (custom_serial_no list)."""
     reserved = set()
     for it in so.items:
-        raw = it.get("custom_serial_no") or ""
-        for tok in str(raw).replace(",", "\n").splitlines():
-            tok = tok.strip()
-            if tok:
-                reserved.add(tok)
+        for tok in _split_serial_blob(it.get("custom_serial_no") or ""):
+            reserved.add(tok)
     return reserved
 
 

@@ -433,7 +433,8 @@ export class ExceptionWorkspace {
 				scope: "bill",
 			}
 		).then((rows) => {
-			if (!rows || !rows.length) {
+			const visible_rows = (rows || []).filter((r) => this._should_show_request(r));
+			if (!visible_rows.length) {
 				container.html(`<div class="text-muted text-center" style="padding:16px">${__("No requests found")}</div>`);
 				return;
 			}
@@ -448,7 +449,7 @@ export class ExceptionWorkspace {
 					<th></th>
 				</tr></thead><tbody>`;
 
-			rows.forEach((r) => {
+			visible_rows.forEach((r) => {
 				const status_cls = {
 					"Pending": "warning", "Approved": "success",
 					"Rejected": "danger", "Expired": "secondary",
@@ -483,6 +484,7 @@ function format_currency(val) {
 // Exposed as instance method via prototype assignment so it can use PosState/EventBus.
 ExceptionWorkspace.prototype._is_appliable = function (r) {
 	// Only fully-approved, not-yet-consumed exceptions can be applied to a cart.
+	if (!ExceptionWorkspace.prototype._should_show_request(r)) return false;
 	const status = (r && r.status) || "";
 	if (status !== "Approved" && status !== "Auto-Approved") return false;
 	if (r.pos_invoice) return false; // already consumed
@@ -490,6 +492,19 @@ ExceptionWorkspace.prototype._is_appliable = function (r) {
 	if (r.exception_type === "Stock Count Variance") return false;
 	if (r.reference_doctype === "CH Cycle Count") return false;
 	return true;
+};
+
+ExceptionWorkspace.prototype._should_show_request = function (r) {
+	if (!r || r.pos_invoice) return false;
+	if (r.exception_type === "Stock Count Variance") return false;
+	if (r.reference_doctype === "CH Cycle Count") return false;
+	if (!r.raised_at) return false;
+
+	const raised_at = Date.parse(String(r.raised_at).replace(" ", "T"));
+	if (!Number.isFinite(raised_at)) return false;
+
+	const age_ms = Date.now() - raised_at;
+	return age_ms <= 24 * 60 * 60 * 1000;
 };
 
 ExceptionWorkspace.prototype._apply_and_bill = function (exception_name) {

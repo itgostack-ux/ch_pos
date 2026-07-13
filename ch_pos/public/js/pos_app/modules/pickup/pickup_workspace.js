@@ -30,6 +30,7 @@ export class PickupWorkspace {
 		this._rows = [];
 		this._reserved_rows = [];
 		this._today_rows = [];
+		this._manager_roles = new Set(["Store Manager", "Stock Manager", "System Manager", "Administrator"]);
 		this._filter = { search: "", days_ahead: 30, overdue_only: 0 };
 		this._focus_so = null;
 		EventBus.on("workspace:render", (ctx) => {
@@ -159,6 +160,29 @@ export class PickupWorkspace {
 			this._refresh_kpis();
 			this._load();
 		});
+		panel.on("click", ".ch-pickup-reassign", (e) => {
+			const $btn = $(e.currentTarget);
+			this._open_reassign_dialog({
+				sales_order: $btn.data("so"),
+				old_serial: $btn.data("serial"),
+				item_code: $btn.data("item"),
+				customer_name: $btn.data("customer") || "",
+			});
+		});
+		panel.on("click", ".ch-pickup-unreserve", (e) => {
+			const $btn = $(e.currentTarget);
+			this._open_unreserve_dialog({
+				sales_order: $btn.data("so"),
+				serial_no: $btn.data("serial"),
+				item_code: $btn.data("item"),
+				customer_name: $btn.data("customer") || "",
+			});
+		});
+		panel.on("click", ".ch-pickup-add-imei", (e) => {
+			const name = $(e.currentTarget).data("name");
+			const row = this._rows.find((x) => x.name === name);
+			if (row) this._open_add_imei_dialog(row);
+		});
 		panel.on("click", ".ch-pickup-bill", (e) => {
 			const name = $(e.currentTarget).data("name");
 			const row = this._rows.find(r => r.name === name);
@@ -172,7 +196,7 @@ export class PickupWorkspace {
 				frappe.msgprint({
 					title: __("Reserved IMEI Not Tagged"),
 					indicator: "orange",
-					message: __("This prebooking reserves stock. Tag the reserved IMEI in the 'Reserved IMEIs / Serials' tab before billing."),
+					message: __("This pre-booking reserves stock, but no IMEI is tagged on its rows. Open the Sales Order, fill Reserved IMEI/Serial on serialized rows, then bill from Pickup."),
 				});
 				return;
 			}
@@ -373,13 +397,19 @@ export class PickupWorkspace {
 				</div>`
 				: (requires_imei_gate
 					? `<div class="small" style="margin-top:6px;color:#991b1b;">
-						<i class="fa fa-exclamation-triangle"></i> ${__("Reserved IMEI not tagged yet")}
+						<i class="fa fa-exclamation-triangle"></i> ${__("Reserved IMEI not tagged on pre-booking")}
 					</div>`
 					: "");
 			const bill_title = imei_ready
 				? __("Verify IMEI and create invoice")
 				: __("Cannot bill until reserved IMEI is available");
 			const row_state_class = imei_ready ? "ch-pickup-row-ready" : "ch-pickup-row-not-ready";
+			const can_manage = this._can_reassign_reserved();
+			const add_imei_btn = (!imei_ready && can_manage)
+				? `<button class="btn btn-default btn-sm ch-pickup-add-imei" data-name="${frappe.utils.escape_html(r.name)}">
+					<i class="fa fa-plus"></i> ${__("Add IMEI")}
+				</button>`
+				: "";
 
 			return `
 				<div class="ch-pickup-row ${row_state_class}" style="display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--pos-border);align-items:flex-start;">
@@ -405,6 +435,7 @@ export class PickupWorkspace {
 						<button class="btn btn-success btn-sm ch-pickup-bill" data-name="${r.name}" title="${frappe.utils.escape_html(bill_title)}">
 							<i class="fa fa-check"></i> ${__("Bill & Pickup")}
 						</button>
+						${add_imei_btn}
 					</div>
 				</div>
 			`;
@@ -428,6 +459,10 @@ export class PickupWorkspace {
 			return;
 		}
 		$list.html(`
+			<div class="text-muted" style="padding:8px 12px;font-size:12px;background:#f8fafc;border-bottom:1px solid var(--pos-border);">
+				<i class="fa fa-info-circle"></i>
+				${__("Reserved IMEIs are hidden from the Sell IMEI picker. Manager can Unreserve to release for walk-in sale, or Reassign to swap with another IMEI.")}
+			</div>
 			<table class="table table-condensed" style="margin:0;">
 				<thead>
 					<tr>
@@ -437,6 +472,7 @@ export class PickupWorkspace {
 						<th>${__("Sales Order")}</th>
 						<th>${__("Due")}</th>
 						<th>${__("Warehouse")}</th>
+						<th style="width:180px;">${__("Action")}</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -444,6 +480,27 @@ export class PickupWorkspace {
 						const overdue = r.is_overdue
 							? `<span style="background:#fee2e2;color:#b91c1c;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:600;margin-left:6px;">${__("Overdue")}</span>`
 							: "";
+						const can_reassign = this._can_reassign_reserved();
+						const action_btn = can_reassign
+							? `<div style="display:flex;gap:6px;flex-wrap:wrap;">
+								<button class="btn btn-warning btn-xs ch-pickup-unreserve"
+									data-so="${frappe.utils.escape_html(r.sales_order)}"
+									data-serial="${frappe.utils.escape_html(r.serial_no)}"
+									data-item="${frappe.utils.escape_html(r.item_code)}"
+									data-customer="${frappe.utils.escape_html(r.customer_name || r.customer || "")}"
+									title="${__("Release this IMEI so it becomes available in Sell")}">
+									<i class="fa fa-unlock"></i> ${__("Unreserve")}
+								</button>
+								<button class="btn btn-default btn-xs ch-pickup-reassign"
+									data-so="${frappe.utils.escape_html(r.sales_order)}"
+									data-serial="${frappe.utils.escape_html(r.serial_no)}"
+									data-item="${frappe.utils.escape_html(r.item_code)}"
+									data-customer="${frappe.utils.escape_html(r.customer_name || r.customer || "")}"
+									title="${__("Swap this IMEI with another one for the same item")}">
+									<i class="fa fa-exchange"></i> ${__("Reassign")}
+								</button>
+							</div>`
+							: `<span class="text-muted small" title="${__("Requires Store Manager / Stock Manager / System Manager role")}">${__("Manager only")}</span>`;
 						return `
 							<tr>
 								<td><code>${frappe.utils.escape_html(r.serial_no)}</code></td>
@@ -452,12 +509,178 @@ export class PickupWorkspace {
 								<td>${frappe.utils.escape_html(r.sales_order)}</td>
 								<td>${r.delivery_date || "—"}${overdue}</td>
 								<td>${frappe.utils.escape_html(r.warehouse || "—")}</td>
+								<td>${action_btn}</td>
 							</tr>
 						`;
 					}).join("")}
 				</tbody>
 			</table>
 		`);
+	}
+
+	_can_reassign_reserved() {
+		const roles = Array.isArray(frappe.user_roles) ? frappe.user_roles : [];
+		return roles.some((r) => this._manager_roles.has(r));
+	}
+
+	_open_reassign_dialog(ctx) {
+		if (!ctx || !ctx.sales_order || !ctx.old_serial || !ctx.item_code) return;
+
+		const d = new frappe.ui.Dialog({
+			title: __("Reassign Reserved IMEI"),
+			fields: [
+				{ fieldname: "sales_order", fieldtype: "Data", label: __("Sales Order"), read_only: 1, default: ctx.sales_order },
+				{ fieldname: "customer", fieldtype: "Data", label: __("Customer"), read_only: 1, default: ctx.customer_name || "" },
+				{ fieldname: "item_code", fieldtype: "Data", label: __("Item"), read_only: 1, default: ctx.item_code },
+				{ fieldname: "old_serial", fieldtype: "Data", label: __("Current Reserved IMEI"), read_only: 1, default: ctx.old_serial },
+				{ fieldname: "new_serial", fieldtype: "Data", label: __("New IMEI / Serial"), reqd: 1 },
+				{ fieldname: "reason", fieldtype: "Small Text", label: __("Reason"), reqd: 1 },
+			],
+			primary_action_label: __("Reassign"),
+			primary_action: (v) => {
+				const new_serial = String(v.new_serial || "").trim();
+				if (!new_serial) {
+					frappe.show_alert({ message: __("Enter new IMEI/serial"), indicator: "orange" });
+					return;
+				}
+				frappe.call({
+					method: "ch_pos.api.pos_api.reassign_prebook_reserved_serial",
+					args: {
+						sales_order: ctx.sales_order,
+						old_serial: ctx.old_serial,
+						new_serial,
+						item_code: ctx.item_code,
+						reason: v.reason,
+					},
+					freeze: true,
+					freeze_message: __("Reassigning reserved IMEI..."),
+					callback: (r) => {
+						if (!r.message) return;
+						d.hide();
+						const out = r.message;
+						frappe.show_alert({
+							message: __("Reassigned on {0}: {1} → {2}", [out.sales_order, out.old_serial, out.new_serial]),
+							indicator: out.status === "ok" ? "green" : "orange",
+						});
+						this._refresh_kpis();
+						this._load();
+					},
+				});
+			},
+		});
+		d.show();
+	}
+
+	_open_unreserve_dialog(ctx) {
+		if (!ctx || !ctx.sales_order || !ctx.serial_no || !ctx.item_code) return;
+		const d = new frappe.ui.Dialog({
+			title: __("Unreserve IMEI"),
+			fields: [
+				{ fieldname: "sales_order", fieldtype: "Data", label: __("Sales Order"), read_only: 1, default: ctx.sales_order },
+				{ fieldname: "customer", fieldtype: "Data", label: __("Customer"), read_only: 1, default: ctx.customer_name || "" },
+				{ fieldname: "item_code", fieldtype: "Data", label: __("Item"), read_only: 1, default: ctx.item_code },
+				{ fieldname: "serial_no", fieldtype: "Data", label: __("Reserved IMEI"), read_only: 1, default: ctx.serial_no },
+				{ fieldname: "reason", fieldtype: "Small Text", label: __("Reason"), reqd: 1 },
+			],
+			primary_action_label: __("Unreserve"),
+			primary_action: (v) => {
+				frappe.call({
+					method: "ch_pos.api.pos_api.release_prebook_reserved_serial",
+					args: {
+						sales_order: ctx.sales_order,
+						serial_no: ctx.serial_no,
+						item_code: ctx.item_code,
+						reason: v.reason,
+					},
+					freeze: true,
+					freeze_message: __("Releasing reserved IMEI..."),
+					callback: (r) => {
+						if (!r.message) return;
+						d.hide();
+						const msg = r.message || {};
+						frappe.show_alert({
+							message: __("Unreserved {0} from {1}", [ctx.serial_no, ctx.sales_order]),
+							indicator: "orange",
+						});
+						// Market-standard reminder — SO commitment stands; row
+						// still needs an IMEI before pickup/billing. Show a
+						// prominent yellow msgprint so the manager doesn't
+						// forget to re-tag once new stock arrives.
+						if (msg.reminder) {
+							frappe.msgprint({
+								title: __("IMEI Pending Reminder"),
+								indicator: "orange",
+								message: `
+									<div style="padding:8px 2px;">
+										<div style="font-weight:600;margin-bottom:6px;">
+											<i class="fa fa-hourglass-half"></i>
+											${__("Reservation released, but the order still needs IMEI.")}
+										</div>
+										<div style="font-size:12px;line-height:1.5;">
+											${frappe.utils.escape_html(msg.reminder)}
+										</div>
+										<div class="text-muted" style="font-size:11px;margin-top:8px;">
+											${__("Sales Order: {0} · Item: {1} · Qty: {2} · Tagged: {3} · Pending IMEI: {4}",
+												[msg.sales_order, msg.item_code, cint(msg.row_qty), cint(msg.still_tagged), cint(msg.pending_imei)])}
+										</div>
+									</div>
+								`,
+							});
+						}
+						this._refresh_kpis();
+						this._load();
+					},
+				});
+			},
+		});
+		d.show();
+	}
+
+	_open_add_imei_dialog(row) {
+		const item_options = [...new Set((row.items || []).map((it) => it.item_code).filter(Boolean))];
+		if (!item_options.length) {
+			frappe.show_alert({ message: __("No item rows found on this pre-booking."), indicator: "orange" });
+			return;
+		}
+		const d = new frappe.ui.Dialog({
+			title: __("Add IMEI to Pre-Booking"),
+			fields: [
+				{ fieldname: "sales_order", fieldtype: "Data", label: __("Sales Order"), read_only: 1, default: row.name },
+				{ fieldname: "item_code", fieldtype: "Select", label: __("Item"), reqd: 1, options: item_options.join("\n"), default: item_options[0] },
+				{ fieldname: "serial_no", fieldtype: "Data", label: __("IMEI / Serial"), reqd: 1 },
+				{ fieldname: "reason", fieldtype: "Small Text", label: __("Reason"), reqd: 1 },
+			],
+			primary_action_label: __("Add IMEI"),
+			primary_action: (v) => {
+				const serial_no = String(v.serial_no || "").trim();
+				if (!serial_no) {
+					frappe.show_alert({ message: __("Enter IMEI/serial"), indicator: "orange" });
+					return;
+				}
+				frappe.call({
+					method: "ch_pos.api.pos_api.tag_prebook_reserved_serial",
+					args: {
+						sales_order: row.name,
+						item_code: v.item_code,
+						serial_no,
+						reason: v.reason,
+					},
+					freeze: true,
+					freeze_message: __("Tagging IMEI..."),
+					callback: (r) => {
+						if (!r.message) return;
+						d.hide();
+						frappe.show_alert({
+							message: __("Tagged {0} on {1}", [serial_no, row.name]),
+							indicator: "green",
+						});
+						this._refresh_kpis();
+						this._load();
+					},
+				});
+			},
+		});
+		d.show();
 	}
 
 	_render_today() {

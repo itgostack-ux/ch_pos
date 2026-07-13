@@ -208,7 +208,8 @@ export class PrebookWorkspace {
 
 	_render_create() {
 		const { cart, customer, total } = this._read_cart_ctx();
-		const rows = cart.length
+		const has_cart = cart.length > 0;
+		const rows = has_cart
 			? cart.map((it) => `
 				<tr>
 					<td>${frappe.utils.escape_html(it.item_name || it.item_code)}</td>
@@ -217,56 +218,76 @@ export class PrebookWorkspace {
 					<td style="text-align:right"><b>\u20B9${format_number(flt(it.qty || 1) * flt(it.rate || 0))}</b></td>
 				</tr>
 			`).join("")
-			: `<tr><td colspan="4" class="text-muted" style="padding:20px;text-align:center;">
-				${__("Cart is empty. Add items in the Sell workspace first, then return here.")}
-			</td></tr>`;
+			: "";
+
+		const cart_card = has_cart
+			? `<div style="background:#fff;border:1px solid var(--pos-border);border-radius:var(--pos-radius);padding:14px;">
+					<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+						<b>${__("Customer")}</b>
+						<span class="text-muted">${frappe.utils.escape_html(customer || __("(no customer selected)"))}</span>
+					</div>
+					<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+						<b>${__("Cart Items (optional starting point)")}</b>
+						<span>${cart.length} ${__("line(s)")}</span>
+					</div>
+					<table class="table table-condensed" style="margin:0;">
+						<thead>
+							<tr>
+								<th>${__("Item")}</th>
+								<th style="text-align:right">${__("Qty")}</th>
+								<th style="text-align:right">${__("Rate")}</th>
+								<th style="text-align:right">${__("Amount")}</th>
+							</tr>
+						</thead>
+						<tbody>${rows}</tbody>
+						<tfoot>
+							<tr>
+								<th colspan="3" style="text-align:right">${__("Total")}</th>
+								<th style="text-align:right">\u20B9${format_number(total)}</th>
+							</tr>
+						</tfoot>
+					</table>
+					<div class="text-muted" style="font-size:11px;margin-top:8px;">
+						${__("These cart items are only a starting point. You can add more items — including out-of-stock or upcoming-launch items — inside the Pre-Booking form.")}
+					</div>
+				</div>`
+			: `<div style="background:#fff;border:1px solid var(--pos-border);border-radius:var(--pos-radius);padding:24px;text-align:center;">
+					<i class="fa fa-bookmark" style="font-size:36px;color:#0369a1;opacity:0.6;"></i>
+					<h4 style="margin:12px 0 6px;">${__("Start a New Pre-Booking")}</h4>
+					<p class="text-muted" style="font-size:13px;margin-bottom:16px;">
+						${__("Add any item from the full Item list — including items not currently in stock (upcoming launches, back-orders, custom orders). Reserve stock when available, or tag IMEI later before billing.")}
+					</p>
+					<button class="btn btn-success btn-lg ch-prebook-reserve">
+						<i class="fa fa-plus-circle"></i> ${__("New Pre-Booking")}
+					</button>
+					<button class="btn btn-default btn-lg ch-prebook-proforma" style="margin-left:8px;">
+						<i class="fa fa-file-text-o"></i> ${__("New Proforma")}
+					</button>
+					<div class="text-muted" style="font-size:11px;margin-top:12px;">
+						${__("Pre-Booking = Sales Order with reservation + advance. Proforma = non-binding quotation.")}
+					</div>
+				</div>`;
 
 		return `
 			<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;">
 				<div style="flex:2;min-width:380px;">
-					<div style="background:#fff;border:1px solid var(--pos-border);border-radius:var(--pos-radius);padding:14px;">
-						<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-							<b>${__("Customer")}</b>
-							<span class="text-muted">${frappe.utils.escape_html(customer || __("(no customer selected)"))}</span>
-						</div>
-						<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-							<b>${__("Cart Items")}</b>
-							<span>${cart.length} ${__("line(s)")}</span>
-						</div>
-						<table class="table table-condensed" style="margin:0;">
-							<thead>
-								<tr>
-									<th>${__("Item")}</th>
-									<th style="text-align:right">${__("Qty")}</th>
-									<th style="text-align:right">${__("Rate")}</th>
-									<th style="text-align:right">${__("Amount")}</th>
-								</tr>
-							</thead>
-							<tbody>${rows}</tbody>
-							<tfoot>
-								<tr>
-									<th colspan="3" style="text-align:right">${__("Total")}</th>
-									<th style="text-align:right">\u20B9${format_number(total)}</th>
-								</tr>
-							</tfoot>
-						</table>
-					</div>
+					${cart_card}
 				</div>
 
 				<div style="flex:1;min-width:280px;">
 					<div style="background:#fff;border:1px solid var(--pos-border);border-radius:var(--pos-radius);padding:14px;display:flex;flex-direction:column;gap:10px;">
-						<button class="btn btn-primary btn-block ch-prebook-proforma" ${cart.length ? "" : "disabled"}>
+						<button class="btn btn-primary btn-block ch-prebook-proforma">
 							<i class="fa fa-file-text-o"></i> ${__("Generate Proforma Invoice")}
 						</button>
 						<div class="text-muted" style="font-size:11px;margin-top:-4px;">
 							${__("Creates a submitted Quotation and opens the Proforma Invoice print format. No stock reservation.")}
 						</div>
 						<hr style="margin:8px 0;">
-						<button class="btn btn-success btn-block ch-prebook-reserve" ${cart.length ? "" : "disabled"}>
+						<button class="btn btn-success btn-block ch-prebook-reserve">
 							<i class="fa fa-bookmark"></i> ${__("Create Pre-Booking (Reserve Stock)")}
 						</button>
 						<div class="text-muted" style="font-size:11px;margin-top:-4px;">
-							${__("Creates a Sales Order with stock reservation. Accepts an optional advance amount.")}
+							${__("Opens an editable Pre-Booking form. Pick any item — stock availability is not required.")}
 						</div>
 					</div>
 				</div>
@@ -504,8 +525,24 @@ export class PrebookWorkspace {
 	}
 
 	_proforma_flow(cart, customer) {
-		const cart_total = (cart || []).reduce(
-			(s, it) => s + flt(it.qty || 1) * flt(it.rate || 0), 0,
+		let seed_items = (cart || []).map((it) => ({
+			item_code: it.item_code,
+			qty: flt(it.qty || 1),
+			rate: flt(it.rate || 0),
+			uom: it.uom || "Nos",
+			warehouse: it.warehouse || PosState.warehouse || "",
+		}));
+		if (!seed_items.length) {
+			seed_items = [{
+				item_code: "",
+				qty: 1,
+				rate: 0,
+				uom: "Nos",
+				warehouse: PosState.warehouse || "",
+			}];
+		}
+		const initial_total = (seed_items || []).reduce(
+			(s, it) => s + flt(it.qty || 0) * flt(it.rate || 0), 0,
 		);
 		const dlg = new frappe.ui.Dialog({
 			title: __("Generate Proforma Invoice"),
@@ -518,28 +555,67 @@ export class PrebookWorkspace {
 					fieldname: "valid_till", fieldtype: "Date", label: __("Valid Till"),
 					default: frappe.datetime.add_days(frappe.datetime.nowdate(), 15),
 				},
+				{ fieldname: "section_break_items", fieldtype: "Section Break", label: __("Proforma Items") },
+				{
+					fieldname: "items_hint",
+					fieldtype: "HTML",
+					options: `<div class="text-muted" style="font-size:12px;margin-bottom:6px;">${__("Select Item to search the full item list (not limited by current sellable stock).")}</div>`,
+				},
+				{
+					fieldname: "proforma_items",
+					fieldtype: "Table",
+					label: __("Items"),
+					reqd: 1,
+					in_place_edit: 1,
+					data: seed_items,
+					fields: [
+						{
+							fieldname: "item_code",
+							fieldtype: "Link",
+							options: "Item",
+							label: __("Item"),
+							reqd: 1,
+							in_list_view: 1,
+							get_query: () => ({ filters: { disabled: 0, is_sales_item: 1 } }),
+						},
+						{ fieldname: "qty", fieldtype: "Float", label: __("Qty"), reqd: 1, in_list_view: 1, default: 1 },
+						{ fieldname: "rate", fieldtype: "Currency", label: __("Rate"), reqd: 1, in_list_view: 1, default: 0 },
+						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos" },
+						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 1 },
+					],
+				},
 				{ fieldname: "section_break_b", fieldtype: "Section Break" },
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Terms / Notes") },
 				{
 					fieldname: "html_total", fieldtype: "HTML",
-					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> \u20B9${format_number(cart_total)}</div>
+					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> \u20B9${format_number(initial_total)}</div>
 						<div class="text-muted" style="font-size:11px;text-align:right;">${__("Proforma is a non-binding quote. Collect advance via Pre-Booking only.")}</div>`,
 				},
 			],
 			primary_action_label: __("Generate"),
 			primary_action: (v) => {
+				const table_rows = (v.proforma_items || [])
+					.filter((r) => r && r.item_code && flt(r.qty) > 0)
+					.map((r) => ({
+						item_code: r.item_code,
+						qty: flt(r.qty || 1),
+						rate: flt(r.rate || 0),
+						uom: r.uom || "Nos",
+						warehouse: r.warehouse || PosState.warehouse || null,
+					}));
+				if (!table_rows.length) {
+					frappe.show_alert({
+						message: __("Add at least one item in the proforma table."),
+						indicator: "red",
+					});
+					return;
+				}
 				frappe.call({
 					method: "ch_pos.api.pos_api.create_pos_quotation",
 					args: {
 						pos_profile: PosState.pos_profile,
 						customer: v.customer,
-						items: cart.map((it) => ({
-							item_code: it.item_code,
-							qty: flt(it.qty || 1),
-							rate: flt(it.rate || 0),
-							uom: it.uom || "Nos",
-							warehouse: it.warehouse,
-						})),
+						items: table_rows,
 						valid_till: v.valid_till,
 						notes: v.notes,
 					},
@@ -585,6 +661,26 @@ export class PrebookWorkspace {
 	}
 
 	_prebook_flow(cart, customer, total) {
+		let seed_items = (cart || []).map((it) => ({
+			item_code: it.item_code,
+			qty: flt(it.qty || 1),
+			rate: flt(it.rate || 0),
+			uom: it.uom || "Nos",
+			warehouse: it.warehouse || PosState.warehouse || "",
+			serial_no: String(it.serial_no || "").trim(),
+		}));
+		if (!seed_items.length) {
+			seed_items = [{
+				item_code: "",
+				qty: 1,
+				rate: 0,
+				uom: "Nos",
+				warehouse: PosState.warehouse || "",
+				serial_no: "",
+			}];
+		}
+		const initial_total = (seed_items || []).reduce((s, it) => s + flt(it.qty || 0) * flt(it.rate || 0), 0);
+
 		const dlg = new frappe.ui.Dialog({
 			title: __("Create Pre-Booking (Reserve Stock)"),
 			fields: [
@@ -605,6 +701,36 @@ export class PrebookWorkspace {
 					fieldname: "reserve_stock", fieldtype: "Check",
 					label: __("Reserve Stock"), default: 1,
 				},
+				{ fieldname: "section_break_items", fieldtype: "Section Break", label: __("Pre-Booking Items") },
+				{
+					fieldname: "items_hint",
+					fieldtype: "HTML",
+					options: `<div class="text-muted" style="font-size:12px;margin-bottom:6px;">${__("Select Item to search the full item list (not limited by current sellable stock).")}</div>`,
+				},
+				{
+					fieldname: "prebook_items",
+					fieldtype: "Table",
+					label: __("Items"),
+					reqd: 1,
+					in_place_edit: 1,
+					data: seed_items,
+					fields: [
+						{
+							fieldname: "item_code",
+							fieldtype: "Link",
+							options: "Item",
+							label: __("Item"),
+							reqd: 1,
+							in_list_view: 1,
+							get_query: () => ({ filters: { disabled: 0, is_sales_item: 1 } }),
+						},
+						{ fieldname: "qty", fieldtype: "Float", label: __("Qty"), reqd: 1, in_list_view: 1, default: 1 },
+						{ fieldname: "rate", fieldtype: "Currency", label: __("Rate"), reqd: 1, in_list_view: 1, default: 0 },
+						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos" },
+						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 1 },
+						{ fieldname: "serial_no", fieldtype: "Data", label: __("IMEI / Serial"), in_list_view: 1 },
+					],
+				},
 				{ fieldname: "section_break_pay", fieldtype: "Section Break" },
 				{
 					fieldname: "payments_html", fieldtype: "HTML",
@@ -616,11 +742,31 @@ export class PrebookWorkspace {
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Notes") },
 				{
 					fieldname: "html_total", fieldtype: "HTML",
-					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> ₹${format_number(total)}</div>`,
+					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> ₹${format_number(initial_total || total || 0)}</div>
+						<div class="text-muted" style="font-size:11px;text-align:right;">${__("Order total is computed from the item rows above.")}</div>`,
 				},
 			],
 			primary_action_label: __("Create Pre-Booking"),
 			primary_action: (v) => {
+				const table_rows = (v.prebook_items || [])
+					.filter((r) => r && r.item_code && flt(r.qty) > 0)
+					.map((r) => ({
+						item_code: r.item_code,
+						qty: flt(r.qty || 1),
+						rate: flt(r.rate || 0),
+						uom: r.uom || "Nos",
+						warehouse: r.warehouse || PosState.warehouse || null,
+						serial_no: String(r.serial_no || "").trim(),
+					}));
+
+				if (!table_rows.length) {
+					frappe.show_alert({
+						message: __("Add at least one item in the pre-booking table."),
+						indicator: "red",
+					});
+					return;
+				}
+
 				// Parse split-tender rows from the inline UI's hidden payload
 				let payments = [];
 				try { payments = JSON.parse(v.payments_json || "[]"); } catch (e) { payments = []; }
@@ -667,23 +813,46 @@ export class PrebookWorkspace {
 					}
 				}
 
+				const reserve_stock = v.reserve_stock ? 1 : 0;
+				const duplicate_serials = [];
+				const seen_serials = new Set();
+				const items_payload = table_rows.map((it) => {
+					const serial_no = String(it.serial_no || "").trim();
+					if (serial_no) {
+						if (seen_serials.has(serial_no)) duplicate_serials.push(serial_no);
+						seen_serials.add(serial_no);
+					}
+					return {
+						item_code: it.item_code,
+						qty: flt(it.qty || 1),
+						rate: flt(it.rate || 0),
+						uom: it.uom || "Nos",
+						warehouse: it.warehouse,
+						serial_no,
+					};
+				});
+
+				if (duplicate_serials.length) {
+					frappe.show_alert({
+						message: __("Duplicate IMEI/Serial in pre-booking cart: {0}", [
+							[...new Set(duplicate_serials)].join(", "),
+						]),
+						indicator: "red",
+					});
+					return;
+				}
+
 				frappe.call({
 					method: "ch_pos.api.pos_api.create_pre_booking",
 					args: {
 						pos_profile: PosState.pos_profile,
 						customer: v.customer,
-						items: cart.map((it) => ({
-							item_code: it.item_code,
-							qty: flt(it.qty || 1),
-							rate: flt(it.rate || 0),
-							uom: it.uom || "Nos",
-							warehouse: it.warehouse,
-						})),
+						items: items_payload,
 						delivery_date: v.delivery_date,
 						advance_amount: flt(v.advance_amount),
 						payments: payments,
 						notes: v.notes,
-						reserve_stock: v.reserve_stock ? 1 : 0,
+						reserve_stock,
 					},
 					freeze: true,
 					freeze_message: __("Creating Pre-Booking..."),
@@ -705,6 +874,8 @@ export class PrebookWorkspace {
 		const so_name = so.name || __("Sales Order");
 		const so_url = `/app/sales-order/${encodeURIComponent(so_name)}`;
 		const so_print = `/printview?doctype=Sales%20Order&name=${encodeURIComponent(so_name)}&no_letterhead=0`;
+		const pending_rows = (so.serial_pending_rows || []).filter(Boolean);
+		const qty_pending_rows = (so.qty_pending_rows || []).filter(Boolean);
 		const pe_details = (so.advance_payment_entries_detail || []).filter(Boolean);
 		const pe_names = pe_details.length
 			? pe_details.map((d) => d.name).filter(Boolean)
@@ -738,6 +909,43 @@ export class PrebookWorkspace {
 					</div>`;
 			}).join("")
 			: `<div class="text-muted" style="font-size:12px;">${__("No advance receipt generated.")}</div>`;
+
+		const pending_html = pending_rows.length
+			? `<div style="margin-top:10px;padding:10px;border:1px solid #f59e0b;border-radius:8px;background:#fffbeb;">
+				<div style="font-weight:600;color:#92400e;margin-bottom:6px;">
+					<i class="fa fa-exclamation-triangle"></i> ${__("IMEI Pending Items")}
+				</div>
+				<div class="text-muted" style="font-size:12px;margin-bottom:6px;">
+					${__("Pre-booking is created as launch/backorder. Tag IMEI before billing in Pickup flow.")}
+				</div>
+				<div style="font-size:12px;">
+					${pending_rows.map((r) => {
+						const label = frappe.utils.escape_html(r.item_name || r.item_code || "");
+						const code = frappe.utils.escape_html(r.item_code || "");
+						return `<div style="margin:2px 0;">• <b>${label}</b> <span class="text-muted">(${code})</span> — ${__("Need")}: ${cint(r.qty)} · ${__("Assigned")}: ${cint(r.assigned)} · <span style="color:#b91c1c;">${__("Pending")}: ${cint(r.pending)}</span></div>`;
+					}).join("")}
+				</div>
+			</div>`
+			: "";
+
+		const qty_pending_html = qty_pending_rows.length
+			? `<div style="margin-top:10px;padding:10px;border:1px solid #fb923c;border-radius:8px;background:#fff7ed;">
+				<div style="font-weight:600;color:#9a3412;margin-bottom:6px;">
+					<i class="fa fa-hourglass-half"></i> ${__("Backorder Qty Pending")}
+				</div>
+				<div class="text-muted" style="font-size:12px;margin-bottom:6px;">
+					${__("No physical stock in the source warehouse — pre-booking is accepted without a stock reservation. Fulfilment resumes when supply arrives (matches SAP MTO / Oracle ATP / Zoho backorder).")}
+				</div>
+				<div style="font-size:12px;">
+					${qty_pending_rows.map((r) => {
+						const label = frappe.utils.escape_html(r.item_name || r.item_code || "");
+						const code = frappe.utils.escape_html(r.item_code || "");
+						const wh = frappe.utils.escape_html(r.warehouse || "");
+						return `<div style="margin:2px 0;">• <b>${label}</b> <span class="text-muted">(${code})</span> — ${__("Warehouse")}: ${wh} · ${__("Need")}: ${cint(r.qty)} · ${__("On-hand")}: ${cint(r.available)} · <span style="color:#b91c1c;">${__("Backorder")}: ${cint(r.pending)}</span></div>`;
+					}).join("")}
+				</div>
+			</div>`
+			: "";
 
 		frappe.msgprint({
 			title: __("Pre-Booking Created"),
@@ -773,6 +981,8 @@ export class PrebookWorkspace {
 							<i class="fa fa-print"></i> ${__("Print Pre-Booking")}
 						</a>
 					</div>
+					${pending_html}
+					${qty_pending_html}
 				</div>`,
 			primary_action: {
 				label: __("Open Pickup / Bill Queue"),
@@ -1101,6 +1311,8 @@ export class PrebookWorkspace {
 				rate: flt(it.rate || 0),
 				uom: it.uom || "Nos",
 				warehouse: it.warehouse,
+				has_serial_no: cint(it.has_serial_no || 0),
+				serial_no: (it.serial_no || "").trim(),
 				source_quotation: res.quotation,
 				quotation_item: it.quotation_item,
 			}));
