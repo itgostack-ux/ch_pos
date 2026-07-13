@@ -152,6 +152,110 @@ export class PrebookWorkspace {
 		return { cart, customer, total };
 	}
 
+	/**
+	 * Fetch the active selling price for an item — CH Item Price (POS
+	 * channel, Active) first, then fall back to the active Price List
+	 * (POS profile's selling_price_list, else Standard Selling), else
+	 * Item.standard_rate.
+	 *
+	 * Returns { rate, mrp, stock_uom } or {} when nothing resolves.
+	 */
+	async _resolve_item_price(item_code) {
+		if (!item_code) return {};
+		try {
+			const detail = await frappe.xcall(
+				"ch_pos.api.search.get_item_detail_for_pos",
+				{ item_code, warehouse: PosState.warehouse || null }
+			);
+			const rate = flt(detail?.selling_price || detail?.mrp || 0);
+			if (rate > 0 || flt(detail?.mrp) > 0) {
+				return { rate: flt(detail.selling_price || detail.mrp), mrp: flt(detail.mrp), stock_uom: null };
+			}
+		} catch (e) {
+			// fall through to Item Price / standard_rate
+		}
+		try {
+			const price_list = PosState.price_list
+				|| frappe.defaults.get_default("selling_price_list")
+				|| "Standard Selling";
+			const ip = await frappe.db.get_value("Item Price",
+				{ item_code, price_list, selling: 1 },
+				"price_list_rate");
+			if (ip && flt(ip.message?.price_list_rate) > 0) {
+				return { rate: flt(ip.message.price_list_rate), mrp: 0, stock_uom: null };
+			}
+		} catch (e) { /* ignore */ }
+		try {
+			const item = await frappe.db.get_value("Item", item_code,
+				["standard_rate", "stock_uom"]);
+			return {
+				rate: flt(item?.message?.standard_rate || 0),
+				mrp: 0,
+				stock_uom: item?.message?.stock_uom || null,
+			};
+		} catch (e) {
+			return {};
+		}
+	}
+
+	/**
+	 * Return an onchange handler for the item_code child field in a
+	 * Dialog Table so picking an Item auto-populates rate (from CH Item
+	 * Price / Item Price) and stock UOM. Called with `this` = the child
+	 * cell control (Frappe grid_row semantics). Also re-renders the
+	 * dialog's html_total block if present.
+	 *
+	 * `get_dlg` is a thunk because the enclosing dialog is often not yet
+	 * constructed at the point the field spec is built.
+	 */
+	_make_item_code_onchange(get_dlg, items_fieldname) {
+		const workspace = this;
+		return function () {
+			// `this` = the item_code cell control; this.doc = row plain obj
+			const row = this.doc;
+			if (!row || !row.item_code) return;
+			workspace._resolve_item_price(row.item_code).then((info) => {
+				const dlg = get_dlg();
+				const grid = dlg?.fields_dict?.[items_fieldname]?.grid;
+				const grid_row = grid?.grid_rows_by_docname?.[row.name];
+				if (!grid_row) return;
+				const patch = {};
+				if (info.rate && !flt(row.rate)) patch.rate = info.rate;
+				if (info.stock_uom && (!row.uom || row.uom === "Nos")) patch.uom = info.stock_uom;
+				Object.entries(patch).forEach(([field, value]) => {
+					row[field] = value;
+					grid.set_value(field, value, row);
+				});
+				workspace._refresh_dialog_total(dlg, items_fieldname);
+				if (info.rate && !patch.rate) {
+					// Rate was already set — show a small hint instead of overwriting cashier input.
+					frappe.show_alert({
+						message: __("Suggested rate for {0}: ₹{1}", [row.item_code, format_number(info.rate)]),
+						indicator: "blue",
+					}, 4);
+				} else if (!info.rate) {
+					frappe.show_alert({
+						message: __("No selling price configured for {0}. Enter rate manually.", [row.item_code]),
+						indicator: "orange",
+					}, 5);
+				}
+			});
+		};
+	}
+
+	/**
+	 * Recompute the Order Total shown in the dialog's html_total HTML
+	 * block from the current items table.
+	 */
+	_refresh_dialog_total(dlg, items_fieldname) {
+		if (!dlg) return;
+		const rows = dlg.get_value(items_fieldname) || [];
+		const total = rows.reduce((s, r) => s + flt(r.qty || 0) * flt(r.rate || 0), 0);
+		const html_field = dlg.fields_dict.html_total;
+		if (!html_field) return;
+		html_field.$wrapper.find(".ch-pb-order-total").text("\u20B9" + format_number(total));
+	}
+
 	_switch_tab(tab) {
 		this._active_tab = tab;
 		const $tabs = this._panel.find(".ch-pb-tab");
@@ -544,7 +648,9 @@ export class PrebookWorkspace {
 		const initial_total = (seed_items || []).reduce(
 			(s, it) => s + flt(it.qty || 0) * flt(it.rate || 0), 0,
 		);
-		const dlg = new frappe.ui.Dialog({
+		let dlg;
+		const get_dlg = () => dlg;
+		dlg = new frappe.ui.Dialog({
 			title: __("Generate Proforma Invoice"),
 			fields: [
 				{
@@ -577,9 +683,18 @@ export class PrebookWorkspace {
 							reqd: 1,
 							in_list_view: 1,
 							get_query: () => ({ filters: { disabled: 0, is_sales_item: 1 } }),
+							onchange: this._make_item_code_onchange(get_dlg, "proforma_items"),
 						},
-						{ fieldname: "qty", fieldtype: "Float", label: __("Qty"), reqd: 1, in_list_view: 1, default: 1 },
-						{ fieldname: "rate", fieldtype: "Currency", label: __("Rate"), reqd: 1, in_list_view: 1, default: 0 },
+						{
+							fieldname: "qty", fieldtype: "Float", label: __("Qty"),
+							reqd: 1, in_list_view: 1, default: 1,
+							onchange: () => this._refresh_dialog_total(get_dlg(), "proforma_items"),
+						},
+						{
+							fieldname: "rate", fieldtype: "Currency", label: __("Rate"),
+							reqd: 1, in_list_view: 1, default: 0,
+							onchange: () => this._refresh_dialog_total(get_dlg(), "proforma_items"),
+						},
 						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos" },
 						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 1 },
 					],
@@ -588,7 +703,7 @@ export class PrebookWorkspace {
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Terms / Notes") },
 				{
 					fieldname: "html_total", fieldtype: "HTML",
-					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> \u20B9${format_number(initial_total)}</div>
+					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> <span class="ch-pb-order-total">\u20B9${format_number(initial_total)}</span></div>
 						<div class="text-muted" style="font-size:11px;text-align:right;">${__("Proforma is a non-binding quote. Collect advance via Pre-Booking only.")}</div>`,
 				},
 			],
@@ -681,7 +796,9 @@ export class PrebookWorkspace {
 		}
 		const initial_total = (seed_items || []).reduce((s, it) => s + flt(it.qty || 0) * flt(it.rate || 0), 0);
 
-		const dlg = new frappe.ui.Dialog({
+		let dlg;
+		const get_dlg = () => dlg;
+		dlg = new frappe.ui.Dialog({
 			title: __("Create Pre-Booking (Reserve Stock)"),
 			fields: [
 				{
@@ -723,9 +840,18 @@ export class PrebookWorkspace {
 							reqd: 1,
 							in_list_view: 1,
 							get_query: () => ({ filters: { disabled: 0, is_sales_item: 1 } }),
+							onchange: this._make_item_code_onchange(get_dlg, "prebook_items"),
 						},
-						{ fieldname: "qty", fieldtype: "Float", label: __("Qty"), reqd: 1, in_list_view: 1, default: 1 },
-						{ fieldname: "rate", fieldtype: "Currency", label: __("Rate"), reqd: 1, in_list_view: 1, default: 0 },
+						{
+							fieldname: "qty", fieldtype: "Float", label: __("Qty"),
+							reqd: 1, in_list_view: 1, default: 1,
+							onchange: () => this._refresh_dialog_total(get_dlg(), "prebook_items"),
+						},
+						{
+							fieldname: "rate", fieldtype: "Currency", label: __("Rate"),
+							reqd: 1, in_list_view: 1, default: 0,
+							onchange: () => this._refresh_dialog_total(get_dlg(), "prebook_items"),
+						},
 						{ fieldname: "uom", fieldtype: "Data", label: __("UOM"), in_list_view: 1, default: "Nos" },
 						{ fieldname: "warehouse", fieldtype: "Link", options: "Warehouse", label: __("Warehouse"), in_list_view: 1 },
 						{ fieldname: "serial_no", fieldtype: "Data", label: __("IMEI / Serial"), in_list_view: 1 },
@@ -742,7 +868,7 @@ export class PrebookWorkspace {
 				{ fieldname: "notes", fieldtype: "Small Text", label: __("Notes") },
 				{
 					fieldname: "html_total", fieldtype: "HTML",
-					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> ₹${format_number(initial_total || total || 0)}</div>
+					options: `<div style="text-align:right;padding:6px 0;"><b>${__("Order Total")}:</b> <span class="ch-pb-order-total">\u20B9${format_number(initial_total || total || 0)}</span></div>
 						<div class="text-muted" style="font-size:11px;text-align:right;">${__("Order total is computed from the item rows above.")}</div>`,
 				},
 			],

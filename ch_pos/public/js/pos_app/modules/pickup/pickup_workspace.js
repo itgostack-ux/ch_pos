@@ -736,7 +736,15 @@ export class PickupWorkspace {
 	}
 
 	_confirm_imeis_then_load(row, reserved) {
-		const scanned = [];
+		// Serials on Frappe are typically stored uppercase (Item.serial_no
+		// creation normalizes) and scanner input can carry stray whitespace,
+		// zero-width chars, or trailing CR from certain USB HID guns. Compare
+		// on a normalized key while preserving the original display form.
+		const _norm = (s) => String(s || "").replace(/[\s\u200B-\u200D\uFEFF]/g, "").toUpperCase();
+		const reserved_by_key = new Map();
+		reserved.forEach((s) => { reserved_by_key.set(_norm(s), s); });
+		const scanned = [];  // holds original reserved-form strings
+		const scanned_keys = () => new Set(scanned.map(_norm));
 
 		const dlg = new frappe.ui.Dialog({
 			title: __("Confirm IMEI Hand-over — {0}", [row.customer_name]),
@@ -765,7 +773,7 @@ export class PickupWorkspace {
 								<i class="fa fa-barcode"></i> ${__("Scan all reserved IMEIs to continue")} (${reserved.length})
 							</div>
 							<input type="text" class="form-control input-sm pk-imei-input"
-								placeholder="${__("Scan reserved IMEI, press Enter")}">
+								placeholder="${__("Scan or type reserved IMEI, then Enter")}">
 							<div class="pk-imei-chips" style="margin-top:6px;"></div>
 							<div class="pk-imei-req text-muted" style="font-size:0.78rem;margin-top:4px;"></div>
 							<div class="pk-imei-progress" style="font-size:0.78rem;margin-top:4px;font-weight:600;"></div>
@@ -774,7 +782,12 @@ export class PickupWorkspace {
 			],
 			primary_action_label: __("Load into Cart"),
 			primary_action: () => {
-				const missing = reserved.filter((s) => !scanned.includes(s));
+				// Auto-commit whatever is typed in the scan field (cashiers
+				// often type manually and click Load without pressing Enter).
+				try_commit_input();
+				const missing = [...reserved_by_key.entries()]
+					.filter(([k]) => !scanned_keys().has(k))
+					.map(([, orig]) => orig);
 				if (missing.length) {
 					frappe.msgprint({
 						title: __("IMEI Scan Required"),
@@ -791,22 +804,23 @@ export class PickupWorkspace {
 
 		const $w = dlg.$wrapper;
 		const render = () => {
-			const missing = reserved.filter((s) => !scanned.includes(s));
-			const done = reserved.length - missing.length;
+			const done_keys = scanned_keys();
+			const missing = [...reserved_by_key.entries()].filter(([k]) => !done_keys.has(k));
+			const done = reserved_by_key.size - missing.length;
 			$w.find(".pk-imei-chips").html(
 				scanned.map((s, i) =>
 					`<span class="badge" data-idx="${i}" style="background:#e0e7ff;color:#3730a3;margin:2px;cursor:pointer">${frappe.utils.escape_html(s)} ✕</span>`
 				).join("")
 			);
 			$w.find(".pk-imei-req").html(
-				reserved.map((s) => {
-					const ok = scanned.includes(s);
-					return `<span style="margin-right:10px;color:${ok ? "#16a34a" : "#b91c1c"}">${ok ? "✔" : "○"} <code>${frappe.utils.escape_html(s)}</code></span>`;
+				[...reserved_by_key.entries()].map(([k, orig]) => {
+					const ok = done_keys.has(k);
+					return `<span style="margin-right:10px;color:${ok ? "#16a34a" : "#b91c1c"}">${ok ? "✔" : "○"} <code>${frappe.utils.escape_html(orig)}</code></span>`;
 				}).join("")
 			);
 			$w.find(".pk-imei-progress").html(
 				missing.length
-					? `<span style="color:#b91c1c">${__("{0}/{1} IMEIs confirmed ", [done, reserved.length])}· ${__("{0} pending", [missing.length])}</span>`
+					? `<span style="color:#b91c1c">${__("{0}/{1} IMEIs confirmed ", [done, reserved_by_key.size])}· ${__("{0} pending", [missing.length])}</span>`
 					: `<span style="color:#166534">${__("All reserved IMEIs confirmed")}</span>`
 			);
 			if (missing.length) {
@@ -815,19 +829,31 @@ export class PickupWorkspace {
 				dlg.enable_primary_action();
 			}
 		};
-		$w.find(".pk-imei-input").on("keydown", function (e) {
-			if (e.key !== "Enter") return;
-			e.preventDefault();
-			const val = ($(this).val() || "").trim();
-			if (!val) return;
-			if (!reserved.includes(val)) {
-				frappe.show_alert({ message: __("IMEI {0} is not reserved on this pre-booking", [val]), indicator: "red" });
-				$(this).val("");
-				return;
+		const try_commit_input = () => {
+			const $inp = $w.find(".pk-imei-input");
+			const raw = ($inp.val() || "").trim();
+			if (!raw) return false;
+			const key = _norm(raw);
+			const orig = reserved_by_key.get(key);
+			if (!orig) {
+				frappe.show_alert({
+					message: __("IMEI {0} is not reserved on this pre-booking. Expected: {1}",
+						[raw, [...reserved_by_key.values()].join(", ")]),
+					indicator: "red",
+				});
+				$inp.val("").trigger("focus");
+				return false;
 			}
-			if (!scanned.includes(val)) scanned.push(val);
-			$(this).val("");
+			if (!scanned_keys().has(key)) scanned.push(orig);
+			$inp.val("").trigger("focus");
 			render();
+			return true;
+		};
+		$w.find(".pk-imei-input").on("keydown", function (e) {
+			// Enter (barcode terminator) OR Tab (some HID scanners emit Tab).
+			if (e.key !== "Enter" && e.key !== "Tab") return;
+			e.preventDefault();
+			try_commit_input();
 		});
 		$w.on("click", ".pk-imei-chips .badge", function () {
 			scanned.splice($(this).data("idx"), 1);
