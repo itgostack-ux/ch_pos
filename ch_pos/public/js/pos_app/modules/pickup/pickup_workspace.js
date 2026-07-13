@@ -183,6 +183,11 @@ export class PickupWorkspace {
 			const row = this._rows.find((x) => x.name === name);
 			if (row) this._open_add_imei_dialog(row);
 		});
+		panel.on("click", ".ch-pickup-cancel-refund", (e) => {
+			const name = $(e.currentTarget).data("name");
+			const advance = flt($(e.currentTarget).data("advance"));
+			this._cancel_pickup_prebook_flow(name, advance);
+		});
 		panel.on("click", ".ch-pickup-bill", (e) => {
 			const name = $(e.currentTarget).data("name");
 			const row = this._rows.find(r => r.name === name);
@@ -435,8 +440,9 @@ export class PickupWorkspace {
 						<button class="btn btn-success btn-sm ch-pickup-bill" data-name="${r.name}" title="${frappe.utils.escape_html(bill_title)}">
 							<i class="fa fa-check"></i> ${__("Bill & Pickup")}
 						</button>
-						${add_imei_btn}
-					</div>
+						${add_imei_btn}					<button class="btn btn-default btn-sm ch-pickup-cancel-refund" data-name="${r.name}" data-advance="${adv}" style="color:#dc2626;border-color:#fca5a5;" title="${__('Cancel pre-booking and refund/retain advance')}">
+						<i class="fa fa-times-circle"></i> ${__('Cancel / Refund')}
+					</button>					</div>
 				</div>
 			`;
 		}).join("");
@@ -961,5 +967,90 @@ export class PickupWorkspace {
 		if (auto_print) {
 			window.open(print_url, "_blank");
 		}
+	}
+
+	/**
+	 * Cancel a pre-booking from the Pickup/Bill workspace and handle the
+	 * advance (refund to customer or retain as credit). Same logic as the
+	 * Prebook workspace's _cancel_prebook_flow but invoked here so the
+	 * cashier doesn't have to navigate away when stock couldn't be arranged.
+	 */
+	_cancel_pickup_prebook_flow(name, advance) {
+		const modes = (PosState.payment_modes || []).map((m) => m.mode_of_payment).filter(Boolean);
+		const default_refund_mop = modes[0] || "Cash";
+		const refund_mop_options = modes.join("\n") || "Cash";
+
+		const fields = [];
+		if (advance > 0) {
+			fields.push({
+				fieldtype: "Select", fieldname: "action", reqd: 1,
+				label: __("Advance ₹{0} collected — what to do?", [format_number(advance)]),
+				options: [__("Refund to customer"), __("Keep as credit (adjust to another bill)")].join("\n"),
+				default: __("Refund to customer"),
+			});
+			fields.push({
+				fieldtype: "Select", fieldname: "refund_mode", label: __("Refund Mode of Payment"),
+				options: refund_mop_options,
+				default: default_refund_mop,
+				depends_on: `eval:doc.action == '${__("Refund to customer")}'`,
+				reqd: 0,
+				description: __("Payment Entry will be created to refund the advance."),
+			});
+		} else {
+			fields.push({
+				fieldtype: "HTML", fieldname: "noadv",
+				options: `<div class="text-muted">${__("No advance collected on this pre-booking.")}</div>`,
+			});
+		}
+		fields.push({
+			fieldtype: "Small Text", fieldname: "reason", label: __("Reason (required)"),
+			reqd: 1,
+			description: __("Minimum 5 characters. Explain why the pre-booking is being cancelled."),
+		});
+
+		const d = new frappe.ui.Dialog({
+			title: __("Cancel Pre-Booking {0}", [name]),
+			size: "small",
+			fields,
+			primary_action_label: __("Cancel Pre-Booking"),
+			primary_action: (v) => {
+				const reason = (v.reason || "").trim();
+				if (reason.length < 5) {
+					frappe.show_alert({ message: __("Please enter a reason (min 5 chars)."), indicator: "red" });
+					return;
+				}
+				const retain = v.action === __("Keep as credit (adjust to another bill)");
+				d.hide();
+				frappe.confirm(
+					__("Cancel pre-booking {0}? Reserved stock will be released.", [name]),
+					() => {
+						frappe.call({
+							method: "ch_pos.api.pos_api.cancel_pre_booking",
+							args: {
+								sales_order: name,
+								action: retain ? "retain_credit" : "refund",
+								refund_mode_of_payment: retain ? null : (v.refund_mode || null),
+								reason,
+							},
+							freeze: true,
+							freeze_message: __("Cancelling pre-booking…"),
+							callback: (r) => {
+								if (!r.message) return;
+								const m = r.message;
+								frappe.show_alert({
+									message: retain
+										? __("Cancelled — ₹{0} retained as customer credit.", [format_number(m.retained || 0)])
+										: __("Cancelled — advance of ₹{0} will be refunded.", [format_number(advance)]),
+									indicator: "green",
+								}, 6);
+								this._refresh_kpis();
+								this._load();
+							},
+						});
+					}
+				);
+			},
+		});
+		d.show();
 	}
 }

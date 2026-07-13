@@ -2576,6 +2576,38 @@ def create_pos_invoice(
 
     _enforce_token_linkage(pos_profile, kiosk_token)
 
+    # ── Free Gift guard ──────────────────────────────────────────────────
+    # Items with ch_allow_zero_rate=1 are "free gifts" — they must ONLY be
+    # billed when one of the following is true:
+    #  a) There is at least one paid (rate > 0, non-free-bundle) item in the
+    #     same invoice (the gift is bundled with a device purchase today).
+    #  b) original_invoice is provided (Late Free Gift: customer comes back
+    #     to collect a gift they missed at the original billing time).
+    #  c) A spin-wheel gift code is active on the cart (already validated
+    #     by _enforce_token_linkage / the POS state; the presence of
+    #     kiosk_token is the signal).
+    # Violating this guard means free items are being given away standalone,
+    # which bypasses inventory cost and creates GL imbalance.
+    if isinstance(items, list) and items:
+        _has_zero_rate_gift = any(
+            cint(frappe.db.get_value("Item", it.get("item_code"), "ch_allow_zero_rate") or 0)
+            and flt(it.get("rate", 0)) == 0
+            and not cint(it.get("is_free_bundle_item"))
+            for it in items if it.get("item_code")
+        )
+        if _has_zero_rate_gift:
+            _has_paid_item = any(
+                flt(it.get("rate", 0)) > 0
+                and not cint(it.get("is_free_bundle_item"))
+                for it in items
+            )
+            if not _has_paid_item and not original_invoice and not kiosk_token:
+                frappe.throw(
+                    _("Free gift items cannot be billed without a main item purchase in the same invoice, "
+                      "a previous invoice reference (Late Free Gift), or a valid gift redemption code."),
+                    title=_("Free Gift — Main Item Required"),
+                )
+
     inv = frappe.new_doc("Sales Invoice")
     inv.custom_ch_pos_session = session_name
     inv.pos_profile = pos_profile
