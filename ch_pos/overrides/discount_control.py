@@ -54,6 +54,16 @@ def validate_pos_commercial_policy(doc, method=None):
 		if not item_code or rate <= 0:
 			continue
 
+		# ── Sales-Order pickup exemption ─────────────────────────────────
+		# Rows that originated from a submitted Sales Order carry the
+		# pre-booking contracted rate. That rate was accepted by the customer
+		# at SO creation time (an advance may have been collected). Re-gating
+		# these rows at invoice time against MOP/discount-limit is incorrect
+		# and blocks a legitimate handover. Skip all commercial policy checks
+		# for SO-linked rows; the governance checkpoint was SO submission.
+		if (item.get("sales_order") or "").strip():
+			continue
+
 		# ── Exception override ───────────────────────────────────────────
 		# If this item is covered by a pre-approved exception on the invoice,
 		# skip MOP floor and discount-limit enforcement entirely.
