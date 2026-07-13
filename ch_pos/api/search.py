@@ -606,10 +606,14 @@ def get_available_serials(item_code, warehouse) -> list:
     # pre-booking validity grace window and warehouse scoping.
     if rows:
         try:
-            from ch_pos.api.pos_api import _get_open_reserved_sales_order_for_serial
+            from ch_pos.api.pos_api import (
+                _get_open_reserved_sales_order_for_serial,
+                _is_exchange_order_new_device,
+            )
             rows = [
                 r for r in rows
                 if not _get_open_reserved_sales_order_for_serial(r["serial_no"], warehouse)
+                and not _is_exchange_order_new_device(r["serial_no"])
             ]
         except Exception:
             # If the helper is unavailable (edge case), fall back to unfiltered

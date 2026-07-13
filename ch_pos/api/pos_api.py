@@ -52,6 +52,33 @@ def _split_serial_blob(raw) -> list[str]:
     return serials
 
 
+def _is_exchange_order_new_device(serial_no: str) -> bool:
+    """Return True when this serial is the *new device* on an open Buyback
+    Exchange Order that has not yet been invoiced / closed / cancelled.
+
+    These serials are logically committed to an exchange customer even though
+    no Sales Order row (custom_serial_no) holds them. A pre-booking or
+    walk-in sale must not consume a device that is about to be handed to the
+    exchange customer.
+    """
+    serial_no = (serial_no or "").strip()
+    if not serial_no:
+        return False
+    if not frappe.db.table_exists("Buyback Exchange Order"):
+        return False
+    hit = frappe.db.sql(
+        """
+        SELECT name
+          FROM `tabBuyback Exchange Order`
+         WHERE new_imei_serial = %(serial)s
+           AND status NOT IN ('Closed', 'Cancelled')
+         LIMIT 1
+        """,
+        {"serial": serial_no},
+    )
+    return bool(hit)
+
+
 def _pick_available_serials_for_prebooking(
     item_code: str,
     warehouse: str,
@@ -60,7 +87,8 @@ def _pick_available_serials_for_prebooking(
 ) -> list[str]:
     """Pick up to ``needed`` free serials from one warehouse for reserve flow.
 
-    Filters out serials already reserved by another open pre-booking and any
+    Filters out serials already reserved by another open pre-booking, serials
+    committed to an open Buyback Exchange Order as the new device, and any
     serials passed in ``exclude`` (already consumed in this cart payload).
     """
     needed = cint(needed)
@@ -89,6 +117,8 @@ def _pick_available_serials_for_prebooking(
             continue
         reserved_so = _get_open_reserved_sales_order_for_serial(sn, warehouse)
         if reserved_so:
+            continue
+        if _is_exchange_order_new_device(sn):
             continue
         picked.append(sn)
         if len(picked) >= needed:
@@ -654,6 +684,23 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
                         .format(serial, dup[0][0]),
                         title=frappe._("Duplicate IMEI"),
                     )
+
+            # ── Exchange-new-device guard ────────────────────────────────
+            # Block the IMEI if it is the new device on any open Buyback
+            # Exchange Order. These devices are logically committed to an
+            # exchange customer even though no Sales Order row holds them.
+            if _is_exchange_order_new_device(serial):
+                exo_name = frappe.db.get_value(
+                    "Buyback Exchange Order",
+                    {"new_imei_serial": serial, "status": ["not in", ["Closed", "Cancelled"]]},
+                    "name",
+                )
+                frappe.throw(
+                    frappe._("IMEI {0} is reserved for Buyback Exchange Order {1}. "
+                             "Complete or cancel the exchange before pre-booking this device.")
+                    .format(serial, exo_name or ""),
+                    title=frappe._("IMEI Reserved for Exchange"),
+                )
 
     # ── Market-standard backorder pre-flight ────────────────────────────
     # Mirror ERPNext's own `get_available_qty_to_reserve` (actual_qty minus
