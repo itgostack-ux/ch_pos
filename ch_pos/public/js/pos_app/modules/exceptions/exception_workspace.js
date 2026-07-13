@@ -154,6 +154,11 @@ export class ExceptionWorkspace {
 				panel.find(".ch-exc-original").val("").prop("readonly", true);
 				return;
 			}
+			const locked_original = flt(this._locked_form_context?.original_value || 0);
+			if (locked_original > 0) {
+				panel.find(".ch-exc-original").val(locked_original);
+				return;
+			}
 			const price_list = frappe.defaults.get_default("selling_price_list") || "Standard Selling";
 			frappe.xcall("frappe.client.get_value", {
 				doctype: "Item Price",
@@ -183,11 +188,13 @@ export class ExceptionWorkspace {
 	_apply_open_context(panel) {
 		const ctx = this._open_context;
 		const serial_input = panel.find(".ch-exc-serial");
+		const original_input = panel.find(".ch-exc-original");
 		const item_display = panel.find(".ch-exc-item-display");
 
 		if (!ctx || ctx.source !== "cart_line") {
 			this._locked_form_context = null;
 			serial_input.val("").prop("readonly", false);
+			original_input.val("");
 			item_display.hide().text("");
 			if (this._customer_control?.$input) {
 				this._customer_control.$input.prop("disabled", false).prop("readonly", false);
@@ -196,9 +203,18 @@ export class ExceptionWorkspace {
 		}
 
 		const initial_item_code = (ctx.item_code || "").trim();
+		const original_value = flt(ctx.original_value || 0);
+		this._locked_form_context = {
+			cart_idx: (ctx.cart_idx !== undefined && ctx.cart_idx !== null) ? parseInt(ctx.cart_idx, 10) : null,
+			item_code: initial_item_code,
+			serial_no: ctx.serial_no || "",
+			customer: (ctx.customer || PosState.customer || PosState.default_customer || "").trim(),
+			original_value,
+		};
 		if (initial_item_code) this._set_item_prefill(initial_item_code);
-		const customer_value = (ctx.customer || PosState.customer || PosState.default_customer || "").trim();
+		const customer_value = this._locked_form_context.customer;
 		if (this._customer_control) this._customer_control.set_value(customer_value);
+		if (original_value > 0) original_input.val(original_value);
 		serial_input.val(ctx.serial_no || "");
 
 		const item_label = [ctx.item_name || "", ctx.item_code || ""].filter(Boolean).join(" (") + (ctx.item_name && ctx.item_code ? ")" : "");
@@ -208,13 +224,6 @@ export class ExceptionWorkspace {
 		if (ctx.lock_customer && this._customer_control?.$input) {
 			this._customer_control.$input.prop("disabled", true).prop("readonly", true);
 		}
-
-		this._locked_form_context = {
-			cart_idx: (ctx.cart_idx !== undefined && ctx.cart_idx !== null) ? parseInt(ctx.cart_idx, 10) : null,
-			item_code: initial_item_code,
-			serial_no: ctx.serial_no || "",
-			customer: customer_value,
-		};
 
 		if (!initial_item_code && ctx.serial_no) {
 			this._resolve_item_from_serial(ctx.serial_no).then((resolved) => {

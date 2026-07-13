@@ -11699,9 +11699,13 @@ def pos_send_approval_link(order_name) -> dict:
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"Buyback approval email failed for {doc.name}")
 
-    # Advance order status so the UI reflects "waiting for customer"
+    # Advance order status so the UI reflects "waiting for customer".
+    # Mirror workflow_state too — a stale mirror makes the next full save
+    # look like a workflow transition and trips Frappe's validation.
     if doc.status == "Approved":
         doc.db_set("status", "Awaiting Customer Approval", notify=True)
+        if doc.meta.has_field("workflow_state"):
+            doc.db_set("workflow_state", "Awaiting Customer Approval", update_modified=False)
 
     masked = doc.mobile_no[:2] + "****" + doc.mobile_no[-2:]
     return {

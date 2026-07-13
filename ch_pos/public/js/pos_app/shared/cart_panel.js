@@ -981,6 +981,9 @@ export class CartPanel {
 			const item = PosState.cart[idx];
 			if (!item) return;
 			const item_code = item.item_code || item.item || item.code || item.name || "";
+			const original_value = flt(
+				item.pre_exception_price_list_rate || item.price_list_rate || item.mrp || item.rate || 0
+			);
 			// Require either a serial (serialized goods) OR an item_code
 			// (VAS / accessories / plan rows). Without either we cannot
 			// anchor the exception to anything meaningful.
@@ -999,6 +1002,7 @@ export class CartPanel {
 				cart_idx: idx,
 				item_code,
 				item_name: item.item_name || "",
+				original_value,
 				serial_no: item.serial_no || "",
 				customer,
 				lock_serial: !!item.serial_no,
