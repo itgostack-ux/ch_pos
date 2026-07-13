@@ -214,26 +214,31 @@ export class PrebookWorkspace {
 			// `this` = the item_code cell control; this.doc = row plain obj
 			const row = this.doc;
 			if (!row || !row.item_code) return;
+			// Snapshot the item we are resolving so stale async responses
+			// from a rapidly changed item do not overwrite a newer selection.
+			const resolved_for = row.item_code;
 			workspace._resolve_item_price(row.item_code).then((info) => {
+				if (row.item_code !== resolved_for) return; // item changed again
 				const dlg = get_dlg();
 				const grid = dlg?.fields_dict?.[items_fieldname]?.grid;
 				const grid_row = grid?.grid_rows_by_docname?.[row.name];
 				if (!grid_row) return;
 				const patch = {};
-				if (info.rate && !flt(row.rate)) patch.rate = info.rate;
-				if (info.stock_uom && (!row.uom || row.uom === "Nos")) patch.uom = info.stock_uom;
+				// Always overwrite rate and warehouse when item changes —
+				// a stale rate from the previous item must not be carried over.
+				if (info.rate > 0) patch.rate = info.rate;
+				else if (!flt(row.rate)) patch.rate = 0; // clear stale rate
+				if (info.stock_uom) patch.uom = info.stock_uom;
+				// Reset warehouse to store default on item change so the row
+				// doesn't inherit the warehouse from the previously selected item.
+				const default_wh = PosState.warehouse || "";
+				if (default_wh) patch.warehouse = default_wh;
 				Object.entries(patch).forEach(([field, value]) => {
 					row[field] = value;
 					grid.set_value(field, value, row);
 				});
 				workspace._refresh_dialog_total(dlg, items_fieldname);
-				if (info.rate && !patch.rate) {
-					// Rate was already set — show a small hint instead of overwriting cashier input.
-					frappe.show_alert({
-						message: __("Suggested rate for {0}: ₹{1}", [row.item_code, format_number(info.rate)]),
-						indicator: "blue",
-					}, 4);
-				} else if (!info.rate) {
+				if (!info.rate) {
 					frappe.show_alert({
 						message: __("No selling price configured for {0}. Enter rate manually.", [row.item_code]),
 						indicator: "orange",
@@ -652,6 +657,7 @@ export class PrebookWorkspace {
 		const get_dlg = () => dlg;
 		dlg = new frappe.ui.Dialog({
 			title: __("Generate Proforma Invoice"),
+			size: "extra-large",
 			fields: [
 				{
 					fieldname: "customer", fieldtype: "Link", options: "Customer",
@@ -800,6 +806,7 @@ export class PrebookWorkspace {
 		const get_dlg = () => dlg;
 		dlg = new frappe.ui.Dialog({
 			title: __("Create Pre-Booking (Reserve Stock)"),
+			size: "extra-large",
 			fields: [
 				{
 					fieldname: "customer", fieldtype: "Link", options: "Customer",
