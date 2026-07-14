@@ -394,7 +394,7 @@
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
-          "X-Frappe-CSRF-Token": "guest"
+          "X-Frappe-CSRF-Token": {{ (csrf_token or "guest") | tojson }}
         },
         body: "token=" + encodeURIComponent(TOKEN)
       })
@@ -403,9 +403,13 @@
         var wait = (STYLE === "Simple") ? 400 : 4600;
         setTimeout(function() {
           if (!res.ok || !res.body || !res.body.message) {
-            var msg = (res.body && res.body._server_messages)
-              ? "Unable to reveal — please refresh and try again."
-              : "Something went wrong.";
+            var msg = "Unable to reveal — please refresh and try again.";
+            try {
+              // Surface the real server reason (expired / cancelled / already
+              // redeemed) instead of a generic retry hint.
+              var sm = JSON.parse(res.body._server_messages || "[]");
+              if (sm.length) msg = JSON.parse(sm[0]).message || msg;
+            } catch (e) { /* keep generic message */ }
             spinBtn.textContent = msg;
             return;
           }

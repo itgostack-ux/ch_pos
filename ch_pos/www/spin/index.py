@@ -15,6 +15,14 @@ def get_context(context):
 	context.no_breadcrumbs = 1
 	context.title = "Spin & Win — Your Gift Awaits"
 
+	# Guests skip CSRF validation, but a browser with a live Desk session
+	# (store staff testing the link, kiosk machines) gets validated — the
+	# reveal POST must carry that session's real token or it 400s.
+	if frappe.session.user and frappe.session.user != "Guest":
+		context.csrf_token = frappe.sessions.get_csrf_token()
+	else:
+		context.csrf_token = "guest"
+
 	token = (frappe.form_dict.get("token") or "").strip()
 	context.token = token
 	context.gift = None
