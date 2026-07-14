@@ -127,6 +127,16 @@ def run():
         "POS detail did not reflect customer approval method"
     )
 
+    # Phase B — indemnity/NOC hard gate before Paid. Seed a captured
+    # indemnity so pos_settle_buyback_cashback can complete the payout.
+    frappe.db.set_value(
+        "Buyback Order",
+        order_name,
+        "indemnity_signed",
+        1,
+        update_modified=False,
+    )
+
     settled = pos_settle_buyback_cashback(order_name=order_name, payment_method="UPI")
     assert settled.get("status") in ("Paid", "Closed"), f"Unexpected settlement status: {settled}"
 

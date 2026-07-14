@@ -78,9 +78,15 @@ export class ClaimsWorkspace {
 				<!-- Pending Claims Pipeline -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
-						<span><i class="fa fa-list-alt"></i> ${__("VAS Claims Board")}
+						<span><i class="fa fa-list-alt"></i> ${__("Claims Board")}
+							<span class="badge ch-claim-filter" data-filter="all"
+								style="background:#f3f4f6;color:#374151;font-size:10px;margin-left:6px;padding:2px 6px;border-radius:10px;vertical-align:middle;cursor:pointer">
+								${__("All")}</span>
+							<span class="badge ch-claim-filter" data-filter="manufacturer"
+								style="background:#e0f2fe;color:#075985;font-size:10px;margin-left:4px;padding:2px 6px;border-radius:10px;vertical-align:middle;cursor:pointer">
+								${__("Manufacturer")}</span>
 							<span class="badge ch-claim-filter" data-filter="vas"
-								style="background:#fff7ed;color:#92400e;font-size:10px;margin-left:6px;padding:2px 6px;border-radius:10px;vertical-align:middle">
+								style="background:#fff7ed;color:#92400e;font-size:10px;margin-left:4px;padding:2px 6px;border-radius:10px;vertical-align:middle;cursor:pointer">
 								<i class="fa fa-shield"></i> ${__("VAS / Extended")}</span>
 						</span>
 						<button class="btn btn-xs btn-default ch-claim-refresh" style="border-radius:var(--pos-radius-sm)">
@@ -135,12 +141,19 @@ export class ClaimsWorkspace {
 
 		panel.on("click", ".ch-claim-refresh", () => this._load_claims_pipeline(panel));
 
-		// Status-group tabs for the VAS claims board (scope stays VAS-only).
+		panel.on("click", ".ch-claim-filter", (e) => {
+			const filter = $(e.currentTarget).data("filter") || "vas";
+			if (filter === this._claim_filter) return;
+			this._claim_filter = filter;
+			this._claim_tab = "action";
+			this._load_claims_pipeline(panel);
+		});
+
+		// Status-group tabs for the currently selected claims-board filter.
 		panel.on("click", ".ch-claim-tab", (e) => {
 			const tab = $(e.currentTarget).data("tab");
 			if (!tab || tab === this._claim_tab) return;
 			this._claim_tab = tab;
-			this._claim_filter = "vas";
 			this._render_claim_board(panel);
 		});
 
@@ -1615,6 +1628,8 @@ _render_dashboard(panel, data) {
 		const VAS_TYPES = ["vas_plan", "anniversary_warranty", "repair_warranty"];
 		if (f === "vas") {
 			filters.coverage_type = ["in", VAS_TYPES];
+		} else if (f === "manufacturer") {
+			filters.coverage_type = "manufacturer_warranty";
 		}
 
 		frappe.xcall("frappe.client.get_list", {

@@ -5957,6 +5957,19 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
             ).format(serial_no, reserved_so),
         }
 
+    # ── Bin gate ────────────────────────────────────────────────────────────
+    # The picker only offers Sellable (or untagged) serials; manual IMEI entry
+    # must obey the same rule or buyback/exchange-held devices become sellable
+    # by typing their number.
+    bin_type = frappe.db.get_value("CH Stock Bin", {"serial_no": serial_no}, "bin_type")
+    if bin_type and bin_type != "Sellable":
+        return {
+            "valid": False,
+            "reason": frappe._(
+                "IMEI {0} is held in the {1} bin and cannot be sold from POS."
+            ).format(serial_no, bin_type),
+        }
+
     # ── FIFO enforcement ────────────────────────────────────────────────────
     if not cint(allow_fifo_override):
         oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse)
@@ -12485,6 +12498,12 @@ def _get_oldest_fifo_serial(item_code, warehouse):
     warehouse and use the latest such inward as the received-date, then take
     the minimum across serials to find the FIFO leader.
     """
+    # The FIFO leader must be a serial the cashier can actually pick, so this
+    # applies the SAME gates as search.get_available_serials: Active Serial No
+    # in this warehouse, Sellable (or untagged) CH Stock Bin, not reserved on
+    # an open pre-booking, not an exchange-order new device. A serial parked
+    # in the Buyback/Reserved bin previously stayed in the SNBB baseline and
+    # blocked every legitimate pick ("FIFO restricted: <unpickable serial>").
     rows = frappe.db.sql("""
         SELECT
             available.serial_no,
@@ -12499,32 +12518,43 @@ def _get_oldest_fifo_serial(item_code, warehouse):
             GROUP BY sbe.serial_no
             HAVING SUM(sbe.qty) > 0
         ) available
+        JOIN `tabSerial No` sn
+            ON sn.name = available.serial_no
+            AND sn.status = 'Active'
+            AND sn.warehouse = %s
+        LEFT JOIN `tabCH Stock Bin` sb
+            ON sb.serial_no = available.serial_no
         JOIN `tabSerial and Batch Entry` sbe_in ON sbe_in.serial_no = available.serial_no
         JOIN `tabSerial and Batch Bundle` sbb_in
             ON sbe_in.parent = sbb_in.name
             AND sbb_in.type_of_transaction = 'Inward'
             AND sbb_in.docstatus = 1
             AND sbb_in.warehouse = %s
+        WHERE (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
         GROUP BY available.serial_no
         ORDER BY received_date ASC, available.serial_no ASC
-        LIMIT 1
-    """, (item_code, warehouse, warehouse), as_dict=True)
+        LIMIT 10
+    """, (item_code, warehouse, warehouse, warehouse), as_dict=True)
 
-    if rows:
-        return rows[0].serial_no, rows[0].received_date
+    if not rows:
+        # Fallback: use Serial No document creation timestamp on sites that do
+        # not have SNBB rows for this item (e.g. legacy opening stock).
+        rows = frappe.db.sql("""
+            SELECT sn.name AS serial_no, sn.creation AS received_date
+            FROM `tabSerial No` sn
+            LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
+            WHERE sn.item_code = %s AND sn.warehouse = %s AND sn.status = 'Active'
+              AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
+            ORDER BY sn.creation ASC, sn.name ASC
+            LIMIT 10
+        """, (item_code, warehouse), as_dict=True)
 
-    # Fallback: use Serial No document creation timestamp on sites that do not
-    # have the legacy purchase_document_date field.
-    fallback = frappe.db.sql("""
-        SELECT name, creation
-        FROM `tabSerial No`
-        WHERE item_code = %s AND warehouse = %s AND status = 'Active'
-        ORDER BY creation ASC
-        LIMIT 1
-    """, (item_code, warehouse), as_dict=True)
-
-    if fallback:
-        return fallback[0].name, fallback[0].creation
+    for row in rows:
+        if _get_open_reserved_sales_order_for_serial(row.serial_no, warehouse):
+            continue
+        if _is_exchange_order_new_device(row.serial_no):
+            continue
+        return row.serial_no, row.received_date
 
     return None, None
 

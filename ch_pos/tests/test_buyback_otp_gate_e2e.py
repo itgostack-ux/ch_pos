@@ -163,6 +163,18 @@ def run():
 
     order.reload()
     if order.status not in ("Paid", "Closed"):
+        # Phase B — indemnity/NOC is a hard gate before Paid. Seed a
+        # captured indemnity so record_payment can progress.
+        if not int(order.get("indemnity_signed") or 0):
+            frappe.db.set_value(
+                "Buyback Order",
+                order_name,
+                "indemnity_signed",
+                1,
+                update_modified=False,
+            )
+            order.reload()
+
         payment_out = record_payment(
             order_name=order_name,
             payment_method="Cash",
