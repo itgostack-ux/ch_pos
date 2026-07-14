@@ -1231,7 +1231,27 @@ export class BuybackWorkspace {
 		const order = data.order;
 		const price = order ? order.final_price : (data.quoted_price || data.estimated_price);
 		const saved_settlement = order && order.settlement_type ? order.settlement_type : "";
+		const indemnity_ok = !!(order && order.indemnity_signed);
+		const order_name = order ? order.name : "";
 		const summary = this._html_order_summary(order);
+
+		const indemnity_banner = !indemnity_ok ? `
+			<div class="ch-bb-info-note" style="background:#fffbeb;border-color:#fbbf24;color:#92400e;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+				<div>
+					<i class="fa fa-exclamation-triangle"></i>
+					<strong>${__("Indemnity / NOC required before settlement")}</strong><br>
+					<span style="font-size:12px">${__("Capture the customer's signed declaration of ownership first.")}</span>
+				</div>
+				<button class="btn btn-warning ch-bb-record-indemnity"
+					data-order="${frappe.utils.escape_html(order_name)}"
+					style="border-radius:var(--pos-radius,8px);white-space:nowrap;min-height:36px;font-size:12px;font-weight:700">
+					<i class="fa fa-file-signature"></i> ${__("Record Indemnity")}
+				</button>
+			</div>` : `
+			<div class="ch-bb-info-note" style="background:#f0fdf4;border-color:#86efac;color:#166534;margin-top:12px">
+				<i class="fa fa-check-circle"></i> <strong>${__("Indemnity / NOC captured")}</strong>
+			</div>`;
+
 		return `
 			<div class="ch-bb-valuation-banner" style="background:#f0f9ff;border-color:#0ea5e9">
 				<div class="ch-bb-val-label" style="color:#0284c7">
@@ -1243,6 +1263,7 @@ export class BuybackWorkspace {
 					: ""}
 			</div>
 			${summary}
+			${indemnity_banner}
 			<div class="ch-bb-section-label" style="margin-top:14px">
 				${__("How does the customer want to receive value?")}
 			</div>
@@ -1258,7 +1279,8 @@ export class BuybackWorkspace {
 					<div style="margin:10px 0">
 						<label class="ch-bb-field-label">${__("Payment Method")}</label>
 						<select class="form-control ch-bb-cashback-mode"
-							style="border-radius:var(--pos-radius,8px)">
+							style="border-radius:var(--pos-radius,8px)"
+							${!indemnity_ok ? "disabled" : ""}>
 							<option value="Cash">${__("Cash")}</option>
 							<option value="UPI">${__("UPI")}</option>
 							<option value="Bank Transfer">${__("Bank Transfer")}</option>
@@ -1266,7 +1288,8 @@ export class BuybackWorkspace {
 					</div>
 					<button class="btn btn-warning ch-bb-act ch-bb-cashback"
 						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:44px"
-						data-price="${price}">
+						data-price="${price}"
+						${!indemnity_ok ? "disabled title='" + __("Record Indemnity first") + "'" : ""}>
 						<i class="fa fa-money"></i> ${__("Settle as Cashback")}
 					</button>
 				</div>
@@ -1288,7 +1311,8 @@ export class BuybackWorkspace {
 						data-order-name="${order ? order.name : ""}"
 						data-item-name="${frappe.utils.escape_html(data.item_name || "")}"
 						data-imei="${data.imei_serial || ""}"
-						data-grade="${data.estimated_grade || ""}">
+						data-grade="${data.estimated_grade || ""}"
+						${!indemnity_ok ? "disabled title='" + __("Record Indemnity first") + "'" : ""}>
 						<i class="fa fa-exchange"></i> ${__("Add to Cart & Sell")}
 					</button>
 				</div>
