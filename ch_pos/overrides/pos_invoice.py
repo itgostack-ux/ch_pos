@@ -1134,7 +1134,7 @@ def validate_eod_lock(doc, method=None):
                 "POS Session {0} is not open. Current status: {1}"
             ).format(active.get("name"), active.get("status"))
         )
-
+        
     if doc.posting_date and active.get("business_date"):
         if str(active.get("business_date")) != str(doc.posting_date):
             frappe.throw(
