@@ -177,7 +177,7 @@ export class ServiceWorkspace {
 		panel.on("click", ".ch-svc-print-invoice", function () {
 			const invoice = $(this).data("name");
 			if (!invoice) return;
-			print_invoice_pdf(invoice, "GoFix Service Invoice", { doctype: "Sales Invoice", no_letterhead: 1 });
+			print_invoice_pdf(invoice, null, { doctype: "Sales Invoice" });
 		});
 		panel.on("click", ".ch-svc-raise-exception", function () {
 			let sr = {};

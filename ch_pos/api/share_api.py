@@ -13,61 +13,62 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
-from frappe.utils import get_url
+from frappe.utils import cint, get_url
 
 
-_DEFAULT_FORMAT = "Custom Sales Invoice"
-_GOFIX_FORMAT = "GoFix Service Invoice"
 _VALID_CHANNELS = {"print", "email", "whatsapp", "einvoice"}
 
 
 def _resolve_print_format(invoice_name: str) -> str:
-	"""GoFix invoices use a different print format — mirror payment_dialog logic."""
-	try:
-		sr = frappe.db.get_value("Sales Invoice", invoice_name, "custom_gofix_service_request")
-	except Exception:
-		sr = None
-	return _GOFIX_FORMAT if sr else _DEFAULT_FORMAT
+	"""Compatibility wrapper for older POS code."""
+	return _resolve_print_settings(invoice_name).get("print_format") or "Custom Sales Invoice"
 
 
-def _pdf_download_url(invoice_name: str, print_format: str) -> str:
+def _resolve_print_settings(invoice_name: str) -> dict:
+	from ch_erp15.ch_erp15.print_helpers import resolve_sales_invoice_print_settings
+
+	return resolve_sales_invoice_print_settings(invoice_name=invoice_name)
+
+
+def _pdf_download_url(invoice_name: str, print_format: str, no_letterhead: int = 0) -> str:
 	"""Return a fully-qualified PDF download URL (server-rendered, headered)."""
 	return (
 		f"/api/method/frappe.utils.print_format.download_pdf"
 		f"?doctype=Sales+Invoice"
 		f"&name={frappe.utils.escape_html(invoice_name)}"
 		f"&format={frappe.utils.escape_html(print_format)}"
-		f"&no_letterhead=0"
+		f"&no_letterhead={cint(no_letterhead)}"
 	)
 
 
-def _generate_pdf_bytes(invoice_name: str, print_format: str) -> bytes:
+def _generate_pdf_bytes(invoice_name: str, print_format: str, no_letterhead: int = 0) -> bytes:
 	"""Render a Sales Invoice to a PDF byte string using Frappe's print pipeline."""
 	pdf_bytes = frappe.get_print(
 		doctype="Sales Invoice",
 		name=invoice_name,
 		print_format=print_format,
 		as_pdf=True,
-		no_letterhead=False,
+		no_letterhead=bool(cint(no_letterhead)),
 	)
 	return pdf_bytes
 
 
-def _share_print(invoice_name: str, fmt: str) -> dict:
+def _share_print(invoice_name: str, fmt: str, no_letterhead: int = 0) -> dict:
 	return {
 		"success": True,
-		"pdf_url": _pdf_download_url(invoice_name, fmt),
+		"pdf_url": _pdf_download_url(invoice_name, fmt, no_letterhead=no_letterhead),
 		"print_format": fmt,
+		"no_letterhead": cint(no_letterhead),
 	}
 
 
-def _share_email(invoice_name: str, fmt: str, recipient: str | None) -> dict:
+def _share_email(invoice_name: str, fmt: str, recipient: str | None, no_letterhead: int = 0) -> dict:
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
 	email = (recipient or "").strip() or (doc.contact_email or "").strip()
 	if not email:
 		return {"success": False, "message": _("No email on file for this customer.")}
 
-	pdf_bytes = _generate_pdf_bytes(invoice_name, fmt)
+	pdf_bytes = _generate_pdf_bytes(invoice_name, fmt, no_letterhead=no_letterhead)
 	frappe.sendmail(
 		recipients=[email],
 		subject=_("Your invoice {0}").format(invoice_name),
@@ -103,7 +104,8 @@ def _share_whatsapp(invoice_name: str, fmt: str, mobile_no: str | None) -> dict:
 	from ch_item_master.ch_core.whatsapp import get_template
 	template_name = get_template(doc.company, "invoice_receipt")[0] or "invoice_receipt"
 
-	pdf_url = get_url(_pdf_download_url(invoice_name, fmt))
+	settings = _resolve_print_settings(invoice_name)
+	pdf_url = get_url(_pdf_download_url(invoice_name, fmt, no_letterhead=settings.get("no_letterhead", 0)))
 	body_values = {
 		"1": doc.customer_name or doc.customer or _("Customer"),
 		"2": invoice_name,
@@ -172,15 +174,17 @@ def share_invoice(
 	if not channels:
 		frappe.throw(_("At least one valid channel is required."), title=_("Share Invoice"))
 
-	fmt = _resolve_print_format(invoice_name)
+	settings = _resolve_print_settings(invoice_name)
+	fmt = settings.get("print_format") or _resolve_print_format(invoice_name)
+	no_letterhead = cint(settings.get("no_letterhead"))
 	results: dict = {}
 
 	for ch in channels:
 		try:
 			if ch == "print":
-				results[ch] = _share_print(invoice_name, fmt)
+				results[ch] = _share_print(invoice_name, fmt, no_letterhead=no_letterhead)
 			elif ch == "email":
-				results[ch] = _share_email(invoice_name, fmt, email)
+				results[ch] = _share_email(invoice_name, fmt, email, no_letterhead=no_letterhead)
 			elif ch == "whatsapp":
 				results[ch] = _share_whatsapp(invoice_name, fmt, mobile_no)
 			elif ch == "einvoice":

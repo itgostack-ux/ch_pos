@@ -12811,6 +12811,30 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 # Reprint — Today's Sales Invoices
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _stamp_sales_invoice_print_metadata(rows, company=None):
+    """Attach the company-wise print format used by every POS reprint surface."""
+    if not rows:
+        return rows
+    try:
+        from ch_erp15.ch_erp15.print_helpers import resolve_sales_invoice_print_settings
+    except Exception:
+        resolve_sales_invoice_print_settings = None
+
+    for row in rows:
+        row["__doctype"] = "Sales Invoice"
+        if resolve_sales_invoice_print_settings:
+            settings = resolve_sales_invoice_print_settings(
+                invoice_name=row.get("name"),
+                company=row.get("company") or company,
+            )
+            row["__print_format"] = settings.get("print_format") or "Custom Sales Invoice"
+            row["__no_letterhead"] = cint(settings.get("no_letterhead"))
+        else:
+            row["__print_format"] = "Custom Sales Invoice"
+            row["__no_letterhead"] = 0
+    return rows
+
+
 @frappe.whitelist()
 def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
                         doc_type="Invoice") -> list:
@@ -12853,9 +12877,11 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
         rows = frappe.db.sql("""
             SELECT
                 pi.name,
+                pi.company,
                 pi.customer,
                 pi.customer_name,
                 pi.grand_total,
+                pi.outstanding_amount,
                 pi.posting_date,
                 pi.posting_time,
                 pi.is_return,
@@ -12874,7 +12900,7 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
             ORDER BY pi.posting_date DESC, pi.posting_time DESC
             LIMIT 50
         """, (pos_profile, company, f"%{invoice_no}%"), as_dict=True)
-        return rows
+        return _stamp_sales_invoice_print_metadata(rows, company=company)
 
     if phone:
         phone_clean = phone.strip()
@@ -12891,9 +12917,11 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
         rows = frappe.db.sql("""
             SELECT
                 pi.name,
+                pi.company,
                 pi.customer,
                 pi.customer_name,
                 pi.grand_total,
+                pi.outstanding_amount,
                 pi.posting_date,
                 pi.posting_time,
                 pi.is_return,
@@ -12912,16 +12940,18 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
             ORDER BY pi.posting_date DESC, pi.posting_time DESC
             LIMIT 50
         """.format(cust_placeholders=cust_placeholders), [pos_profile, company] + customers, as_dict=True)  # noqa: UP032
-        return rows
+        return _stamp_sales_invoice_print_metadata(rows, company=company)
 
     filter_date = getdate(date) if date else getdate(nowdate())
 
     rows = frappe.db.sql("""
         SELECT
             pi.name,
+            pi.company,
             pi.customer,
             pi.customer_name,
             pi.grand_total,
+            pi.outstanding_amount,
             pi.posting_date,
             pi.posting_time,
             pi.is_return,
@@ -12940,7 +12970,7 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
         ORDER BY pi.posting_time DESC
     """, (pos_profile, company, filter_date), as_dict=True)
 
-    return rows
+    return _stamp_sales_invoice_print_metadata(rows, company=company)
 
 
 def _get_prebooking_advance_receipts(company, date=None, phone=None, invoice_no=None) -> list:
@@ -14344,14 +14374,21 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
 def _pickup_invoice_response(inv, status="ok"):
     from urllib.parse import quote
     print_format = "Custom Sales Invoice"
+    no_letterhead = 0
     try:
         # Keep pickup flow print behavior aligned with the main POS payment/share flow.
-        from ch_pos.api.share_api import _resolve_print_format
+        from ch_erp15.ch_erp15.print_helpers import resolve_sales_invoice_print_settings
 
-        print_format = _resolve_print_format(inv.name) or print_format
+        settings = resolve_sales_invoice_print_settings(
+            invoice_name=inv.name,
+            company=getattr(inv, "company", None),
+        )
+        print_format = settings.get("print_format") or print_format
+        no_letterhead = cint(settings.get("no_letterhead"))
     except Exception:
         if getattr(inv, "custom_gofix_service_request", None):
             print_format = "GoFix Service Invoice"
+            no_letterhead = 1
     return {
         "status": status,
         "name": inv.name,
@@ -14362,9 +14399,10 @@ def _pickup_invoice_response(inv, status="ok"):
         "customer": inv.customer,
         "customer_name": inv.customer_name,
         "print_format": print_format,
+        "no_letterhead": no_letterhead,
         "print_url": "/printview?doctype=Sales%20Invoice"
                      f"&name={quote(inv.name)}"
-                     f"&format={quote(print_format)}&no_letterhead=0",
+                     f"&format={quote(print_format)}&no_letterhead={no_letterhead}",
     }
 
 

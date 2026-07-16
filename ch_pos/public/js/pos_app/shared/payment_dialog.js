@@ -3082,32 +3082,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				this._overlay.find("#ch-pay-cd-sec").text(countdown);
 				this._overlay.find(".ch-pay-countdown-badge").text(countdown);
 				this._auto_timer = setTimeout(tick, 1000);
-			}
-			const name = $(e.currentTarget).data("name");
-			const do_print = (is_gofix) => {
-				const fmt = is_gofix ? "GoFix Service Invoice" : "Custom Sales Invoice";
-				const opts = is_gofix ? { no_letterhead: 1 } : {};
-				// Server-rendered PDF → header on every page (no browser print quirks)
-				print_invoice_pdf(name, fmt, opts);
-			};
-			// Check both link directions. Some GoFix invoices are linked from
-			// Service Request.service_invoice while Sales Invoice.custom_gofix_service_request
-			// remains empty.
-			frappe.xcall("frappe.client.get_value", {
-				doctype: "Sales Invoice", filters: name,
-				fieldname: "custom_gofix_service_request"
-			}).then(r => {
-				if (r && r.custom_gofix_service_request) {
-					do_print(true);
-					return null;
 				}
-				return frappe.xcall("frappe.client.get_value", {
-					doctype: "Service Request",
-					filters: { service_invoice: name },
-					fieldname: "name",
-				}).then(sr => do_print(!!(sr && sr.name)));
-			}).catch(() => do_print(false));
-		});
+				const name = $(e.currentTarget).data("name");
+				// Server-rendered PDF; print_helper resolves the company format.
+				print_invoice_pdf(name, null, { doctype: "Sales Invoice" });
+			});
 
 		// Phase 2 — Share Receipt (one-click multi-channel fanout)
 		this._overlay.on("click", ".ch-pay-share-btn", e => {

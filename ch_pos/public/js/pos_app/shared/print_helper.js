@@ -19,13 +19,36 @@
  */
 
 const PDF_ENDPOINT = "/api/method/frappe.utils.print_format.download_pdf";
+const DEFAULT_SALES_INVOICE_FORMAT = "Custom Sales Invoice";
+
+async function resolve_sales_invoice_print_settings(invoice_name) {
+	try {
+		return await frappe.xcall(
+			"ch_erp15.ch_erp15.print_helpers.get_sales_invoice_print_settings",
+			{ invoice_name }
+		);
+	} catch (err) {
+		console.warn("print_invoice_pdf: could not resolve company print format", err);
+		return null;
+	}
+}
 
 export async function print_invoice_pdf(invoice_name, print_format, opts = {}) {
 	if (!invoice_name) return;
 
 	const doctype = opts.doctype || "Sales Invoice";
-	const fmt = print_format || "Custom Sales Invoice";
-	const no_letterhead = opts.no_letterhead ? 1 : 0;
+	let fmt = print_format || DEFAULT_SALES_INVOICE_FORMAT;
+	let no_letterhead = opts.no_letterhead ? 1 : 0;
+
+	if (doctype === "Sales Invoice" && !opts.skip_resolve) {
+		const settings = await resolve_sales_invoice_print_settings(invoice_name);
+		if (settings && settings.print_format) {
+			fmt = settings.print_format;
+			if (opts.no_letterhead === undefined) {
+				no_letterhead = settings.no_letterhead ? 1 : 0;
+			}
+		}
+	}
 
 	const params = new URLSearchParams({
 		doctype: doctype,

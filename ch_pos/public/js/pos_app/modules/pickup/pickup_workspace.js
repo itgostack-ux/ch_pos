@@ -22,6 +22,7 @@
  */
 import { PosState, EventBus } from "../../state.js";
 import { format_number } from "../../shared/helpers.js";
+import { print_invoice_pdf } from "../../shared/print_helper.js";
 
 export class PickupWorkspace {
 	constructor() {
@@ -206,11 +207,16 @@ export class PickupWorkspace {
 				return;
 			}
 			this._bill_flow(row);
-		});
-		panel.on("click", ".ch-pickup-invoice-print", (e) => {
-			const url = $(e.currentTarget).data("url");
-			if (url) window.open(url, "_blank");
-		});
+			});
+			panel.on("click", ".ch-pickup-invoice-print", (e) => {
+				const $btn = $(e.currentTarget);
+				const invoice = $btn.data("name");
+				if (!invoice) return;
+				print_invoice_pdf(invoice, $btn.data("format") || null, {
+					doctype: "Sales Invoice",
+					no_letterhead: cint($btn.data("no-letterhead") || 0),
+				});
+			});
 	}
 
 	_switch_tab(tab) {
@@ -317,22 +323,15 @@ export class PickupWorkspace {
 					this._render_reserved();
 				},
 			});
-		} else if (this._active_tab === "today") {
-			frappe.call({
-				method: "frappe.client.get_list",
-				args: {
-					doctype: "Sales Invoice",
-					filters: {
-						posting_date: frappe.datetime.nowdate(),
-						docstatus: 1,
+			} else if (this._active_tab === "today") {
+				frappe.call({
+					method: "ch_pos.api.pos_api.get_todays_invoices",
+					args: {
 						pos_profile: PosState.pos_profile,
+						date: frappe.datetime.nowdate(),
+						doc_type: "Invoice",
 					},
-					fields: ["name", "customer", "customer_name", "grand_total",
-						"outstanding_amount", "posting_date", "posting_time"],
-					order_by: "creation desc",
-					limit_page_length: 100,
-				},
-				callback: (r) => {
+					callback: (r) => {
 					this._today_rows = r.message || [];
 					this._render_today();
 				},
@@ -702,9 +701,9 @@ export class PickupWorkspace {
 				</div>
 			`);
 			return;
-		}
-		$list.html(this._today_rows.map(r => `
-			<div style="display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--pos-border);align-items:center;">
+			}
+			$list.html(this._today_rows.map(r => `
+				<div style="display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--pos-border);align-items:center;">
 				<div style="flex:1.2;min-width:180px;">
 					<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name || r.customer)}</div>
 					<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div>
@@ -720,7 +719,9 @@ export class PickupWorkspace {
 				</div>
 				<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:140px;">
 					<button class="btn btn-default btn-xs ch-pickup-invoice-print"
-						data-url="/printview?doctype=Sales%20Invoice&name=${encodeURIComponent(r.name)}&format=Custom%20Sales%20Invoice&no_letterhead=0">
+						data-name="${frappe.utils.escape_html(r.name)}"
+						data-format="${frappe.utils.escape_html(r.__print_format || "")}"
+						data-no-letterhead="${cint(r.__no_letterhead || 0)}">
 						<i class="fa fa-print"></i> ${__("Print")}
 					</button>
 				</div>

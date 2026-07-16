@@ -2292,18 +2292,19 @@ export class CartService {
 						: (is_receipt
 							? `${__("State")}: ${receipt_state || "-"} · ${__("MOP")}: ${mop || "-"} · ${__("Sales Order")}: ${frappe.utils.escape_html(inv.linked_sales_orders || "-")}`
 							: `${__("Sale Type")}: ${sale_type || "-"} · ${__("MOP")}: ${mop || "-"}`);
-					const dt = frappe.utils.escape_html(inv.__doctype || "Sales Invoice");
-					const fmt = frappe.utils.escape_html(inv.__print_format || "");
-					return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
+						const dt = frappe.utils.escape_html(inv.__doctype || "Sales Invoice");
+						const fmt = frappe.utils.escape_html(inv.__print_format || "");
+						const no_letterhead = cint(inv.__no_letterhead || 0);
+						return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
 						<div style="flex:1">
 							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${type_tag} ${receipt_badge} ${is_ret}</div>
 							<div class="text-muted" style="font-size:12px">${customer} · ${sign}₹${format_number(flt(inv.grand_total))} · ${frappe.utils.escape_html(inv.posting_date || "")} ${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
 							<div class="text-muted" style="font-size:11px">${meta_line}</div>
 							${inv.items_summary ? `<div class="text-muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">${frappe.utils.escape_html(inv.items_summary)}</div>` : ""}
 						</div>
-						<button class="btn btn-xs btn-default ch-reprint-btn"
+							<button class="btn btn-xs btn-default ch-reprint-btn"
 						        data-name="${frappe.utils.escape_html(inv.name)}"
-						        data-doctype="${dt}" data-format="${fmt}">
+						        data-doctype="${dt}" data-format="${fmt}" data-no-letterhead="${no_letterhead}">
 							<i class="fa fa-print"></i> ${__("Print")}
 						</button>
 					</div>`;
@@ -2426,19 +2427,23 @@ export class CartService {
 
 		// Print button — uses doctype + print format stamped on the row by the API
 		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
-			const $btn = $(e.currentTarget);
-			const name = $btn.data("name");
-			const dt = $btn.data("doctype") || "Sales Invoice";
-			let fmt = $btn.data("format") || "";
-			if (!fmt) {
-				const is_gofix = $btn.data("gofix");
-				fmt = is_gofix ? "GoFix Service Invoice"
+				const $btn = $(e.currentTarget);
+				const name = $btn.data("name");
+				const dt = $btn.data("doctype") || "Sales Invoice";
+				let fmt = $btn.data("format") || "";
+				const opts = { doctype: dt };
+				if ($btn.attr("data-no-letterhead") !== undefined) {
+					opts.no_letterhead = cint($btn.data("no-letterhead") || 0);
+				}
+				if (!fmt) {
+					const is_gofix = $btn.data("gofix");
+					fmt = is_gofix ? "GoFix Service Invoice"
 			               : (dt === "Quotation"
 								? "Proforma Invoice"
 								: (dt === "Payment Entry" ? "Standard" : "Custom Sales Invoice"));
-			}
-			print_invoice_pdf(name, fmt, { doctype: dt });
-		});
+				}
+				print_invoice_pdf(name, fmt, opts);
+			});
 	}
 
 	// ── Manager Approval Dialog ─────────────────────────
