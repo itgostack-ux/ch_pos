@@ -1571,6 +1571,19 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
             )
             issue_cat = match
 
+    from ch_pos.api.repair import build_condition_and_backup
+
+    product_condition_desc, backup_info = build_condition_and_backup(
+        device_condition, accessories, data_disclaimer
+    )
+
+    walkin_source = None
+    if frappe.db.table_exists("Walkin Source"):
+        walkin_source = (
+            frappe.db.get_value("Walkin Source", "POS Counter", "name")
+            or frappe.db.get_value("Walkin Source", {}, "name")
+        )
+
     sr = frappe.get_doc({
         "doctype": "Service Request",
         "customer": customer or None,
@@ -1578,7 +1591,9 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
         "contact_number": token.customer_phone,
         "company": profile.company,
         "source_warehouse": profile.warehouse,
-        "walkin_source": frappe.db.get_value("Walk-in Source", {}, "name"),  # first available walk-in source
+        "walkin_source": walkin_source,
+        "product_condition_desc": product_condition_desc,
+        "backup_info": backup_info,
         "decision": "Accepted",        # Customer is present — accepting the device
         "device_item": device_item or None,
         "device_item_name": _device_label(token.device_brand, token.device_model) if not device_item else None,

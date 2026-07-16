@@ -39,6 +39,12 @@ class POSRepairIntake(Document):
 
         device_item = self._resolve_device_item()
 
+        from ch_pos.api.repair import build_condition_and_backup
+
+        product_condition_desc, backup_info = build_condition_and_backup(
+            self.device_condition, self.accessories_received, self.data_backup_disclaimer
+        )
+
         sr = frappe.new_doc("Service Request")
         sr.customer = self.customer
         sr.contact_number = self.customer_phone
@@ -55,16 +61,20 @@ class POSRepairIntake(Document):
         sr.mode_of_service = self.mode_of_service
         sr.password = self.password_pattern
         sr.walkin_source = "POS Counter"
-        sr.status = "Draft"
         sr.priority = "Medium"
         sr.accessories_received = self.accessories_received or ""
         sr.data_backup_disclaimer = self.data_backup_disclaimer or 0
+        sr.product_condition_desc = product_condition_desc
+        sr.backup_info = backup_info
         sr.insert(ignore_permissions=True)
+        # POS-raised requests go straight to Submitted so they are actionable
+        # in Service Hub / GoFix Ops Hub without a manual draft round-trip.
+        sr.submit()
 
         self.db_set("service_request", sr.name)
         self.db_set("status", "Converted")
         frappe.msgprint(
-            f"Service Request <b>{sr.name}</b> created.",
+            f"Service Request <b>{sr.name}</b> created and submitted.",
             indicator="green",
             alert=True,
         )

@@ -2,6 +2,76 @@ import frappe
 from buyback.utils import validate_indian_phone
 
 
+def build_condition_and_backup(device_condition, accessories, data_disclaimer):
+	"""Map the POS condition inputs onto the Service Request fields that are
+	mandatory at submit time (validate_mandatory_fields), so a POS-raised
+	request can go straight to Submitted and appear in Service Hub / GoFix
+	Ops Hub without a manual round-trip through the draft form.
+	"""
+	condition_bits = []
+	if device_condition:
+		condition_bits.append(f"Device condition: {device_condition}")
+	if accessories:
+		condition_bits.append(f"Accessories received: {accessories}")
+	product_condition_desc = (
+		". ".join(condition_bits) or "Not assessed at POS counter — verify at service hub."
+	)
+	backup_info = (
+		"Customer acknowledged at POS that data may be lost during repair; no backup taken by store."
+		if frappe.utils.cint(data_disclaimer)
+		else "No backup recorded at POS intake."
+	)
+	return product_condition_desc, backup_info
+
+
+@frappe.whitelist()
+def create_service_intake_from_pos(data) -> dict:
+	"""Create and SUBMIT a GoFix Service Request from the POS Service Intake form.
+
+	POS-raised requests must land as submitted documents so they are
+	immediately actionable in Service Hub and GoFix Ops Hub (which filters
+	docstatus = 1). The device-condition select and the data-loss disclaimer
+	checkbox are mapped onto the submit-mandatory text fields.
+	"""
+	if isinstance(data, str):
+		data = frappe.parse_json(data)
+
+	frappe.has_permission("Service Request", "create", throw=True)
+
+	if data.get("contact_number"):
+		data["contact_number"] = validate_indian_phone(data["contact_number"], "Contact Phone")
+
+	product_condition_desc, backup_info = build_condition_and_backup(
+		data.get("device_condition"),
+		data.get("accessories_received"),
+		data.get("data_backup_disclaimer"),
+	)
+
+	sr = frappe.new_doc("Service Request")
+	for field in (
+		"customer", "contact_number", "device_item", "serial_no",
+		"issue_category", "issue_description",
+		"warranty_status", "device_condition", "accessories_received",
+		"data_backup_disclaimer", "mode_of_service",
+		"company", "source_warehouse", "service_date", "priority",
+	):
+		if data.get(field):
+			sr.set(field, data[field])
+	for line in data.get("issue_lines") or []:
+		sr.append("issue_lines", line)
+	sr.decision = "Draft"
+	sr.walkin_source = data.get("walkin_source") or "POS Counter"
+	sr.product_condition_desc = product_condition_desc
+	sr.backup_info = backup_info
+	if not sr.service_date:
+		sr.service_date = frappe.utils.today()
+
+	sr.insert()
+	sr.submit()
+
+	return {"name": sr.name, "docstatus": sr.docstatus, "status": sr.status}
+
+
 @frappe.whitelist()
 def create_repair_intake(data, pos_profile=None) -> dict:
     """Create POS Repair Intake and auto-generate Service Request on submit."""

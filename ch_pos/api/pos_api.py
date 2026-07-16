@@ -6784,7 +6784,7 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
         payment_row["custom_upi_transaction_id"] = upi_txn_id
     inv.append("payments", payment_row)
 
-    for tax in profile.get("taxes", []):
+    for tax in profile.get("taxes") or []:
         inv.append("taxes", {
             "charge_type": tax.charge_type,
             "account_head": tax.account_head,
@@ -6792,17 +6792,48 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
             "description": tax.description or tax.account_head,
         })
 
+    # The Maker-Checker workflow's "POS Direct Submit" edge requires the
+    # invoice to be tied to an open POS session (condition:
+    # doc.custom_ch_pos_session) — stamp it before insert.
+    if hasattr(inv, "custom_ch_pos_session"):
+        from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+
+        _active = get_active_session(pos_profile)
+        if _active and _active.get("name"):
+            inv.custom_ch_pos_session = _active.get("name")
+
     inv.insert(ignore_permissions=True)
-    # BRD POS exception: POS invoices bypass Maker-Checker (BRD Section 3.1)
-    inv.workflow_state = "Approved"
-    inv.custom_si_approval_state = "Approved"
-    inv.submit()
+    # BRD POS exception: POS invoices bypass Maker-Checker (BRD Section 3.1).
+    # Use the workflow's own "POS Direct Submit" action — force-setting
+    # workflow_state trips validate_workflow's direct-transition guard.
+    from frappe.model.workflow import apply_workflow, get_workflow_name
+
+    if hasattr(inv, "custom_si_approval_state"):
+        inv.custom_si_approval_state = "Approved"
+    if get_workflow_name("Sales Invoice"):
+        try:
+            inv = apply_workflow(inv, "POS Direct Submit")
+        except Exception:
+            inv.reload()
+            inv.workflow_state = "Approved"
+            inv.submit()
+    else:
+        inv.submit()
 
     # Mark service request as billed
     try:
         frappe.db.set_value("Service Request", service_request, "service_invoice", inv.name, update_modified=False)
     except Exception:
         pass  # custom field may not exist yet
+
+    # Billed repairs close their Service Order (submit + workflow Closed) so
+    # they don't linger as drafts with a QC-Pass badge.
+    try:
+        from gofix.gofix_services.api import auto_close_service_order_after_billing
+
+        auto_close_service_order_after_billing(service_request=service_request)
+    except ImportError:
+        pass  # gofix not installed
 
     # Increment repair intake counter
     try:
@@ -7170,8 +7201,15 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     frappe.db.set_value("Service Request", service_request, sr_updates, update_modified=False)
 
     if qc_result == "Pass" and sr.service_order:
-        frappe.db.set_value("Sales Order", sr.service_order, "workflow_state", "Closed",
-                            update_modified=False)
+        # Properly close the Service Order (submit + workflow Closed + native
+        # status) instead of stamping a Closed badge on a draft.
+        try:
+            from gofix.gofix_services.api import auto_close_service_order_after_billing
+
+            auto_close_service_order_after_billing(service_order=sr.service_order)
+        except ImportError:
+            frappe.db.set_value("Sales Order", sr.service_order, "workflow_state", "Closed",
+                                update_modified=False)
 
     return {
         "invoice": inv.name,

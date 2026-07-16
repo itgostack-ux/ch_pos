@@ -276,9 +276,10 @@ export class RepairWorkspace {
 			// Keep first category as primary issue_category for backward compat
 			const primary_issue = selected_issues.length ? selected_issues[0] : "";
 
-			frappe.xcall("frappe.client.insert", {
-				doc: {
-					doctype: "Service Request",
+			// Server API inserts AND submits — POS-raised requests must land as
+			// submitted docs so they show in Service Hub / GoFix Ops Hub.
+			frappe.xcall("ch_pos.api.repair.create_service_intake_from_pos", {
+				data: {
 					customer: customer,
 					contact_number: phone,
 					device_item: device_item,
@@ -294,7 +295,6 @@ export class RepairWorkspace {
 					company: PosState.company || "",
 					source_warehouse: PosState.warehouse || "",
 					service_date: frappe.datetime.get_today(),
-					decision: "Draft",
 					priority: priority,
 					walkin_source: "POS Counter",
 				},
@@ -306,7 +306,7 @@ export class RepairWorkspace {
 				panel.find(".ch-rep-result-area").html(`
 					<div class="ch-rep-result">
 						<i class="fa fa-check-circle" style="font-size:18px;color:var(--pos-success)"></i>
-						<span><b>${doc.name}</b> ${__("created successfully")}</span>
+						<span><b>${doc.name}</b> ${__("created & submitted")}</span>
 						<div style="margin-left:auto;display:flex;gap:6px">
 							<button class="btn btn-sm btn-primary ch-rep-accept-job"
 								data-name="${doc.name}" style="border-radius:var(--pos-radius-sm);font-weight:700">
