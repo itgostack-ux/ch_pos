@@ -17,7 +17,7 @@ Run:
 import traceback
 import types
 import frappe
-from frappe.utils import nowdate, add_days
+from frappe.utils import add_days, flt, nowdate
 
 _results = []
 FLOW = "PrebookReserve"
@@ -116,7 +116,20 @@ def _make_reserved_so(serial, item, warehouse, delivery_date):
         so.set_warehouse = warehouse
     if so.meta.has_field("reserve_stock"):
         so.reserve_stock = 1
-    row = {"item_code": item, "qty": 1, "rate": 1000, "warehouse": warehouse,
+    ch_price = frappe.db.get_value(
+        "CH Item Price",
+        {"item_code": item, "channel": "POS", "status": "Active"},
+        ["selling_price", "mrp"],
+        as_dict=True,
+    ) or {}
+    rate = flt(ch_price.get("selling_price") or ch_price.get("mrp"))
+    if not rate:
+        rate = flt(frappe.db.get_value(
+            "Item Price",
+            {"item_code": item, "price_list": so.selling_price_list, "selling": 1},
+            "price_list_rate",
+        ))
+    row = {"item_code": item, "qty": 1, "rate": rate or 1, "warehouse": warehouse,
            "delivery_date": delivery_date}
     if frappe.get_meta("Sales Order Item").has_field("custom_serial_no"):
         row["custom_serial_no"] = serial

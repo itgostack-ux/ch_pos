@@ -110,15 +110,15 @@ def _pick_available_serials_for_prebooking(
         as_dict=True,
     )
 
+    serials = [(row.get("name") or "").strip() for row in rows]
+    reserved_serials, exchange_serials = _get_blocked_serials_for_sale(serials, warehouse)
+
     picked = []
     for row in rows:
         sn = (row.get("name") or "").strip()
         if not sn or sn in exclude:
             continue
-        reserved_so = _get_open_reserved_sales_order_for_serial(sn, warehouse)
-        if reserved_so:
-            continue
-        if _is_exchange_order_new_device(sn):
+        if sn in reserved_serials or sn in exchange_serials:
             continue
         picked.append(sn)
         if len(picked) >= needed:
@@ -8852,6 +8852,86 @@ def _notify_expired_prebook_advances(rows) -> None:
     frappe.sendmail(recipients=sorted(recipients), subject=subject, message=message)
 
 
+def _get_blocked_serials_for_sale(
+    serial_nos,
+    warehouse: str | None = None,
+    include_exchange: bool = True,
+) -> tuple[dict[str, str], set[str]]:
+    """Return reserved and exchange-committed serials using set-based queries."""
+    serials = {
+        str(serial_no or "").strip()
+        for serial_no in (serial_nos or [])
+        if str(serial_no or "").strip()
+    }
+    if not serials:
+        return {}, set()
+
+    reserved: dict[str, str] = {}
+    so_item_meta = frappe.get_meta("Sales Order Item")
+    if so_item_meta.has_field("custom_serial_no"):
+        warehouse_filter = ""
+        params = {"grace": PREBOOK_HOLD_GRACE_DAYS}
+        if warehouse:
+            warehouse_filter = (
+                " AND (IFNULL(soi.warehouse, '') = %(warehouse)s"
+                " OR IFNULL(so.set_warehouse, '') = %(warehouse)s)"
+            )
+            params["warehouse"] = warehouse
+
+        serial_filter = ""
+        if len(serials) <= 20:
+            serial_checks = []
+            for index, serial_no in enumerate(sorted(serials)):
+                key = f"serial_{index}"
+                params[key] = serial_no
+                serial_checks.append(
+                    "FIND_IN_SET(%({0})s, "
+                    "REPLACE(REPLACE(REPLACE(IFNULL(soi.custom_serial_no, ''), "
+                    "'\\r', ''), '\\n', ','), ' ', '')) > 0".format(key)
+                )
+            serial_filter = " AND (" + " OR ".join(serial_checks) + ")"
+
+        reservation_rows = frappe.db.sql(
+            f"""
+            SELECT so.name, soi.custom_serial_no
+              FROM `tabSales Order Item` soi
+              JOIN `tabSales Order` so ON so.name = soi.parent
+             WHERE so.docstatus = 1
+               AND so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
+               AND COALESCE(so.reserve_stock, 0) = 1
+               AND (so.delivery_date IS NULL
+                    OR so.delivery_date >= DATE_SUB(CURDATE(), INTERVAL %(grace)s DAY))
+               AND IFNULL(soi.custom_serial_no, '') != ''
+               {warehouse_filter}
+               {serial_filter}
+             ORDER BY so.modified DESC
+            """,
+            params,
+            as_dict=True,
+        )
+        for row in reservation_rows:
+            normalized = str(row.custom_serial_no or "").replace("\r", "").replace("\n", ",").replace(" ", "")
+            for token in normalized.split(","):
+                if token in serials and token not in reserved:
+                    reserved[token] = row.name
+
+    exchange_serials: set[str] = set()
+    if include_exchange and frappe.db.table_exists("Buyback Exchange Order"):
+        exchange_serials.update(
+            frappe.get_all(
+                "Buyback Exchange Order",
+                filters={
+                    "new_imei_serial": ("in", list(serials)),
+                    "status": ("not in", ["Closed", "Cancelled"]),
+                },
+                pluck="new_imei_serial",
+                limit_page_length=0,
+            )
+        )
+
+    return reserved, exchange_serials
+
+
 def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | None = None) -> str | None:
     """Return an open reserve-stock Sales Order name if this serial is reserved.
 
@@ -8867,45 +8947,10 @@ def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | N
     if not serial_no:
         return None
 
-    so_item_meta = frappe.get_meta("Sales Order Item")
-    if not so_item_meta.has_field("custom_serial_no"):
-        return None
-
-    warehouse_filter = ""
-    params = {
-        "serial": serial_no,
-        "grace": PREBOOK_HOLD_GRACE_DAYS,
-    }
-
-    if warehouse:
-        warehouse_filter = " AND (IFNULL(soi.warehouse, '') = %(warehouse)s OR IFNULL(so.set_warehouse, '') = %(warehouse)s)"
-        params["warehouse"] = warehouse
-
-    # Match the exact IMEI as a whole token: custom_serial_no holds a single
-    # serial or a newline-joined list. Normalise newlines/CR/spaces to a
-    # comma-set and use FIND_IN_SET for an exact-token match.
-    row = frappe.db.sql(
-        f"""
-        SELECT so.name
-          FROM `tabSales Order Item` soi
-          JOIN `tabSales Order` so ON so.name = soi.parent
-         WHERE so.docstatus = 1
-           AND so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
-           AND COALESCE(so.reserve_stock, 0) = 1
-           AND (so.delivery_date IS NULL
-                OR so.delivery_date >= DATE_SUB(CURDATE(), INTERVAL %(grace)s DAY))
-           AND FIND_IN_SET(
-                 %(serial)s,
-                 REPLACE(REPLACE(REPLACE(IFNULL(soi.custom_serial_no, ''), '\r', ''), '\n', ','), ' ', '')
-               ) > 0
-           {warehouse_filter}
-         ORDER BY so.modified DESC
-         LIMIT 1
-        """,
-        params,
-        as_dict=True,
+    reserved, _exchange = _get_blocked_serials_for_sale(
+        [serial_no], warehouse, include_exchange=False
     )
-    return row[0].name if row else None
+    return reserved.get(serial_no)
 
 
 @frappe.whitelist()

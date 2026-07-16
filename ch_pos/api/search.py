@@ -544,7 +544,7 @@ def get_available_serials(item_code, warehouse) -> list:
     Each row includes:
       - serial_no            : the IMEI / serial number
       - warranty_expiry_date : for the WE chip in UI
-      - inward_date          : FIRST inward date from SNBB; falls back to
+      - inward_date          : latest inward date into this warehouse; falls back to
                                Serial No.creation when SNBB has no record.
                                Drives the stock-ageing chip on the picker.
       - ch_is_imei           : 1 = real manufacturer IMEI, 0 = system barcode
@@ -555,7 +555,7 @@ def get_available_serials(item_code, warehouse) -> list:
     if not item_code or not warehouse:
         return []
 
-    # Primary query: use Serial and Batch Bundle (SNBB) inward dates for true FIFO order.
+    # Primary query: use the latest SNBB inward into this warehouse for true FIFO order.
     # COALESCE fallback chain on inward_date guarantees NEVER-NULL value:
     #   SNBB posting_datetime  →  Serial No.creation
     # This fixes the bug where the FIFO-oldest serial showed no inward date in UI.
@@ -573,17 +573,19 @@ def get_available_serials(item_code, warehouse) -> list:
                      CASE WHEN COALESCE(sn.ch_is_imei, 0) = 1 THEN 'IMEI' ELSE 'Barcode' END
             ) AS ch_serial_kind,
             COALESCE(
-                MIN(DATE(sbb.posting_datetime)),
+                MAX(DATE(sbb.posting_datetime)),
                 DATE(sn.creation)
             ) AS inward_date,
             COALESCE(sb.bin_type, 'Sellable') AS bin_type
         FROM `tabSerial No` sn
         LEFT JOIN `tabSerial and Batch Entry` sbe
-            ON sbe.serial_no = sn.name
+            ON sbe.warehouse = %(warehouse)s
+            AND sbe.serial_no = sn.name
         LEFT JOIN `tabSerial and Batch Bundle` sbb
             ON sbe.parent = sbb.name
             AND sbb.type_of_transaction = 'Inward'
             AND sbb.docstatus = 1
+            AND sbb.warehouse = %(warehouse)s
         LEFT JOIN `tabCH Stock Bin` sb
             ON sb.serial_no = sn.name
         WHERE sn.item_code = %(item_code)s
@@ -600,20 +602,20 @@ def get_available_serials(item_code, warehouse) -> list:
         ORDER BY inward_date ASC, sn.name ASC
     """, {"item_code": item_code, "warehouse": warehouse}, as_dict=True)
 
-    # Exclude serials currently reserved on an open pre-booking. Done in Python
-    # (not SQL) so we reuse the single source of truth in
-    # `pos_api._get_open_reserved_sales_order_for_serial` which honors the
-    # pre-booking validity grace window and warehouse scoping.
+    # Exclude reserved and exchange-committed serials in two set-based queries.
+    # The old per-row checks issued two database queries for every displayed
+    # serial, making common 50-100 IMEI lots take several seconds to open.
     if rows:
         try:
-            from ch_pos.api.pos_api import (
-                _get_open_reserved_sales_order_for_serial,
-                _is_exchange_order_new_device,
+            from ch_pos.api.pos_api import _get_blocked_serials_for_sale
+
+            reserved_serials, exchange_serials = _get_blocked_serials_for_sale(
+                [r["serial_no"] for r in rows], warehouse
             )
             rows = [
                 r for r in rows
-                if not _get_open_reserved_sales_order_for_serial(r["serial_no"], warehouse)
-                and not _is_exchange_order_new_device(r["serial_no"])
+                if r["serial_no"] not in reserved_serials
+                and r["serial_no"] not in exchange_serials
             ]
         except Exception:
             # If the helper is unavailable (edge case), fall back to unfiltered
@@ -786,4 +788,3 @@ def get_external_imei_plan_for_item(item_code) -> dict:
         # configured — cannot auto-open the IMEI prompt safely.
         return {}
     return plan
-
