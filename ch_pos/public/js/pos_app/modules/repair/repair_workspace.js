@@ -545,6 +545,27 @@ export class RepairWorkspace {
     </div>
   ` : ""}
 
+  ${d.billing_location && d.billing_location.requires_remote_otp && !d.billing_location.otp_verified && !d.service_invoice ? `
+    <div class="ch-cld-remote-otp" style="background:#fffbeb;border:1px solid #fbbf24;border-radius:8px;padding:12px 16px;margin-bottom:12px">
+      <div style="font-weight:700;color:#92400e;margin-bottom:4px">
+        <i class="fa fa-map-marker"></i> ${__("Device is not at its home store")}
+      </div>
+      <div style="font-size:12px;color:#78350f;margin-bottom:8px">
+        ${__("Device at")}: <b>${frappe.utils.escape_html(d.billing_location.device_at || __("in transit"))}</b>
+        &nbsp;·&nbsp; ${__("Home store")}: <b>${frappe.utils.escape_html(d.billing_location.home_store || "")}</b><br>
+        ${__("Record the return transfer to bill normally, or take the customer's OTP consent to bill here.")}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="btn btn-sm btn-warning ch-cld-send-otp">
+          <i class="fa fa-paper-plane"></i> ${__("Send OTP (WhatsApp / Email)")}
+        </button>
+        <input type="text" class="form-control form-control-sm ch-cld-remote-otp-input"
+          placeholder="${__("Enter customer OTP")}" maxlength="6"
+          style="width:160px;letter-spacing:3px;text-align:center;font-weight:700">
+      </div>
+    </div>
+  ` : ""}
+
   <!-- Repair Summary (read-only context) -->
   <div class="ch-closure-section" style="background:#f8fafc;border-color:#e2e8f0">
     <div class="ch-closure-section-title" style="margin-bottom:6px"><i class="fa fa-clipboard"></i> ${__("Repair Summary")}</div>
@@ -703,6 +724,22 @@ export class RepairWorkspace {
 				if (!(parseFloat(first_pay.val()) > 0)) first_pay.val(grand.toFixed(2)).trigger("input");
 			});
 
+			// Remote-billing OTP: send consent OTP to the customer
+			dlg.$body.on("click", ".ch-cld-send-otp", (e) => {
+				const btn = $(e.currentTarget);
+				btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Sending…")}`);
+				frappe.xcall("gofix.gofix_services.api.request_remote_billing_otp", {
+					service_request: sr_name,
+				}).then((r) => {
+					frappe.show_alert({ message: r.message || __("OTP sent"), indicator: "green" });
+					btn.html(`<i class="fa fa-refresh"></i> ${__("Resend OTP")}`).prop("disabled", false);
+					dlg.$body.find(".ch-cld-remote-otp-input").focus();
+				}).catch((err) => {
+					frappe.show_alert({ message: err.message || __("Could not send OTP"), indicator: "red" });
+					btn.html(`<i class="fa fa-paper-plane"></i> ${__("Send OTP (WhatsApp / Email)")}`).prop("disabled", false);
+				});
+			});
+
 			// Add part row
 			dlg.$body.on("click", ".ch-cld-add-part", () => {
 				const idx = dlg.$body.find(".ch-cld-part-row").length;
@@ -858,6 +895,15 @@ export class RepairWorkspace {
 		const technician  = this._current_technician || "";
 		const delivery_ack = dlg.$body.find(".ch-cld-delivery-ack").is(":checked") ? 1 : 0;
 		const delivery_note = dlg.$body.find(".ch-cld-delivery-note").val().trim();
+		// Off-store billing consent OTP (block shown only when device is away)
+		const remote_otp = (dlg.$body.find(".ch-cld-remote-otp-input").val() || "").trim();
+		if (dlg.$body.find(".ch-cld-remote-otp").length && !remote_otp) {
+			frappe.show_alert({
+				message: __("Device is not at its home store — send the customer an OTP and enter it to bill here."),
+				indicator: "orange",
+			});
+			return;
+		}
 
 		dlg.get_primary_btn().prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Processing…")}`);
 
@@ -872,6 +918,7 @@ export class RepairWorkspace {
 			technician,
 			spare_parts: JSON.stringify(spare_parts),
 			service_charge,
+			remote_otp,
 		}).then((r) => {
 			dlg.hide();
 			const se_msg = r.stock_entry ? __(" · Stock Entry: {0}", [r.stock_entry]) : "";

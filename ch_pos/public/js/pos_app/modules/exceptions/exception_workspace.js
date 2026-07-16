@@ -104,6 +104,8 @@ export class ExceptionWorkspace {
 					<div class="ch-exc-customer-link"></div>
 				</div>
 				<div class="col-sm-12" style="margin-top:8px">
+					<div class="small text-muted ch-exc-context-display"
+						style="display:none;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:8px 10px;margin-bottom:8px"></div>
 					<label class="control-label">${__("Reason")} *</label>
 					<textarea class="form-control ch-exc-reason" rows="2"
 						placeholder="${__("Why is this exception needed?")}"></textarea>
@@ -190,12 +192,59 @@ export class ExceptionWorkspace {
 		const serial_input = panel.find(".ch-exc-serial");
 		const original_input = panel.find(".ch-exc-original");
 		const item_display = panel.find(".ch-exc-item-display");
+		const context_display = panel.find(".ch-exc-context-display");
 
-		if (!ctx || ctx.source !== "cart_line") {
+		if (!ctx) {
 			this._locked_form_context = null;
 			serial_input.val("").prop("readonly", false);
 			original_input.val("");
 			item_display.hide().text("");
+			context_display.hide().text("");
+			if (this._customer_control?.$input) {
+				this._customer_control.$input.prop("disabled", false).prop("readonly", false);
+			}
+			return;
+		}
+
+		if (ctx.source === "service_request") {
+			this._locked_form_context = {
+				source: "service_request",
+				reference_doctype: ctx.reference_doctype || "Service Request",
+				reference_name: ctx.reference_name || "",
+				customer: (ctx.customer || PosState.customer || PosState.default_customer || "").trim(),
+				customer_name: ctx.customer_name || "",
+				customer_phone: ctx.customer_phone || "",
+				serial_no: ctx.serial_no || "",
+				store_warehouse: ctx.store_warehouse || PosState.warehouse || "",
+				original_value: flt(ctx.original_value || 0),
+			};
+			if (this._customer_control) this._customer_control.set_value(this._locked_form_context.customer);
+			if (this._locked_form_context.original_value > 0) original_input.val(this._locked_form_context.original_value);
+			serial_input.val(this._locked_form_context.serial_no || "");
+			panel.find(".ch-exc-reason").val(ctx.reason || "");
+			item_display.hide().text("");
+			context_display
+				.html(
+					`<b>${__("GoFix Service Request")}:</b> ${frappe.utils.escape_html(this._locked_form_context.reference_name || "")}
+					${this._locked_form_context.customer_name ? ` &nbsp; <b>${__("Customer")}:</b> ${frappe.utils.escape_html(this._locked_form_context.customer_name)}` : ""}
+					${this._locked_form_context.customer_phone ? ` &nbsp; <b>${__("Phone")}:</b> ${frappe.utils.escape_html(this._locked_form_context.customer_phone)}` : ""}`
+				)
+				.show();
+
+			frappe.show_alert({
+				message: __("Exception form opened for GoFix service request {0}.", [this._locked_form_context.reference_name || ""]),
+				indicator: "blue",
+			});
+			this._open_context = null;
+			return;
+		}
+
+		if (ctx.source !== "cart_line") {
+			this._locked_form_context = null;
+			serial_input.val("").prop("readonly", false);
+			original_input.val("");
+			item_display.hide().text("");
+			context_display.hide().text("");
 			if (this._customer_control?.$input) {
 				this._customer_control.$input.prop("disabled", false).prop("readonly", false);
 			}
@@ -302,6 +351,8 @@ export class ExceptionWorkspace {
 		const serial_no = (locked_ctx?.serial_no || panel.find(".ch-exc-serial").val() || "").trim();
 		const item_code = (locked_ctx?.item_code || (this._item_control ? this._item_control.get_value() : "") || "").trim();
 		const customer = (locked_ctx?.customer || (this._customer_control ? this._customer_control.get_value() : "") || "").trim();
+		const reference_doctype = (locked_ctx?.reference_doctype || "").trim();
+		const reference_name = (locked_ctx?.reference_name || "").trim();
 
 		if (!exception_type) {
 			frappe.show_alert({ message: __("Select an exception type"), indicator: "orange" });
@@ -320,7 +371,7 @@ export class ExceptionWorkspace {
 		// PosState.company can be null/undefined before session is fully loaded.
 		// JS JSON.stringify drops undefined values → missing required positional arg in Python.
 		const company = PosState.company || "";
-		const store_warehouse = PosState.warehouse || "";
+		const store_warehouse = locked_ctx?.store_warehouse || PosState.warehouse || "";
 		const pos_profile = PosState.pos_profile || "";
 		if (!company) {
 			frappe.show_alert({ message: __("POS session not active. Please open a session first."), indicator: "red" });
@@ -343,6 +394,8 @@ export class ExceptionWorkspace {
 				store_warehouse,
 				pos_profile,
 				customer: customer || "",
+				reference_doctype: reference_doctype || "",
+				reference_name: reference_name || "",
 			}
 		).then((res) => {
 			btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Submit Request")}`);
@@ -391,6 +444,7 @@ export class ExceptionWorkspace {
 			panel.find(".ch-exc-reason").val("");
 			panel.find(".ch-exc-requested, .ch-exc-original, .ch-exc-serial").val("");
 			panel.find(".ch-exc-item-display").hide().text("");
+			panel.find(".ch-exc-context-display").hide().text("");
 			if (this._item_control) this._item_control.set_value("");
 			if (this._customer_control) this._customer_control.set_value("");
 			this._locked_form_context = null;

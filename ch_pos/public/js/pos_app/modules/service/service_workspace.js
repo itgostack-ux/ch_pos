@@ -6,6 +6,7 @@
  */
 import { PosState, EventBus } from "../../state.js";
 import { format_number } from "../../shared/helpers.js";
+import { print_invoice_pdf } from "../../shared/print_helper.js";
 
 const DECISION_MAP = {
 	Draft: "warning", Accepted: "info", "In Service": "warning",
@@ -93,7 +94,9 @@ export class ServiceWorkspace {
 						["customer_name", "like", `%${q}%`],
 					],
 					fields: ["name", "customer_name", "status", "device_item_name",
-						"issue_category", "decision", "service_date", "estimated_cost"],
+						"issue_category", "decision", "service_date", "estimated_cost",
+						"customer", "contact_number", "serial_no", "actual_imei",
+						"source_warehouse", "service_invoice"],
 					order_by: "creation desc",
 					limit_page_length: 20,
 				},
@@ -110,6 +113,16 @@ export class ServiceWorkspace {
 					}
 					const cards = items.map((sr) => {
 						const badge = DECISION_MAP[sr.decision] || "muted";
+						const inv = sr.service_invoice || "";
+						const sr_payload = encodeURIComponent(JSON.stringify({
+							name: sr.name,
+							customer: sr.customer || "",
+							customer_name: sr.customer_name || "",
+							contact_number: sr.contact_number || "",
+							serial_no: sr.serial_no || sr.actual_imei || "",
+							source_warehouse: sr.source_warehouse || "",
+							estimated_cost: sr.estimated_cost || 0,
+						}));
 						return `
 						<div class="ch-svc-card" data-name="${sr.name}">
 							<div class="ch-svc-card-top">
@@ -129,6 +142,21 @@ export class ServiceWorkspace {
 									style="border-radius:var(--pos-radius-sm);font-weight:700">
 									<i class="fa fa-external-link"></i> ${__("Open in GoFix")}
 								</button>
+								${inv ? `
+									<button class="btn btn-sm btn-outline-secondary ch-svc-view-invoice" data-name="${frappe.utils.escape_html(inv)}"
+										style="border-radius:var(--pos-radius-sm);font-weight:700">
+										<i class="fa fa-file-text-o"></i> ${__("View Invoice")}
+									</button>
+									<button class="btn btn-sm btn-primary ch-svc-print-invoice" data-name="${frappe.utils.escape_html(inv)}"
+										style="border-radius:var(--pos-radius-sm);font-weight:700">
+										<i class="fa fa-print"></i> ${__("Print Invoice")}
+									</button>
+								` : `
+									<button class="btn btn-sm btn-outline-warning ch-svc-raise-exception" data-sr="${sr_payload}"
+										style="border-radius:var(--pos-radius-sm);font-weight:700">
+										<i class="fa fa-exclamation-triangle"></i> ${__("Raise Exception")}
+									</button>
+								`}
 							</div>
 						</div>`;
 					}).join("");
@@ -142,6 +170,39 @@ export class ServiceWorkspace {
 
 		panel.on("click", ".ch-svc-open-sr", function () {
 			frappe.set_route("Form", "Service Request", $(this).data("name"));
+		});
+		panel.on("click", ".ch-svc-view-invoice", function () {
+			frappe.set_route("Form", "Sales Invoice", $(this).data("name"));
+		});
+		panel.on("click", ".ch-svc-print-invoice", function () {
+			const invoice = $(this).data("name");
+			if (!invoice) return;
+			print_invoice_pdf(invoice, "GoFix Service Invoice", { doctype: "Sales Invoice", no_letterhead: 1 });
+		});
+		panel.on("click", ".ch-svc-raise-exception", function () {
+			let sr = {};
+			try {
+				sr = JSON.parse(decodeURIComponent($(this).data("sr") || "%7B%7D"));
+			} catch (e) {
+				sr = {};
+			}
+			PosState.active_mode = "exceptions";
+			EventBus.emit("mode:set", "exceptions");
+			EventBus.emit("mode:switch", "exceptions");
+			EventBus.emit("exception:open", {
+				source: "service_request",
+				reference_doctype: "Service Request",
+				reference_name: sr.name || "",
+				customer: sr.customer || "",
+				customer_name: sr.customer_name || "",
+				customer_phone: sr.contact_number || "",
+				serial_no: sr.serial_no || "",
+				original_value: sr.estimated_cost || 0,
+				store_warehouse: sr.source_warehouse || PosState.warehouse || "",
+				reason: sr.name
+					? __("Customer requested billing exception for GoFix service request {0}.", [sr.name])
+					: __("Customer requested billing exception for GoFix service request."),
+			});
 		});
 		panel.on("click", ".ch-svc-open-gofix", () => {
 			frappe.set_route("List", "Service Request");

@@ -6727,7 +6727,8 @@ def get_store_repairs(pos_profile) -> dict:
 
 @frappe.whitelist()
 def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile,
-                           customer="Walk-in Customer", service_order=None, upi_txn_id=None) -> dict:
+                           customer="Walk-in Customer", service_order=None, upi_txn_id=None,
+                           remote_otp=None) -> dict:
     """Create a Sales Invoice to collect payment for a completed repair job.
 
     Marks Service Request as billed after invoice submission.
@@ -6739,6 +6740,14 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     sr_doc = frappe.get_doc("Service Request", service_request)
+
+    # Guard: bill at the device's home store, or with customer OTP consent
+    try:
+        from gofix.gofix_services.api import assert_billing_location
+
+        assert_billing_location(sr_doc, remote_otp)
+    except ImportError:
+        pass
 
     # Find or create a repair service item (must be sellable: Active lifecycle)
     repair_item = frappe.db.get_value(
@@ -6987,13 +6996,25 @@ def get_repair_closure_data(service_request) -> dict:
         "decision": sr.decision or "",
         "priority": sr.priority or "",
         "service_invoice": sr.service_invoice or "",
+        "billing_location": _repair_billing_location(sr),
     }
+
+
+def _repair_billing_location(sr) -> dict:
+    """Home-store billing guard status for the closure dialog (gofix-aware)."""
+    try:
+        from gofix.gofix_services.api import billing_location_status
+
+        return billing_location_status(sr)
+    except ImportError:
+        return {"at_home_store": True, "requires_remote_otp": False, "otp_verified": False}
 
 
 @frappe.whitelist()
 def close_repair_order(service_request, pos_profile, payments, qc_result,
                        qc_remarks="", delivery_ack=0, delivery_note="",
-                       technician="", spare_parts=None, service_charge=0) -> None:
+                       technician="", spare_parts=None, service_charge=0,
+                       remote_otp=None) -> None:
     """Complete the repair closure flow in one atomic call.
 
     Steps:
@@ -7035,6 +7056,14 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     # Guard: don't double-bill
     if frappe.db.get_value("Service Request", service_request, "service_invoice"):
         frappe.throw(frappe._("Service Request {0} is already billed").format(service_request))
+
+    # Guard: bill at the device's home store, or with customer OTP consent
+    try:
+        from gofix.gofix_services.api import assert_billing_location
+
+        assert_billing_location(sr, remote_otp)
+    except ImportError:
+        pass
 
     # 1 — Assign technician
     if technician and sr.service_order:
