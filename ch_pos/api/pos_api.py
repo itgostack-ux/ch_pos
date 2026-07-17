@@ -8855,8 +8855,23 @@ def release_expired_prebook_reservations() -> int:
 
 
 def _notify_expired_prebook_advances(rows) -> None:
-    """Alert all management heads + the full accounts team that expired
-    pre-bookings carry an advance needing a refund/forfeit decision."""
+    """Alert management heads + the OWNING COMPANY's accounts team that
+    expired pre-bookings carry an advance needing a refund/forfeit decision.
+
+    One email per company, accounts team scoped through the notification
+    router (fail-closed) so clerks never receive another company's list.
+    """
+    from collections import defaultdict
+
+    by_company = defaultdict(list)
+    for so in rows:
+        by_company[so.get("company") or ""].append(so)
+
+    for company, company_rows in by_company.items():
+        _send_expired_prebook_email(company, company_rows)
+
+
+def _send_expired_prebook_email(company, rows) -> None:
     recipients = set()
 
     # Management heads (CEO/COO/CFO or CH Notification Settings digest_roles).
@@ -8866,20 +8881,24 @@ def _notify_expired_prebook_advances(rows) -> None:
     except Exception:
         pass
 
-    # Entire accounts team.
-    acct_users = frappe.get_all(
-        "Has Role",
-        filters={"role": ("in", ["Accounts Manager", "Accounts User"]), "parenttype": "User"},
-        pluck="parent",
-    )
-    for u in set(acct_users):
-        if u in ("Administrator", "Guest"):
-            continue
-        if not frappe.db.get_value("User", u, "enabled"):
-            continue
-        email = frappe.db.get_value("User", u, "email")
-        if email:
-            recipients.add(email)
+    # Accounts team of the owning company only (fail-closed on unknown scope).
+    try:
+        from ch_erp15.ch_erp15.notification_router import scoped_role_emails
+        recipients.update(scoped_role_emails(["Accounts Manager", "Accounts User"], company=company or None))
+    except ImportError:
+        acct_users = frappe.get_all(
+            "Has Role",
+            filters={"role": ("in", ["Accounts Manager", "Accounts User"]), "parenttype": "User"},
+            pluck="parent",
+        )
+        for u in set(acct_users):
+            if u in ("Administrator", "Guest"):
+                continue
+            if not frappe.db.get_value("User", u, "enabled"):
+                continue
+            email = frappe.db.get_value("User", u, "email")
+            if email:
+                recipients.add(email)
 
     if not recipients:
         return
@@ -8908,6 +8927,8 @@ def _notify_expired_prebook_advances(rows) -> None:
     )
     total_advance = sum(flt(so.advance_paid) for so in rows)
     subject = _("Action needed: {0} expired pre-booking(s) with advance — refund/forfeit decision").format(len(rows))
+    if company:
+        subject = f"{subject} — {company}"
     message = _(
         "<p>The following pre-bookings have lapsed (validity passed) and their reserved "
         "device(s) were returned to sellable stock. Each still holds a customer "
