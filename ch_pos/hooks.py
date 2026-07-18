@@ -15,7 +15,7 @@ add_to_apps_screen = [
 		"name": "ch_pos",
 		"logo": "/assets/ch_pos/icon.svg",
 		"title": "CH POS",
-		"route": "/POS",
+		"route": "/desk/pos",
 	}
 ]
 
