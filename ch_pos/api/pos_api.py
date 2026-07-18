@@ -3438,7 +3438,10 @@ def create_pos_invoice(
         if ch_item_type in ("Refurbished", "Pre-Owned"):
             row["custom_is_margin_item"] = 1
 
-        if item_serial:
+        # Plan/VAS rows carry the serial as a COVERAGE REFERENCE (post-sale
+        # attach: the device was already sold by us) — stock sellability
+        # gates apply only when the serial is physically being sold.
+        if item_serial and not item_is_plan:
             _sbin = frappe.db.get_value("CH Stock Bin", {"serial_no": item_serial}, "bin_type")
             if _sbin == "Transfer":
                 frappe.throw(
@@ -3832,21 +3835,40 @@ def create_pos_invoice(
                 "included_in_print_rate", "docstatus"],
         order_by="idx")
 
-    return {
-        "name": inv.name,
-        "grand_total": final.grand_total if final else 0,
-        "rounded_total": final.rounded_total if final else 0,
-        "paid_amount": final.paid_amount if final else 0,
-        "net_total": final.net_total if final else 0,
-        "total_taxes": final.total_taxes_and_charges if final else 0,
-        "status": "created",
-        "items_in_db": items_in_db,
-        "taxes_in_db": taxes_in_db,
+    # Free sale: reclassify stock cost as promotional expense
+    if cint(is_free_sale):
+        _post_free_sale_write_off(inv)
+
+    # Redeem voucher after successful submit
+    voucher_redeemed = 0
+    if voucher_code and flt(voucher_amount) > 0:
+        from ch_item_master.ch_item_master.voucher_api import redeem_voucher
+        rv = redeem_voucher(voucher_code, flt(voucher_amount), pos_invoice=inv.name)
+        voucher_redeemed = flt(rv.get("redeemed_amount", 0))
+
+    # Create Active VAS Plans records for warranty items
+    sold_plans = []
+
+    # Build a map of device items on this invoice (non-warranty rows) so we can
+    # auto-infer for_item_code / serial_no when the frontend did not send them
+    # (for example AI upsell or attach flows that know the device item but not
+    # the IMEI at submit time).
+    device_items_on_inv = [
+        inv_item for inv_item in inv.items
+        if not any(
+            wi2.get("warranty_plan") and inv_item.item_code == (
+                frappe.db.get_value("CH Warranty Plan", wi2["warranty_plan"], "service_item")
+            )
+            for wi2 in warranty_items
+        )
+    ]
+
+    plan_service_items = {
+        _get_plan_service_item(wi.get("warranty_plan"))
+        for wi in warranty_items
+        if wi.get("warranty_plan")
     }
-
-
-def _enforce_token_linkage(pos_profile, kiosk_token):
-    return
+    plan_service_items.discard("")
 
 
 
@@ -4289,7 +4311,14 @@ def _enforce_token_linkage(pos_profile, kiosk_token):
 
     return {
         "name": inv.name,
-        "grand_total": inv.grand_total,
+        "grand_total": final.grand_total if final else inv.grand_total,
+        "rounded_total": final.rounded_total if final else 0,
+        "paid_amount": final.paid_amount if final else 0,
+        "net_total": final.net_total if final else 0,
+        "total_taxes": final.total_taxes_and_charges if final else 0,
+        "status": "created",
+        "items_in_db": items_in_db,
+        "taxes_in_db": taxes_in_db,
         "sold_plans": sold_plans,
         "active_plans": sold_plans,
         "incentive_earned": incentive_total,
