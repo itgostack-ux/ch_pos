@@ -10,6 +10,9 @@ boot_session = "ch_pos.boot.boot_session"
 required_apps = ["frappe", "erpnext", "ch_item_master"]
 
 # Each item in the list will be shown as an app in the apps page
+# Old apps-screen route lives on in bookmarks/history — redirect it.
+website_redirects = [{"source": "/POS", "target": "/desk/pos"}]
+
 add_to_apps_screen = [
 	{
 		"name": "ch_pos",
