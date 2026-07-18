@@ -128,6 +128,13 @@ def _assert_machine_in_scope(machine):
 
 @frappe.whitelist()
 def get_payment_machines(company=None, store=None, pos_profile=None, payment_mode=None):
+    from ch_item_master.ch_core.shadow_live import manual_payment_entry
+
+    if manual_payment_entry():
+        # Shadow-live pilot: terminals (Paytm / Pine Labs) are unplugged —
+        # staff key in the card RRN / UPI reference manually.
+        return {"providers": [], "machines": [], "manual_only": True}
+
     filters = {"enabled": 1}
     if company:
         filters["company"] = company
@@ -283,6 +290,15 @@ def _build_test_order(machine, amount, payment_mode, merchant_order_reference, c
 @frappe.whitelist()
 def initiate_payment(machine_name, amount, payment_mode, customer=None, customer_name=None,
         customer_email=None, customer_phone=None, merchant_order_reference=None, notes=None):
+    from ch_item_master.ch_core.shadow_live import manual_payment_entry
+
+    if manual_payment_entry():
+        frappe.throw(
+            _("Shadow live mode — payment machines are disabled. "
+              "Enter the card / UPI reference manually and save the payment."),
+            title=_("Payment Machines Disabled"),
+        )
+
     machine = _get_machine(machine_name)
     # Bind the live gateway order to the operator's store authority.
     _assert_machine_in_scope(machine)

@@ -2037,6 +2037,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			const type = this._mop_type(p.mode);
 			let ref_html = "";
 			if (type === "upi") {
+				if (this._payment_machine_data.manual_only) {
+					ref_html = `
+					<div class="ch-pay-gateway-refs mt-1">
+						<input type="text" class="form-control form-control-sm ch-pay-row-utr" data-idx="${idx}"
+							placeholder="${__("UPI UTR / Txn ID")}" value="${frappe.utils.escape_html(p.upi_transaction_id || "")}">
+					</div>`;
+				} else {
 				const providers = this._gateway_providers_for_mode(p.mode);
 				const machines = this._machines_for_row(p);
 				ref_html = `
@@ -2058,7 +2065,19 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 						<input type="text" class="form-control form-control-sm ch-pay-row-utr" data-idx="${idx}"
 							placeholder="${__("UPI UTR / Txn ID")}" value="${frappe.utils.escape_html(p.upi_transaction_id || "")}">
 					</div>`;
+				}
 			} else if (type === "card") {
+				if (this._payment_machine_data.manual_only) {
+					ref_html = `
+					<div class="ch-pay-card-refs mt-1">
+						<div class="ch-pay-gateway-grid ch-pay-gateway-grid-two">
+							<input type="text" class="form-control form-control-sm ch-pay-row-rrn" data-idx="${idx}"
+								placeholder="${__("Card RRN / Approval Code")}" value="${frappe.utils.escape_html(p.card_reference || "")}">
+							<input type="text" class="form-control form-control-sm ch-pay-row-card4" data-idx="${idx}"
+								placeholder="${__("Last 4 digits")}" maxlength="4" value="${frappe.utils.escape_html(p.card_last_four || "")}">
+						</div>
+					</div>`;
+				} else {
 				const providers = this._gateway_providers_for_mode(p.mode);
 				const machines = this._machines_for_row(p);
 				ref_html = `
@@ -2084,6 +2103,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 								placeholder="${__("Last 4 digits")}" maxlength="4" value="${frappe.utils.escape_html(p.card_last_four || "")}">
 						</div>
 					</div>`;
+				}
 			} else if (type === "bank") {
 				ref_html = `
 					<div class="ch-pay-bank-refs mt-1">
