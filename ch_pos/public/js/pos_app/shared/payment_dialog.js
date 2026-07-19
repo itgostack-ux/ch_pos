@@ -2828,6 +2828,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			for_serial_no:    c.for_serial_no || null,
 			is_warranty:      c.is_warranty || false,
 			is_vas:           c.is_vas || false,
+			// GoFix service rows — consolidated repair billing (bifurcated
+			// from retail rows server-side: no stock, no MSP, repair gates).
+			is_service:       c.is_service || false,
+			service_request:  c.service_request || null,
+			description:      c.description || null,
 			manager_approved: c.manager_approved || false,
 			manager_user:     c.manager_user || null,
 			override_reason:  c.override_reason || null,

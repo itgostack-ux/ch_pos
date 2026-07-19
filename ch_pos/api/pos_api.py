@@ -3303,6 +3303,23 @@ def create_pos_invoice(
             return True
         return False
 
+    # ── GoFix service rows — bifurcated billing path ─────────────────────
+    # A cart row carrying ``service_request`` bills a completed repair as a
+    # consolidated non-stock line (see gofix get_service_billing_line). These
+    # rows skip retail gates (MSP floor, serial checks, offers) and instead
+    # enforce the repair gates: Completed + un-invoiced + customer match +
+    # device custody + below-cost floor.
+    service_billing = {}
+    for _it in items:
+        _svc_sr = (_it.get("service_request") or "").strip() if isinstance(_it, dict) else ""
+        if _svc_sr:
+            service_billing[_svc_sr] = service_billing.get(_svc_sr, 0.0) + (
+                (flt(_it.get("qty", 1)) or 1.0) * flt(_it.get("rate") or 0))
+    if service_billing:
+        _validate_service_cart_rows(service_billing, customer)
+        if len(service_billing) == 1 and hasattr(inv, "custom_gofix_service_request"):
+            inv.custom_gofix_service_request = next(iter(service_billing))
+
     for item in items:
         if item.get("customer_imei") is not None and not item.get("for_serial_no"):
             item["for_serial_no"] = item.get("customer_imei")
@@ -3376,6 +3393,12 @@ def create_pos_invoice(
         item_plan_type = _get_plan_type(item.get("warranty_plan")) if item.get("warranty_plan") else ""
         item_is_vas = cint(item.get("is_vas", 0)) or cint(
             item_plan_type in ("Value Added Service", "Protection Plan"))
+        item_is_service = bool((item.get("service_request") or "").strip())
+
+        # Service rows carry the repair breakdown (labour, spares, part
+        # warranties) in the line description — keep it on the invoice.
+        if item_is_service and item.get("description"):
+            row["description"] = item.get("description")
 
         if (item_exception_original > 0 and item_exception_final >= 0
                 and item_exception_original != item_exception_final):
@@ -3413,6 +3436,7 @@ def create_pos_invoice(
         # needs to be enforced for pre-bookings, gate it in create_pre_booking
         # before the SO is submitted, not here.
         if (not item_is_plan and not item_is_vas and not is_free_bundle_row
+                and not item_is_service
                 and flt(effective_rate) > 0
                 and not _item_so):
             floor_price = _get_item_floor_price(item.get("item_code"), profile.company)
@@ -3845,6 +3869,23 @@ def create_pos_invoice(
         from ch_item_master.ch_item_master.voucher_api import redeem_voucher
         rv = redeem_voucher(voucher_code, flt(voucher_amount), pos_invoice=inv.name)
         voucher_redeemed = flt(rv.get("redeemed_amount", 0))
+
+    # ── Link billed GoFix service rows back to their Service Requests ────
+    # Mirrors the Repair Closure path: stamp the invoice on the SR, flip it
+    # to Invoiced, and close the Service Order so it doesn't linger as a
+    # draft with a QC-Pass badge.
+    for _svc_sr_name in (service_billing or {}):
+        _svc_updates = {"service_invoice": inv.name, "status": "Invoiced"}
+        for _svc_col in ("decision", "workflow_state"):
+            if frappe.db.has_column("Service Request", _svc_col):
+                _svc_updates[_svc_col] = "Invoiced"
+        frappe.db.set_value("Service Request", _svc_sr_name, _svc_updates, update_modified=True)
+        try:
+            from gofix.gofix_services.api import auto_close_service_order_after_billing
+
+            auto_close_service_order_after_billing(service_request=_svc_sr_name)
+        except ImportError:
+            pass
 
     # Create Active VAS Plans records for warranty items
     sold_plans = []
@@ -6754,6 +6795,89 @@ def get_store_repairs(pos_profile) -> dict:
     return service_requests
 
 
+def _enforce_service_billing_floor(sr_doc, amount):
+    """Below-cost + final-cost floor for repair billing (Ops Hub parity).
+
+    Repair billing may not go below Cost-to-Company (parts at buying cost +
+    labour at cost rate) without an APPROVED "Service Below Cost Billing"
+    exception, and may not undercut a locked Final Cost. Shared by the
+    Repair Closure path (collect_repair_payment) and cart-billed service
+    rows (create_pos_invoice).
+    """
+    amount = flt(amount)
+    try:
+        from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import (
+            _EXCEPTION_APPROVED_STATES,
+            _below_cost_exception_status,
+            _get_company_cost,
+        )
+    except ImportError:
+        return
+
+    final_cost = flt(sr_doc.get("final_cost") or 0)
+    if final_cost and amount < final_cost - 0.005:
+        frappe.throw(frappe._(
+            "A Final Cost of {0} is set on {1} — you cannot bill less at POS. "
+            "Bill at least the Final Cost, or change it in the Service Ops Hub."
+        ).format(
+            frappe.bold(frappe.format_value(final_cost, {"fieldtype": "Currency"})),
+            sr_doc.name,
+        ))
+    company_cost = _get_company_cost(sr_doc)
+    if company_cost["total"] > 0 and amount < company_cost["total"]:
+        status = _below_cost_exception_status(sr_doc)
+        if status not in _EXCEPTION_APPROVED_STATES:
+            frappe.throw(frappe._(
+                "Repair charge {0} is below Cost to Company {1} "
+                "(parts {2} + damaged {3} + labour {4}). Set a Final Cost in the "
+                "Service Ops Hub and get the below-cost exception approved first (current: {5})."
+            ).format(
+                frappe.bold(frappe.format_value(amount, {"fieldtype": "Currency"})),
+                frappe.bold(frappe.format_value(company_cost["total"], {"fieldtype": "Currency"})),
+                frappe.format_value(company_cost["parts_cost"], {"fieldtype": "Currency"}),
+                frappe.format_value(company_cost["damaged_parts_cost"], {"fieldtype": "Currency"}),
+                frappe.format_value(company_cost["labour_cost"], {"fieldtype": "Currency"}),
+                status or frappe._("no exception raised"),
+            ))
+
+
+def _validate_service_cart_rows(service_billing, customer):
+    """Gate GoFix service rows billed through the POS cart.
+
+    Service rows are a bifurcated path: no stock movement (consolidated
+    non-stock line), no MSP floor, no serial gates — instead they carry the
+    repair-specific gates: SR must be Completed and un-invoiced, belong to
+    the invoice customer, sit at its home store, and clear the below-cost /
+    final-cost floor.
+    """
+    for sr_name, amount in service_billing.items():
+        sr_doc = frappe.get_doc("Service Request", sr_name)
+
+        if sr_doc.service_invoice:
+            frappe.throw(frappe._(
+                "Service {0} is already invoiced ({1}) — remove it from the cart."
+            ).format(sr_name, sr_doc.service_invoice))
+        if hasattr(sr_doc, "is_completed_status") and not sr_doc.is_completed_status():
+            frappe.throw(frappe._(
+                "Service {0} is not Completed yet and cannot be billed."
+            ).format(sr_name))
+        if customer and sr_doc.customer and sr_doc.customer != customer:
+            frappe.throw(frappe._(
+                "Service {0} belongs to customer {1} — it cannot be billed on {2}'s invoice."
+            ).format(sr_name, sr_doc.customer, customer))
+
+        # Device custody: bill at the device's home store. The cart path has
+        # no OTP capture — remote billing goes through Repair Closure.
+        try:
+            from gofix.gofix_services.api import assert_billing_location
+
+            assert_billing_location(sr_doc, None)
+        except ImportError:
+            pass
+
+        _enforce_service_billing_floor(sr_doc, flt(amount))
+
+
 @frappe.whitelist()
 def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile,
                            customer="Walk-in Customer", service_order=None, upi_txn_id=None,
@@ -6777,6 +6901,11 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
         assert_billing_location(sr_doc, remote_otp)
     except ImportError:
         pass
+
+    # Below-cost floor — same doctrine as the Ops Hub invoice stage. POS is
+    # the easiest place to type an arbitrary low amount, so the gate must
+    # exist here too.
+    _enforce_service_billing_floor(sr_doc, amount)
 
     # Find or create a repair service item (must be sellable: Active lifecycle)
     repair_item = frappe.db.get_value(

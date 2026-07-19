@@ -509,7 +509,7 @@ export class CartService {
 		// lookup so the second unit creates a new PAID line at selling_price.
 		const existing = PosState.cart.find(
 			(c) => c.item_code === item_data.item_code
-				&& !c.is_warranty && !c.is_vas && !c.is_free_bundle_item
+				&& !c.is_warranty && !c.is_vas && !c.is_free_bundle_item && !c.is_service
 		);
 
 		if (existing) {
@@ -563,9 +563,13 @@ export class CartService {
 			primary_action_label: __("Attach & Add"),
 			primary_action: (values) => {
 				const imei = (values.customer_imei || "").trim();
-				if (!/^\d{14,17}$/.test(imei)) {
+				// Phones carry 14–17 digit IMEIs; laptops/wearables carry
+				// alphanumeric serials (e.g. a repaired laptop's service tag).
+				// The server validator resolves either against Serial No /
+				// plan category rules — the client only screens junk input.
+				if (!/^\d{14,17}$/.test(imei) && !/^[A-Za-z0-9\-\/]{6,30}$/.test(imei)) {
 					frappe.show_alert({
-						message: __("Customer Device IMEI must be 14–17 digits"),
+						message: __("Enter a 14–17 digit IMEI or the device serial number (6–30 characters)"),
 						indicator: "red",
 					});
 					return;
@@ -592,7 +596,9 @@ export class CartService {
 
 	set_cart_qty(idx, qty) {
 		const item = PosState.cart[idx];
-		if (!item || item.has_serial_no || item.is_warranty || item.is_vas) return;
+		// is_service: a repair bills as one fixed line — qty/rate are locked
+		// to the server-computed total (final cost / below-cost floor).
+		if (!item || item.has_serial_no || item.is_warranty || item.is_vas || item.is_service) return;
 		if (item.is_free_bundle_item) {
 			frappe.show_alert({
 				message: __("Free accessory is limited to 1 per device. Add another unit separately to bill it."),
@@ -1823,8 +1829,8 @@ export class CartService {
 
 				if (mode === "customer") {
 					const imei = (values.customer_imei || "").trim();
-					if (!/^\d{14,17}$/.test(imei)) {
-						frappe.show_alert({ message: __("Customer Device IMEI must be 14–17 digits"), indicator: "red" });
+					if (!/^\d{14,17}$/.test(imei) && !/^[A-Za-z0-9\-\/]{6,30}$/.test(imei)) {
+						frappe.show_alert({ message: __("Enter a 14–17 digit IMEI or the device serial number (6–30 characters)"), indicator: "red" });
 						return;
 					}
 					for_serial_no = imei;

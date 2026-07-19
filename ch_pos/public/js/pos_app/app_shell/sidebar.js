@@ -597,9 +597,11 @@ export class Sidebar {
 		return MODE_SECTIONS.flatMap((s) => s.modes.map((m) => m.key));
 	}
 	static get TRANSACTIONAL_MODES() {
-		return ["sell", "returns", "buyback", "repair"];
+		// "service" keeps the cart visible so a completed repair can be
+		// added to the bill directly from the Service Tracker.
+		return ["sell", "returns", "buyback", "repair", "service"];
 	}
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["service", "imei", "customer360", "reports", "material_request", "inbound_receive", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
+		return ["imei", "customer360", "reports", "material_request", "inbound_receive", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
 	}
 }
