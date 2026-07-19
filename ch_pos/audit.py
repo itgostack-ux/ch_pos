@@ -54,6 +54,12 @@ def log_business_event(
         doc.user = user or frappe.session.user
         doc.timestamp = now_datetime()
         doc.flags.ignore_permissions = True
+        # The referenced document (ref_doctype/ref_name) may be mid-creation —
+        # e.g. a new Sales Invoice being audited from inside its own validate(),
+        # before it has been inserted. An audit trail describing an in-flight
+        # event must not fail just because the thing it describes isn't
+        # committed yet, so link existence is not enforced here.
+        doc.flags.ignore_links = True
         doc.insert(ignore_permissions=True)
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"Audit log failed: {event_type} on {ref_name}")
