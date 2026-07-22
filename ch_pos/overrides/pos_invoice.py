@@ -343,6 +343,37 @@ def create_customer_device_records(doc, method=None):
                 if pf and pf.options == "Sales Invoice":
                     device_kwargs["purchase_invoice"] = doc.name
 
+            # Base (manufacturer/seller) warranty — stamped on EVERY device
+            # sale from the Item's default-warranty profile, independent of
+            # whether any plan was sold on top.
+            from ch_item_master.ch_item_master.warranty_api import get_item_default_warranty
+            base = get_item_default_warranty(item.item_code)
+            if base["months"]:
+                base_expiry = frappe.utils.add_months(doc.posting_date, base["months"])
+                device_kwargs.update({
+                    "base_warranty_type": base["type"],
+                    "base_warranty_months": base["months"],
+                    "base_warranty_expiry": base_expiry,
+                })
+                # Native Serial No expiry + CH Serial Lifecycle window so
+                # warranty-claim inference sees the base warranty. Fill-only —
+                # never clobber a window a sold plan already wrote.
+                try:
+                    frappe.db.set_value("Serial No", sn, "warranty_expiry_date",
+                                        base_expiry, update_modified=False)
+                    lc = frappe.db.get_value(
+                        "CH Serial Lifecycle", {"serial_no": sn},
+                        ["name", "warranty_end_date"], as_dict=True)
+                    if lc and not lc.warranty_end_date:
+                        frappe.db.set_value("CH Serial Lifecycle", lc.name, {
+                            "warranty_start_date": doc.posting_date,
+                            "warranty_end_date": base_expiry,
+                        }, update_modified=False)
+                except Exception:
+                    frappe.log_error(
+                        frappe.get_traceback(),
+                        f"Base warranty stamp failed for serial {sn} / {doc.name}")
+
             # Attach warranty info if selected (don't set active_warranty_plan —
             # that's a Link to Active VAS Plans which is created separately)
             if item.get("custom_warranty_plan"):

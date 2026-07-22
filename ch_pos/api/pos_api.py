@@ -4461,14 +4461,28 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
             )
 
     today = nowdate()
+    coverage_start = today
+    if cint(plan_doc.get("starts_after_base_warranty")):
+        # Stack on top of the device's manufacturer/seller warranty: coverage
+        # begins the day after the base warranty expires (when still running).
+        from ch_item_master.ch_item_master.warranty_api import get_base_warranty_expiry
+        base_expiry = None
+        if serial_no:
+            base_expiry = frappe.db.get_value(
+                "CH Customer Device", {"serial_no": serial_no}, "base_warranty_expiry")
+        if not base_expiry and item_code:
+            base_expiry = get_base_warranty_expiry(item_code, today)
+        if base_expiry and getdate(base_expiry) >= getdate(today):
+            coverage_start = frappe.utils.add_days(base_expiry, 1)
+
     sp = frappe.new_doc("Active VAS Plans")
     sp.warranty_plan = warranty_plan
     sp.customer = customer
     sp.item_code = item_code
     sp.serial_no = serial_no
     sp.company = company
-    sp.start_date = today
-    sp.end_date = add_months(today, plan_doc.duration_months or 12)
+    sp.start_date = coverage_start
+    sp.end_date = add_months(coverage_start, plan_doc.duration_months or 12)
     sp.status = "Active"
     sp.sales_invoice = sales_invoice
     sp.plan_price = plan_price

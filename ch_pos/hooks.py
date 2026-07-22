@@ -86,8 +86,10 @@ doc_events = {
             "ch_pos.overrides.cutoff_time_guard.validate_pos_cutoff_time",
         ],
         "on_submit": [
-            "ch_pos.overrides.pos_invoice.create_customer_device_records",
+            # lifecycle first: device registration stamps the base-warranty
+            # window onto the CH Serial Lifecycle row, which this creates.
             "ch_pos.overrides.pos_invoice.update_serial_lifecycle",
+            "ch_pos.overrides.pos_invoice.create_customer_device_records",
             "ch_pos.overrides.pos_invoice.update_kiosk_token_status",
             "ch_pos.overrides.pos_invoice.increment_coupon_usage",
             "ch_pos.api.gift_redemption.issue_gift_for_invoice_hook",
