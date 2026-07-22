@@ -4,8 +4,17 @@
  */
 
 (function() {
+	// frappe.ready only exists on WEBSITE pages; this file is loaded on the
+	// desk via app_include_js, where calling it throws a TypeError on every
+	// page load (and the guard never registered). Use jQuery document-ready
+	// on desk, frappe.ready when it exists.
+	const ready =
+		typeof frappe !== "undefined" && typeof frappe.ready === "function"
+			? frappe.ready
+			: (fn) => $(fn);
+
 	// Register session-end guard early in app lifecycle
-	frappe.ready(() => {
+	ready(() => {
 		frappe.ui.form.on("User", {
 			setup: function(frm) {
 				// This allows us to intercept logout attempts
