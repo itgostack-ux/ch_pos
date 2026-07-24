@@ -1,14 +1,20 @@
 frappe.ui.form.on("POS Incentive Ledger", {
 	refresh(frm) {
 		if (frm.is_new()) return;
+		const request_id = (frm.__incentive_capability_request || 0) + 1;
+		frm.__incentive_capability_request = request_id;
+		frappe.xcall(
+			"ch_pos.pos_core.doctype.pos_incentive_ledger.pos_incentive_ledger.get_incentive_ui_capabilities",
+			{ name: frm.doc.name }
+		).then((capabilities) => {
+			if (frm.__incentive_capability_request !== request_id) return;
+			_render_incentive_actions(frm, capabilities || {});
+		});
+	},
+});
 
-		const canApprove = frappe.user.has_role("System Manager")
-			|| frappe.user.has_role("Accounts Manager")
-			|| frappe.user.has_role("POS Manager");
-		const canPay = frappe.user.has_role("System Manager")
-			|| frappe.user.has_role("Accounts Manager");
-
-		if (frm.doc.status === "Pending" && canApprove) {
+function _render_incentive_actions(frm, capabilities) {
+		if (frm.doc.status === "Pending" && capabilities.can_approve) {
 			frm.add_custom_button(__("Approve"), () => {
 				frappe.call({
 					method: "ch_pos.pos_core.doctype.pos_incentive_ledger.pos_incentive_ledger.approve_incentive",
@@ -20,7 +26,7 @@ frappe.ui.form.on("POS Incentive Ledger", {
 			}).addClass("btn-primary");
 		}
 
-		if (frm.doc.status === "Approved" && canPay) {
+		if (frm.doc.status === "Approved" && capabilities.can_pay) {
 			frm.add_custom_button(__("Mark Paid"), () => {
 				frappe.prompt([
 					{
@@ -56,7 +62,7 @@ frappe.ui.form.on("POS Incentive Ledger", {
 			}).addClass("btn-primary");
 		}
 
-		if ((frm.doc.status === "Pending" || frm.doc.status === "Approved") && canApprove) {
+		if ((frm.doc.status === "Pending" || frm.doc.status === "Approved") && capabilities.can_cancel) {
 			frm.add_custom_button(__("Cancel"), () => {
 				frappe.confirm(
 					__("Cancel this incentive entry?"),
@@ -72,5 +78,4 @@ frappe.ui.form.on("POS Incentive Ledger", {
 				);
 			});
 		}
-	},
-});
+}

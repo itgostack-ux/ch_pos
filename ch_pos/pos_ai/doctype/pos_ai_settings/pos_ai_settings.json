@@ -8,6 +8,7 @@
   "enable_ai",
   "ai_provider",
   "api_endpoint",
+  "allowed_api_hosts",
   "api_key",
   "models_section",
   "comparison_model",
@@ -42,6 +43,14 @@
    "fieldname": "api_endpoint",
    "fieldtype": "Data",
    "label": "API Endpoint"
+  },
+  {
+   "default": "api.openai.com",
+   "depends_on": "eval:doc.enable_ai",
+   "description": "Exact HTTPS hostnames allowed for credential-bearing AI requests, one per line.",
+   "fieldname": "allowed_api_hosts",
+   "fieldtype": "Small Text",
+   "label": "Allowed API Hosts"
   },
   {
    "depends_on": "eval:doc.enable_ai",

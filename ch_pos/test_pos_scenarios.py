@@ -894,7 +894,7 @@ def scenario_15_bank_offer_discount(ctx):
 
         if not test_offer:
             warn(name, f"TEST-OFFER-CC-HDFC not returned (cart={rate}, MOP={ctx['mop_card']}). "
-                       f"Run setup_test_data.run first. Available: {[o['offer_name'] for o in offers]}")
+                       f"Seed the required test offer fixtures first. Available: {[o['offer_name'] for o in offers]}")
             return
 
         # Apply as additional_discount_amount

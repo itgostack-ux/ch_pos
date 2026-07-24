@@ -12,8 +12,11 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_store_scope
+
 
 def _resolve_warehouse(pos_profile):
+    assert_pos_profile_scope(pos_profile)
     warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
     if not warehouse:
         frappe.throw(_("POS Profile {0} has no warehouse configured.").format(pos_profile))
@@ -23,27 +26,36 @@ def _resolve_warehouse(pos_profile):
 @frappe.whitelist()
 def get_store_stock_report(pos_profile, only_due=0, class_filter=None) -> dict:
     """Return the store stock + cycle-count report for a POS profile's warehouse."""
+    frappe.has_permission("CH Cycle Count", "read", throw=True)
     if not pos_profile:
         frappe.throw(_("POS Profile is required."))
     warehouse = _resolve_warehouse(pos_profile)
 
     from ch_erp15.ch_erp15.doctype.ch_cycle_count.ch_cycle_count import get_store_stock
-    rows = get_store_stock(warehouse, only_due=only_due, class_filter=class_filter)
+    result = get_store_stock(warehouse, only_due=only_due, class_filter=class_filter)
+    rows = result.get("items", [])  # Extract items from paginated response
+    pagination = result.get("pagination", {})
 
+    # Get actual total count from database (not limited by pagination)
+    total_items = frappe.db.count("Bin", filters={"warehouse": warehouse, "actual_qty": (">", 0)})
+    
     due_count = sum(1 for r in rows if r.get("due"))
     total_value = sum(flt(r.get("stock_value")) for r in rows)
+    
     return {
         "warehouse": warehouse,
         "rows": rows,
         "summary": {
-            "items": len(rows),
+            "items": total_items,  # Actual total count
+            "items_on_page": len(rows),  # Items in current page
             "due_for_count": due_count,
             "total_stock_value": total_value,
         },
+        "pagination": pagination,  # Include pagination info for UI
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_store_cycle_count(pos_profile, class_filter=None, only_due=1) -> dict:
     """Create a Draft CH Cycle Count for the store, pre-loaded with on-hand items.
 
@@ -62,12 +74,13 @@ def start_store_cycle_count(pos_profile, class_filter=None, only_due=1) -> dict:
     cc.warehouse = warehouse
     cc.company = company
     cc.count_date = frappe.utils.today()
-    cc.counted_by = frappe.session.user
     cc.count_class_filter = class_filter or None
     cc.status = "Counting"
-    for line in get_count_lines(warehouse, class_filter=class_filter, only_due=only_due):
+    result = get_count_lines(warehouse, class_filter=class_filter, only_due=only_due)
+    lines = result.get("items", [])  # Extract items from paginated response
+    for line in lines:
         cc.append("items", line)
-    cc.insert(ignore_permissions=True)
+    cc.insert()
 
     return {
         "cycle_count": cc.name,
@@ -86,7 +99,7 @@ def start_store_cycle_count(pos_profile, class_filter=None, only_due=1) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def submit_pos_count(cycle_count, counts) -> dict:
     """Apply counts entered in POS to a Draft/Counting CH Cycle Count and submit.
 
@@ -96,7 +109,9 @@ def submit_pos_count(cycle_count, counts) -> dict:
     if isinstance(counts, str):
         counts = json.loads(counts)
     cc = frappe.get_doc("CH Cycle Count", cycle_count)
+    cc.check_permission("write")
     cc.check_permission("submit")
+    assert_store_scope(warehouse=cc.warehouse, company=cc.company)
     if cc.docstatus != 0:
         frappe.throw(_("Cycle count {0} is already submitted.").format(cc.name))
 
@@ -109,7 +124,7 @@ def submit_pos_count(cycle_count, counts) -> dict:
             row.scanned_serials = c.get("scanned_serials") or ""
         else:
             row.counted_qty = flt(c.get("counted_qty"))
-    cc.save(ignore_permissions=True)
+    cc.save()
     cc.submit()
     cc.reload()
     return {
@@ -133,6 +148,7 @@ def list_cycle_counts(pos_profile, limit=25) -> list:
     see the last counts performed at their warehouse, by whom, with the final
     status (Verified / Variance / Pending Approval) and the resulting variance.
     """
+    frappe.has_permission("CH Cycle Count", "read", throw=True)
     if not pos_profile:
         frappe.throw(_("POS Profile is required."))
     warehouse = _resolve_warehouse(pos_profile)
@@ -170,6 +186,7 @@ def list_variance_requests(pos_profile, limit=25) -> dict:
     Stock Audit operator can audit the full variance approval history,
     not just the open ones.
     """
+    frappe.has_permission("CH Exception Request", "read", throw=True)
     if not pos_profile:
         frappe.throw(_("POS Profile is required."))
     warehouse = _resolve_warehouse(pos_profile)

@@ -23,7 +23,7 @@ def advance_business_date(store, new_date, reason=None, manager_user=None):
 	"""Advance the business date for a store. Requires manager override."""
 	lock_key = f"bd_advance_{frappe.scrub(store)}"
 	lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 15)", (lock_key,))[0][0]
-	if not lock_result:
+	if lock_result != 1:
 		frappe.throw(_("Business date for store {0} is being updated by another process. Please retry.").format(store))
 	try:
 		frappe.has_permission("CH Business Date", "write", throw=True)
@@ -62,21 +62,17 @@ def advance_business_date(store, new_date, reason=None, manager_user=None):
 			})
 			doc.insert(ignore_permissions=True)
 
-		frappe.db.commit()
+		from ch_pos.audit import log_business_event
 
-		try:
-			from ch_pos.audit import log_business_event
-
-			log_business_event(
-				event_type="Business Date Change",
-				ref_doctype="CH Business Date",
-				ref_name=store,
-				before=str(doc.previous_date or ""),
-				after=str(new_date),
-				remarks=reason or "",
-			)
-		except Exception:
-			frappe.log_error("Business Date audit log failed")
+		log_business_event(
+			event_type="Business Date Change",
+			ref_doctype="CH Business Date",
+			ref_name=store,
+			before=str(doc.previous_date or ""),
+			after=str(new_date),
+			remarks=reason or "",
+			raise_on_error=True,
+		)
 
 		return doc.as_dict()
 	finally:

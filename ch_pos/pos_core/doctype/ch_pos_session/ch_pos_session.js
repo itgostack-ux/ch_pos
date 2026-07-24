@@ -4,18 +4,21 @@
 /**
  * CH POS Session form customisations.
  *
- * Administrator-only "Re-open Session" button for Closed sessions.
+ * Role-configured "Re-open Session" control for Closed sessions.
  * Mirrors the SAP CAR "Cash Desk Re-open" and Oracle Xstore "Force Open Till"
  * supervisor overrides — a deliberate, audited break from the normal lifecycle
  * (Closed is a terminal state in `_VALID_TRANSITIONS`) used when a cashier
  * mistakenly closes a session that still needs to bill.
  */
 frappe.ui.form.on("CH POS Session", {
-	refresh(frm) {
+	async refresh(frm) {
 		if (frm.is_new()) return;
 		if (frm.doc.status !== "Closed") return;
-		// Hard-gated to Administrator. Backend re-validates.
-		if (frappe.session.user !== "Administrator") return;
+		const canReopen = await frappe.xcall(
+			"ch_pos.api.session_api.can_reopen_closed_session",
+			{ session_name: frm.doc.name },
+		);
+		if (!canReopen) return;
 
 		frm.add_custom_button(
 			__("Re-open Session"),
@@ -58,7 +61,7 @@ frappe.ui.form.on("CH POS Session", {
 					__("Re-open"),
 				);
 			},
-			__("Administrator"),
+			__("Session Control"),
 		);
 	},
 });

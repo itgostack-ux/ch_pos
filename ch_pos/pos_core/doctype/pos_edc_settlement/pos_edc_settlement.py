@@ -19,9 +19,30 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt, cint
 
+from ch_pos.api.scope_guard import assert_store_scope
+from ch_pos.config import require_configured_roles
+
+
+def _assert_edc_scope(doc) -> None:
+	store = doc.store
+	warehouse = doc.store
+	if doc.session:
+		session = frappe.db.get_value(
+			"CH POS Session", doc.session, ["store", "company", "pos_profile"], as_dict=True
+		)
+		if not session or session.company != doc.company:
+			frappe.throw(_("EDC settlement session does not match its company."))
+		profile_warehouse = frappe.db.get_value("POS Profile", session.pos_profile, "warehouse")
+		if doc.store and doc.store not in {session.store, profile_warehouse}:
+			frappe.throw(_("EDC settlement store does not match its POS session."))
+		store = session.store
+		warehouse = profile_warehouse
+	assert_store_scope(store=store, warehouse=warehouse, company=doc.company)
+
 
 class POSEDCSettlement(Document):
 	def validate(self):
+		_assert_edc_scope(self)
 		self._compute_totals()
 		self._update_status()
 
@@ -55,7 +76,7 @@ class POSEDCSettlement(Document):
 		unmatched = [r for r in self.transactions if r.match_status == "Unmatched"]
 		self.status = "Draft" if unmatched else "Matched"
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def auto_match(self) -> None:
 		"""Attempt to auto-match each Unmatched transaction to a Sales Invoice.
 
@@ -64,6 +85,18 @@ class POSEDCSettlement(Document):
 		  2. Amount + date match — single Sales Invoice with exact amount on settlement_date
 		     with a card payment mode
 		"""
+		self.check_permission("write")
+		require_configured_roles(
+			"edc_reconciliation_roles",
+			defaults=("Accounts Manager", "POS Manager"),
+			action=_("auto-match EDC transactions"),
+		)
+		_assert_edc_scope(self)
+		if not self.session:
+			frappe.throw(
+				_("A POS Session is required before EDC transactions can be auto-matched."),
+				title=_("EDC Session Required"),
+			)
 		matched_count = 0
 		for row in self.transactions:
 			if row.match_status == "Matched":
@@ -71,11 +104,21 @@ class POSEDCSettlement(Document):
 
 			# Strategy 1: RRN exact match
 			if row.rrn:
-				invoice = frappe.db.get_value(
-					"Sales Invoice Payment",
-					{"custom_card_reference": row.rrn, "parenttype": "Sales Invoice"},
-					"parent",
+				invoice = frappe.db.sql(
+					"""
+					SELECT pi.name
+					FROM `tabSales Invoice Payment` sip
+					JOIN `tabSales Invoice` pi ON pi.name = sip.parent
+					WHERE sip.custom_card_reference = %(rrn)s
+					  AND sip.parenttype = 'Sales Invoice'
+					  AND pi.company = %(company)s
+					  AND pi.docstatus = 1
+					  AND (%(session)s = '' OR pi.custom_ch_pos_session = %(session)s)
+					LIMIT 2
+					""",
+					{"rrn": row.rrn, "company": self.company, "session": self.session or ""},
 				)
+				invoice = invoice[0][0] if len(invoice) == 1 else None
 				if invoice:
 					row.matched_pos_invoice = invoice
 					row.match_status = "Matched"
@@ -96,12 +139,16 @@ class POSEDCSettlement(Document):
 					JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
 					WHERE pi.posting_date = %(date)s
 					  AND pi.docstatus = 1
+					  AND pi.company = %(company)s
+					  AND (%(session)s = '' OR pi.custom_ch_pos_session = %(session)s)
 					  AND sip.amount = %(amount)s
 					  {mop_filter}
 					LIMIT 2
 				""".format(mop_filter=mop_type_filter), {  # noqa: UP032
 					"date": row.transaction_date,
 					"amount": flt(row.amount),
+					"company": self.company,
+					"session": self.session or "",
 				})
 				if len(results) == 1:
 					row.matched_pos_invoice = results[0][0]
@@ -110,11 +157,11 @@ class POSEDCSettlement(Document):
 
 		self._compute_totals()
 		self._update_status()
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"matched": matched_count, "total": len(self.transactions)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def upload_edc_transactions(settlement_name, transactions_json) -> dict:
 	"""Bulk-upload EDC transactions (from CSV parse on frontend).
 
@@ -131,19 +178,32 @@ def upload_edc_transactions(settlement_name, transactions_json) -> dict:
 		transactions_json = frappe.parse_json(transactions_json)
 
 	doc = frappe.get_doc("POS EDC Settlement", settlement_name)
+	doc.check_permission("write")
+	require_configured_roles(
+		"edc_reconciliation_roles",
+		defaults=("Accounts Manager", "POS Manager"),
+		action=_("upload EDC transactions"),
+	)
+	_assert_edc_scope(doc)
 	if doc.docstatus != 0:
 		frappe.throw(_("Can only upload transactions to a Draft settlement"), title=_("Pos Edc Settlement Error"))
 
+	if not isinstance(transactions_json, list) or len(transactions_json) > 5000:
+		frappe.throw(_("EDC upload must contain at most 5,000 transaction rows."))
+
 	for txn in transactions_json:
+		amount = flt(txn.get("amount", 0))
+		if amount <= 0:
+			frappe.throw(_("Every EDC transaction must have a positive amount."))
 		doc.append("transactions", {
 			"rrn": txn.get("rrn") or "",
 			"card_last_four": txn.get("card_last_four") or "",
 			"card_network": txn.get("card_network") or "",
 			"transaction_date": txn.get("transaction_date"),
 			"transaction_time": txn.get("transaction_time") or "",
-			"amount": flt(txn.get("amount", 0)),
+			"amount": amount,
 			"match_status": "Unmatched",
 		})
 
-	doc.save(ignore_permissions=True)
+	doc.save()
 	return {"inserted": len(transactions_json)}

@@ -241,29 +241,31 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
-   "email": 1,
-   "print": 1,
-   "read": 1,
-   "role": "System Manager",
    "submit": 1,
    "cancel": 1,
-   "write": 1
+   "amend": 1,
+   "email": 1,
+   "import": 1,
+   "print": 1
   },
   {
-   "create": 1,
-   "read": 1,
    "role": "Accounts Manager",
-   "submit": 1,
-   "write": 1
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1
   },
   {
-   "create": 1,
-   "read": 1,
    "role": "POS Manager",
-   "submit": 1,
-   "write": 1
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1
   }
  ],
  "sort_field": "closing_date",

@@ -3,10 +3,8 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt, now_datetime
 
-
-APPROVER_ROLES = {"System Manager", "Accounts Manager", "POS Manager"}
-PAYER_ROLES = {"System Manager", "Accounts Manager"}
-CANCELLER_ROLES = {"System Manager", "Accounts Manager", "POS Manager"}
+from ch_pos.api.scope_guard import assert_store_scope
+from ch_pos.config import has_configured_roles, is_privileged_user
 
 ALLOWED_TRANSITIONS = {
     "Pending": {"Approved", "Cancelled"},
@@ -16,7 +14,46 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+def _assert_incentive_scope(doc) -> None:
+    if not doc.get("store") and not doc.get("company") and not is_privileged_user():
+        frappe.throw(_("Incentive entry has no store or company scope."), frappe.PermissionError)
+    assert_store_scope(store=doc.get("store"), company=doc.get("company"))
+
+
 class POSIncentiveLedger(Document):
+    def before_insert(self):
+        if not frappe.flags.get("incentive_engine_write"):
+            frappe.throw(
+                _("Incentive entries can only be created by the incentive engine."),
+                frappe.PermissionError,
+            )
+        if (self.status or "Pending") != "Pending":
+            frappe.throw(_("New incentive entries must start as Pending."))
+
+        _assert_incentive_scope(self)
+        executive = frappe.db.get_value(
+            "POS Executive",
+            self.pos_executive,
+            ["store", "company"],
+            as_dict=True,
+        )
+        if not executive:
+            frappe.throw(_("POS Executive was not found."))
+        if self.company != executive.company or self.store != executive.store:
+            frappe.throw(_("Incentive entry does not match the executive's store and company."))
+
+        if self.invoice:
+            invoice = frappe.db.get_value(
+                "Sales Invoice",
+                self.invoice,
+                ["company", "custom_sales_executive"],
+                as_dict=True,
+            )
+            if not invoice or invoice.company != self.company:
+                frappe.throw(_("Incentive invoice does not match its company."))
+            if invoice.custom_sales_executive and invoice.custom_sales_executive != self.pos_executive:
+                frappe.throw(_("Incentive invoice belongs to another sales executive."))
+
     def validate(self):
         self.status = self.status or "Pending"
         self._validate_status_transition_and_stamps()
@@ -53,6 +90,8 @@ class POSIncentiveLedger(Document):
                 frappe.throw(_("Payout Reference is mandatory when status is Paid."), title=_("Validation Error"))
             return
 
+        _assert_incentive_scope(self)
+
         allowed = ALLOWED_TRANSITIONS.get(old_status, set())
         if new_status not in allowed:
             frappe.throw(
@@ -63,12 +102,20 @@ class POSIncentiveLedger(Document):
             )
 
         if new_status == "Approved":
-            _ensure_role(APPROVER_ROLES, _("Only Accounts/POS managers can approve incentives."))
+            _ensure_role(
+                "incentive_approval_roles",
+                ("Accounts Manager", "POS Manager"),
+                _("You do not have a configured incentive approval role."),
+            )
             self.approved_by = frappe.session.user
             self.approved_on = now_datetime()
 
         elif new_status == "Paid":
-            _ensure_role(PAYER_ROLES, _("Only Accounts Manager/System Manager can mark incentives as Paid."))
+            _ensure_role(
+                "incentive_payment_roles",
+                ("Accounts Manager",),
+                _("You do not have a configured incentive payment role."),
+            )
             if old_status != "Approved":
                 frappe.throw(
                     _("Incentive must be Approved before marking it Paid."),
@@ -80,34 +127,80 @@ class POSIncentiveLedger(Document):
             self.paid_on = now_datetime()
 
         elif new_status == "Cancelled":
-            _ensure_role(CANCELLER_ROLES, _("Only Accounts/POS managers can cancel incentive entries."))
+            _ensure_role(
+                "incentive_cancellation_roles",
+                ("Accounts Manager", "POS Manager"),
+                _("You do not have a configured incentive cancellation role."),
+            )
 
 
-def _ensure_role(required_roles: set[str], message: str):
-    user_roles = set(frappe.get_roles(frappe.session.user))
-    if user_roles.intersection(required_roles):
+def _ensure_role(fieldname: str, defaults, message: str):
+    if has_configured_roles(fieldname, defaults):
         return
     frappe.throw(message, title=_("Not Permitted"), exc=frappe.PermissionError)
 
 
 @frappe.whitelist()
-def approve_incentive(name: str):
-    _ensure_role(APPROVER_ROLES, _("Only Accounts/POS managers can approve incentives."))
+def get_incentive_ui_capabilities(name: str) -> dict:
+    """Return incentive actions from configured roles and exact record scope."""
     doc = frappe.get_doc("POS Incentive Ledger", name)
+    doc.check_permission("read")
+    _assert_incentive_scope(doc)
+    return {
+        "can_approve": bool(
+            doc.status == "Pending"
+            and has_configured_roles(
+                "incentive_approval_roles",
+                ("Accounts Manager", "POS Manager"),
+            )
+        ),
+        "can_pay": bool(
+            doc.status == "Approved"
+            and has_configured_roles(
+                "incentive_payment_roles",
+                ("Accounts Manager",),
+            )
+        ),
+        "can_cancel": bool(
+            doc.status in {"Pending", "Approved"}
+            and has_configured_roles(
+                "incentive_cancellation_roles",
+                ("Accounts Manager", "POS Manager"),
+            )
+        ),
+    }
+
+
+@frappe.whitelist(methods=["POST"])
+def approve_incentive(name: str):
+    _ensure_role(
+        "incentive_approval_roles",
+        ("Accounts Manager", "POS Manager"),
+        _("You do not have a configured incentive approval role."),
+    )
+    doc = frappe.get_doc("POS Incentive Ledger", name)
+    doc.check_permission("write")
+    _assert_incentive_scope(doc)
     if doc.status != "Pending":
         frappe.throw(_("Only Pending entries can be approved."), title=_("Invalid Transition"))
     doc.status = "Approved"
-    doc.save(ignore_permissions=True)
+    doc.save()
     return {"name": doc.name, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def mark_incentive_paid(name: str, payout_reference: str, payout_month: str | None = None):
-    _ensure_role(PAYER_ROLES, _("Only Accounts Manager/System Manager can mark incentives as Paid."))
+    _ensure_role(
+        "incentive_payment_roles",
+        ("Accounts Manager",),
+        _("You do not have a configured incentive payment role."),
+    )
     if not payout_reference:
         frappe.throw(_("Payout Reference is mandatory."), title=_("Validation Error"))
 
     doc = frappe.get_doc("POS Incentive Ledger", name)
+    doc.check_permission("write")
+    _assert_incentive_scope(doc)
     if doc.status != "Approved":
         frappe.throw(_("Only Approved entries can be marked Paid."), title=_("Invalid Transition"))
 
@@ -115,16 +208,22 @@ def mark_incentive_paid(name: str, payout_reference: str, payout_month: str | No
     if payout_month:
         doc.payout_month = payout_month
     doc.status = "Paid"
-    doc.save(ignore_permissions=True)
+    doc.save()
     return {"name": doc.name, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_incentive(name: str):
-    _ensure_role(CANCELLER_ROLES, _("Only Accounts/POS managers can cancel incentive entries."))
+    _ensure_role(
+        "incentive_cancellation_roles",
+        ("Accounts Manager", "POS Manager"),
+        _("You do not have a configured incentive cancellation role."),
+    )
     doc = frappe.get_doc("POS Incentive Ledger", name)
+    doc.check_permission("write")
+    _assert_incentive_scope(doc)
     if doc.status not in {"Pending", "Approved"}:
         frappe.throw(_("Only Pending or Approved entries can be cancelled."), title=_("Invalid Transition"))
     doc.status = "Cancelled"
-    doc.save(ignore_permissions=True)
+    doc.save()
     return {"name": doc.name, "status": doc.status}

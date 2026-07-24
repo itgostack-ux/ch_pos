@@ -24,20 +24,15 @@ from erpnext.accounts.doctype.monthly_distribution.monthly_distribution import (
 )
 from erpnext.accounts.report.financial_statements import get_period_list
 
-
-_PRIVILEGED_ROLES = {
-    "System Manager",
-    "Accounts Manager",
-    "Accounts User",
-    "POS Manager",
-}
-
+from ch_pos.config import has_configured_roles
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _is_manager():
-    roles = frappe.get_roles(frappe.session.user)
-    return any(r in roles for r in _PRIVILEGED_ROLES)
+    return has_configured_roles(
+        "incentive_report_roles",
+        ("Accounts Manager", "Accounts User", "POS Manager"),
+    )
 
 
 def _scope_get_user_scope(user=None):

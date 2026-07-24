@@ -28,10 +28,10 @@ export class PickupWorkspace {
 	constructor() {
 		this._panel = null;
 		this._active_tab = "pending"; // pending | reserved | today
-		this._rows = [];
-		this._reserved_rows = [];
-		this._today_rows = [];
-		this._manager_roles = new Set(["Store Manager", "Stock Manager", "System Manager", "Administrator"]);
+			this._rows = [];
+			this._reserved_rows = [];
+			this._today_rows = [];
+			this._can_reassign_reserved_capability = false;
 		this._filter = { search: "", days_ahead: 30, overdue_only: 0 };
 		this._focus_so = null;
 		EventBus.on("workspace:render", (ctx) => {
@@ -120,13 +120,29 @@ export class PickupWorkspace {
 			</div>
 		`);
 
-		this._bind(panel);
-		this._refresh_kpis();
-		if (this._focus_so) {
-			this._apply_focus_filter();
-		} else {
-			this._switch_tab(this._active_tab);
+			this._bind(panel);
+			this._refresh_kpis();
+			this._load_capabilities().finally(() => {
+				if (this._focus_so) {
+					this._apply_focus_filter();
+				} else {
+					this._switch_tab(this._active_tab);
+				}
+			});
 		}
+
+	_load_capabilities() {
+		this._can_reassign_reserved_capability = false;
+		if (!PosState.pos_profile) return Promise.resolve();
+		return frappe.xcall("ch_pos.api.pos_api.get_prebook_ui_capabilities", {
+			pos_profile: PosState.pos_profile,
+		}).then((capabilities) => {
+			this._can_reassign_reserved_capability = Boolean(
+				capabilities?.can_reassign_reserved
+			);
+		}).catch(() => {
+			this._can_reassign_reserved_capability = false;
+		});
 	}
 
 	_bind(panel) {
@@ -505,7 +521,7 @@ export class PickupWorkspace {
 									<i class="fa fa-exchange"></i> ${__("Reassign")}
 								</button>
 							</div>`
-							: `<span class="text-muted small" title="${__("Requires Store Manager / Stock Manager / System Manager role")}">${__("Manager only")}</span>`;
+								: `<span class="text-muted small" title="${__("Requires configured pre-booking management permission")}">${__("Restricted")}</span>`;
 						return `
 							<tr>
 								<td><code>${frappe.utils.escape_html(r.serial_no)}</code></td>
@@ -524,8 +540,7 @@ export class PickupWorkspace {
 	}
 
 	_can_reassign_reserved() {
-		const roles = Array.isArray(frappe.user_roles) ? frappe.user_roles : [];
-		return roles.some((r) => this._manager_roles.has(r));
+		return this._can_reassign_reserved_capability;
 	}
 
 	_open_reassign_dialog(ctx) {

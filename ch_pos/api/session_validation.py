@@ -6,7 +6,10 @@ Enforces EOD token handling: all tokens must be either billed (Converted) or rej
 
 import frappe
 from frappe import _
-from frappe.utils import now_datetime, get_datetime
+from frappe.utils import cint, get_datetime, now_datetime
+
+from ch_pos.api.scope_guard import assert_pos_profile_scope
+from ch_pos.config import get_control_setting, require_authenticated_user, require_configured_roles
 
 
 PENDING_STATUSES = ("Waiting", "Hold", "Engaged", "In Progress")
@@ -31,8 +34,13 @@ def get_pending_tokens_for_store(store_code: str = None, pos_profile: str = None
 			"warning": <str or None>
 		}
 	"""
+	require_authenticated_user()
+	require_configured_roles(
+		"token_view_roles",
+		defaults=("POS User", "POS Manager", "Store Manager", "Technician"),
+		action=_("view pending store tokens"),
+	)
 	user = frappe.session.user
-	company = frappe.db.get_value("User", user, "company") or frappe.get_cached_value("System Settings", None, "default_company")
 
 	# If pos_profile not provided, try to get it from recent POS sessions
 	if not pos_profile:
@@ -44,39 +52,42 @@ def get_pending_tokens_for_store(store_code: str = None, pos_profile: str = None
 		)
 		if recent_session:
 			pos_profile = recent_session[0] if isinstance(recent_session, (list, tuple)) else recent_session
+	if not pos_profile:
+		return {"count": 0, "tokens": [], "warning": None}
+
+	anchors = assert_pos_profile_scope(pos_profile)
+	if store_code and store_code not in {anchors.get("store"), anchors.get("warehouse")}:
+		frappe.throw(_("Store does not match the selected POS Profile."), frappe.PermissionError)
 
 	filters = {
 		"docstatus": [">", 0],  # Only submitted tokens
 		"status": ["in", PENDING_STATUSES],
 	}
 
-	if pos_profile:
-		filters["pos_profile"] = pos_profile
-	if store_code:
-		filters["store"] = store_code
-	if company:
-		filters["company"] = company
+	filters["pos_profile"] = pos_profile
+	filters["company"] = anchors.get("company")
 
-	pending = frappe.get_list(
+	total = frappe.db.count("POS Kiosk Token", filters=filters)
+	pending = frappe.get_all(
 		"POS Kiosk Token",
-		fields=["name", "status", "customer_name", "created"],
+		fields=["name", "status", "customer_name", "creation"],
 		filters=filters,
-		limit_page_length=None,  # Get all pending
+		limit_page_length=100,
 		order_by="creation desc",
 	)
 
 	warning = None
-	if pending:
-		plural = "token" if len(pending) == 1 else "tokens"
+	if total:
+		plural = "token" if total == 1 else "tokens"
 		warning = _("Cannot close session — {count} {plural} {verb} pending: {names}").format(
-			count=len(pending),
+			count=total,
 			plural=plural,
-			verb="is" if len(pending) == 1 else "are",
-			names=", ".join(t["name"] for t in pending[:5]) + ("..." if len(pending) > 5 else "")
+			verb="is" if total == 1 else "are",
+			names=", ".join(t["name"] for t in pending[:5]) + ("..." if total > 5 else "")
 		)
 
 	return {
-		"count": len(pending),
+		"count": total,
 		"tokens": pending,
 		"warning": warning,
 	}
@@ -132,64 +143,66 @@ def auto_close_pending_tokens_at_eod() -> None:
 
 	now = now_datetime()
 
-	# Find all submitted, pending tokens
-	pending_tokens = frappe.get_list(
-		"POS Kiosk Token",
-		fields=["name", "status", "pos_profile", "store"],
-		filters={
-			"docstatus": [">", 0],  # Only submitted
-			"status": ["in", PENDING_STATUSES],
-		},
-		limit_page_length=None,
+	batch_limit = max(1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000))
+	pending_tokens = frappe.db.sql(
+		"""
+		SELECT name, status, pos_profile, store, company, expires_at
+		FROM `tabPOS Kiosk Token`
+		WHERE docstatus > 0
+		  AND status IN %(statuses)s
+		  AND (expires_at IS NULL OR expires_at <= %(now)s)
+		ORDER BY expires_at ASC, name ASC
+		LIMIT %(limit)s
+		FOR UPDATE
+		""",
+		{"statuses": PENDING_STATUSES, "now": now, "limit": batch_limit},
+		as_dict=True,
 	)
 
 	closed_count = 0
 	errors = []
 
-	for token_row in pending_tokens:
-		token_name = token_row["name"]
-		token_status = token_row["status"]
+	cancelled_names = [row.name for row in pending_tokens if row.status in ("Waiting", "Hold")]
+	dropped_names = [row.name for row in pending_tokens if row.status in ("Engaged", "In Progress")]
 
-		try:
-			# Skip if expires_at is in the future (still valid)
-			expires_at = frappe.db.get_value("POS Kiosk Token", token_name, "expires_at")
-			if expires_at and get_datetime(expires_at) > now:
-				continue
-
-			# Determine auto-close action based on current status
-			new_status = "Cancelled" if token_status in ("Waiting", "Hold") else "Dropped"
-
+	try:
+		if cancelled_names:
 			frappe.db.set_value(
 				"POS Kiosk Token",
-				token_name,
-				{
-					"status": new_status,
-					"drop_reason": "Auto-closed at EOD" if new_status == "Dropped" else None,
-				},
+				{"name": ("in", cancelled_names)},
+				{"status": "Cancelled", "drop_reason": None},
 				update_modified=False,
 			)
+		if dropped_names:
+			frappe.db.set_value(
+				"POS Kiosk Token",
+				{"name": ("in", dropped_names)},
+				{"status": "Dropped", "drop_reason": "Auto-closed at EOD"},
+				update_modified=False,
+			)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "EOD Token Auto-Close Update Failed")
+		raise
 
-			log.info(f"Auto-closed token {token_name}: {token_status} → {new_status}")
-			closed_count += 1
-
-			# Log audit event
-			try:
-				from ch_pos.audit import log_business_event
-				log_business_event(
-					event_type="EOD Auto-Close",
-					ref_doctype="POS Kiosk Token",
-					ref_name=token_name,
-					before=token_status,
-					after=new_status,
-					remarks=f"Auto-closed at EOD (expired or end-of-shift)",
-					company=frappe.db.get_value("POS Kiosk Token", token_name, "company") or "",
-				)
-			except Exception as e:
-				log.warning(f"Audit log failed for {token_name}: {str(e)}")
-
-		except Exception as e:
-			err_msg = f"Failed to auto-close token {token_name}: {str(e)}"
-			log.error(err_msg)
+	from ch_pos.audit import log_business_event
+	for token_row in pending_tokens:
+		new_status = "Cancelled" if token_row.status in ("Waiting", "Hold") else "Dropped"
+		closed_count += 1
+		log.info(f"Auto-closed token {token_row.name}: {token_row.status} → {new_status}")
+		try:
+			log_business_event(
+				event_type="EOD Auto-Close",
+				ref_doctype="POS Kiosk Token",
+				ref_name=token_row.name,
+				before=token_row.status,
+				after=new_status,
+				remarks="Auto-closed at EOD (expired or end-of-shift)",
+				store=token_row.store,
+				company=token_row.company or "",
+			)
+		except Exception as exc:
+			err_msg = f"Audit log failed for {token_row.name}: {str(exc)}"
+			log.warning(err_msg)
 			errors.append(err_msg)
 
 	if errors:

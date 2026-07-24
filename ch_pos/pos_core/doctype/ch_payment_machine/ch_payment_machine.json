@@ -29,6 +29,7 @@
   "webhook_url",
   "column_break_urls",
   "api_base_url",
+  "order_api_url",
   "remarks"
  ],
  "fields": [
@@ -168,9 +169,18 @@
   {
    "fieldname": "api_base_url",
    "fieldtype": "Data",
-   "label": "API Base URL",
+   "label": "Authentication API URL",
    "options": "URL",
-   "description": "Optional override. Leave blank to use provider defaults"
+   "permlevel": 1,
+   "description": "Required for live Pine Labs machines. Must use HTTPS and a hostname allowed by CH POS Control Settings."
+  },
+  {
+   "fieldname": "order_api_url",
+   "fieldtype": "Data",
+   "label": "Order API URL",
+   "options": "URL",
+   "permlevel": 1,
+   "description": "Required for live Pine Labs machines. Must use HTTPS and a hostname allowed by CH POS Control Settings."
   },
   {
    "fieldname": "remarks",
@@ -188,31 +198,38 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
    "email": 1,
    "export": 1,
+   "import": 1,
    "print": 1,
-   "read": 1,
    "report": 1,
+   "share": 1
+  },
+  {
    "role": "System Manager",
-   "share": 1,
+   "permlevel": 1,
+   "read": 1,
    "write": 1
   },
   {
-   "create": 1,
-   "read": 1,
-   "report": 1,
    "role": "Accounts Manager",
-   "write": 1
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "report": 1
   },
   {
-   "read": 1,
-   "role": "POS User"
+   "role": "POS User",
+   "read": 1
   },
   {
-   "read": 1,
-   "role": "Sales User"
+   "role": "Sales User",
+   "read": 1
   }
  ],
  "quick_entry": 1,

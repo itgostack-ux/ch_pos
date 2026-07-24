@@ -52,6 +52,7 @@
 		const prefill_mobile = (opts.prefill_mobile || "").trim();
 
 		let otp_verified_number = "";
+		let otp_verification_token = "";
 		let last_auto_synced_mobile = "";
 		let duplicate_check_timer = null;
 		let last_duplicate_phone_checked = "";
@@ -247,7 +248,7 @@
 		};
 
 		const check_existing_customer = (phone_no) => {
-			return frappe.xcall("ch_pos.api.pos_api.find_existing_customer_by_phone", { phone_no })
+			return frappe.xcall("ch_pos.api.pos_api.find_existing_customer_by_phone", { phone_no, company })
 				.then((res) => res || { exists: false })
 				.catch((err) => {
 					console.error("Customer duplicate check failed", err);
@@ -288,6 +289,7 @@
 			// Don't clear OTP verification if we're just re-syncing the same number that was verified
 			if (otp_verified_number !== mobile) {
 				otp_verified_number = "";
+				otp_verification_token = "";
 			}
 			d.set_value("whatsapp_number", mobile)
 				.then(() => paint_whatsapp_input(mobile))
@@ -501,6 +503,7 @@
 							});
 							if (res && res.valid) {
 								otp_verified_number = whatsapp;
+								otp_verification_token = res.verification_token || "";
 								d.fields_dict.otp_status.$wrapper.html(status_html(__("WhatsApp verified"), "#15803d"));
 							} else {
 								const msg = (res && res.message) || __("Invalid OTP");
@@ -535,6 +538,7 @@
 					area: values.area || "",
 					gstin: values.gstin || "",
 					pan_number: pan_raw || "",
+					otp_verification_token,
 					same_as_billing: values.same_as_billing ? 1 : 0,
 					shipping_address_line1: values.shipping_address_line1 || "",
 					shipping_city: values.shipping_city || "",
@@ -604,6 +608,7 @@
 			(d.doc || (d.doc = {})).whatsapp_number = val;
 			whatsapp_manually_edited = val !== last_auto_synced_mobile;
 			otp_verified_number = "";
+			otp_verification_token = "";
 			d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
 			toggle_send_otp_button();
 		});
@@ -705,10 +710,10 @@
 					mobile_no: whatsapp,
 					customer_name: input_value("customer_name") || "Customer",
 					email_id: input_value("email_id"),
-					channel: d.get_value("otp_channel") || "auto",
 					company: company || "",
 				});
 				otp_verified_number = "";
+				otp_verification_token = "";
 				const channels = [];
 				if (res && res.sent_whatsapp) channels.push(__("WhatsApp"));
 				if (res && res.sent_sms) channels.push(__("SMS"));
@@ -741,14 +746,17 @@
 			}).then((res) => {
 				if (res && res.valid) {
 					otp_verified_number = whatsapp;
+					otp_verification_token = res.verification_token || "";
 					d.fields_dict.otp_status.$wrapper.html(status_html(__("WhatsApp verified"), "#15803d"));
 					frappe.show_alert({ message: __("WhatsApp verified"), indicator: "green" });
 				} else {
 					otp_verified_number = "";
+					otp_verification_token = "";
 					d.fields_dict.otp_status.$wrapper.html(status_html((res && res.message) || __("Invalid OTP"), "#b91c1c"));
 				}
 			}).catch((err) => {
 				otp_verified_number = "";
+				otp_verification_token = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(otp_error_message(err, __("OTP verification failed")), "#b91c1c"));
 			});
 		};
@@ -805,6 +813,7 @@
 					(d.doc || (d.doc = {})).whatsapp_number = val;
 					whatsapp_manually_edited = val !== last_auto_synced_mobile;
 					otp_verified_number = "";
+					otp_verification_token = "";
 					d.fields_dict.otp_status.$wrapper.html(status_html(__("OTP not verified")));
 				});
 			}

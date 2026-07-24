@@ -279,6 +279,7 @@ export class RepairWorkspace {
 			// Server API inserts AND submits — POS-raised requests must land as
 			// submitted docs so they show in Service Hub / GoFix Ops Hub.
 			frappe.xcall("ch_pos.api.repair.create_service_intake_from_pos", {
+				pos_profile: PosState.pos_profile,
 				data: {
 					customer: customer,
 					contact_number: phone,
@@ -488,6 +489,7 @@ export class RepairWorkspace {
 		// Fetch full SR data then show dialog
 		return frappe.xcall("ch_pos.api.pos_api.get_repair_closure_data", {
 			service_request: sr_name,
+			pos_profile: PosState.pos_profile,
 		}).then((d) => {
 			const tech_options = (d.technicians || []).map(t => `<option value="${t.name}">${t.full_name || t.name}</option>`).join("");
 			const mop_opts_html = mop_options.map(m => `<option value="${m}">${m}</option>`).join("");

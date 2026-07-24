@@ -63,7 +63,7 @@ export class ImeiWorkspace {
 			);
 			frappe.call({
 				method: "ch_pos.api.pos_api.imei_history",
-				args: { serial_no: q },
+				args: { serial_no: q, pos_profile: PosState.pos_profile },
 				callback: (r) => {
 					const d = r.message;
 					if (!d || d.error) {

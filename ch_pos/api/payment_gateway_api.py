@@ -1,6 +1,9 @@
 import json
+import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import frappe
 import requests
@@ -9,16 +12,27 @@ from frappe.rate_limiter import rate_limit
 from frappe.utils import cint, flt, get_url
 from frappe.utils.password import get_decrypted_password
 
+from ch_pos.api.scope_guard import assert_pos_profile_scope, get_pos_profile_anchors
+from ch_pos.api.outbound_security import post_json_to_allowed_https
+from ch_pos.config import (
+    get_control_setting,
+    is_privileged_user,
+    require_authenticated_user,
+    require_configured_roles,
+)
 
-PINE_AUTH_URLS = {
-    "UAT": "https://pluraluat.v2.pinepg.in/api/auth/v1/token",
-    "PRODUCTION": "https://api.pluralpay.in/api/auth/v1/token",
-}
 
-PINE_ORDER_URLS = {
-    "UAT": "https://pluraluat.v2.pinepg.in/api/pay/v1/orders",
-    "PRODUCTION": "https://api.pluralpay.in/api/pay/v1/orders",
-}
+def _bounded_callback_body() -> str:
+    """Return the raw callback body after enforcing the configured byte cap."""
+    limit = max(1024, min(cint(get_control_setting("guest_payload_max_bytes", 65536)), 1048576))
+    raw = frappe.request.get_data(cache=True) or b""
+    query = getattr(frappe.request, "query_string", b"") or b""
+    if len(raw) + len(query) > limit:
+        frappe.throw(_("Callback payload is too large."), frappe.ValidationError)
+    try:
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+    except UnicodeDecodeError:
+        frappe.throw(_("Callback payload must be UTF-8."), frappe.ValidationError)
 
 
 # ── Credential helpers ───────────────────────────────────────────────
@@ -30,6 +44,114 @@ def _safe_get_password(doctype, name, fieldname):
         return get_decrypted_password(doctype, name, fieldname, raise_exception=False)
     except Exception:
         return None
+
+
+def _configured_gateway_hosts() -> set[str]:
+    raw_hosts = str(get_control_setting("payment_gateway_allowed_hosts", "") or "")
+    hosts = {
+        host.strip().lower().rstrip(".")
+        for host in raw_hosts.replace(",", "\n").splitlines()
+        if host.strip()
+    }
+    invalid = [
+        host
+        for host in hosts
+        if "://" in host
+        or "/" in host
+        or "@" in host
+        or ":" in host
+        or any(character.isspace() for character in host)
+    ]
+    if invalid:
+        frappe.throw(
+            _("Payment gateway host allowlist contains an invalid hostname."),
+            frappe.ValidationError,
+        )
+    if not hosts:
+        frappe.throw(
+            _("Configure at least one Payment Gateway Allowed Host in CH POS Control Settings."),
+            frappe.ValidationError,
+        )
+    return hosts
+
+
+def _resolve_gateway_url(machine, fieldname: str) -> str:
+    if fieldname not in {"api_base_url", "order_api_url"}:
+        raise ValueError("Unsupported payment gateway endpoint field")
+
+    endpoint = str(machine.get(fieldname) or "").strip()
+    if not endpoint:
+        label = "Authentication API URL" if fieldname == "api_base_url" else "Order API URL"
+        frappe.throw(
+            _("{0} is required on payment machine {1}.").format(
+                label, machine.machine_name or machine.name
+            ),
+            frappe.ValidationError,
+            title=_("Payment Gateway Not Configured"),
+        )
+    if "\\" in endpoint or any(character.isspace() for character in endpoint):
+        frappe.throw(_("Payment gateway URL is invalid."), frappe.ValidationError)
+
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError:
+        frappe.throw(_("Payment gateway URL is invalid."), frappe.ValidationError)
+
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or port not in (None, 443)
+    ):
+        frappe.throw(
+            _("Payment gateway URLs must use HTTPS on port 443 without embedded credentials."),
+            frappe.ValidationError,
+        )
+    if hostname not in _configured_gateway_hosts():
+        frappe.throw(
+            _("Payment gateway host {0} is not allowlisted.").format(hostname),
+            frappe.PermissionError,
+        )
+    return endpoint
+
+
+def _gateway_timeout_seconds() -> int:
+    configured = cint(get_control_setting("payment_gateway_timeout_seconds", 30)) or 30
+    return max(1, min(configured, 120))
+
+
+def _gateway_response_max_bytes() -> int:
+    configured = cint(get_control_setting("payment_gateway_response_max_bytes", 1048576)) or 1048576
+    return max(1024, min(configured, 10485760))
+
+
+def _verify_pine_callback_signature(machine_name: str | None, body: str, signature: str) -> str:
+    """Authenticate a Pine Labs callback against a configured machine.
+
+    An absent machine, client secret, or signature is an authentication
+    failure.  Callback endpoints must never silently downgrade to unsigned
+    mode because their URLs are public by design.
+    """
+    machine_name = (machine_name or "").strip()
+    if not machine_name or not frappe.db.exists("CH Payment Machine", machine_name):
+        frappe.throw(_("Unknown payment machine"), frappe.AuthenticationError)
+
+    secret = _safe_get_password("CH Payment Machine", machine_name, "client_secret")
+    if not secret or not signature:
+        frappe.throw(_("Webhook signature is required"), frappe.AuthenticationError)
+
+    expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature.strip()):
+        frappe.log_error(
+            title="Pine Labs Signature Mismatch",
+            message=f"Signature validation failed for machine {machine_name}.",
+        )
+        frappe.throw(_("Webhook signature validation failed"), frappe.AuthenticationError)
+    return machine_name
 
 
 def _machine_has_pine_credentials(machine):
@@ -91,16 +213,30 @@ def _get_machine(machine_name):
 
 def _user_store_company_scope():
     """Return ``(stores, companies)`` the current user is entitled to, or
-    ``None`` for unrestricted access (System Manager / bypass, or when the
-    ch_erp15 scope module is unavailable in a standalone/test env)."""
+    ``None`` for unrestricted access. Missing scope infrastructure fails closed."""
+    require_authenticated_user()
+    if is_privileged_user():
+        return None
     try:
         from ch_erp15.ch_erp15.scope import get_user_scope
     except ImportError:
-        return None
+        return set(), set()
     scope = get_user_scope()
     if scope.get("bypass"):
         return None
     return (scope.get("stores") or set(), scope.get("companies") or set())
+
+
+def _machine_matches_scope(machine, scoped) -> bool:
+    if scoped is None:
+        return True
+    stores, companies = scoped
+    return bool(
+        machine.get("store")
+        and machine.get("company")
+        and machine.get("store") in stores
+        and machine.get("company") in companies
+    )
 
 
 def _assert_machine_in_scope(machine):
@@ -112,12 +248,20 @@ def _assert_machine_in_scope(machine):
     if frappe.session.user == "Guest":
         frappe.throw(_("You must be signed in to use a payment machine."), frappe.PermissionError)
     scoped = _user_store_company_scope()
-    if scoped is None:
-        return
-    stores, companies = scoped
-    if machine.store and machine.store in stores:
-        return
-    if machine.company and machine.company in companies:
+    if _machine_matches_scope(machine, scoped):
+        if machine.pos_profile:
+            anchors = get_pos_profile_anchors(machine.pos_profile)
+            if (
+                anchors.get("company") != machine.company
+                or anchors.get("store") != machine.store
+            ):
+                frappe.throw(
+                    _("Payment machine {0} has inconsistent store configuration.").format(
+                        machine.machine_name or machine.name
+                    ),
+                    frappe.PermissionError,
+                )
+            assert_pos_profile_scope(machine.pos_profile)
         return
     frappe.throw(
         _("You are not entitled to operate payment machine {0}.").format(
@@ -134,6 +278,23 @@ def get_payment_machines(company=None, store=None, pos_profile=None, payment_mod
         # Shadow-live pilot: terminals (Paytm / Pine Labs) are unplugged —
         # staff key in the card RRN / UPI reference manually.
         return {"providers": [], "machines": [], "manual_only": True}
+
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    require_configured_roles(
+        "payment_gateway_roles",
+        defaults=("POS User", "POS Manager", "Accounts User", "Accounts Manager"),
+        action=_("use payment gateways"),
+    )
+
+    if pos_profile:
+        anchors = get_pos_profile_anchors(pos_profile)
+        assert_pos_profile_scope(pos_profile)
+        if company and company != anchors.get("company"):
+            frappe.throw(_("POS Profile belongs to another company."), frappe.PermissionError)
+        if store and store != anchors.get("store"):
+            frappe.throw(_("POS Profile belongs to another store."), frappe.PermissionError)
+        company = anchors.get("company")
+        store = anchors.get("store")
 
     filters = {"enabled": 1}
     if company:
@@ -160,12 +321,7 @@ def get_payment_machines(company=None, store=None, pos_profile=None, payment_mod
     # entitled to. Prevents enumerating another store's terminals.
     scoped = _user_store_company_scope()
     if scoped is not None:
-        stores, companies = scoped
-        machines = [
-            m for m in machines
-            if (m.get("store") and m["store"] in stores)
-            or (m.get("company") and m["company"] in companies)
-        ]
+        machines = [m for m in machines if _machine_matches_scope(m, scoped)]
 
     providers = []
     seen = set()
@@ -202,16 +358,21 @@ def _pine_generate_token(machine):
         "client_secret": client_secret,
         "grant_type": "client_credentials",
     }
+    endpoint = _resolve_gateway_url(machine, "api_base_url")
     try:
-        response = requests.post(
-            machine.api_base_url or PINE_AUTH_URLS[env],
+        response = post_json_to_allowed_https(
+            endpoint,
+            allowed_hosts=_configured_gateway_hosts(),
+            label=_("Payment gateway"),
             headers=headers,
-            json=payload,
-            timeout=20,
+            payload=payload,
+            timeout=_gateway_timeout_seconds(),
+            max_response_bytes=_gateway_response_max_bytes(),
         )
         response.raise_for_status()
-        token = response.json().get("access_token")
-    except requests.exceptions.RequestException as exc:
+        response_data = response.json()
+        token = response_data.get("access_token") if isinstance(response_data, dict) else None
+    except (requests.exceptions.RequestException, ValueError) as exc:
         frappe.log_error(
             title="Pine Labs token failed",
             message=f"machine={machine.name}\nerror={exc}",
@@ -239,16 +400,23 @@ def _pine_create_order(machine, access_token, payload):
         "Request-Timestamp": _utc_now_iso(),
         "Request-ID": str(uuid.uuid4()),
     }
+    endpoint = _resolve_gateway_url(machine, "order_api_url")
     try:
-        response = requests.post(
-            PINE_ORDER_URLS[env],
+        response = post_json_to_allowed_https(
+            endpoint,
+            allowed_hosts=_configured_gateway_hosts(),
+            label=_("Payment gateway"),
             headers=headers,
-            json=payload,
-            timeout=30,
+            payload=payload,
+            timeout=_gateway_timeout_seconds(),
+            max_response_bytes=_gateway_response_max_bytes(),
         )
         response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as exc:
+        response_data = response.json()
+        if not isinstance(response_data, dict):
+            raise ValueError("Gateway response must be a JSON object")
+        return response_data
+    except (requests.exceptions.RequestException, ValueError) as exc:
         frappe.log_error(
             title="Pine Labs order failed",
             message=f"machine={machine.name}\nerror={exc}",
@@ -287,7 +455,7 @@ def _build_test_order(machine, amount, payment_mode, merchant_order_reference, c
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def initiate_payment(machine_name, amount, payment_mode, customer=None, customer_name=None,
         customer_email=None, customer_phone=None, merchant_order_reference=None, notes=None):
     from ch_item_master.ch_core.shadow_live import manual_payment_entry
@@ -298,6 +466,13 @@ def initiate_payment(machine_name, amount, payment_mode, customer=None, customer
               "Enter the card / UPI reference manually and save the payment."),
             title=_("Payment Machines Disabled"),
         )
+
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    require_configured_roles(
+        "payment_gateway_roles",
+        defaults=("POS User", "POS Manager", "Accounts User", "Accounts Manager"),
+        action=_("initiate an external payment"),
+    )
 
     machine = _get_machine(machine_name)
     # Bind the live gateway order to the operator's store authority.
@@ -361,41 +536,14 @@ def initiate_payment(machine_name, amount, payment_mode, customer=None, customer
 @rate_limit(limit=60, seconds=300, methods=["GET", "POST"], ip_based=True)
 def pine_labs_return(**kwargs):
     """Pine Labs return callback — HMAC validation required (H17)."""
-    body = frappe.request.get_data(as_text=True) or "{}"
+    body = _bounded_callback_body() or "{}"
     sig_header = frappe.get_request_header("X-PINELABS-SIGNATURE") or ""
 
-    # Validate HMAC signature (H17)
     machine_param = frappe.form_dict.get("machine", "")
-    settings = frappe.get_cached_doc("CH Payment Machine", machine_param) if machine_param else None
-    secret = _safe_get_password("CH Payment Machine", settings.name, "client_secret") if settings else None
-    if secret:
-        import hmac
-        import hashlib
-        expected_sig = hmac.new(
-            secret.encode(), body.encode(), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected_sig, sig_header):
-            frappe.log_error(
-                title="Pine Labs Signature Mismatch",
-                message=f"Signature validation failed on return callback. Expected: {expected_sig[:16]}..., got: {sig_header[:16]}...",
-            )
-            frappe.throw(
-                _("Webhook signature validation failed"),
-                frappe.AuthenticationError,
-            )
-    else:
-        # Machine could not be identified (missing `machine` param) or has no
-        # secret — signature could NOT be verified. These handlers only log
-        # and never mutate financial state, so we don't reject (a real bank
-        # callback may not echo our machine param), but we record the gap so
-        # an unsigned/forged callback is auditable rather than silent.
-        frappe.log_error(
-            title="Pine Labs Return Unverified",
-            message=f"Return callback accepted WITHOUT signature verification "
-                    f"(machine={machine_param or 'missing'}, sig_present={bool(sig_header)}).",
-        )
-
-    frappe.logger("ch_pos_payment_gateway").info("Pine Labs return: %s", json.dumps(kwargs, default=str))
+    machine_param = _verify_pine_callback_signature(machine_param, body, sig_header)
+    frappe.logger("ch_pos_payment_gateway").info(
+        "Verified Pine Labs return callback for machine %s", machine_param
+    )
     return kwargs
 
 
@@ -403,43 +551,15 @@ def pine_labs_return(**kwargs):
 @rate_limit(limit=120, seconds=300, methods=["POST"], ip_based=True)
 def pine_labs_webhook():
     """Pine Labs webhook callback — HMAC validation required (H17)."""
-    body = frappe.request.get_data(as_text=True) or "{}"
+    body = _bounded_callback_body() or "{}"
     sig_header = frappe.get_request_header("X-PINELABS-SIGNATURE") or ""
 
     # Attempt to extract machine name from payload to get the right secret
     payload = json.loads(body) if body else {}
     machine_name = payload.get("machine") or frappe.form_dict.get("machine")
 
-    # Validate HMAC signature (H17)
-    secret = (
-        _safe_get_password("CH Payment Machine", machine_name, "client_secret")
-        if machine_name and frappe.db.exists("CH Payment Machine", machine_name)
-        else None
+    machine_name = _verify_pine_callback_signature(machine_name, body, sig_header)
+    frappe.logger("ch_pos_payment_gateway").info(
+        "Verified Pine Labs webhook callback for machine %s", machine_name
     )
-    if secret:
-        import hmac
-        import hashlib
-        expected_sig = hmac.new(
-            secret.encode(), body.encode(), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected_sig, sig_header):
-            frappe.log_error(
-                title="Pine Labs Signature Mismatch",
-                message=f"Signature validation failed on webhook. Machine: {machine_name}",
-            )
-            frappe.throw(
-                _("Webhook signature validation failed"),
-                frappe.AuthenticationError,
-            )
-    else:
-        # Unidentifiable machine or no secret → signature NOT verified. Handler
-        # only logs (no state mutation), so we don't reject a possibly-genuine
-        # callback, but we record the unverified acceptance for audit.
-        frappe.log_error(
-            title="Pine Labs Webhook Unverified",
-            message=f"Webhook accepted WITHOUT signature verification "
-                    f"(machine={machine_name or 'missing'}, sig_present={bool(sig_header)}).",
-        )
-
-    frappe.logger("ch_pos_payment_gateway").info("Pine Labs webhook: %s", body)
     return {"status": "ok"}

@@ -12,10 +12,17 @@ Rules:
 - Logout ≠ session close; Lock = temporary pause
 """
 
+import hashlib
+import hmac
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt, cint, now_datetime, getdate, nowdate, time_diff_in_seconds
+from frappe.utils.password import get_encryption_key
+
+from ch_pos.config import get_control_setting, is_privileged_user
 
 
 VARIANCE_AUTO_ALLOW = 100  # ₹100 default threshold
@@ -35,6 +42,33 @@ def _get_variance_threshold():
 
 
 class CHPOSSession(Document):
+    def before_insert(self):
+        if not self.flags.get("ch_server_issued") and not is_privileged_user():
+            frappe.throw(
+                _("POS Sessions can only be opened through the Open Session action."),
+                frappe.PermissionError,
+            )
+        profile = frappe.get_cached_doc("POS Profile", self.pos_profile)
+        if self.company and self.company != profile.company:
+            frappe.throw(_("Session company must match the POS Profile."), frappe.PermissionError)
+        self.company = profile.company
+        self.user = frappe.session.user
+        self.business_date = get_store_business_date(self.store)
+        self.shift_start = now_datetime()
+        self.status = "Open"
+        self.closing_approved_by = None
+        self.closing_approved_at = None
+        if self.flags.get("ch_opening_approval_verified"):
+            if not self.opening_approved_by:
+                frappe.throw(_("Verified opening approval is missing its manager identity."))
+        elif is_privileged_user():
+            self.opening_approved_by = frappe.session.user
+            self.opening_approved_at = now_datetime()
+        else:
+            frappe.throw(_("Manager approval is required to open a POS Session."), frappe.PermissionError)
+        self.opening_approved_at = self.opening_approved_at or now_datetime()
+        self.opening_evidence_signature = self._expected_opening_signature()
+
     def validate(self):
         self._validate_company_device_consistency()
         self._validate_no_duplicate_open()
@@ -42,13 +76,104 @@ class CHPOSSession(Document):
         self._validate_no_duplicate_device_date()
         self._validate_business_date()
         self._validate_user_allocation()
+        # opening_evidence_signature is permlevel 1; frappe's higher-permlevel
+        # reset WIPES the value minted in before_insert for any cashier
+        # without that permlevel (i.e. everyone but System Manager) before
+        # validate runs. Re-mint within the same server-issued request —
+        # ch_server_issued can only be set by session_api.open_session, never
+        # by a client-supplied document, so this is not a tamper vector.
+        if (
+            self.is_new()
+            and self.flags.get("ch_server_issued")
+            and not (self.get("opening_evidence_signature") or "").strip()
+        ):
+            self.opening_evidence_signature = self._expected_opening_signature()
+        if not self._has_valid_opening_signature():
+            frappe.throw(_("POS Session opening evidence failed integrity verification."), frappe.PermissionError)
         if self.status in ("Closing", "Pending Close"):
             self._calculate_totals()
             self._calculate_cash_variance()
             self._validate_variance()
 
     def on_submit(self):
+        if not self._has_valid_opening_signature():
+            frappe.throw(_("POS Session opening evidence failed integrity verification."), frappe.PermissionError)
         self.db_set("status", "Open")
+
+    def before_update_after_submit(self):
+        if self.flags.get("ch_server_state_update"):
+            return
+        previous = self.get_doc_before_save()
+        if not previous:
+            return
+        protected = (
+            "status", "user", "company", "store", "device", "pos_profile",
+            "business_date", "opening_cash", "expected_float", "opening_approved_by",
+            "opening_approved_at", "shift_end", "closing_cash_expected",
+            "closing_cash_actual", "cash_variance", "closing_approved_by",
+            "closing_approved_at", "auto_closed",
+        )
+        if any(str(self.get(field) or "") != str(previous.get(field) or "") for field in protected):
+            frappe.throw(
+                _("POS Session financial/state evidence can only be changed through session actions."),
+                frappe.PermissionError,
+            )
+
+    def _opening_signature_payload(self):
+        # NB: the docname must NOT be part of this payload. The signature is
+        # minted in before_insert, which runs BEFORE autoname assigns
+        # self.name; validate() re-verifies AFTER naming — including "name"
+        # made every fresh session fail its own integrity check.
+        return json.dumps(
+            {
+                "company": self.company or "",
+                "store": self.store or "",
+                "device": self.device or "",
+                "pos_profile": self.pos_profile or "",
+                "user": self.user or "",
+                "business_date": str(self.business_date or ""),
+                "shift_start": str(self.shift_start or ""),
+                "opening_cash": f"{flt(self.opening_cash):.6f}",
+                "expected_float": f"{flt(self.expected_float):.6f}",
+                "approved_by": self.opening_approved_by or "",
+                "approved_at": str(self.opening_approved_at or ""),
+                "pos_opening_entry": self.pos_opening_entry or "",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _expected_opening_signature(self):
+        return hmac.new(
+            get_encryption_key().encode(),
+            self._opening_signature_payload().encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _has_valid_opening_signature(self):
+        actual = str(self.get("opening_evidence_signature") or "")
+        return bool(actual) and hmac.compare_digest(actual, self._expected_opening_signature())
+
+    def _expected_closing_signature(self):
+        payload = json.dumps(
+            {
+                "name": self.name,
+                "status": "Closed",
+                "shift_end": str(self.shift_end or ""),
+                "closing_cash_expected": f"{flt(self.closing_cash_expected):.6f}",
+                "closing_cash_actual": f"{flt(self.closing_cash_actual):.6f}",
+                "cash_variance": f"{flt(self.cash_variance):.6f}",
+                "variance_reason": self.variance_reason or "",
+                "closing_approved_by": self.closing_approved_by or "",
+                "closing_approved_at": str(self.closing_approved_at or ""),
+                "auto_closed": cint(self.auto_closed),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hmac.new(
+            get_encryption_key().encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
 
     def before_cancel(self):
         frappe.throw(_("POS Sessions cannot be cancelled. Close them instead."), title=_("Ch Pos Session Error"))
@@ -115,7 +240,7 @@ class CHPOSSession(Document):
                 )
               
     def _validate_no_duplicate_open_for_store(self):
-        """Auto-close existing session instead of blocking."""
+        """Block opening a second active session for the same store."""
         if self.docstatus != 0:
             return
 
@@ -132,20 +257,10 @@ class CHPOSSession(Document):
         )
 
         if existing:
-            old_doc = frappe.get_doc("CH POS Session", existing.name)
-
-            old_doc.flags.ignore_validate = True
-            old_doc.auto_closed = 1
-
-            old_doc.close_session(
-                closing_cash=0,
-                variance_reason="Auto-closed while opening new session"
-            )
-
-            frappe.db.commit()
-
-            frappe.msgprint(
-                _("Previous session {0} was automatically closed.").format(existing.name)
+            frappe.throw(
+                _("Session {0} is still active for this store. Close it before opening another session.").format(
+                    existing.name
+                )
             )
 
     def _validate_no_duplicate_device_date(self):
@@ -173,6 +288,8 @@ class CHPOSSession(Document):
     def _validate_user_allocation(self):
         """User must be assigned to this company and store via POS Executive."""
         if self.docstatus != 0:
+            return
+        if is_privileged_user(self.user):
             return
 
         # Check POS Executive — the single source of truth
@@ -218,28 +335,24 @@ class CHPOSSession(Document):
 
     def _calculate_totals(self):
         """Fetch invoice totals for this session."""
-        invoices = frappe.get_all(
-            "Sales Invoice",
-            filters={
-                "custom_ch_pos_session": self.name,
-                "docstatus": 1,
-            },
-            fields=["name", "grand_total", "is_return"],
-        )
+        totals = frappe.db.sql(
+            """
+            SELECT
+                SUM(CASE WHEN COALESCE(is_return, 0) = 0 THEN 1 ELSE 0 END) AS total_invoices,
+                COALESCE(SUM(CASE WHEN COALESCE(is_return, 0) = 0 THEN grand_total ELSE 0 END), 0) AS total_sales,
+                SUM(CASE WHEN COALESCE(is_return, 0) = 1 THEN 1 ELSE 0 END) AS total_returns,
+                COALESCE(SUM(CASE WHEN COALESCE(is_return, 0) = 1 THEN ABS(grand_total) ELSE 0 END), 0) AS total_return_amount
+            FROM `tabSales Invoice`
+            WHERE custom_ch_pos_session = %s AND docstatus = 1
+            """,
+            self.name,
+            as_dict=True,
+        )[0]
 
-        total_invoices = 0
-        total_sales = 0.0
-        total_returns = 0
-        total_return_amount = 0.0
-
-        for inv in invoices:
-            amt = flt(inv.grand_total)
-            if inv.is_return:
-                total_returns += 1
-                total_return_amount += abs(amt)
-            else:
-                total_invoices += 1
-                total_sales += amt
+        total_invoices = cint(totals.total_invoices)
+        total_sales = flt(totals.total_sales)
+        total_returns = cint(totals.total_returns)
+        total_return_amount = flt(totals.total_return_amount)
 
         self.total_invoices = total_invoices
         self.total_sales = total_sales
@@ -276,9 +389,19 @@ class CHPOSSession(Document):
         # Cash expected = opening + cash sales - cash returns - cash drops
         cash_expected = flt(self.opening_cash)
 
+        mode_names = sorted({row.mode_of_payment for row in (self.payment_details or []) if row.mode_of_payment})
+        cash_modes = {
+            row.name
+            for row in frappe.get_all(
+                "Mode of Payment",
+                filters={"name": ("in", mode_names), "type": "Cash"},
+                fields=["name"],
+                limit_page_length=len(mode_names),
+            )
+        } if mode_names else set()
+
         for row in (self.payment_details or []):
-            mop_type = frappe.db.get_value("Mode of Payment", row.mode_of_payment, "type")
-            if mop_type == "Cash":
+            if row.mode_of_payment in cash_modes:
                 cash_expected += flt(row.expected_amount)
 
         # Subtract cash drops
@@ -327,28 +450,6 @@ class CHPOSSession(Document):
             frappe.throw(_("Session is not locked."), title=_("Ch Pos Session Error"))
         self.db_set("status", "Open")
         self.status = "Open"
-
-    # Valid state transitions for the session lifecycle
-    _VALID_TRANSITIONS = {
-        "Draft": {"Open"},
-        "Open": {"Locked", "Closing", "Pending Close", "Closed"},
-        "Locked": {"Open", "Closing", "Pending Close", "Closed"},
-        "Suspended": {"Open", "Closing", "Closed"},
-        "Closing": {"Pending Close", "Closed"},
-        "Pending Close": {"Closed"},
-        "Closed": set(),  # terminal state
-    }
-
-    def _validate_status_transition(self, new_status):
-        """Ensure only valid state transitions are allowed."""
-        old_status = self.get_db_value("status") or "Draft"
-        allowed = self._VALID_TRANSITIONS.get(old_status, set())
-        if new_status not in allowed:
-            frappe.throw(
-                _("Invalid session transition: {0} → {1}. Allowed: {2}").format(
-                    old_status, new_status, ", ".join(allowed) or "none"
-                )
-            )
 
     def close_session(self, closing_cash, denomination_rows=None, variance_reason=None,
                       manager_pin_user=None):
@@ -415,12 +516,12 @@ class CHPOSSession(Document):
                 update_fields["duration_minutes"] = self.duration_minutes
             update_fields["closing_approved_by"] = self.closing_approved_by
             update_fields["closing_approved_at"] = self.closing_approved_at
+            update_fields["closing_evidence_signature"] = self._expected_closing_signature()
 
-            for field, value in update_fields.items():
-                self.db_set(field, value, update_modified=False)
-
-            self.db_set("modified", now_datetime())
+            update_fields["modified"] = now_datetime()
+            self.db_set(update_fields, update_modified=False)
             self.status = "Closed"
+            self.closing_evidence_signature = update_fields["closing_evidence_signature"]
 
             # Mark the linked ERPNext POS Opening Entry as closed so that
             # check_opening_entry() (which filters pos_closing_entry=None) stops
@@ -489,8 +590,14 @@ def auto_close_stale_sessions():
             "CH POS Session",
             filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", today)},
             fields=["name", "pos_profile", "store", "business_date"],
+            order_by="business_date asc, name asc",
+            limit_page_length=max(
+                1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000)
+            ),
         )
-        for s in stale:
+        for index, s in enumerate(stale):
+            savepoint = f"auto_close_stale_{index}"
+            frappe.db.savepoint(savepoint)
             try:
                 doc = frappe.get_doc("CH POS Session", s.name)
                 doc.auto_closed = 1
@@ -500,9 +607,8 @@ def auto_close_stale_sessions():
                 )
                 frappe.logger("session").info(f"Auto-closed stale session {s.name} (biz date: {s.business_date})")
             except Exception:
+                frappe.db.rollback(save_point=savepoint)
                 frappe.log_error(frappe.get_traceback(), f"Auto-close failed for {s.name}")
-        if stale:
-            frappe.db.commit()
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
@@ -527,10 +633,16 @@ def auto_close_overnight_sessions():
         yesterday = getdate(add_days(nowdate(), -1))
         open_sessions = frappe.get_all(
             "CH POS Session",
-            filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<", yesterday)},
+            filters={"status": ("in", ["Open", "Locked", "Suspended"]), "docstatus": 1, "business_date": ("<=", yesterday)},
             fields=["name", "pos_profile", "store", "business_date"],
+            order_by="business_date asc, name asc",
+            limit_page_length=max(
+                1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000)
+            ),
         )
-        for s in open_sessions:
+        for index, s in enumerate(open_sessions):
+            savepoint = f"auto_close_overnight_{index}"
+            frappe.db.savepoint(savepoint)
             try:
                 doc = frappe.get_doc("CH POS Session", s.name)
                 doc.auto_closed = 1
@@ -542,8 +654,7 @@ def auto_close_overnight_sessions():
                     f"Overnight auto-close: {s.name} (store: {s.store}, biz date: {s.business_date})"
                 )
             except Exception:
+                frappe.db.rollback(save_point=savepoint)
                 frappe.log_error(frappe.get_traceback(), f"Overnight auto-close failed for {s.name}")
-        if open_sessions:
-            frappe.db.commit()
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))

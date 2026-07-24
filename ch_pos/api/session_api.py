@@ -14,6 +14,17 @@ import frappe
 from frappe import _
 from frappe.utils import flt, cint, nowdate, now_datetime, getdate, add_days
 
+from ch_pos.api.scope_guard import (
+    assert_pos_profile_scope,
+    assert_session_scope,
+    assert_store_scope,
+)
+from ch_pos.config import (
+    assert_session_operator,
+    get_control_setting,
+    is_privileged_user,
+    require_configured_roles,
+)
 from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
 from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import build_settlement_snapshot
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
@@ -35,6 +46,21 @@ def _ensure_store_business_date_is_not_future(store):
     return business_date
 
 
+def _session_report_limit() -> int:
+    value = cint(get_control_setting("session_report_row_limit", 5000)) or 5000
+    return max(1, min(value, 20000))
+
+
+def _ensure_session_report_limit(rows, limit, label):
+    if len(rows) > limit:
+        frappe.throw(
+            _("{0} exceeds the configured session-report limit of {1} rows.").format(
+                label, limit
+            )
+        )
+    return rows
+
+
 # ── Session Lifecycle ────────────────────────────────────────────────────────
 
 
@@ -43,9 +69,11 @@ def get_session_status(pos_profile) -> dict:
     """Check if an active session exists for this profile.
     Called on POS startup to decide: show opening screen or resume."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
+    assert_pos_profile_scope(pos_profile)
 
     session = get_active_session(pos_profile)
     if session:
+        assert_session_operator(session, _("resume another cashier's POS session"))
         _ensure_store_business_date_is_not_future(session.store)
         return {
             "has_session": True,
@@ -133,10 +161,11 @@ def get_session_status(pos_profile) -> dict:
     return {"has_session": False}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> dict:
     """Open a new POS session. Called from the POS opening screen."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_pos_profile_scope(pos_profile)
     opening_cash = flt(opening_cash)
 
     # Get store from POS Profile Extension
@@ -151,9 +180,17 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
     if not store:
         frappe.throw(_("No CH Store configured for POS Profile {0}. Set it on POS Profile Extension.").format(pos_profile), title=_("API Error"))
 
+    # Operational gate: till access requires an active POS Executive
+    # assignment at THIS store — org scope (CH User Scope) alone is
+    # back-office visibility and never opens a session.
+    from ch_pos.api.scope_guard import assert_pos_executive
+    assert_pos_executive(store)
+
     # Resolve company from POS Profile
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company or frappe.defaults.get_global_default("company")
+    company = profile.company
+    if not company:
+        frappe.throw(_("POS Profile {0} has no company configured.").format(pos_profile))
 
     # Resolve device — from parameter, from user allocation, or None
     device_doc = None
@@ -163,14 +200,22 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
             ["name", "company", "store", "pos_profile", "warehouse", "is_active"],
             as_dict=True,
         )
-        if device_doc and not device_doc.is_active:
+        if not device_doc:
+            frappe.throw(_("Device {0} was not found.").format(device))
+        if not device_doc.is_active:
             frappe.throw(_("Device {0} is inactive.").format(device), title=_("API Error"))
-        if device_doc and device_doc.company != company:
+        if device_doc.company != company:
             frappe.throw(
                 _("Device {0} belongs to company {1}, but POS Profile company is {2}.").format(
                     device, device_doc.company, company
                 )
             )
+        if device_doc.store and device_doc.store != store:
+            frappe.throw(_("Device {0} is assigned to a different store.").format(device))
+        if device_doc.pos_profile and device_doc.pos_profile != pos_profile:
+            frappe.throw(_("Device {0} is assigned to a different POS Profile.").format(device))
+        if device_doc.warehouse and device_doc.warehouse != profile.warehouse:
+            frappe.throw(_("Device {0} is assigned to a different warehouse.").format(device))
 
     # Get business date
     business_date = _ensure_store_business_date_is_not_future(store)
@@ -279,7 +324,7 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
             "period_start_date": now_datetime(),
             "balance_details": balance_details,
         })
-        opening_entry.insert(ignore_permissions=True)
+        opening_entry.insert()
         # SECURITY (H9): Validate POS Manager role or approval before submitting
         if not frappe.has_permission("POS Opening Entry", "submit", throw=False):
             frappe.throw(
@@ -319,7 +364,9 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
             "pos_opening_entry": opening_entry.name,
             "status": "Open",
         })
-        session.insert(ignore_permissions=True)
+        session.flags.ch_server_issued = True
+        session.flags.ch_opening_approval_verified = True
+        session.insert()
         session.submit()
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
@@ -336,13 +383,15 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def close_session(session_name, closing_cash, denominations=None,
                   variance_reason=None, manager_pin=None) -> dict:
     """Close a POS session with cash reconciliation. Called from POS closing dashboard."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_session_scope(session_name)
 
     session = frappe.get_doc("CH POS Session", session_name)
+    assert_session_operator(session, _("close another cashier's POS session"))
     if session.status not in ("Open", "Locked", "Pending Close"):
         frappe.throw(_("Session {0} cannot be closed (status: {1})").format(
             session_name, session.status))
@@ -378,6 +427,24 @@ def close_session(session_name, closing_cash, denominations=None,
         manager_user = pin_result["user"]
 
     if settlement_doc:
+        from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import (
+            has_valid_settlement_signature,
+        )
+
+        if not has_valid_settlement_signature(settlement_doc):
+            frappe.throw(
+                _("Settlement approval evidence failed integrity verification."),
+                frappe.PermissionError,
+            )
+        if (
+            settlement_doc.session != session.name
+            or settlement_doc.company != session.company
+            or settlement_doc.store != session.store
+        ):
+            frappe.throw(
+                _("Settlement does not belong to this session/company/store."),
+                frappe.PermissionError,
+            )
         authoritative_closing_cash = flt(settlement_doc.actual_closing_cash)
         authoritative_variance_reason = settlement_doc.variance_reason or authoritative_variance_reason
         if settlement_doc.signoff_by_manager:
@@ -422,16 +489,33 @@ def close_session(session_name, closing_cash, denominations=None,
 
 
 @frappe.whitelist()
+def can_reopen_closed_session(session_name) -> bool:
+    """Return whether the caller may see the audited closed-session control."""
+    try:
+        require_configured_roles(
+            "closed_session_reopen_roles",
+            defaults=("Accounts Manager",),
+            action=_("re-open a closed POS session"),
+        )
+        assert_session_scope(session_name)
+        session = frappe.get_doc("CH POS Session", session_name)
+        assert_session_operator(session, _("re-open another cashier's POS session"))
+        return session.status == "Closed"
+    except frappe.PermissionError:
+        return False
+
+
+@frappe.whitelist(methods=["POST"])
 def admin_reopen_session(session_name, reason) -> dict:
-    """Administrator-only: re-open a Closed POS session for corrections.
+    """Re-open a Closed POS session for authorized accounting corrections.
 
     Use when a session was closed prematurely / by mistake and the store
     needs to resume billing on the same business date without creating a
     fresh opening entry.
 
-    Hard-locked to ``Administrator`` (not even System Manager) because this
-    reverses a terminal state, voids the linked CH POS Settlement, and may
-    roll back the store's business date. All of those are accounting-sensitive.
+    Access is controlled by ``closed_session_reopen_roles``. Administrator and
+    System Manager retain the immutable platform bypass. The operation reverses
+    a terminal state and is therefore fully audited.
 
     Effects (mirrors the existing ``reopen_settlement`` pattern for the
     Pending-Close case, extended to handle the Closed terminal state):
@@ -455,13 +539,12 @@ def admin_reopen_session(session_name, reason) -> dict:
       session_name: CH POS Session name (must be in status ``Closed``).
       reason: Non-empty audit reason — required.
     """
-    # ── Hard gate: Administrator only ───────────────────────────
-    if frappe.session.user != "Administrator":
-        frappe.throw(
-            _("Only the Administrator can re-open a Closed POS session."),
-            frappe.PermissionError,
-            title=_("Permission Denied"),
-        )
+    require_configured_roles(
+        "closed_session_reopen_roles",
+        defaults=("Accounts Manager",),
+        action=_("re-open a closed POS session"),
+    )
+    assert_session_scope(session_name)
 
     if not reason or not str(reason).strip():
         frappe.throw(_("Reason is mandatory to re-open a Closed session."),
@@ -469,6 +552,7 @@ def admin_reopen_session(session_name, reason) -> dict:
     reason = str(reason).strip()
 
     session = frappe.get_doc("CH POS Session", session_name)
+    assert_session_operator(session, _("re-open another cashier's POS session"))
     if session.status != "Closed":
         frappe.throw(
             _("Session {0} is in status '{1}', not 'Closed'. "
@@ -479,7 +563,7 @@ def admin_reopen_session(session_name, reason) -> dict:
         )
 
     # Serialise against concurrent close/reopen activity on the same session.
-    lock_key = f"sess_admin_reopen_{frappe.scrub(session_name)}"
+    lock_key = f"sess_control_reopen_{frappe.scrub(session_name)}"
     if not frappe.db.sql("SELECT GET_LOCK(%s, 15)", (lock_key,))[0][0]:
         frappe.throw(_("Session {0} is busy. Please retry.").format(session_name),
                      title=_("Session Busy"))
@@ -509,7 +593,7 @@ def admin_reopen_session(session_name, reason) -> dict:
         )
         if settlement_name:
             settlement = frappe.get_doc("CH POS Settlement", settlement_name)
-            settlement.flags.ignore_permissions = True
+            settlement.check_permission("cancel")
             settlement.cancel()
 
         # 2. Reverse the session record. db_set bypasses _VALID_TRANSITIONS,
@@ -571,10 +655,7 @@ def admin_reopen_session(session_name, reason) -> dict:
                 }, update_modified=True)
                 bd_status_change = "Closed → Closing Pending"
 
-        # 5. Commit so the audit log row sees the reopened state.
-        frappe.db.commit()
-
-        # 6. Audit log (best-effort).
+        # 5. Audit log (best-effort).
         try:
             from ch_pos.audit import log_business_event
             log_business_event(
@@ -589,7 +670,7 @@ def admin_reopen_session(session_name, reason) -> dict:
                     "business_date_status_change": bd_status_change,
                 },
                 remarks=(
-                    "Session reopened by Administrator. "
+                    "Closed POS session reopened. "
                     "Reason: {0}".format(reason)
                 ),
                 # NOTE: `store` field on CH Business Audit Log is a Link to
@@ -599,7 +680,7 @@ def admin_reopen_session(session_name, reason) -> dict:
                 user=frappe.session.user,
             )
         except Exception:
-            pass
+            frappe.log_error(frappe.get_traceback(), "POS session reopen audit failed")
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
 
@@ -617,17 +698,24 @@ def admin_reopen_session(session_name, reason) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def switch_user(session_name, new_user, pwd=None) -> dict:
     """Switch cashier — new cashier must authenticate with their credentials."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_session_scope(session_name)
 
     session = frappe.get_doc("CH POS Session", session_name)
+    assert_session_operator(session, _("switch the cashier on another user's session"))
     if session.status != "Open":
         frappe.throw(_("Session is not open"), title=_("API Error"))
 
     if not frappe.db.exists("User", new_user):
         frappe.throw(_("User {0} does not exist").format(new_user), title=_("API Error"))
+    if not frappe.db.get_value("User", new_user, "enabled"):
+        frappe.throw(_("User {0} is disabled").format(new_user), frappe.PermissionError)
+    if not frappe.has_permission("Sales Invoice", "create", user=new_user):
+        frappe.throw(_("The new cashier cannot create Sales Invoices."), frappe.PermissionError)
+    assert_session_scope(session_name, user=new_user)
 
     # Authenticate the new cashier
     if not pwd:
@@ -659,7 +747,7 @@ def switch_user(session_name, new_user, pwd=None) -> dict:
             remarks=f"Switched by {frappe.session.user}",
         )
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "POS cashier switch audit failed")
 
     # Return executive access for the new user so Billed By updates
     executive_access = None
@@ -668,7 +756,7 @@ def switch_user(session_name, new_user, pwd=None) -> dict:
         profile = frappe.get_cached_doc("POS Profile", session.pos_profile)
         executive_access = _get_executive_access(new_user, profile.warehouse)
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "POS cashier executive access lookup failed")
 
     return {
         "user": new_user,
@@ -680,15 +768,17 @@ def switch_user(session_name, new_user, pwd=None) -> dict:
 # ── Cash Drop ────────────────────────────────────────────────────────────────
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_cash_drop(session_name, amount, reason, manager_pin) -> dict:
     """Create a cash drop (register → safe) during an active session."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_session_scope(session_name)
     amount = flt(amount)
     if amount <= 0:
         frappe.throw(_("Amount must be positive"), title=_("API Error"))
 
     session = frappe.get_doc("CH POS Session", session_name)
+    assert_session_operator(session, _("create a cash drop for another user's session"))
     if session.status != "Open":
         frappe.throw(_("Session is not open"), title=_("API Error"))
 
@@ -714,7 +804,8 @@ def create_cash_drop(session_name, amount, reason, manager_pin) -> dict:
         "approved_by": pin_result["user"],
         "approved_at": now_datetime(),
     })
-    drop.insert(ignore_permissions=True)
+    drop.flags.ch_manager_approval_verified = True
+    drop.insert()
     drop.submit()
     return {
         "drop_name": drop.name,
@@ -729,16 +820,20 @@ def create_cash_drop(session_name, amount, reason, manager_pin) -> dict:
 @frappe.whitelist()
 def get_business_date(store) -> dict:
     """Get the current business date for a store."""
+    store_company = frappe.db.get_value("CH Store", store, "company")
+    assert_store_scope(store=store, company=store_company)
     return {
         "business_date": str(get_store_business_date(store)),
         "system_date": str(nowdate()),
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def override_business_date(store, new_date, reason, manager_pin) -> dict:
     """Override the business date. Requires manager with override permission."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    store_company = frappe.db.get_value("CH Store", store, "company")
+    assert_store_scope(store=store, company=store_company)
 
     pin_result = verify_manager_pin(
         manager_pin, store=store, permission="can_override_business_date"
@@ -757,10 +852,26 @@ def override_business_date(store, new_date, reason, manager_pin) -> dict:
 # ── Manager PIN verification (for POS UI) ───────────────────────────────────
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def verify_pin(pin, store=None, permission=None) -> dict:
     """Verify a manager PIN from the POS UI."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
+    if not store:
+        frappe.throw(_("Store is required to verify an approval PIN."))
+    allowed_permissions = {
+        "can_approve_opening",
+        "can_approve_closing",
+        "can_approve_cash_drop",
+        "can_override_business_date",
+        "can_approve_discount",
+        "can_force_close_session",
+    }
+    if permission and permission not in allowed_permissions:
+        frappe.throw(_("Invalid approval permission."), frappe.PermissionError)
+    assert_store_scope(
+        store=store,
+        company=frappe.db.get_value("CH Store", store, "company"),
+    )
     return verify_manager_pin(pin, store=store, permission=permission)
 
 
@@ -771,7 +882,14 @@ def verify_pin(pin, store=None, permission=None) -> dict:
 def get_x_report(session_name) -> dict:
     """X Report — interim session report (during shift). Does not close session."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
+    assert_session_scope(session_name)
     session = frappe.get_doc("CH POS Session", session_name)
+    if session.user != frappe.session.user and not is_privileged_user():
+        require_configured_roles(
+            "session_report_roles",
+            defaults=("Store Manager", "POS Manager", "Accounts Manager"),
+            action=_("view another cashier's X report"),
+        )
     snapshot = build_settlement_snapshot(session)
     settlement_name = frappe.db.get_value(
         "CH POS Settlement",
@@ -781,6 +899,7 @@ def get_x_report(session_name) -> dict:
     settlement = frappe.get_doc("CH POS Settlement", settlement_name) if settlement_name else None
 
     # Fetch live invoice data
+    report_limit = _session_report_limit()
     invoices = frappe.get_all(
         "Sales Invoice",
         filters={
@@ -788,10 +907,26 @@ def get_x_report(session_name) -> dict:
             "docstatus": 1,
             "is_consolidated": 0,
             "posting_date": session.business_date,
+            "custom_ch_pos_session": session.name,
         },
         fields=["name", "grand_total", "is_return", "total_taxes_and_charges",
                 "posting_time", "customer_name", "custom_ch_sale_type"],
+        limit_page_length=report_limit + 1,
     )
+    _ensure_session_report_limit(invoices, report_limit, _("X-report invoices"))
+
+    petty_cash_rows = frappe.get_list(
+        "CH Cash Drop",
+        filters={
+            "session": session.name,
+            "movement_type": "Petty Expense",
+            "docstatus": 1,
+        },
+        fields=["name", "reason", "amount", "remarks", "posting_time", "approved_by"],
+        order_by="posting_time asc, creation asc",
+        limit_page_length=report_limit + 1,
+    )
+    _ensure_session_report_limit(petty_cash_rows, report_limit, _("X-report petty cash rows"))
 
     total_sales = sum(flt(i.grand_total) for i in invoices if not i.is_return)
     total_returns = sum(abs(flt(i.grand_total)) for i in invoices if i.is_return)
@@ -838,17 +973,7 @@ def get_x_report(session_name) -> dict:
         "refund_cash_out": snapshot["refund_cash_out"],
         "petty_cash_out": snapshot["petty_cash_out"],
         "buyback_cash_out": snapshot["buyback_cash_out"],
-        "petty_cash_rows": frappe.get_all(
-            "CH Cash Drop",
-            filters={
-                "session": session.name,
-                "movement_type": "Petty Expense",
-                "docstatus": 1,
-            },
-            fields=["name", "reason", "amount", "remarks", "posting_time", "approved_by"],
-            order_by="posting_time asc, creation asc",
-            ignore_permissions=True,
-        ),
+        "petty_cash_rows": petty_cash_rows,
         "settlement": {
             "name": settlement.name,
             "status": settlement.settlement_status,
@@ -862,8 +987,18 @@ def get_x_report(session_name) -> dict:
 def get_z_report(store, business_date) -> dict:
     """Z Report — end-of-day store summary across all sessions."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
+    assert_store_scope(
+        store=store,
+        company=frappe.db.get_value("CH Store", store, "company"),
+    )
+    require_configured_roles(
+        "session_report_roles",
+        defaults=("Store Manager", "POS Manager", "Accounts Manager"),
+        action=_("view the store Z report"),
+    )
     business_date = getdate(business_date)
 
+    report_limit = _session_report_limit()
     sessions = frappe.get_all(
         "CH POS Session",
         filters={"store": store, "business_date": business_date, "docstatus": 1},
@@ -871,7 +1006,9 @@ def get_z_report(store, business_date) -> dict:
                 "opening_cash", "closing_cash_actual", "cash_variance",
                 "total_invoices", "net_sales", "total_cash_drops"],
         order_by="shift_start asc",
+        limit_page_length=report_limit + 1,
     )
+    _ensure_session_report_limit(sessions, report_limit, _("Z-report sessions"))
 
     session_names = [s.name for s in sessions]
 
@@ -1047,11 +1184,14 @@ def _is_settlement_complete_for_store(store, business_date):
       cover the card receipt total for that store/date.
     """
     # Pre-fetch pos_profiles for this store/date to avoid nested subquery
+    report_limit = _session_report_limit()
     profiles = frappe.get_all(
         "CH POS Session",
         filters={"store": store, "business_date": business_date, "docstatus": 1},
         pluck="pos_profile",
+        limit_page_length=report_limit + 1,
     )
+    _ensure_session_report_limit(profiles, report_limit, _("Settlement sessions"))
     if not profiles:
         return True, _("Settlement complete (no sessions for the day).")
 

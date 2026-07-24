@@ -222,10 +222,19 @@ export class StockAuditWorkspace {
 					<td class="text-center">${due_badge}</td>
 				</tr>`;
 			}).join("");
+			
+			// Pagination info for the header
+			const summary = d.summary || {};
+			const pagination = d.pagination || {};
+			let warehouse_label = frappe.utils.escape_html(d.warehouse || "");
+			if (pagination.has_more) {
+				warehouse_label += `<span style="margin-left:8px;font-size:12px;color:#666;">(Showing ${summary.items_on_page || 0} of ${summary.items || 0} items)</span>`;
+			}
+			
 			body.html(`
 				<div class="ch-pos-section-card">
 					<div class="section-header" style="display:flex;justify-content:space-between;align-items:center">
-						<span><i class="fa fa-cubes"></i> ${__("Store Stock — {0}", [frappe.utils.escape_html(d.warehouse || "")])}</span>
+						<span><i class="fa fa-cubes"></i> ${__("Store Stock — {0}", [warehouse_label])}</span>
 						<div style="display:flex;gap:6px;align-items:center">
 							<button class="btn btn-xs btn-default ch-sa-print-stock" data-payload='${payload}'>
 								<i class="fa fa-print"></i> ${__("Print Snapshot")}

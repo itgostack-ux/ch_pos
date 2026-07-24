@@ -1,5 +1,8 @@
 import frappe
+from frappe import _
 from buyback.utils import validate_indian_phone
+
+from ch_pos.api.scope_guard import assert_pos_profile_scope
 
 
 def build_condition_and_backup(device_condition, accessories, data_disclaimer):
@@ -24,8 +27,8 @@ def build_condition_and_backup(device_condition, accessories, data_disclaimer):
 	return product_condition_desc, backup_info
 
 
-@frappe.whitelist()
-def create_service_intake_from_pos(data) -> dict:
+@frappe.whitelist(methods=["POST"])
+def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	"""Create and SUBMIT a GoFix Service Request from the POS Service Intake form.
 
 	POS-raised requests must land as submitted documents so they are
@@ -37,6 +40,13 @@ def create_service_intake_from_pos(data) -> dict:
 		data = frappe.parse_json(data)
 
 	frappe.has_permission("Service Request", "create", throw=True)
+	anchors = assert_pos_profile_scope(pos_profile)
+	if data.get("company") and data.get("company") != anchors.get("company"):
+		frappe.throw(_("Company does not match the active POS Profile."), frappe.PermissionError)
+	if data.get("source_warehouse") and data.get("source_warehouse") != anchors.get("warehouse"):
+		frappe.throw(_("Warehouse does not match the active POS Profile."), frappe.PermissionError)
+	data["company"] = anchors.get("company")
+	data["source_warehouse"] = anchors.get("warehouse")
 
 	if data.get("contact_number"):
 		data["contact_number"] = validate_indian_phone(data["contact_number"], "Contact Phone")
@@ -72,19 +82,21 @@ def create_service_intake_from_pos(data) -> dict:
 	return {"name": sr.name, "docstatus": sr.docstatus, "status": sr.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_repair_intake(data, pos_profile=None) -> dict:
     """Create POS Repair Intake and auto-generate Service Request on submit."""
     if isinstance(data, str):
         data = frappe.parse_json(data)
 
+    frappe.has_permission("POS Repair Intake", "create", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+
     # Default store (GoGizmo source warehouse) from POS Profile when caller did not pass one.
     # Ensures Service Request gets correctly tagged to the originating store even
     # if the kiosk/POS UI omits it from the payload.
-    if not data.get("store") and pos_profile:
-        ws = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
-        if ws:
-            data["store"] = ws
+    if data.get("store") and data.get("store") != anchors.get("warehouse"):
+        frappe.throw(_("Store does not match the active POS Profile."), frappe.PermissionError)
+    data["store"] = anchors.get("warehouse")
 
     # Validate and normalise phone number if provided
     if data.get("customer_phone"):

@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import cint
 
 
 @frappe.whitelist()
@@ -8,7 +9,10 @@ def search_items_by_name(doctype, txt, searchfield, start, page_len, filters):
     - Returns item_code as the stored value (required by Link field)
     - Returns item_name as the visible label in the dropdown
     """
+    frappe.has_permission("Item", "read", throw=True)
     txt_like = f"%{txt or ''}%"
+    start = max(0, cint(start))
+    page_len = max(1, min(cint(page_len) or 20, 100))
 
     items = frappe.db.sql(
         """
@@ -25,10 +29,9 @@ def search_items_by_name(doctype, txt, searchfield, start, page_len, filters):
         """,
         {
             "txt": txt_like,
-            "start": int(start or 0),
-            "page_len": int(page_len or 20),
+            "start": start,
+            "page_len": page_len,
         },
     )
 
-  
     return [(item_code, item_name, "") for item_code, item_name in items]

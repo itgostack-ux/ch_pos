@@ -1,34 +1,279 @@
 import datetime
+import re
 
 import frappe
 from frappe import _
 from frappe.rate_limiter import rate_limit
-from frappe.utils import flt, cint, nowdate, add_months, now_datetime, fmt_money, getdate, get_last_day, get_datetime, validate_email_address
-try:
-    from buyback.utils import validate_indian_phone
-except ImportError:
-    def validate_indian_phone(phone):
-        """Fallback: accept any phone if buyback app is not installed."""
-        return phone
+from frappe.utils import (
+    add_days,
+    add_months,
+    cint,
+    flt,
+    fmt_money,
+    get_datetime,
+    get_last_day,
+    getdate,
+    now_datetime,
+    nowdate,
+    validate_email_address,
+)
+
+from ch_item_master.ch_item_master.utils import validate_indian_phone
+from ch_pos.api.scope_guard import (
+    assert_any_warehouse_scope,
+    assert_pos_profile_scope,
+    assert_sales_invoice_scope,
+    assert_store_scope,
+)
+from ch_pos.config import (
+    get_control_setting,
+    get_configured_roles,
+    has_configured_roles,
+    is_privileged_user,
+    require_authenticated_user,
+    require_configured_roles,
+    require_privileged_user,
+)
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
 
-PREBOOK_REASSIGN_ALLOWED_ROLES = {"Store Manager", "Stock Manager", "System Manager", "Administrator"}
+def _split_serials(raw) -> list[str]:
+    if not raw:
+        return []
+    return [serial.strip() for serial in str(raw).replace("\r", "").split("\n") if serial.strip()]
+
+
+def _assert_company_scope(company, action=None) -> None:
+    if not company and not is_privileged_user():
+        frappe.throw(
+            _("Company is required to {0}.").format(action or _("perform this action")),
+            frappe.PermissionError,
+        )
+    if company:
+        assert_store_scope(company=company)
+
+
+def _assert_customer_pos_access(customer, pos_profile=None, action="access") -> None:
+    if not pos_profile:
+        if is_privileged_user():
+            return
+        frappe.throw(
+            _("POS Profile is required to {0} a customer.").format(action),
+            frappe.PermissionError,
+        )
+    assert_pos_profile_scope(pos_profile)
+    if is_privileged_user():
+        return
+    if frappe.db.get_value("POS Profile", pos_profile, "customer") == customer:
+        return
+    if frappe.db.get_value("Customer", customer, "owner") == frappe.session.user:
+        return
+    if frappe.db.exists(
+        "Sales Invoice",
+        {"customer": customer, "pos_profile": pos_profile, "docstatus": ("!=", 2)},
+    ):
+        return
+    require_configured_roles(
+        "customer_override_roles",
+        defaults=("POS Manager", "Store Manager"),
+        action=_("{0} a customer with no transaction at this store").format(action),
+    )
+
+
+def _assert_service_request_scope(service_request, permission="read"):
+    doc = (
+        service_request
+        if getattr(service_request, "doctype", None) == "Service Request"
+        else frappe.get_doc("Service Request", service_request)
+    )
+    doc.check_permission(permission)
+    warehouse = doc.get("source_warehouse")
+    store = doc.get("store")
+    company = doc.get("company")
+    if not any((warehouse, store, company)) and not is_privileged_user():
+        frappe.throw(_("Service Request has no store or company scope."), frappe.PermissionError)
+    assert_store_scope(store=store, warehouse=warehouse, company=company)
+    return doc
+
+
+def _assert_buyback_doc_scope(document, permission="read"):
+    """Apply DocType permission and exact store/company scope to buyback records."""
+    require_authenticated_user()
+    doc = document
+    if not getattr(doc, "doctype", None):
+        raise TypeError("A loaded buyback document is required")
+    if not is_privileged_user():
+        doc.check_permission(permission)
+
+    location = (doc.get("store") or "").strip()
+    company = doc.get("company")
+    store = location if location and frappe.db.exists("CH Store", location) else None
+    warehouse = location if location and frappe.db.exists("Warehouse", location) else None
+    if not any((store, warehouse, company)) and not is_privileged_user():
+        frappe.throw(_("Buyback record has no store or company scope."), frappe.PermissionError)
+
+    location_company = None
+    if store:
+        location_company = frappe.db.get_value("CH Store", store, "company")
+    elif warehouse:
+        location_company = frappe.db.get_value("Warehouse", warehouse, "company")
+    if company and location_company and company != location_company:
+        frappe.throw(_("Buyback record has inconsistent store and company."), frappe.PermissionError)
+
+    assert_store_scope(store=store, warehouse=warehouse, company=company)
+    return doc
+
+
+def _assert_buyback_profile_match(document, pos_profile):
+    anchors = assert_pos_profile_scope(pos_profile)
+    location = (document.get("store") or "").strip()
+    if location and location not in {anchors.get("store"), anchors.get("warehouse")}:
+        frappe.throw(_("Buyback record belongs to another store."), frappe.PermissionError)
+    if document.get("company") and document.get("company") != anchors.get("company"):
+        frappe.throw(_("Buyback record belongs to another company."), frappe.PermissionError)
+    return anchors
+
+
+def _resolve_exchange_credit(assessment_name, buyback_order, customer, pos_profile):
+    """Lock and validate the authoritative buyback credit for one POS sale."""
+    if not assessment_name:
+        frappe.throw(_("Buyback Assessment is required for exchange credit."))
+
+    frappe.db.sql(
+        "SELECT name FROM `tabBuyback Assessment` WHERE name=%s FOR UPDATE",
+        assessment_name,
+    )
+    assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+    _assert_buyback_doc_scope(assessment, "read")
+    _assert_buyback_profile_match(assessment, pos_profile)
+
+    valid_statuses = {"Quoted", "Quote Accepted", "Submitted", "Inspection Created"}
+    if assessment.status not in valid_statuses or assessment.docstatus == 2:
+        frappe.throw(_("Buyback Assessment is not eligible for exchange credit."))
+    if not customer or customer == "Walk-in Customer":
+        frappe.throw(_("A named customer is required for exchange credit."))
+    if assessment.customer and assessment.customer != customer:
+        frappe.throw(_("Exchange credit belongs to another customer."), frappe.PermissionError)
+    if assessment.linked_pos_invoice:
+        frappe.throw(
+            _("Exchange credit was already used on invoice {0}.").format(
+                assessment.linked_pos_invoice
+            )
+        )
+    if assessment.expires_on and getdate(assessment.expires_on) < getdate(nowdate()):
+        frappe.throw(_("Buyback Assessment has expired."))
+
+    submitted_order = frappe.db.get_value(
+        "Buyback Order",
+        {"buyback_assessment": assessment.name, "docstatus": 1},
+        "name",
+        order_by="modified desc",
+    )
+    if buyback_order and submitted_order and buyback_order != submitted_order:
+        frappe.throw(_("Buyback Order does not match the assessment."), frappe.PermissionError)
+    order_name = buyback_order or submitted_order
+    order = None
+    credit = 0.0
+    if order_name:
+        frappe.db.sql(
+            "SELECT name FROM `tabBuyback Order` WHERE name=%s FOR UPDATE",
+            order_name,
+        )
+        order = frappe.get_doc("Buyback Order", order_name)
+        _assert_buyback_doc_scope(order, "read")
+        _assert_buyback_profile_match(order, pos_profile)
+        if order.docstatus != 1 or order.status in (
+            "Draft",
+            "Awaiting Approval",
+            "Rejected",
+            "Cancelled",
+            "Closed",
+        ):
+            frappe.throw(_("Buyback Order is not eligible for exchange settlement."))
+        if order.buyback_assessment != assessment.name or order.customer != customer:
+            frappe.throw(_("Buyback Order does not match this customer and assessment."))
+        if order.sales_invoice:
+            frappe.throw(
+                _("Buyback Order was already used on invoice {0}.").format(order.sales_invoice)
+            )
+        credit = flt(order.final_price)
+    else:
+        credit = flt(assessment.quoted_price) or flt(assessment.estimated_price)
+
+    if credit <= 0:
+        frappe.throw(_("Exchange credit has no approved value."))
+    return {
+        "assessment": assessment,
+        "order": order,
+        "credit": flt(credit, 2),
+    }
+
+
+def _caller_can_apply_discount(profile_anchors, effective_percentage) -> bool:
+    if is_privileged_user():
+        return True
+    filters = {
+        "user": frappe.session.user,
+        "company": profile_anchors.get("company"),
+        "is_active": 1,
+        "can_give_discount": 1,
+    }
+    if profile_anchors.get("store"):
+        filters["store"] = profile_anchors.get("store")
+    rows = frappe.get_all(
+        "POS Executive",
+        filters=filters,
+        fields=["max_discount_pct"],
+        limit_page_length=20,
+    )
+    for row in rows:
+        maximum = flt(row.max_discount_pct)
+        if maximum <= 0 or effective_percentage <= maximum + 0.0001:
+            return True
+    return False
 
 
 def _ensure_prebook_reassign_access() -> None:
-    roles = set(frappe.get_roles(frappe.session.user))
-    if roles.intersection(PREBOOK_REASSIGN_ALLOWED_ROLES):
-        return
-    frappe.throw(
-        _("Only Manager and above can reassign reserved IMEI/serial on pre-bookings."),
-        frappe.PermissionError,
-        title=_("Not Permitted"),
+    require_configured_roles(
+        "prebook_reassign_roles",
+        defaults=("Store Manager", "Stock Manager"),
+        action=_("reassign reserved IMEI/serial on pre-bookings"),
     )
+
+
+def _get_pos_document_read_scope(pos_profile, doctype):
+    """Authorize a POS document read and return its exact store anchors."""
+    require_configured_roles(
+        "reprint_roles",
+        defaults=("POS User", "POS Manager", "Store Manager"),
+        action=_("view store POS documents"),
+    )
+    frappe.has_permission(doctype, "read", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+    if not anchors.get("company") or not anchors.get("warehouse"):
+        frappe.throw(
+            _("POS Profile {0} must have a Company and Warehouse.").format(pos_profile),
+            frappe.PermissionError,
+        )
+    return anchors
+
+
+def _assert_document_matches_pos_profile(document, anchors) -> None:
+    """Require every warehouse anchor on a source document to match the profile."""
+    if document.company != anchors.get("company"):
+        frappe.throw(_("Document belongs to another company."), frappe.PermissionError)
+    warehouses = {document.get("set_warehouse")} if document.get("set_warehouse") else set()
+    warehouses.update(row.warehouse for row in (document.get("items") or []) if row.warehouse)
+    if not warehouses or warehouses != {anchors.get("warehouse")}:
+        frappe.throw(_("Document belongs to another store."), frappe.PermissionError)
 
 
 def _open_prebook_for_serial_edit(sales_order):
     so = frappe.get_doc("Sales Order", sales_order)
+    so.check_permission("write")
+    warehouses = [so.get("set_warehouse")]
+    warehouses.extend(row.warehouse for row in (so.items or []) if row.warehouse)
+    assert_any_warehouse_scope(warehouses, company=so.company)
     if so.docstatus != 1:
         frappe.throw(_("Only submitted pre-bookings can be edited for IMEI changes."))
     if so.status in ("Closed", "Cancelled", "Completed", "On Hold"):
@@ -145,215 +390,6 @@ def _normalize_customer_approval_method(method: str | None) -> str:
         )
     return method
 
-# ── Buyback Exchange Credit helpers ─────────────────────────────────────────
-
-_EXCHANGE_MOP = "Buyback Exchange Credit"
-
-
-def _get_buyback_liability_account(company):
-    """Return the Buyback Liability GL account for this company.
-
-    Falls back gracefully: Buyback Settings liability account → standard
-    Device Buyback Liability account → legacy MOP account → legacy expense
-    setting. The expense fallback keeps old installs working, but production
-    should configure a liability account so exchange credit clears the payable.
-    """
-    account = None
-    if frappe.get_meta("Buyback Settings").has_field("buyback_liability_account"):
-        account = frappe.db.get_single_value("Buyback Settings", "buyback_liability_account")
-    if not account and company:
-        account = frappe.db.get_value(
-            "Account",
-            {"company": company, "account_name": "Device Buyback Liability", "is_group": 0},
-            "name",
-        )
-    if account:
-        return account
-    # Fallback: MOP account table
-    row = frappe.db.get_value(
-        "Mode of Payment Account",
-        {"parent": _EXCHANGE_MOP, "company": company},
-        "default_account",
-    )
-    if row:
-        return row
-    return frappe.db.get_single_value("Buyback Settings", "buyback_expense_account")
-
-
-def _ensure_buyback_exchange_mop(account, company):
-    """Create 'Buyback Exchange Credit' Mode of Payment if it doesn't exist.
-
-    Idempotent — safe to call on every exchange invoice. Uses a cached
-    flag so repeated calls in the same request skip the DB lookup.
-    """
-    _cache_key = f"buyback_exchange_mop_ok_{company}"
-    if frappe.cache().get_value(_cache_key):
-        return _EXCHANGE_MOP
-
-    if not frappe.db.exists("Mode of Payment", _EXCHANGE_MOP):
-        mop = frappe.new_doc("Mode of Payment")
-        mop.mode_of_payment = _EXCHANGE_MOP
-        mop.type = "General"
-        if account and company:
-            mop.append("accounts", {"company": company, "default_account": account})
-        mop.flags.ignore_permissions = True
-        mop.insert()
-        frappe.db.commit()
-    elif account and company:
-        # Ensure this company's account is configured
-        exists = frappe.db.exists(
-            "Mode of Payment Account",
-            {"parent": _EXCHANGE_MOP, "company": company},
-        )
-        if not exists:
-            mop = frappe.get_doc("Mode of Payment", _EXCHANGE_MOP)
-            mop.append("accounts", {"company": company, "default_account": account})
-            mop.flags.ignore_permissions = True
-            mop.save()
-            frappe.db.commit()
-
-    frappe.cache().set_value(_cache_key, True, expires_in_sec=3600)
-    return _EXCHANGE_MOP
-
-
-def _allocate_customer_advance(inv, requested):
-    """Allocate up to ``requested`` from the customer's unallocated Payment Entries
-    onto ``inv.advances``.
-
-    This is the ERPNext-idiomatic way to apply an advance to a Sales Invoice:
-    the Payment Entry's unallocated balance is consumed and the SI's outstanding
-    is reduced via the ``advances`` child table — GST is computed on the full
-    grand_total (NOT on a fictitious "discount") and the customer ledger stays
-    correct.
-
-    Returns the total amount actually allocated. Throws if the front-end
-    requested more advance than the customer actually has unallocated.
-
-    The previous implementation added ``advance_amount`` to ``inv.discount_amount``
-    which (a) corrupted the GST base because GST is computed on net of discount,
-    and (b) never reduced the customer's unallocated PE balance — so the same
-    advance could be "spent" multiple times.
-    """
-    requested = flt(requested)
-    if requested <= 0 or not inv.customer or inv.customer == "Walk-in Customer":
-        return 0.0
-
-    rows = frappe.db.sql(
-        """
-        SELECT pe.name, pe.unallocated_amount
-          FROM `tabPayment Entry` pe
-         WHERE pe.docstatus = 1
-           AND pe.party_type = 'Customer'
-           AND pe.party = %(party)s
-           AND pe.company = %(company)s
-           AND pe.unallocated_amount > 0.005
-         ORDER BY pe.posting_date, pe.creation
-        """,
-        {"party": inv.customer, "company": inv.company},
-        as_dict=True,
-    )
-
-    remaining = requested
-    allocated_total = 0.0
-    for r in rows:
-        if remaining <= 0.005:
-            break
-        alloc = min(flt(r.unallocated_amount), remaining)
-        if alloc <= 0:
-            continue
-        inv.append("advances", {
-            "reference_type": "Payment Entry",
-            "reference_name": r.name,
-            "advance_amount": flt(r.unallocated_amount),
-            "allocated_amount": alloc,
-            "remarks": "POS advance allocation",
-        })
-        allocated_total += alloc
-        remaining -= alloc
-
-    if remaining > 0.5:
-        frappe.throw(
-            frappe._(
-                "Cannot apply advance of ₹{0}. Only ₹{1} of unallocated Payment Entries "
-                "is available for {2}. Refresh the cart or have the customer pay the difference."
-            ).format(requested, allocated_total, inv.customer),
-            title=frappe._("Advance Mismatch"),
-        )
-
-    return allocated_total
-
-
-def _allocate_sales_order_advance(inv, sales_order, cap=None):
-    """Pull advance allocations sitting on a Sales Order onto ``inv.advances``.
-
-    When a pre-booking is billed, ERPNext's ``make_sales_invoice`` mapper copies
-    the SO's ``advances`` child rows onto the Sales Invoice. Our POS path
-    builds the SI from scratch (so the cashier can edit / append items at
-    pickup time) so we replicate that copy explicitly: every Payment Entry
-    that referenced the SO is added as an advance allocation, capped at the
-    invoice's grand_total so we never over-apply.
-
-    Returns the total amount allocated.
-    """
-    if not sales_order:
-        return 0.0
-
-    so_advances = frappe.db.sql(
-        """
-        SELECT  per.reference_name AS pe_name,
-                pe.unallocated_amount,
-                per.allocated_amount
-          FROM `tabPayment Entry Reference` per
-          JOIN `tabPayment Entry` pe ON pe.name = per.parent
-         WHERE per.reference_doctype = 'Sales Order'
-           AND per.reference_name   = %(so)s
-           AND pe.docstatus = 1
-           AND pe.party_type = 'Customer'
-           AND pe.party = %(party)s
-           AND pe.company = %(company)s
-           AND per.allocated_amount > 0.005
-         ORDER BY pe.posting_date, pe.creation
-        """,
-        {"so": sales_order, "party": inv.customer, "company": inv.company},
-        as_dict=True,
-    )
-    if not so_advances:
-        return 0.0
-
-    # Cap at invoice grand total so we never over-allocate.
-    try:
-        inv.run_method("calculate_taxes_and_totals")
-    except Exception:
-        pass
-    target = flt(cap if cap is not None else (inv.rounded_total or inv.grand_total))
-    if target <= 0:
-        return 0.0
-
-    # De-duplicate PEs across multiple SO references and start fresh.
-    seen = set()
-    total = 0.0
-    for adv in so_advances:
-        if adv.pe_name in seen:
-            continue
-        seen.add(adv.pe_name)
-        remaining = target - total
-        if remaining <= 0.005:
-            break
-        alloc = min(flt(adv.allocated_amount), remaining)
-        if alloc <= 0:
-            continue
-        inv.append("advances", {
-            "reference_type": "Payment Entry",
-            "reference_name": adv.pe_name,
-            "advance_amount": flt(adv.allocated_amount),
-            "allocated_amount": alloc,
-            "remarks": f"POS pickup — advance from Sales Order {sales_order}",
-        })
-        total += alloc
-
-    return total
-
-
 def _enforce_token_linkage(pos_profile, kiosk_token):
     """Block billing without a linked kiosk token when enforcement is enabled."""
     if kiosk_token:
@@ -381,6 +417,8 @@ def _enforce_token_linkage(pos_profile, kiosk_token):
 @frappe.whitelist()
 def get_pos_profile_data(pos_profile) -> dict:
     """Return POS profile configuration needed by the CH POS frontend."""
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    assert_pos_profile_scope(pos_profile)
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
 
     payment_modes = []
@@ -411,6 +449,9 @@ def get_pos_profile_data(pos_profile) -> dict:
         executive_access = {
             "companies": [],
             "is_manager": False,
+            "is_privileged": False,
+            "can_manage_session": False,
+            "can_select_all_companies": False,
             "store_executives": {},
             "own_executive": None,
             "stores": [],
@@ -434,14 +475,15 @@ def get_pos_profile_data(pos_profile) -> dict:
 @frappe.whitelist()
 def get_sale_types(company=None) -> list:
     """Return enabled sale types with their sub-types, optionally filtered by company."""
+    _assert_company_scope(company, _("load POS sale types"))
+    frappe.has_permission("CH Sale Type", "read", throw=True)
     filters = {"enabled": 1}
-    types = frappe.get_all(
+    types = frappe.get_list(
         "CH Sale Type",
         filters=filters,
         fields=["name as sale_type_name", "code", "is_default", "requires_customer",
                 "requires_payment", "default_payment_mode", "description"],
         order_by="is_default desc, sale_type_name asc",
-        ignore_permissions=True,
     )
 
     for st in types:
@@ -451,7 +493,6 @@ def get_sale_types(company=None) -> list:
             filters={"parent": st["sale_type_name"], "parenttype": "CH Sale Type"},
             fields=["sale_sub_type", "description", "requires_reference", "reference_doctype"],
             order_by="idx",
-            ignore_permissions=True,
         )
 
         # Filter by allowed companies if specified
@@ -461,7 +502,6 @@ def get_sale_types(company=None) -> list:
                     "POS Allowed Company",
                     filters={"parent": st["sale_type_name"], "parenttype": "CH Sale Type"},
                     pluck="company",
-                    ignore_permissions=True,
                 )
             except Exception:
                 allowed = []
@@ -474,29 +514,31 @@ def get_sale_types(company=None) -> list:
 @frappe.whitelist()
 def get_discount_reasons(company=None) -> list:
     """Return enabled discount reasons, optionally filtered by company."""
+    _assert_company_scope(company, _("load discount reasons"))
+    frappe.has_permission("CH Discount Reason", "read", throw=True)
     filters = {"enabled": 1}
     if company:
         filters["company"] = ("in", [company, "", None])
 
-    return frappe.get_all(
+    return frappe.get_list(
         "CH Discount Reason",
         filters=filters,
         fields=["name", "reason_name", "discount_type", "discount_value",
                 "allow_manual_entry", "max_manual_percent"],
         order_by="allow_manual_entry asc, reason_name asc",
-        ignore_permissions=True,
     )
 
 
 @frappe.whitelist()
 def get_finance_partners() -> dict:
     """Return enabled finance partners with their tenure options for POS dropdown."""
-    partners = frappe.get_all(
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    frappe.has_permission("CH Finance Partner", "read", throw=True)
+    partners = frappe.get_list(
         "CH Finance Partner",
         filters={"enabled": 1},
         fields=["name", "partner_name", "short_code", "tenure_options"],
         order_by="partner_name asc",
-        ignore_permissions=True,
     )
     for p in partners:
         # Parse comma-separated tenure options into list of integers
@@ -505,33 +547,7 @@ def get_finance_partners() -> dict:
     return partners
 
 
-def _ensure_pre_booking_sale_type():
-    """Best-effort bootstrap of the Pre Booking sale type master."""
-    if not frappe.db.exists("DocType", "CH Sale Type"):
-        return None
-
-    existing = frappe.db.get_value("CH Sale Type", {"sale_type_name": "Pre Booking"}, "name")
-    if existing:
-        return existing
-
-    try:
-        doc = frappe.get_doc({
-            "doctype": "CH Sale Type",
-            "sale_type_name": "Pre Booking",
-            "code": "PB",
-            "enabled": 1,
-            "requires_customer": 1,
-            "requires_payment": 0,
-            "description": "Advance reservation order created before final billing.",
-        })
-        doc.insert(ignore_permissions=True)
-        return doc.name
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Failed to create Pre Booking sale type")
-        return None
-
-
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=None,
                        delivery_date=None, sales_executive=None, sale_reference=None,
                        reserve_stock=1, client_request_id=None,
@@ -550,6 +566,8 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
     working. New callers (POS UI) MUST pass ``mode_of_payment``.
     """
     frappe.has_permission("Sales Order", "create", throw=True)
+    frappe.has_permission("Sales Order", "submit", throw=True)
+    assert_pos_profile_scope(pos_profile)
 
     if isinstance(items, str):
         items = frappe.parse_json(items)
@@ -557,8 +575,6 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         frappe.throw(frappe._("At least one item is required for pre-booking"))
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    _ensure_pre_booking_sale_type()
-
     requested_delivery = delivery_date or str(datetime.date.today() + datetime.timedelta(days=7))
     so = frappe.new_doc("Sales Order")
     so.customer = customer or profile.customer
@@ -791,11 +807,10 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         so.reserve_stock = 0
         reserve_relaxed_for_launch = True
 
-    so.flags.ignore_permissions = True
     # POS pre-booking already enforces practical store availability; skip
     # desk-style ATP advisory popup for this API flow to avoid cashier noise.
     so.flags.ch_skip_atp_warning = True
-    so.insert(ignore_permissions=True)
+    so.insert()
 
     submit_warning = None
     try:
@@ -883,7 +898,7 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         try:
             so.add_comment("Comment", comment)
         except Exception:
-            pass
+            frappe.log_error(frappe.get_traceback(), "Pre-booking availability comment failed")
 
     # ── Advance Payment Entries (split-tender capable) ──────────────────
     # Reuse the same advance pattern as ch_payments.advance_payments —
@@ -1048,12 +1063,11 @@ def _create_pre_booking_advance_pe(so, mode_of_payment: str, amount: float,
         "allocated_amount": amount,
     })
     pe.remarks = _("Pre-booking advance against Sales Order {0}").format(so.name)
-    pe.flags.ignore_permissions = True
-    pe.insert(ignore_permissions=True)
+    pe.insert()
     return pe.name
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_pre_booking(sales_order, action="refund",
                        refund_mode_of_payment=None, reason=None) -> dict:
     """Cancel a pre-booking Sales Order and handle its advance (#9 / #11).
@@ -1072,14 +1086,32 @@ def cancel_pre_booking(sales_order, action="refund",
 
     Stock reservation is released by the standard Sales Order cancel.
     """
+    require_configured_roles(
+        "prebook_cancel_roles",
+        defaults=("Store Manager", "POS Manager", "Accounts Manager"),
+        action=_("cancel a pre-booking"),
+    )
+    frappe.has_permission("Payment Entry", "create", throw=True)
+    frappe.db.sql("SELECT name FROM `tabSales Order` WHERE name=%s FOR UPDATE", sales_order)
     so = frappe.get_doc("Sales Order", sales_order)
+    so.check_permission("cancel")
+    source_warehouses = [so.get("set_warehouse")]
+    source_warehouses.extend(row.warehouse for row in (so.items or []) if row.warehouse)
+    assert_any_warehouse_scope(source_warehouses, company=so.company)
     if so.docstatus == 2:
         return {"status": "already_cancelled", "name": so.name}
     if flt(so.per_delivered) > 0 or flt(so.per_billed) > 0:
         frappe.throw(_("Cannot cancel — pre-booking {0} is already partly "
                        "delivered or billed.").format(so.name))
 
-    action = (action or "refund").lower()
+    action = (action or "refund").strip().lower()
+    if action not in {"refund", "retain_credit"}:
+        frappe.throw(_("Action must be refund or retain_credit."))
+    require_configured_roles(
+        "prebook_refund_roles",
+        defaults=("Store Manager", "Accounts Manager"),
+        action=_("refund or retain a pre-booking advance"),
+    )
     retain = action == "retain_credit"
 
     # Advance Payment Entries referencing this SO.
@@ -1094,11 +1126,12 @@ def cancel_pre_booking(sales_order, action="refund",
         pe = frappe.get_doc("Payment Entry", pe_name)
         amt = flt(pe.paid_amount)
         if pe.docstatus == 0:
+            pe.check_permission("delete")
             # Draft — never posted. Refund: just drop it. Retain: re-collect on
             # the new bill, so dropping it is also correct (no credit to keep).
-            frappe.delete_doc("Payment Entry", pe_name, force=True, ignore_permissions=True)
+            frappe.delete_doc("Payment Entry", pe_name)
         elif pe.docstatus == 1:
-            pe.flags.ignore_permissions = True
+            pe.check_permission("cancel")
             pe.cancel()
             if retain:
                 # Re-book the receipt as an unallocated on-account advance so the
@@ -1111,7 +1144,6 @@ def cancel_pre_booking(sales_order, action="refund",
                 refunded += amt
 
     so.reload()
-    so.flags.ignore_permissions = True
     so.cancel()  # releases stock reservation
 
     try:
@@ -1119,13 +1151,13 @@ def cancel_pre_booking(sales_order, action="refund",
             "refunded" if not retain else "advance retained as credit",
             (" " + reason) if reason else ""))
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Pre-booking cancellation comment failed")
 
     return {"status": "cancelled", "name": so.name, "action": action,
             "refunded": round(refunded, 2), "retained": round(retained, 2)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reassign_prebook_reserved_serial(
     sales_order,
     old_serial,
@@ -1239,12 +1271,11 @@ def reassign_prebook_reserved_serial(
         frappe.throw(_("Could not replace old IMEI/serial in the target row."))
 
     target_row.custom_serial_no = "\n".join(updated_serials)
-    so.flags.ignore_permissions = True
     # Reservation-ledger edit on a submitted SO — skip the desk ATP advisory
     # popup (already vetted at pre-book time) and let allow_on_submit=1 on
     # the custom_serial_no field carry the save through.
     so.flags.ch_skip_atp_warning = True
-    so.save(ignore_permissions=True)
+    so.save()
 
     note = _("Reserved IMEI reassigned on {0}: {1} → {2} for item {3} by {4}.").format(
         so.name,
@@ -1258,9 +1289,8 @@ def reassign_prebook_reserved_serial(
     try:
         so.add_comment("Comment", note)
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Reserved IMEI reassignment comment failed")
 
-    frappe.db.commit()
     return {
         "status": "ok",
         "sales_order": so.name,
@@ -1271,7 +1301,7 @@ def reassign_prebook_reserved_serial(
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def release_prebook_reserved_serial(sales_order, serial_no, item_code=None, reason=None) -> dict:
     """Manager-only: unreserve one IMEI/serial from a pre-booking row."""
     _ensure_prebook_reassign_access()
@@ -1299,9 +1329,8 @@ def release_prebook_reserved_serial(sales_order, serial_no, item_code=None, reas
 
     new_serials = [s for s in serials if s != serial_no]
     target_row.custom_serial_no = "\n".join(new_serials)
-    so.flags.ignore_permissions = True
     so.flags.ch_skip_atp_warning = True
-    so.save(ignore_permissions=True)
+    so.save()
 
     # Market-standard reminder — the SO qty commitment stands; only the IMEI
     # allocation has been cleared. Store should re-tag before pickup/billing.
@@ -1317,9 +1346,8 @@ def release_prebook_reserved_serial(sales_order, serial_no, item_code=None, reas
     try:
         so.add_comment("Comment", note)
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Reserved IMEI release comment failed")
 
-    frappe.db.commit()
     # Market-standard reminder text (SAP/Oracle nudge equivalent) so the UI
     # can show a yellow "action needed" toast right after Unreserve.
     reminder = None
@@ -1340,7 +1368,7 @@ def release_prebook_reserved_serial(sales_order, serial_no, item_code=None, reas
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def tag_prebook_reserved_serial(sales_order, item_code, serial_no, reason=None) -> dict:
     """Manager-only: tag a new IMEI/serial on a pre-booking item row."""
     _ensure_prebook_reassign_access()
@@ -1397,9 +1425,8 @@ def tag_prebook_reserved_serial(sales_order, item_code, serial_no, reason=None) 
 
     target_serials.append(serial_no)
     target_row.custom_serial_no = "\n".join(target_serials)
-    so.flags.ignore_permissions = True
     so.flags.ch_skip_atp_warning = True
-    so.save(ignore_permissions=True)
+    so.save()
 
     note = _("Reserved IMEI tagged on {0}: {1} for item {2} by {3}.").format(
         so.name, serial_no, item_code, frappe.session.user
@@ -1409,9 +1436,8 @@ def tag_prebook_reserved_serial(sales_order, item_code, serial_no, reason=None) 
     try:
         so.add_comment("Comment", note)
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Reserved IMEI tagging comment failed")
 
-    frappe.db.commit()
     return {
         "status": "ok",
         "sales_order": so.name,
@@ -1446,8 +1472,7 @@ def _create_on_account_advance_pe(so, mode_of_payment, amount, reference_no=None
     pe.reference_no = reference_no or so.name
     pe.reference_date = nowdate()
     pe.remarks = _("Retained advance credit from cancelled pre-booking {0}").format(so.name)
-    pe.flags.ignore_permissions = True
-    pe.insert(ignore_permissions=True)
+    pe.insert()
     return pe.name
 
 
@@ -1477,12 +1502,11 @@ def _create_advance_refund_pe(so, mode_of_payment, amount):
     pe.reference_no = so.name
     pe.reference_date = nowdate()
     pe.remarks = _("Refund of pre-booking advance for cancelled {0}").format(so.name)
-    pe.flags.ignore_permissions = True
-    pe.insert(ignore_permissions=True)
+    pe.insert()
     return pe.name
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_pos_quotation(pos_profile, customer, items, valid_till=None,
                           notes=None, sales_executive=None,
                           advance_amount=0) -> dict:
@@ -1507,6 +1531,8 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
     pathway is unchanged.
     """
     frappe.has_permission("Quotation", "create", throw=True)
+    frappe.has_permission("Quotation", "submit", throw=True)
+    assert_pos_profile_scope(pos_profile)
 
     if isinstance(items, str):
         items = frappe.parse_json(items)
@@ -1539,9 +1565,7 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
     if sales_executive and qtn.meta.has_field("custom_sales_executive"):
         qtn.custom_sales_executive = sales_executive
 
-    qtn.flags.ignore_permissions = True
-    qtn.flags.ignore_workflow = True
-    qtn.insert(ignore_permissions=True)
+    qtn.insert()
     qtn.submit()
 
     # ``advance_amount`` is intentionally NOT stamped here — see docstring.
@@ -1638,44 +1662,6 @@ def create_pos_quotation(pos_profile, customer, items, valid_till=None,
 
 
 
-
-
-
-
-
-
-
-"""
-CH POS Sales Invoice — Hardcoded taxable/2 split for CGST/SGST.
-
-FORMULA:
-  For each item:
-    exempted_value = PR purchase_exempted_value per unit
-    taxable_value  = (rate − exempted_value) / 1.18
-    amount         = rate × qty
-
-  Sales Taxes and Charges (HARDCODED SPLIT):
-    In-State (2 rows: CGST + SGST):
-      CGST tax_amount = Σ(taxable_value) / 2
-      SGST tax_amount = Σ(taxable_value) / 2
-    Out-of-State (1 row: IGST):
-      IGST tax_amount = Σ(taxable_value)
-
-  GST Breakup Table (HARDCODED SPLIT per HSN):
-    Taxable Amount = Σ(taxable_value) per HSN
-    In-State:
-      CGST Amount  = taxable / 2
-      SGST Amount  = taxable / 2
-    Out-of-State:
-      IGST Amount  = taxable
-
-  Example (rate=92000, exempted=34220, in-state):
-    taxable = (92000 − 34220) / 1.18 = 48,966.10
-    CGST    = 48,966.10 / 2         = 24,483.05
-    SGST    = 48,966.10 / 2         = 24,483.05
-    Grand Total = 92,000
-"""
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # CACHES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1695,7 +1681,7 @@ def _detect_field(doctype, candidates):
                 _FIELD_MAP_CACHE[key] = c
                 return c
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), f"DocType field detection failed for {doctype}")
     _FIELD_MAP_CACHE[key] = None
     return None
 
@@ -1746,7 +1732,7 @@ def _get_purchase_exempted_value_for_serial(serial, item_code=None):
             if val > 0:
                 return val
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Serial purchase-value lifecycle lookup failed")
 
     try:
         pr_name = frappe.db.get_value("Serial No", serial, "purchase_document")
@@ -1764,7 +1750,7 @@ def _get_purchase_exempted_value_for_serial(serial, item_code=None):
             if val > 0:
                 return val
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Serial purchase-document value lookup failed")
 
     try:
         result = frappe.db.sql(f"""
@@ -1779,7 +1765,7 @@ def _get_purchase_exempted_value_for_serial(serial, item_code=None):
         if val > 0:
             return val
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Serial receipt-reference value lookup failed")
 
     try:
         sn_field = _detect_field("Serial No", ["custom_exempted_value", "exempted_value"])
@@ -1788,7 +1774,7 @@ def _get_purchase_exempted_value_for_serial(serial, item_code=None):
             if val > 0:
                 return val
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Serial exempted-value lookup failed")
 
     try:
         if not item_code:
@@ -1800,7 +1786,7 @@ def _get_purchase_exempted_value_for_serial(serial, item_code=None):
                 if val > 0:
                     return val
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Item exempted-value lookup failed")
 
     return 0.0
 
@@ -1884,10 +1870,10 @@ def _force_insert_tax_rows(si_name, template_name):
                 "included_in_paid_amount": 1,
                 "add_deduct_tax":          "Add",
                 "row_id":                  "",
-                "dont_recompute_tax":      1,  # 🔑 prevent ERPNext from overwriting
+                "dont_recompute_tax":      1,
                 "docstatus":    0,
-                "owner":        "Administrator",
-                "modified_by":  "Administrator",
+                "owner":        frappe.session.user,
+                "modified_by":  frappe.session.user,
                 "creation":     frappe.utils.now(),
                 "modified":     frappe.utils.now(),
             }
@@ -1898,7 +1884,6 @@ def _force_insert_tax_rows(si_name, template_name):
                     title=f"POS tax insert [{si_name}]",
                     message=frappe.get_traceback())
 
-        frappe.db.commit()
         frappe.clear_document_cache("Sales Invoice", si_name)
         return True
 
@@ -1909,17 +1894,74 @@ def _force_insert_tax_rows(si_name, template_name):
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1: Write ITEM-LEVEL calculations
-# ═══════════════════════════════════════════════════════════════════════════════
+def _classify_gst_tax(account_head, description=""):
+    value = f"{account_head or ''} {description or ''}".lower()
+    if "cgst" in value:
+        return "CGST"
+    if "sgst" in value or "utgst" in value:
+        return "SGST"
+    if "igst" in value:
+        return "IGST"
+    if "cess" in value:
+        return "CESS"
+    return "OTHER"
+
+
+def _effective_gst_rate(components):
+    interstate = flt(components.get("IGST"))
+    intrastate = flt(components.get("CGST")) + flt(components.get("SGST"))
+    return flt(max(interstate, intrastate) + flt(components.get("CESS")), 6)
+
+
+def _get_header_gst_components(si_name):
+    components = {"CGST": 0.0, "SGST": 0.0, "IGST": 0.0, "CESS": 0.0}
+    rows = frappe.get_all(
+        "Sales Taxes and Charges",
+        filters={"parent": si_name},
+        fields=["account_head", "description", "rate"],
+        order_by="idx",
+    )
+    for row in rows:
+        tax_type = _classify_gst_tax(row.account_head, row.description)
+        if tax_type in components:
+            components[tax_type] += abs(flt(row.rate))
+    return components
+
+
+def _get_item_total_gst_rate(item_code, item_tax_template, fallback_rate):
+    cache_key = f"{item_code or ''}:{item_tax_template or ''}:{flt(fallback_rate, 6)}"
+    if cache_key in _GST_RATE_CACHE:
+        return _GST_RATE_CACHE[cache_key]
+
+    template = item_tax_template or frappe.db.get_value(
+        "Item Tax",
+        {"parent": item_code, "parenttype": "Item"},
+        "item_tax_template",
+    )
+    rate = 0.0
+    if template:
+        template_meta = frappe.get_meta("Item Tax Template")
+        if template_meta.has_field("gst_rate"):
+            rate = flt(frappe.db.get_value("Item Tax Template", template, "gst_rate"))
+        if not rate:
+            components = {"CGST": 0.0, "SGST": 0.0, "IGST": 0.0, "CESS": 0.0}
+            rows = frappe.get_all(
+                "Item Tax Template Detail",
+                filters={"parent": template},
+                fields=["tax_type", "tax_rate"],
+            )
+            for row in rows:
+                tax_type = _classify_gst_tax(row.tax_type)
+                if tax_type in components:
+                    components[tax_type] += abs(flt(row.tax_rate))
+            rate = _effective_gst_rate(components)
+
+    rate = rate or flt(fallback_rate)
+    _GST_RATE_CACHE[cache_key] = rate
+    return rate
 
 def _write_item_calculations(si_name):
-    """
-    Per item:
-      taxable_value = (rate − exempted) / 1.18
-      gst_value     = amount − exempted_total − taxable_row (for reference)
-    Returns totals for subsequent use.
-    """
+    """Calculate inclusive item values from configured item and header tax rates."""
     if not frappe.db.exists("Sales Invoice", si_name):
         return None
 
@@ -1939,7 +1981,7 @@ def _write_item_calculations(si_name):
     has_taxable_val = sii_meta.has_field("taxable_value")
 
     si_items = frappe.db.sql("""
-        SELECT name, item_code, qty, rate, serial_no
+        SELECT name, item_code, qty, rate, serial_no, item_tax_template
         FROM `tabSales Invoice Item`
         WHERE parent = %s ORDER BY idx
     """, (si_name,), as_dict=True)
@@ -1950,6 +1992,8 @@ def _write_item_calculations(si_name):
     grand_total_amount = 0.0
     total_taxable = 0.0
     total_exempted = 0.0
+    total_net = 0.0
+    fallback_gst_rate = _effective_gst_rate(_get_header_gst_components(si_name))
 
     for si_item in si_items:
         rate = flt(si_item.rate)
@@ -1971,25 +2015,31 @@ def _write_item_calculations(si_name):
                     pev_per_unit = flt(
                         frappe.db.get_value("Item", si_item.item_code, item_field) or 0)
             except Exception:
-                pass
+                frappe.log_error(frappe.get_traceback(), "Margin item exempted-value lookup failed")
 
         if pev_per_unit > rate:
             pev_per_unit = rate
 
         exempted_per_unit = flt(pev_per_unit, 2)
 
-        # FORMULA
+        gst_rate = _get_item_total_gst_rate(
+            si_item.item_code,
+            si_item.item_tax_template,
+            fallback_gst_rate,
+        )
         taxable_base_unit = flt(max(rate - exempted_per_unit, 0.0), 6)
-        taxable_val_unit = flt(taxable_base_unit / 1.18, 6)
+        taxable_val_unit = flt(taxable_base_unit / (1 + gst_rate / 100.0), 6)
 
         row_exempted = flt(exempted_per_unit * qty, 2)
         row_taxable = flt(taxable_val_unit * qty, 2)
-        # Display GST value = taxable / 2 (matches hardcoded split)
-        row_gst_display = flt(row_taxable / 2.0, 2)  # per side (CGST or SGST)
+        row_tax = flt(taxable_base_unit * qty - row_taxable, 2)
+        row_net = flt(row_exempted + row_taxable, 2)
+        net_rate_unit = flt(exempted_per_unit + taxable_val_unit, 6)
 
         grand_total_amount += row_total
         total_taxable += row_taxable
         total_exempted += row_exempted
+        total_net += row_net
 
         # amount/rate stay tax-inclusive (what the customer sees/pays);
         # net_amount/net_rate must be the tax-EXCLUSIVE base (row_taxable),
@@ -2008,8 +2058,8 @@ def _write_item_calculations(si_name):
         ]
         params = {
             "amount": row_total,
-            "net_amount": row_taxable,
-            "net_rate": taxable_val_unit,
+            "net_amount": row_net,
+            "net_rate": net_rate_unit,
             "name": si_item.name,
         }
 
@@ -2027,7 +2077,7 @@ def _write_item_calculations(si_name):
             params["taxable_extra"] = row_taxable
         if si_gst_field:
             set_parts.append(f"`{si_gst_field}` = %(gst)s")
-            params["gst"] = flt(row_taxable, 2)  # store total taxable as gst display
+            params["gst"] = row_tax
 
         try:
             frappe.db.sql(f"""
@@ -2040,12 +2090,12 @@ def _write_item_calculations(si_name):
                 title=f"_write_item_calculations [{si_item.name}]",
                 message=frappe.get_traceback())
 
-    frappe.db.commit()
-
     return {
         "grand_total": flt(grand_total_amount, 2),
         "total_taxable": flt(total_taxable, 2),
         "total_exempted": flt(total_exempted, 2),
+        "total_net": flt(total_net, 2),
+        "total_tax": flt(grand_total_amount - total_net, 2),
     }
 
 
@@ -2060,11 +2110,6 @@ def _write_item_calculations(si_name):
 
 
 
-import frappe
-from frappe.utils import flt
-from erpnext.accounts.utils import get_fiscal_year
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 4b: PRE-SUBMIT header sync
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2076,7 +2121,7 @@ def _sync_header_totals_pre_submit(si_name, totals):
     if not totals:
         return
 
-    grand = flt(totals.get("total_taxable"), 2)
+    grand = flt(totals.get("total_net"), 2)
     paid  = flt(frappe.db.get_value("Sales Invoice", si_name, "paid_amount") or 0, 2)
     outstanding = flt(grand - paid, 2)
 
@@ -2097,520 +2142,67 @@ def _sync_header_totals_pre_submit(si_name, totals):
         WHERE name = %(name)s
     """, {"g": grand, "o": outstanding, "name": si_name})
 
-    frappe.db.commit()
     frappe.clear_document_cache("Sales Invoice", si_name)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 7: POST-SUBMIT tax rows + header
 # ═══════════════════════════════════════════════════════════════════════════════
-def _write_tax_rows_and_header(si_name, totals):
-    """Restore real GST tax rows + tax-inclusive header after submit()."""
-    import frappe
-    from frappe.utils import flt
-
-    if not totals:
-        return
-
-    grand   = flt(totals["grand_total"], 2)
-    taxable = flt(totals["total_taxable"], 2)
-    total_tax = flt(grand - taxable, 2)
-
-    tax_rows = frappe.db.sql("""
-        SELECT name, rate, account_head, description
-        FROM `tabSales Taxes and Charges`
-        WHERE parent = %s ORDER BY idx
-    """, (si_name,), as_dict=True)
-
-    if not tax_rows:
-        frappe.log_error(
-            title=f"_write_tax_rows_and_header [{si_name}]",
-            message="No tax rows found"
-        )
-        return
-
-    n = len(tax_rows)
-    if n == 1:
-        splits = [total_tax]
-    elif n == 2:
-        half = flt(total_tax / 2, 2)
-        splits = [half, flt(total_tax - half, 2)]
-    else:
-        total_rate = sum(flt(r.rate) for r in tax_rows) or 1
-        splits, running = [], 0
-        for i, r in enumerate(tax_rows):
-            if i == n - 1:
-                splits.append(flt(total_tax - running, 2))
-            else:
-                part = flt(total_tax * flt(r.rate) / total_rate, 2)
-                splits.append(part)
-                running += part
-
-    running = 0
-    for row, amt in zip(tax_rows, splits):
-        running = flt(running + amt, 2)
-        frappe.db.sql("""
-            UPDATE `tabSales Taxes and Charges`
-            SET tax_amount                             = %(a)s,
-                base_tax_amount                        = %(a)s,
-                tax_amount_after_discount_amount       = %(a)s,
-                base_tax_amount_after_discount_amount  = %(a)s,
-                total                                  = %(t)s,
-                base_total                             = %(t)s
-            WHERE name = %(name)s
-        """, {"a": amt, "t": flt(taxable + running, 2), "name": row.name})
-
-    paid = flt(frappe.db.get_value("Sales Invoice", si_name, "paid_amount") or 0, 2)
-    outstanding = flt(grand - paid, 2)
-
-    frappe.db.sql("""
-        UPDATE `tabSales Invoice`
-        SET net_total                    = %(t)s,
-            base_net_total               = %(t)s,
-            total                        = %(t)s,
-            base_total                   = %(t)s,
-            total_taxes_and_charges      = %(tax)s,
-            base_total_taxes_and_charges = %(tax)s,
-            grand_total                  = %(g)s,
-            base_grand_total             = %(g)s,
-            rounded_total                = %(g)s,
-            base_rounded_total           = %(g)s,
-            outstanding_amount           = %(o)s
-        WHERE name = %(name)s
-    """, {"t": taxable, "tax": total_tax, "g": grand, "o": outstanding, "name": si_name})
-
-    frappe.db.commit()
-    frappe.clear_document_cache("Sales Invoice", si_name)
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 8: REWRITE GL — direct SQL INSERT with docstatus=1
 # ═══════════════════════════════════════════════════════════════════════════════
 def _rewrite_gl_entries(si_name, totals=None):
-    """Rebuild GL entries so General Ledger report shows correct values."""
-    import frappe
-    from frappe.utils import flt
-    from erpnext.accounts.utils import get_fiscal_year
+    """Repost the submitted invoice through ERPNext's accounting framework."""
+    from erpnext.accounts.utils import _delete_accounting_ledger_entries
+
+    savepoint = "ch_pos_gl_repost"
+    previous_repost_flag = getattr(
+        frappe.flags, "through_repost_accounting_ledger", False
+    )
+    frappe.db.savepoint(savepoint)
 
     try:
-        # 1. Delete old entries
-        frappe.db.sql("""
-            DELETE FROM `tabGL Entry`
-            WHERE voucher_type = 'Sales Invoice' AND voucher_no = %s
-        """, (si_name,))
-
-        if frappe.db.exists("DocType", "Payment Ledger Entry"):
-            frappe.db.sql("""
-                DELETE FROM `tabPayment Ledger Entry`
-                WHERE voucher_type = 'Sales Invoice' AND voucher_no = %s
-            """, (si_name,))
-
-        frappe.db.commit()
-        frappe.clear_document_cache("Sales Invoice", si_name)
-
-        # 2. Load doc
         doc = frappe.get_doc("Sales Invoice", si_name)
         if doc.docstatus != 1:
-            return
+            frappe.throw(_("Sales Invoice {0} must be submitted before GL reposting.").format(si_name))
 
-        if totals:
-            taxable = flt(totals["total_taxable"], 2)
-            grand   = flt(totals["grand_total"], 2)
-        else:
-            taxable = flt(doc.net_total, 2)
-            grand   = flt(doc.grand_total, 2)
+        doc.force_set_against_income_account()
+        gl_entries = doc.get_gl_entries()
+        if not gl_entries:
+            frappe.throw(_("No accounting entries were generated for Sales Invoice {0}.").format(si_name))
 
-        required_tax = flt(grand - taxable, 2)
-
-        # 3. Accounts
-        debtors_acc  = doc.debit_to
-        income_acc   = _pick_income_account(doc)
-        cost_center  = _pick_cost_center(doc)
-        company_curr = frappe.get_cached_value("Company", doc.company, "default_currency")
-        fiscal_year  = get_fiscal_year(doc.posting_date, company=doc.company)[0]
-
-        # 4. Recompute tax split from grand-taxable (don't trust doc.taxes[].tax_amount)
-        tax_rows = list(doc.taxes)
-        tax_gl_lines = []
-
-        if tax_rows and required_tax > 0:
-            n = len(tax_rows)
-            if n == 1:
-                splits = [required_tax]
-            elif n == 2:
-                half = flt(required_tax / 2, 2)
-                splits = [half, flt(required_tax - half, 2)]
-            else:
-                total_rate = sum(flt(r.rate) for r in tax_rows) or 1
-                splits, running = [], 0
-                for i, r in enumerate(tax_rows):
-                    if i == n - 1:
-                        splits.append(flt(required_tax - running, 2))
-                    else:
-                        part = flt(required_tax * flt(r.rate) / total_rate, 2)
-                        splits.append(part)
-                        running += part
-
-            for row, amt in zip(tax_rows, splits):
-                if amt <= 0 or not row.account_head:
-                    continue
-                tax_gl_lines.append({
-                    "account":     row.account_head,
-                    "cost_center": row.cost_center or cost_center,
-                    "amount":      amt,
-                })
-
-        # 5. Build entries
-        entries = []
-
-        entries.append({
-            "account": debtors_acc, "party_type": "Customer", "party": doc.customer,
-            "debit": grand, "credit": 0,
-            "against": income_acc, "cost_center": cost_center,
-        })
-        entries.append({
-            "account": income_acc, "party_type": None, "party": None,
-            "debit": 0, "credit": taxable,
-            "against": doc.customer, "cost_center": cost_center,
-        })
-        for tl in tax_gl_lines:
-            entries.append({
-                "account": tl["account"], "party_type": None, "party": None,
-                "debit": 0, "credit": tl["amount"],
-                "against": doc.customer, "cost_center": tl["cost_center"],
-            })
-
-        # 6. Balance check with auto-fix for small rounding
-        total_dr = flt(sum(e["debit"]  for e in entries), 2)
-        total_cr = flt(sum(e["credit"] for e in entries), 2)
-        diff = flt(total_dr - total_cr, 2)
-
-        if abs(diff) > 0.02 and abs(diff) <= 5 and tax_gl_lines:
-            for e in reversed(entries):
-                if e["credit"] > 0 and e["account"] != income_acc:
-                    e["credit"] = flt(e["credit"] + diff, 2)
-                    break
-            total_dr = flt(sum(e["debit"]  for e in entries), 2)
-            total_cr = flt(sum(e["credit"] for e in entries), 2)
-
-        if abs(total_dr - total_cr) > 0.02:
-            frappe.log_error(
-                title=f"_rewrite_gl_entries HARD IMBALANCE [{si_name}]",
-                message=(f"grand={grand} taxable={taxable} tax={required_tax}\n"
-                         f"Dr={total_dr} Cr={total_cr} entries={entries}")
-            )
-            return
-
-        # 7. Direct SQL INSERT with docstatus=1
-        for e in entries:
-            acc_curr = _account_currency(e["account"]) or company_curr
-            gle_name = frappe.generate_hash("GL Entry", 10)
-
-            frappe.db.sql("""
-                INSERT INTO `tabGL Entry` (
-                    name, creation, modified, modified_by, owner, docstatus,
-                    posting_date, transaction_date, fiscal_year, company,
-                    account, party_type, party, cost_center,
-                    debit, credit,
-                    account_currency,
-                    debit_in_account_currency, credit_in_account_currency,
-                    against, against_voucher_type, against_voucher,
-                    voucher_type, voucher_no, voucher_subtype,
-                    remarks, is_opening, is_advance, is_cancelled,
-                    finance_book, due_date
-                ) VALUES (
-                    %(name)s, NOW(), NOW(), %(user)s, %(user)s, 1,
-                    %(posting_date)s, %(posting_date)s, %(fiscal_year)s, %(company)s,
-                    %(account)s, %(party_type)s, %(party)s, %(cost_center)s,
-                    %(debit)s, %(credit)s,
-                    %(account_currency)s,
-                    %(debit_in_ac)s, %(credit_in_ac)s,
-                    %(against)s, 'Sales Invoice', %(voucher_no)s,
-                    'Sales Invoice', %(voucher_no)s, 'Sales Invoice',
-                    %(remarks)s, 'No', 'No', 0,
-                    %(finance_book)s, %(due_date)s
+        total_debit = flt(sum(flt(entry.debit) for entry in gl_entries), 2)
+        total_credit = flt(sum(flt(entry.credit) for entry in gl_entries), 2)
+        if abs(total_debit - total_credit) > 0.02:
+            frappe.throw(
+                _("Accounting entries for Sales Invoice {0} are not balanced. Debit: {1}, Credit: {2}.").format(
+                    si_name, total_debit, total_credit
                 )
-            """, {
-                "name":          gle_name,
-                "user":          frappe.session.user,
-                "posting_date":  doc.posting_date,
-                "fiscal_year":   fiscal_year,
-                "company":       doc.company,
-                "account":       e["account"],
-                "party_type":    e.get("party_type"),
-                "party":         e.get("party"),
-                "cost_center":   e["cost_center"],
-                "debit":         e["debit"],
-                "credit":        e["credit"],
-                "account_currency": acc_curr,
-                "debit_in_ac":   e["debit"],
-                "credit_in_ac":  e["credit"],
-                "against":       e.get("against"),
-                "voucher_no":    doc.name,
-                "remarks":       doc.remarks or f"Inclusive GST — {doc.name}",
-                "finance_book":  doc.get("finance_book"),
-                "due_date":      doc.get("due_date"),
-            })
+            )
 
-        # 8. Payment Ledger
-        if frappe.db.exists("DocType", "Payment Ledger Entry"):
-            _insert_payment_ledger(doc, grand, cost_center, fiscal_year, company_curr)
-
-        # 9. Outstanding
-        outstanding = flt(grand - flt(doc.paid_amount or 0), 2)
-        frappe.db.sql("""
-            UPDATE `tabSales Invoice` SET outstanding_amount = %s WHERE name = %s
-        """, (outstanding, si_name))
-
-        frappe.db.commit()
+        frappe.flags.through_repost_accounting_ledger = True
+        _delete_accounting_ledger_entries("Sales Invoice", si_name)
+        doc.make_gl_entries(gl_entries=gl_entries, from_repost=True)
         frappe.clear_document_cache("Sales Invoice", si_name)
-
     except Exception:
-        frappe.db.rollback()
+        frappe.db.rollback(save_point=savepoint)
         frappe.log_error(
-            title=f"_rewrite_gl_entries FAILED [{si_name}]",
-            message=frappe.get_traceback()
+            title=f"Sales Invoice GL repost failed [{si_name}]",
+            message=frappe.get_traceback(),
         )
-
-
-def _insert_payment_ledger(doc, grand, cost_center, fiscal_year, company_curr):
-    import frappe
-
-    ple_name = frappe.generate_hash("Payment Ledger Entry", 10)
-    acc_curr = _account_currency(doc.debit_to) or company_curr
-
-    frappe.db.sql("""
-        INSERT INTO `tabPayment Ledger Entry` (
-            name, creation, modified, modified_by, owner, docstatus,
-            posting_date, account_type, account, party_type, party,
-            voucher_type, voucher_no, against_voucher_type, against_voucher_no,
-            amount, amount_in_account_currency, account_currency,
-            company, cost_center, finance_book, due_date,
-            delinked, remarks
-        ) VALUES (
-            %(name)s, NOW(), NOW(), %(user)s, %(user)s, 1,
-            %(posting_date)s, 'Receivable', %(account)s, 'Customer', %(customer)s,
-            'Sales Invoice', %(voucher_no)s, 'Sales Invoice', %(voucher_no)s,
-            %(amount)s, %(amount)s, %(currency)s,
-            %(company)s, %(cost_center)s, %(finance_book)s, %(due_date)s,
-            0, %(remarks)s
-        )
-    """, {
-        "name":         ple_name,
-        "user":         frappe.session.user,
-        "posting_date": doc.posting_date,
-        "account":      doc.debit_to,
-        "customer":     doc.customer,
-        "voucher_no":   doc.name,
-        "amount":       grand,
-        "currency":     acc_curr,
-        "company":      doc.company,
-        "cost_center":  cost_center,
-        "finance_book": doc.get("finance_book"),
-        "due_date":     doc.get("due_date"),
-        "remarks":      doc.remarks or f"Inclusive GST — {doc.name}",
-    })
-
-
-def _account_currency(account):
-    import frappe
-    curr = frappe.get_cached_value("Account", account, "account_currency")
-    if curr:
-        return curr
-    company = frappe.get_cached_value("Account", account, "company")
-    return frappe.get_cached_value("Company", company, "default_currency")
-
-
-def _pick_income_account(doc):
-    import frappe
-    for it in doc.items:
-        if it.income_account:
-            return it.income_account
-    return frappe.get_cached_value("Company", doc.company, "default_income_account")
-
-
-def _pick_cost_center(doc):
-    import frappe
-    for it in doc.items:
-        if it.cost_center:
-            return it.cost_center
-    for t in doc.taxes:
-        if t.cost_center:
-            return t.cost_center
-    return frappe.get_cached_value("Company", doc.company, "cost_center")
-
-
-
-
-
-
-
-    
-
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Bypass ch_erp15 GL validator — our pipeline uses transitional states
-    # ═══════════════════════════════════════════════════════════════════════
-    inv.flags.ignore_permissions                = True
-    inv.flags.ignore_pricing_rule               = True
-    inv.flags.disable_rounded_total             = True
-    inv.flags.ignore_gl_balance_check           = True
-    inv.flags.ignore_validate_update_after_submit = True
-
-    try:
-        # ---------- 1. INSERT ----------
-        inv.insert(ignore_permissions=True)
-
-        # ---------- 2. Force tax rows from template ----------
-        if template_name:
-            _force_insert_tax_rows(inv.name, template_name)
-
-        # ---------- 3. Item-level calc (item.net_amount = tax-exclusive) ----------
-        totals = _write_item_calculations(inv.name)
-
-        # ---------- 4. Payment rounding ----------
-        _is_finance_sale = sale_type and (
-            "finance" in (sale_type or "").lower()
-            or "emi" in (sale_type or "").lower()
-        )
-        if (not cint(is_free_sale) and not cint(is_credit_sale)
-                and not _is_finance_sale):
-            rt = flt(totals["grand_total"] if totals else 0)
-            total_paid = sum(flt(p.amount) for p in inv.payments)
-            rounding_diff = round(rt) - total_paid
-
-            if abs(rounding_diff) > 0.001:
-                for p in inv.payments:
-                    if flt(p.amount) > 0:
-                        frappe.db.set_value(
-                            "Sales Invoice Payment", p.name,
-                            {"amount": flt(p.amount) + rounding_diff,
-                             "base_amount": flt(p.base_amount or 0) + rounding_diff},
-                            update_modified=False)
-                        break
-                frappe.db.set_value(
-                    "Sales Invoice", inv.name,
-                    {"paid_amount": round(rt), "base_paid_amount": round(rt)},
-                    update_modified=False)
-
-        # ---------- 4b. Pre-submit header sync ----------
-        _sync_header_totals_pre_submit(inv.name, totals)
-
-        # ---------- 5. SUBMIT ----------
-        inv.reload()
-        inv.workflow_state = "Approved"
-        if hasattr(inv, "custom_si_approval_state"):
-            inv.custom_si_approval_state = "Approved"
-        inv.flags.ignore_validate                    = True
-        inv.flags.ignore_validate_update_after_submit = True
-        inv.flags.ignore_gl_balance_check            = True   # persist bypass
-        inv.flags.ignore_permissions                 = True
-        inv.submit()
-
-        # ---------- 6. Force child docstatus ----------
-        frappe.db.sql(
-            "UPDATE `tabSales Taxes and Charges` SET docstatus = 1 "
-            "WHERE parent = %s AND docstatus = 0",
-            (inv.name,))
-        frappe.db.sql(
-            "UPDATE `tabSales Invoice Item` SET docstatus = 1 "
-            "WHERE parent = %s AND docstatus = 0",
-            (inv.name,))
-        frappe.db.commit()
-
-        # ---------- 7. Restore real tax split + inclusive header ----------
-        _write_tax_rows_and_header(inv.name, totals)
-
-        # ---------- 8. Rewrite GL to final balanced state ----------
-        _rewrite_gl_entries(inv.name, totals)
-
-        frappe.clear_document_cache("Sales Invoice", inv.name)
-
-    except Exception:
-        if inv.name and frappe.db.exists("Sales Invoice", inv.name):
-            try:
-                _doc = frappe.get_doc("Sales Invoice", inv.name)
-                _doc.flags.ignore_gl_balance_check = True
-                _doc.flags.ignore_permissions      = True
-                _doc.flags.ignore_validate         = True
-                if _doc.docstatus == 1:
-                    if hasattr(_doc, "custom_cancel_reason"):
-                        _doc.custom_cancel_reason = "System: auto-rollback"
-                    _doc.cancel()
-                frappe.delete_doc("Sales Invoice", inv.name,
-                                  force=True, ignore_permissions=True)
-            except Exception:
-                frappe.log_error(
-                    frappe.get_traceback(),
-                    f"Draft SI cleanup failed for {inv.name}")
         raise
+    finally:
+        frappe.flags.through_repost_accounting_ledger = previous_repost_flag
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 2: Write TAX ROWS + HEADER (post-submit) — HARDCODED taxable/2 split
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def _write_tax_rows_and_header(si_name, totals):
-    """
-    totals["total_taxable"] is the tax-EXCLUSIVE base (rate.taxable_val_unit,
-    back-calculated via /1.18 in _write_item_calculations) — i.e. what
-    net_total should be. The actual tax amount is the remainder of the
-    tax-inclusive grand_total after that base, split evenly across the
-    CGST/SGST (or GST) rows, or taken in full by a single IGST row.
-
-    Previously this treated total_taxable itself as the tax amount
-    (CGST = total_taxable / 2, SGST = total_taxable / 2) — inverting base
-    and tax — which inflated tax rows far beyond the real 18% rate and made
-    the GL entries built from them unbalanceable against grand_total.
-    """
+    """Persist configured GST amounts and balanced invoice totals."""
     if not totals:
         return
 
     grand_total_amount = totals["grand_total"]
-    total_taxable = totals["total_taxable"]
+    total_net = totals["total_net"]
+    total_tax_amount = totals["total_tax"]
 
     tax_rows = frappe.db.sql("""
         SELECT name, rate, account_head, description
@@ -2618,21 +2210,9 @@ def _write_tax_rows_and_header(si_name, totals):
         WHERE parent = %s ORDER BY idx
     """, (si_name,), as_dict=True)
 
-    def classify_tax_row(tax):
-        acc = (tax.account_head or "").lower()
-        desc = (tax.description or "").lower()
-        combined = acc + " " + desc
-        if "cgst" in combined:
-            return "CGST"
-        if "sgst" in combined or "utgst" in combined:
-            return "SGST"
-        if "igst" in combined:
-            return "IGST"
-        if "gst" in combined:
-            return "GST"
-        return "OTHER"
-
-    classifications = [classify_tax_row(t) for t in tax_rows]
+    classifications = [
+        _classify_gst_tax(t.account_head, t.description) for t in tax_rows
+    ]
     cgst_count = classifications.count("CGST")
     sgst_count = classifications.count("SGST")
     igst_count = classifications.count("IGST")
@@ -2642,34 +2222,33 @@ def _write_tax_rows_and_header(si_name, totals):
     stc_cols = _get_table_columns("tabSales Taxes and Charges")
     has_paid_amt = "included_in_paid_amount" in stc_cols
 
-    # Tax amount = grand_total (tax-inclusive) minus the tax-exclusive
-    # taxable base — NOT the taxable base itself. Split evenly across the
-    # CGST/SGST/GST rows (last one absorbs the rounding remainder so they
-    # sum exactly to total_tax_amount); a lone IGST row takes it in full.
-    total_tax_amount = flt(max(grand_total_amount - total_taxable, 0.0), 2)
-    split_positions = [i for i, t in enumerate(classifications) if t in ("CGST", "SGST", "GST")]
-    n_split = len(split_positions)
-    per_row_tax = flt(total_tax_amount / n_split, 2) if n_split else 0.0
+    split_positions = [
+        index
+        for index, tax_type in enumerate(classifications)
+        if tax_type in ("CGST", "SGST", "IGST", "CESS") and abs(flt(tax_rows[index].rate)) > 0
+    ]
+    if not split_positions:
+        split_positions = [
+            index for index, tax in enumerate(tax_rows) if abs(flt(tax.rate)) > 0
+        ]
+    total_weight = sum(abs(flt(tax_rows[index].rate)) for index in split_positions)
     split_amounts = {}
-    _allocated = 0.0
-    for _i, _pos in enumerate(split_positions):
-        if _i == n_split - 1:
-            split_amounts[_pos] = flt(total_tax_amount - _allocated, 2)
+    allocated = 0.0
+    for offset, position in enumerate(split_positions):
+        if offset == len(split_positions) - 1:
+            split_amounts[position] = flt(total_tax_amount - allocated, 2)
         else:
-            split_amounts[_pos] = per_row_tax
-            _allocated += per_row_tax
+            amount = flt(
+                total_tax_amount * abs(flt(tax_rows[position].rate)) / total_weight,
+                2,
+            )
+            split_amounts[position] = amount
+            allocated += amount
 
     for _pos, (tax, tax_type) in enumerate(zip(tax_rows, classifications)):
-        t_rate = flt(tax.rate)
+        tax_amount = split_amounts.get(_pos, 0.0)
 
-        if tax_type in ("CGST", "SGST", "GST"):
-            tax_amount = split_amounts[_pos]
-        elif tax_type == "IGST":
-            tax_amount = total_tax_amount
-        else:
-            tax_amount = flt(total_taxable * (t_rate / 100.0), 2)
-
-        is_gst_row = tax_type in ("CGST", "SGST", "IGST", "GST")
+        is_gst_row = tax_type in ("CGST", "SGST", "IGST", "CESS")
 
         set_parts = [
             "tax_amount = %(ta)s",
@@ -2703,16 +2282,10 @@ def _write_tax_rows_and_header(si_name, totals):
                 title=f"_write_tax_rows [{tax.name}]",
                 message=frappe.get_traceback())
 
-    # HEADER — GL-BALANCED (net_total = grand_total − taxes)
     grand_total = flt(grand_total_amount, 2)
-    net_total = flt(grand_total - total_tax_amount, 2)
+    net_total = flt(total_net, 2)
     rounded_total = flt(round(grand_total), 2)
     rounding_adj = flt(rounded_total - grand_total, 2)
-    # outstanding_amount was set against the temporary tax-exclusive total by
-    # _sync_header_totals_pre_submit (needed at submit() time); now that the
-    # real tax-inclusive grand_total is restored, recompute it against the
-    # actual paid_amount so a fully-paid POS sale ends up at 0, not a
-    # leftover negative "overpayment" from that temporary state.
     paid_amount = flt(frappe.db.get_value("Sales Invoice", si_name, "paid_amount") or 0, 2)
     outstanding = flt(grand_total - paid_amount, 2)
 
@@ -2749,24 +2322,13 @@ def _write_tax_rows_and_header(si_name, totals):
             title=f"_write_header [{si_name}]",
             message=frappe.get_traceback())
 
-    # GST BREAKUP (uses same hardcoded split per HSN)
     _update_gst_breakup(si_name, is_in_state, is_out_state)
 
-    frappe.db.commit()
     frappe.clear_document_cache("Sales Invoice", si_name)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# GST BREAKUP — HARDCODED taxable/2 split per HSN
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def _update_gst_breakup(si_name, is_in_state, is_out_state):
-    """
-    Per HSN:
-      Taxable Amount = Σ(taxable_value)
-      In-state: CGST = Taxable/2, SGST = Taxable/2
-      Out-state: IGST = Taxable
-    """
+    """Refresh the HSN breakup using configured transaction tax rates."""
     si_meta = frappe.get_meta("Sales Invoice")
     breakup_field = None
     breakup_child_dt = None
@@ -2808,6 +2370,11 @@ def _update_gst_breakup(si_name, is_in_state, is_out_state):
     if not hsn_data:
         return
 
+    components = _get_header_gst_components(si_name)
+    cgst_rate = flt(components.get("CGST")) if is_in_state else 0.0
+    sgst_rate = flt(components.get("SGST")) if is_in_state else 0.0
+    igst_rate = flt(components.get("IGST")) if is_out_state else 0.0
+
     breakup_meta = frappe.get_meta(breakup_child_dt)
     hsn_col = taxable_col = None
     cgst_amt_col = sgst_amt_col = igst_amt_col = None
@@ -2846,28 +2413,9 @@ def _update_gst_breakup(si_name, is_in_state, is_out_state):
     for idx, hsn in enumerate(hsn_data, start=1):
         taxable_amt = flt(hsn.taxable_amount, 2)
 
-        # 🔑 HARDCODED SPLIT per HSN
-        if is_in_state:
-            cgst_amt = flt(taxable_amt / 2.0, 2)  # taxable / 2
-            sgst_amt = flt(taxable_amt / 2.0, 2)  # taxable / 2
-            igst_amt = 0.0
-            cgst_rate_val = 50.0  # display: shows 50% of taxable
-            sgst_rate_val = 50.0
-            igst_rate_val = 0.0
-        elif is_out_state:
-            cgst_amt = 0.0
-            sgst_amt = 0.0
-            igst_amt = flt(taxable_amt, 2)
-            cgst_rate_val = 0.0
-            sgst_rate_val = 0.0
-            igst_rate_val = 100.0
-        else:
-            cgst_amt = flt(taxable_amt / 2.0, 2)
-            sgst_amt = flt(taxable_amt / 2.0, 2)
-            igst_amt = 0.0
-            cgst_rate_val = 50.0
-            sgst_rate_val = 50.0
-            igst_rate_val = 0.0
+        cgst_amt = flt(taxable_amt * cgst_rate / 100.0, 2)
+        sgst_amt = flt(taxable_amt * sgst_rate / 100.0, 2)
+        igst_amt = flt(taxable_amt * igst_rate / 100.0, 2)
 
         row_data = {
             "name":        frappe.generate_hash(length=10),
@@ -2878,8 +2426,8 @@ def _update_gst_breakup(si_name, is_in_state, is_out_state):
             hsn_col:       hsn.hsn_code or "N/A",
             taxable_col:   taxable_amt,
             "docstatus":   1,
-            "owner":       "Administrator",
-            "modified_by": "Administrator",
+            "owner":       frappe.session.user,
+            "modified_by": frappe.session.user,
             "creation":    frappe.utils.now(),
             "modified":    frappe.utils.now(),
         }
@@ -2891,11 +2439,11 @@ def _update_gst_breakup(si_name, is_in_state, is_out_state):
         if igst_amt_col:
             row_data[igst_amt_col] = igst_amt
         if cgst_rate_col:
-            row_data[cgst_rate_col] = cgst_rate_val
+            row_data[cgst_rate_col] = cgst_rate
         if sgst_rate_col:
-            row_data[sgst_rate_col] = sgst_rate_val
+            row_data[sgst_rate_col] = sgst_rate
         if igst_rate_col:
-            row_data[igst_rate_col] = igst_rate_val
+            row_data[igst_rate_col] = igst_rate
 
         try:
             _dynamic_insert(f"tab{breakup_child_dt}", row_data)
@@ -2904,67 +2452,9 @@ def _update_gst_breakup(si_name, is_in_state, is_out_state):
                 title=f"GST breakup insert [{si_name}]",
                 message=frappe.get_traceback())
 
-    frappe.db.commit()
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # REWRITE GL ENTRIES
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-
-
-
-
-# def _rewrite_gl_entries(si_name):
-#     """
-#     Delete existing GL entries and re-make them so they balance with the
-#     updated net_total and total_taxes_and_charges.
-#     """
-#     try:
-#         frappe.db.sql("""
-#             DELETE FROM `tabGL Entry`
-#             WHERE voucher_type = 'Sales Invoice' AND voucher_no = %s
-#         """, (si_name,))
-
-#         if frappe.db.exists("DocType", "Payment Ledger Entry"):
-#             frappe.db.sql("""
-#                 DELETE FROM `tabPayment Ledger Entry`
-#                 WHERE voucher_type = 'Sales Invoice' AND voucher_no = %s
-#             """, (si_name,))
-
-#         frappe.db.commit()
-
-#         doc = frappe.get_doc("Sales Invoice", si_name)
-#         doc.flags.ignore_permissions = True
-#         doc.flags.ignore_validate = True
-#         doc.make_gl_entries()
-
-#         frappe.db.commit()
-
-#     except Exception:
-#         frappe.log_error(
-#             title=f"_rewrite_gl_entries [{si_name}]",
-#             message=frappe.get_traceback())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_item_floor_price(item_code, company=None, channel="POS") -> float:
@@ -3010,6 +2500,320 @@ def _get_item_floor_price(item_code, company=None, channel="POS") -> float:
     return min(price_floor_candidates) if price_floor_candidates else 0.0
 
 
+def _resolve_coupon_discount(
+    coupon_code,
+    customer,
+    cart_total,
+    company=None,
+    lock=False,
+) -> dict:
+    """Return the server-calculated discount for a valid coupon."""
+    code = str(coupon_code or "").strip()
+    if not code:
+        frappe.throw(_("Coupon code is required."))
+
+    coupon_name = frappe.db.get_value("Coupon Code", {"coupon_code": code}, "name")
+    if not coupon_name and frappe.db.exists("Coupon Code", code):
+        coupon_name = code
+    if not coupon_name:
+        frappe.throw(_("Coupon code was not found."))
+
+    if lock:
+        frappe.db.sql(
+            "SELECT name FROM `tabCoupon Code` WHERE name=%s FOR UPDATE",
+            coupon_name,
+        )
+
+    coupon = frappe.db.get_value(
+        "Coupon Code",
+        coupon_name,
+        [
+            "name",
+            "coupon_code",
+            "coupon_name",
+            "pricing_rule",
+            "valid_from",
+            "valid_upto",
+            "maximum_use",
+            "used",
+            "customer",
+        ],
+        as_dict=True,
+    )
+    if coupon.customer and coupon.customer != customer:
+        frappe.throw(_("Coupon is issued to a different customer."), frappe.PermissionError)
+
+    today = getdate(nowdate())
+    if coupon.valid_from and getdate(coupon.valid_from) > today:
+        frappe.throw(_("Coupon is not yet active."))
+    if coupon.valid_upto and getdate(coupon.valid_upto) < today:
+        frappe.throw(_("Coupon has expired."))
+    if cint(coupon.maximum_use) and cint(coupon.used) >= cint(coupon.maximum_use):
+        frappe.throw(_("Coupon usage limit has been reached."))
+    if not coupon.pricing_rule:
+        frappe.throw(_("Coupon has no pricing rule."))
+
+    pricing_rule = frappe.db.get_value(
+        "Pricing Rule",
+        coupon.pricing_rule,
+        [
+            "name",
+            "company",
+            "selling",
+            "disable",
+            "coupon_code_based",
+            "valid_from",
+            "valid_upto",
+            "min_amt",
+            "max_amt",
+            "discount_percentage",
+            "discount_amount",
+        ],
+        as_dict=True,
+    )
+    if not pricing_rule or cint(pricing_rule.disable) or not cint(pricing_rule.selling):
+        frappe.throw(_("Coupon pricing rule is unavailable."))
+    if not cint(pricing_rule.coupon_code_based):
+        frappe.throw(_("Coupon pricing rule is not coupon-controlled."))
+    if company and pricing_rule.company and pricing_rule.company != company:
+        frappe.throw(_("Coupon belongs to another company."), frappe.PermissionError)
+    if pricing_rule.valid_from and getdate(pricing_rule.valid_from) > today:
+        frappe.throw(_("Coupon pricing rule is not yet active."))
+    if pricing_rule.valid_upto and getdate(pricing_rule.valid_upto) < today:
+        frappe.throw(_("Coupon pricing rule has expired."))
+
+    total = flt(cart_total)
+    if total <= 0:
+        frappe.throw(_("Coupon cannot be applied to an empty transaction."))
+    if flt(pricing_rule.min_amt) and total < flt(pricing_rule.min_amt):
+        frappe.throw(
+            _("Minimum transaction value of {0} is required for this coupon.").format(
+                fmt_money(pricing_rule.min_amt)
+            )
+        )
+    if flt(pricing_rule.max_amt) and total > flt(pricing_rule.max_amt):
+        frappe.throw(
+            _("This coupon is limited to transactions up to {0}.").format(
+                fmt_money(pricing_rule.max_amt)
+            )
+        )
+
+    percentage = flt(pricing_rule.discount_percentage)
+    fixed_amount = flt(pricing_rule.discount_amount)
+    if percentage < 0 or percentage > 100 or fixed_amount < 0:
+        frappe.throw(_("Coupon pricing rule contains an invalid discount."))
+    if percentage > 0 and fixed_amount > 0:
+        frappe.throw(_("Coupon pricing rule contains conflicting discounts."))
+
+    if percentage > 0:
+        discount = flt(total * percentage / 100, 2)
+        max_discount = flt(
+            frappe.db.get_value("Pricing Rule", pricing_rule.name, "max_discount") or 0
+        ) if frappe.db.has_column("Pricing Rule", "max_discount") else 0
+        if max_discount:
+            discount = min(discount, max_discount)
+    else:
+        discount = flt(fixed_amount, 2)
+    discount = min(discount, total)
+    if discount <= 0:
+        frappe.throw(_("Coupon provides no applicable discount."))
+
+    return {
+        "coupon_name": coupon.name,
+        "coupon_code": coupon.coupon_code,
+        "pricing_rule": pricing_rule.name,
+        "discount_amount": discount,
+        "discount_percentage": percentage,
+    }
+
+
+def _resolve_voucher_discount(
+    voucher_code,
+    customer,
+    company,
+    cart_total,
+    currency=None,
+    lock=False,
+) -> dict:
+    """Return the authoritative amount for a submitted, scoped voucher."""
+    code = str(voucher_code or "").strip()
+    if not code:
+        frappe.throw(_("Voucher code is required."))
+
+    voucher_name = frappe.db.get_value("CH Voucher", {"voucher_code": code}, "name")
+    if not voucher_name and frappe.db.exists("CH Voucher", code):
+        voucher_name = code
+    if not voucher_name:
+        frappe.throw(_("Voucher code was not found."))
+
+    if lock:
+        frappe.db.sql(
+            "SELECT name FROM `tabCH Voucher` WHERE name=%s FOR UPDATE",
+            voucher_name,
+        )
+
+    voucher = frappe.db.get_value(
+        "CH Voucher",
+        voucher_name,
+        [
+            "name",
+            "voucher_code",
+            "docstatus",
+            "status",
+            "company",
+            "currency",
+            "balance",
+            "valid_from",
+            "valid_upto",
+            "issued_to",
+            "min_order_amount",
+            "max_discount_amount",
+            "single_use",
+            "applicable_channel",
+            "applicable_item_group",
+        ],
+        as_dict=True,
+    )
+    if cint(voucher.docstatus) != 1 or voucher.status not in ("Active", "Partially Used"):
+        frappe.throw(_("Voucher is not active."))
+    if voucher.company != company:
+        frappe.throw(_("Voucher belongs to another company."), frappe.PermissionError)
+    if currency and voucher.currency and voucher.currency != currency:
+        frappe.throw(_("Voucher uses a different currency."))
+    if voucher.issued_to and voucher.issued_to != customer:
+        frappe.throw(_("Voucher is issued to a different customer."), frappe.PermissionError)
+    if voucher.applicable_channel and voucher.applicable_channel != "POS":
+        frappe.throw(_("Voucher is not valid for the POS channel."))
+
+    today = getdate(nowdate())
+    if voucher.valid_from and getdate(voucher.valid_from) > today:
+        frappe.throw(_("Voucher is not yet active."))
+    if voucher.valid_upto and getdate(voucher.valid_upto) < today:
+        frappe.throw(_("Voucher has expired."))
+
+    total = flt(cart_total)
+    if total <= 0:
+        frappe.throw(_("Voucher cannot be applied to an empty transaction."))
+    if flt(voucher.min_order_amount) and total < flt(voucher.min_order_amount):
+        frappe.throw(
+            _("Minimum transaction value of {0} is required for this voucher.").format(
+                fmt_money(voucher.min_order_amount)
+            )
+        )
+
+    amount = flt(voucher.balance)
+    if amount <= 0:
+        frappe.throw(_("Voucher has no remaining balance."))
+    if flt(voucher.max_discount_amount):
+        amount = min(amount, flt(voucher.max_discount_amount))
+    amount = flt(min(amount, total), 2)
+    if amount <= 0:
+        frappe.throw(_("Voucher provides no applicable discount."))
+
+    return {
+        "voucher_name": voucher.name,
+        "voucher_code": voucher.voucher_code,
+        "amount": amount,
+        "balance": flt(voucher.balance),
+        "single_use": cint(voucher.single_use),
+        "applicable_item_group": voucher.applicable_item_group,
+    }
+
+
+def _resolve_bank_offer_discount(offer_name, company, cart_total, payment_modes) -> dict:
+    """Validate a configured bank offer and calculate its discount server-side."""
+    requested_name = str(offer_name or "").strip()
+    if not requested_name:
+        frappe.throw(_("Bank offer is required."))
+
+    resolved_name = requested_name
+    if not frappe.db.exists("CH Item Offer", resolved_name):
+        _prefix, separator, suffix = requested_name.rpartition("[")
+        bracket_name = suffix[:-1].strip() if separator and suffix.endswith("]") else ""
+        if bracket_name and frappe.db.exists("CH Item Offer", bracket_name):
+            resolved_name = bracket_name
+        else:
+            frappe.throw(_("Bank offer was not found."))
+
+    offer = frappe.db.get_value(
+        "CH Item Offer",
+        resolved_name,
+        [
+            "name",
+            "company",
+            "offer_name",
+            "offer_type",
+            "offer_level",
+            "value_type",
+            "value",
+            "channel",
+            "status",
+            "approval_status",
+            "start_date",
+            "end_date",
+            "min_bill_amount",
+            "payment_mode",
+            "stackable",
+        ],
+        as_dict=True,
+    )
+    if (
+        offer.offer_type != "Bank Offer"
+        or offer.offer_level != "Bill"
+        or offer.status != "Active"
+        or offer.approval_status != "Approved"
+        or (offer.channel and offer.channel != "POS")
+    ):
+        frappe.throw(_("Bank offer is not approved for POS billing."))
+
+    in_company = offer.company == company or frappe.db.exists(
+        "CH Offer Company",
+        {"parent": offer.name, "parenttype": "CH Item Offer", "company": company},
+    )
+    if not in_company:
+        frappe.throw(_("Bank offer belongs to another company."), frappe.PermissionError)
+
+    current_time = now_datetime()
+    if offer.start_date and get_datetime(offer.start_date) > current_time:
+        frappe.throw(_("Bank offer is not yet active."))
+    if offer.end_date and get_datetime(offer.end_date) < current_time:
+        frappe.throw(_("Bank offer has expired."))
+
+    total = flt(cart_total)
+    if total <= 0:
+        frappe.throw(_("Bank offer cannot be applied to an empty transaction."))
+    if flt(offer.min_bill_amount) and total < flt(offer.min_bill_amount):
+        frappe.throw(
+            _("Minimum transaction value of {0} is required for this bank offer.").format(
+                fmt_money(offer.min_bill_amount)
+            )
+        )
+
+    normalized_modes = {
+        str(mode or "").strip().casefold() for mode in (payment_modes or []) if mode
+    }
+    if offer.payment_mode and offer.payment_mode.strip().casefold() not in normalized_modes:
+        frappe.throw(_("Bank offer does not match the selected payment mode."))
+
+    value = flt(offer.value)
+    if value <= 0:
+        frappe.throw(_("Bank offer has no configured discount."))
+    if offer.value_type == "Percentage":
+        if value > 100:
+            frappe.throw(_("Bank offer percentage is invalid."))
+        discount = flt(total * value / 100, 2)
+    elif offer.value_type == "Amount":
+        discount = flt(value, 2)
+    else:
+        frappe.throw(_("Bank offer discount type is not supported."))
+    discount = min(discount, total)
+
+    return {
+        "name": offer.name,
+        "offer_name": offer.offer_name,
+        "discount_amount": discount,
+        "stackable": cint(offer.stackable),
+    }
 
 
 
@@ -3024,6 +2828,56 @@ def _get_item_floor_price(item_code, company=None, channel="POS") -> float:
 
 
 
+
+
+
+
+def _allocate_customer_advances(inv, advance_amount, customer, company):
+    """Allocate unallocated customer advance Payment Entries against this
+    invoice (SAP down-payment clearing / ERPNext set_advances parity).
+
+    FIFO over the same unallocated-balance query the payment dialog shows,
+    validated server-side so the client can never claim more advance than
+    actually exists. Rows land in ``inv.advances`` BEFORE insert; ERPNext's
+    submit-side reconciliation (update_against_document_in_jv) then marks
+    the Payment Entries as allocated — the advance reduces outstanding
+    instead of being silently absorbed into a cash/card payment row.
+
+    Returns the total actually allocated (0 when nothing requested).
+    """
+    requested = flt(advance_amount)
+    if requested <= 0:
+        return 0.0
+
+    if not customer or customer == "Walk-in Customer":
+        frappe.throw(_("Advance adjustment requires an identified customer."))
+
+    rows = get_customer_advances(customer, company=company)
+    available = sum(flt(r.get("balance")) for r in rows)
+    if requested > available + 0.01:
+        frappe.throw(
+            _("Requested advance adjustment {0} exceeds the customer's "
+              "unallocated advance balance {1}.").format(
+                fmt_money(requested), fmt_money(available)),
+            title=_("Advance Not Available"),
+        )
+
+    inv.set("advances", [])
+    inv.allocate_advances_automatically = 0
+    remaining = requested
+    for r in rows:
+        if remaining <= 0.005:
+            break
+        take = min(flt(r.get("balance")), remaining)
+        inv.append("advances", {
+            "doctype": "Sales Invoice Advance",
+            "reference_type": "Payment Entry",
+            "reference_name": r.get("name"),
+            "advance_amount": flt(r.get("balance")),
+            "allocated_amount": take,
+        })
+        remaining -= take
+    return requested - max(remaining, 0.0)
 
 
 @frappe.whitelist()
@@ -3046,6 +2900,7 @@ def create_pos_invoice(
     credit_terms=None, credit_interest_rate=0,
     credit_grace_period=0, credit_partial_payment=0,
     credit_approved_by=None,
+    credit_approval_token=None,
     is_free_sale=0, free_sale_reason=None, free_sale_approved_by=None,
     free_sale_approved_at=None, free_sale_approval_name=None,
     advance_amount=0, kiosk_token=None,
@@ -3055,6 +2910,7 @@ def create_pos_invoice(
     original_invoice=None,
     original_invoice_reason=None,
     discount_authorized_by=None,
+    discount_approval_token=None,
     allow_surplus_refund=0,
     surplus_refund_mode_of_payment=None,
     sales_order=None,
@@ -3062,6 +2918,8 @@ def create_pos_invoice(
     **_ignored,
 ):
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "submit", throw=True)
+    profile_anchors = assert_pos_profile_scope(pos_profile)
 
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
     active = get_active_session(pos_profile) if pos_profile else None
@@ -3101,8 +2959,60 @@ def create_pos_invoice(
         items = frappe.parse_json(items)
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    from ch_pos.api.free_sale_api import canonicalize_cart_items
+
+    items = canonicalize_cart_items(items or [], company=profile.company)
     _GST_RATE_CACHE.clear()
     _FIELD_MAP_CACHE.clear()
+
+    if buyback_order and not exchange_assessment:
+        frappe.throw(_("Buyback Order requires a Buyback Assessment."))
+    if cint(is_free_sale) and exchange_assessment:
+        frappe.throw(_("Exchange credit cannot be used on a free sale."))
+
+    exchange_context = None
+    exchange_credit = 0.0
+    exchange_payment_mode = None
+    if exchange_assessment:
+        exchange_context = _resolve_exchange_credit(
+            exchange_assessment,
+            buyback_order,
+            customer,
+            pos_profile,
+        )
+        exchange_credit = exchange_context["credit"]
+        exchange_payment_mode = str(
+            get_control_setting("buyback_exchange_mode_of_payment", "") or ""
+        ).strip()
+        if not exchange_payment_mode or not frappe.db.exists(
+            "Mode of Payment", exchange_payment_mode
+        ):
+            frappe.throw(_("Configure a valid Buyback Exchange Mode of Payment."))
+        if not frappe.db.exists(
+            "Mode of Payment Account",
+            {"parent": exchange_payment_mode, "company": profile.company},
+        ):
+            frappe.throw(
+                _("Configure the exchange Mode of Payment account for company {0}.").format(
+                    profile.company
+                )
+            )
+
+    original_invoice_doc = None
+    if original_invoice:
+        original_invoice_doc = frappe.get_doc("Sales Invoice", original_invoice)
+        original_invoice_doc.check_permission("read")
+        assert_sales_invoice_scope(original_invoice)
+        if (
+            original_invoice_doc.docstatus != 1
+            or original_invoice_doc.is_return
+            or original_invoice_doc.company != profile.company
+            or original_invoice_doc.customer != customer
+        ):
+            frappe.throw(
+                _("Original invoice must be a submitted sale for this customer and company."),
+                frappe.PermissionError,
+            )
 
     _enforce_token_linkage(pos_profile, kiosk_token)
 
@@ -3153,6 +3063,11 @@ def create_pos_invoice(
     inv.is_pos = 1
     inv.update_stock = 1
     inv.due_date = None
+    if exchange_context:
+        inv.custom_exchange_assessment = exchange_context["assessment"].name
+        inv.custom_exchange_amount = exchange_credit
+        if exchange_context.get("order"):
+            inv.custom_exchange_buyback_order = exchange_context["order"].name
 
     if getattr(profile, "company_address", None):
         inv.company_address = profile.company_address
@@ -3170,8 +3085,11 @@ def create_pos_invoice(
         template_name = _resolved.get("template")
         if template_name:
             inv.taxes_and_charges = template_name
+    except ImportError:
+        template_name = None
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "POS GST template resolution failed")
+        frappe.throw(_("Unable to resolve the applicable GST template for this sale."))
 
     if not template_name and getattr(profile, "taxes_and_charges", None):
         template_name = profile.taxes_and_charges
@@ -3214,6 +3132,10 @@ def create_pos_invoice(
             return None
         if exc_name in exception_request_doc_map:
             return exception_request_doc_map[exc_name]
+        frappe.db.sql(
+            "SELECT name FROM `tabCH Exception Request` WHERE name=%s FOR UPDATE",
+            exc_name,
+        )
         exc = frappe.get_doc("CH Exception Request", exc_name)
         if not exc.is_valid():
             frappe.throw(_("Exception Request {0} is no longer valid (status: {1})").format(
@@ -3221,6 +3143,10 @@ def create_pos_invoice(
         if exc.pos_invoice:
             frappe.throw(_("Exception Request {0} was already used in invoice {1}").format(
                 exc_name, exc.pos_invoice))
+        if exc.company and exc.company != profile.company:
+            frappe.throw(_("Exception Request {0} belongs to another company.").format(exc_name))
+        if exc.pos_profile and exc.pos_profile != pos_profile:
+            frappe.throw(_("Exception Request {0} belongs to another POS Profile.").format(exc_name))
         if exc.customer:
             cust_row = frappe.db.get_value(
                 "Customer", exc.customer,
@@ -3257,6 +3183,43 @@ def create_pos_invoice(
             if exception_request_doc is None:
                 exception_request_doc = exception_request_doc_map.get(_line_exc)
 
+    validated_sales_orders: dict[str, object] = {}
+
+    def _get_sales_order_contract(sales_order_name, detail_name, item_code):
+        if not detail_name:
+            frappe.throw(_("Sales Order Item reference is required for pre-booking billing."))
+        if sales_order_name not in validated_sales_orders:
+            order = frappe.get_doc("Sales Order", sales_order_name)
+            order.check_permission("read")
+            if order.docstatus != 1 or order.status in ("Closed", "Cancelled", "Completed", "On Hold"):
+                frappe.throw(_("Sales Order {0} is not open for billing.").format(sales_order_name))
+            if order.company != profile.company or order.customer != customer:
+                frappe.throw(
+                    _("Sales Order {0} belongs to another customer or company.").format(
+                        sales_order_name
+                    ),
+                    frappe.PermissionError,
+                )
+            order_warehouses = [order.get("set_warehouse")]
+            order_warehouses.extend(row.warehouse for row in (order.items or []) if row.warehouse)
+            assert_any_warehouse_scope(order_warehouses, company=order.company)
+            validated_sales_orders[sales_order_name] = order
+
+        contract = frappe.db.get_value(
+            "Sales Order Item",
+            {"name": detail_name, "parent": sales_order_name, "item_code": item_code},
+            ["name", "item_code", "rate", "qty", "delivered_qty", "warehouse"],
+            as_dict=True,
+        )
+        if not contract:
+            frappe.throw(_("Sales Order Item {0} does not match this cart row.").format(detail_name))
+        contract_warehouse = contract.warehouse or validated_sales_orders[sales_order_name].get(
+            "set_warehouse"
+        )
+        if contract_warehouse != profile.warehouse:
+            frappe.throw(_("The pre-booking item belongs to another store."), frappe.PermissionError)
+        return contract
+
     if warranty_claim:
         wc = frappe.get_doc("CH Warranty Claim", warranty_claim)
         if wc.docstatus != 1:
@@ -3270,8 +3233,11 @@ def create_pos_invoice(
         inv.custom_warranty_claim = warranty_claim
 
     warranty_items: list = []
+    canonical_billed_items: list[dict] = []
+    verified_manager_approvals: list[dict] = []
+    consumed_free_sale_approval = None
+    verified_credit_approver = None
     _plan_service_item_cache: dict = {}
-    _plan_type_cache: dict = {}
 
     def _get_plan_service_item(plan_name):
         if not plan_name:
@@ -3281,27 +3247,12 @@ def create_pos_invoice(
                 frappe.db.get_value("CH Warranty Plan", plan_name, "service_item") or "")
         return _plan_service_item_cache[plan_name]
 
-    def _get_plan_type(plan_name):
-        if not plan_name:
-            return ""
-        if plan_name not in _plan_type_cache:
-            _plan_type_cache[plan_name] = (
-                frappe.db.get_value("CH Warranty Plan", plan_name, "plan_type") or "")
-        return _plan_type_cache[plan_name]
-
     def _is_plan_row(cart_item):
-        if cint(cart_item.get("is_warranty")) or cint(cart_item.get("is_vas")):
-            return True
         plan_name = cart_item.get("warranty_plan")
         if not plan_name:
             return False
         service_item = _get_plan_service_item(plan_name)
-        if service_item and cart_item.get("item_code") == service_item:
-            return True
-        for_item_code = cart_item.get("for_item_code")
-        if for_item_code and for_item_code != cart_item.get("item_code"):
-            return True
-        return False
+        return bool(service_item and cart_item.get("item_code") == service_item)
 
     # ── GoFix service rows — bifurcated billing path ─────────────────────
     # A cart row carrying ``service_request`` bills a completed repair as a
@@ -3351,6 +3302,18 @@ def create_pos_invoice(
             _row_exc_name = exception_request_doc.name
 
         if _row_exc_doc:
+            if _row_exc_doc.item_code and _row_exc_doc.item_code != item.get("item_code"):
+                frappe.throw(
+                    _("Exception Request {0} is for a different item.").format(_row_exc_doc.name),
+                    frappe.PermissionError,
+                )
+            if _row_exc_doc.serial_no and _row_exc_doc.serial_no.strip() != item_serial:
+                frappe.throw(
+                    _("Exception Request {0} is for a different serial number.").format(
+                        _row_exc_doc.name
+                    ),
+                    frappe.PermissionError,
+                )
             if not _row_exc_doc.customer or _row_exc_doc.customer == customer:
                 item_exception_original = flt(_row_exc_doc.original_value or item_exception_original)
                 item_exception_final = flt(
@@ -3366,6 +3329,18 @@ def create_pos_invoice(
             effective_rate = 0.0
             item_exception_original = flt(item.get("price_list_rate") or item.get("mrp") or 0)
 
+        _item_so = (item.get("sales_order") or sales_order or "").strip()
+        _item_so_detail = (item.get("so_detail") or "").strip()
+        validated_contract = None
+        if _item_so:
+            validated_contract = _get_sales_order_contract(
+                _item_so, _item_so_detail, item.get("item_code")
+            )
+            remaining_qty = flt(validated_contract.qty) - flt(validated_contract.delivered_qty)
+            if item_qty <= 0 or item_qty > remaining_qty + 0.005:
+                frappe.throw(_("Pre-booking quantity exceeds the remaining Sales Order quantity."))
+            effective_rate = flt(validated_contract.rate)
+
         row = {
             "item_code": item.get("item_code"),
             "qty": item_qty,
@@ -3373,8 +3348,8 @@ def create_pos_invoice(
             "price_list_rate": item_exception_original,
             "uom": item.get("uom", "Nos"),
             "warehouse": profile.warehouse,
-            "discount_percentage": flt(item.get("discount_percentage", 0)),
-            "discount_amount": flt(item.get("discount_amount", 0)),
+            "discount_percentage": 0,
+            "discount_amount": 0,
         }
 
         if is_free_bundle_row:
@@ -3382,17 +3357,13 @@ def create_pos_invoice(
             row["discount_percentage"] = 100
             row["discount_amount"] = flt(item_exception_original)
 
-        _item_so = (item.get("sales_order") or sales_order or "").strip()
-        _item_so_detail = (item.get("so_detail") or "").strip()
         if _item_so:
             row["sales_order"] = _item_so
         if _item_so_detail:
             row["so_detail"] = _item_so_detail
 
         item_is_plan = _is_plan_row(item)
-        item_plan_type = _get_plan_type(item.get("warranty_plan")) if item.get("warranty_plan") else ""
-        item_is_vas = cint(item.get("is_vas", 0)) or cint(
-            item_plan_type in ("Value Added Service", "Protection Plan"))
+        item_is_vas = cint(item.get("is_vas", 0))
         item_is_service = bool((item.get("service_request") or "").strip())
 
         # Service rows carry the repair breakdown (labour, spares, part
@@ -3400,20 +3371,50 @@ def create_pos_invoice(
         if item_is_service and item.get("description"):
             row["description"] = item.get("description")
 
-        if (item_exception_original > 0 and item_exception_final >= 0
-                and item_exception_original != item_exception_final):
-            row["discount_amount"] = flt(max(0, item_exception_original - item_exception_final))
+        if item_exception_original > 0 and effective_rate >= 0:
+            row["discount_amount"] = flt(max(0, item_exception_original - effective_rate))
             row["discount_percentage"] = (
                 flt(row["discount_amount"] / item_exception_original * 100)
                 if item_exception_original > 0 else 0)
 
+        manager_grant = None
+        manager_approval_token = str(item.get("manager_approval_token") or "").strip()
+        if manager_approval_token:
+            from ch_pos.api.manager_approval import consume_approval_grant
+
+            manager_grant = consume_approval_grant(
+                token=manager_approval_token,
+                pos_profile=pos_profile,
+                item_code=item.get("item_code"),
+                rate=effective_rate,
+                qty=item_qty,
+            )
+
         if item.get("warranty_plan") and item_is_plan:
             row["custom_warranty_plan"] = item.get("warranty_plan")
 
-        if item.get("manager_approved"):
+        if manager_grant:
             row["custom_manager_approved"] = 1
-            row["custom_manager_user"] = item.get("manager_user") or ""
+            row["custom_manager_user"] = manager_grant["manager_user"]
             row["custom_override_reason"] = item.get("override_reason") or ""
+            verified_manager_approvals.append({
+                "item_code": row["item_code"],
+                "rate": flt(row["rate"]),
+                "qty": flt(row["qty"]),
+                "manager_user": row["custom_manager_user"],
+            })
+        elif is_privileged_user():
+            row["custom_manager_approved"] = 1
+            row["custom_manager_user"] = frappe.session.user
+            row["custom_override_reason"] = item.get("override_reason") or _(
+                "Privileged POS override"
+            )
+            verified_manager_approvals.append({
+                "item_code": row["item_code"],
+                "rate": flt(row["rate"]),
+                "qty": flt(row["qty"]),
+                "manager_user": row["custom_manager_user"],
+            })
 
         if _row_exc_doc:
             row["custom_exception_request"] = _row_exc_name
@@ -3438,14 +3439,13 @@ def create_pos_invoice(
         if (not item_is_plan and not item_is_vas and not is_free_bundle_row
                 and not item_is_service
                 and flt(effective_rate) > 0
-                and not _item_so):
+                and not validated_contract):
             floor_price = _get_item_floor_price(item.get("item_code"), profile.company)
             row_authorized = bool(
-                item.get("manager_approved")
+                row.get("custom_manager_approved")
                 or (item.get("exception_request") or "").strip()
                 or _row_exc_doc)
             if (floor_price and flt(effective_rate) < floor_price
-                    and not discount_authorized_by
                     and not row_authorized):
                 frappe.throw(
                     _("Below Minimum Selling Price: {0} at {1} is under the floor "
@@ -3457,6 +3457,18 @@ def create_pos_invoice(
 
         if item.get("serial_no") and not item_is_plan:
             row["serial_no"] = item.get("serial_no")
+
+        canonical_billed_items.append({
+            "item_code": row["item_code"],
+            "qty": flt(row["qty"]),
+            "rate": flt(row["rate"]),
+            "warranty_plan": item.get("warranty_plan"),
+            "for_item_code": item.get("for_item_code"),
+            "serial_no": row.get("serial_no") or "",
+            "for_serial_no": item.get("for_serial_no") or "",
+            "is_warranty": cint(item.get("is_warranty")),
+            "is_vas": item_is_vas,
+        })
 
         ch_item_type = frappe.db.get_value("Item", item.get("item_code"), "ch_item_type")
         if ch_item_type in ("Refurbished", "Pre-Owned"):
@@ -3507,35 +3519,89 @@ def create_pos_invoice(
                 "external_intent": 1 if item.get("customer_imei") else 0,
             })
 
-    if cint(is_free_sale):
-        if not free_sale_approved_by:
-            frappe.throw(_("Free sale requires manager approval."), title=_("Free Sale Not Approved"))
+    profile_payment_modes = {
+        row.mode_of_payment for row in (profile.payments or []) if row.mode_of_payment
+    }
+    default_profile_mop = next(
+        (
+            row.mode_of_payment
+            for row in (profile.payments or [])
+            if row.mode_of_payment and cint(row.default)
+        ),
+        next(
+            (row.mode_of_payment for row in (profile.payments or []) if row.mode_of_payment),
+            None,
+        ),
+    )
+    if not default_profile_mop:
+        frappe.throw(_("POS Profile has no payment modes configured."))
 
+    if exchange_credit:
+        gross_item_total = sum(
+            flt(row.rate) * flt(row.qty)
+            for row in (inv.items or [])
+            if not row.get("is_free_item")
+        )
+        if exchange_credit > gross_item_total + 0.005:
+            frappe.throw(_("Exchange credit cannot exceed the transaction value."))
+
+    if cint(is_free_sale):
         from ch_pos.api.free_sale_api import compute_cart_hash
-        expected_hash = compute_cart_hash(customer, items)
+        from ch_pos.pos_core.doctype.ch_free_sale_approval.ch_free_sale_approval import (
+            has_valid_server_signature,
+        )
+        expected_hash = compute_cart_hash(
+            customer,
+            canonical_billed_items,
+            canonical=True,
+        )
 
         candidates = []
         if free_sale_approval_name:
+            named_filters = {"name": free_sale_approval_name, "status": "Approved", "used": 0}
+            if not is_privileged_user():
+                named_filters["requested_by"] = frappe.session.user
             candidates = frappe.get_all(
                 "CH Free Sale Approval",
-                filters={"name": free_sale_approval_name, "status": "Approved", "used": 0},
-                fields=["name", "cart_hash", "customer"], limit=1)
+                filters=named_filters,
+                fields=["name", "cart_hash", "customer", "requested_by", "store", "company"],
+                limit=1,
+            )
         if not candidates:
             candidates = frappe.get_all(
                 "CH Free Sale Approval",
                 filters={"requested_by": frappe.session.user, "status": "Approved", "used": 0},
-                fields=["name", "cart_hash", "customer"],
+                fields=["name", "cart_hash", "customer", "requested_by", "store", "company"],
                 order_by="modified desc", limit=20)
 
         approval_name = None
+        approval_doc = None
         for c in candidates:
+            if c.company != profile.company or c.store != profile_anchors.get("store"):
+                continue
             if c.cart_hash:
                 if c.cart_hash == expected_hash:
+                    candidate_doc = frappe.get_doc("CH Free Sale Approval", c.name)
+                    if not has_valid_server_signature(candidate_doc):
+                        continue
+                    ttl_hours = flt(
+                        frappe.db.get_single_value(
+                            "CH POS Control Settings", "approval_token_ttl_hours"
+                        )
+                        or 24
+                    )
+                    if frappe.utils.time_diff_in_hours(
+                        frappe.utils.now_datetime(), candidate_doc.creation
+                    ) > ttl_hours:
+                        continue
+                    if not candidate_doc.approvals or any(
+                        row.status != "Approved" or not row.responded_at
+                        for row in candidate_doc.approvals
+                    ):
+                        continue
                     approval_name = c.name
+                    approval_doc = candidate_doc
                     break
-            elif (c.customer or "") == (customer or ""):
-                approval_name = c.name
-                break
 
         if not approval_name:
             frappe.throw(
@@ -3544,23 +3610,44 @@ def create_pos_invoice(
                 title=_("Free Sale Not Approved"))
 
         frappe.db.sql(
-            "UPDATE `tabCH Free Sale Approval` SET used=1, used_in_invoice=%s, modified=NOW() WHERE name=%s AND used=0",
-            (inv.name or "pending", approval_name))
+            "UPDATE `tabCH Free Sale Approval` SET used=1, used_in_invoice=%s, modified=NOW() "
+            "WHERE name=%s AND status='Approved' AND used=0 "
+            "AND requested_by=%s AND company=%s AND store <=> %s "
+            "AND cart_hash=%s AND server_signature=%s",
+            (
+                inv.name or "pending",
+                approval_name,
+                frappe.session.user,
+                profile.company,
+                profile_anchors.get("store"),
+                expected_hash,
+                approval_doc.server_signature,
+            ))
         if frappe.db.sql("SELECT ROW_COUNT()")[0][0] == 0:
             frappe.throw(_("Free Sale Approval {0} already used.").format(approval_name))
 
+        approval_rows = [
+            frappe._dict(manager=row.manager, responded_at=row.responded_at)
+            for row in approval_doc.approvals
+            if row.status == "Approved"
+        ]
+        if not approval_rows:
+            frappe.throw(_("Free-sale approval has no verified manager responses."))
+        authoritative_approvers = ", ".join(
+            dict.fromkeys(row.manager for row in approval_rows if row.manager)
+        )
+        authoritative_approved_at = max(
+            (row.responded_at for row in approval_rows if row.responded_at),
+            default=None,
+        )
+        consumed_free_sale_approval = approval_name
         inv.custom_is_free_sale = 1
         inv.custom_free_sale_reason = (free_sale_reason or "")[:200]
-        inv.custom_free_sale_approved_by = (free_sale_approved_by or "")[:140]
-        if free_sale_approved_at:
-            inv.custom_free_sale_approved_at = free_sale_approved_at
+        inv.custom_free_sale_approved_by = authoritative_approvers[:140]
+        if authoritative_approved_at:
+            inv.custom_free_sale_approved_at = authoritative_approved_at
 
-        default_mop = "Cash"
-        for pm in profile.payments or []:
-            if cint(pm.default):
-                default_mop = pm.mode_of_payment
-                break
-        inv.append("payments", {"mode_of_payment": default_mop, "amount": 0})
+        inv.append("payments", {"mode_of_payment": default_profile_mop, "amount": 0})
 
     elif payments:
         if isinstance(payments, str):
@@ -3568,12 +3655,16 @@ def create_pos_invoice(
         if not payments:
             frappe.throw(_("At least one payment mode is required"))
 
-        _valid_mops = set(frappe.db.get_all("Mode of Payment", pluck="name"))
         for p in payments:
-            mop_name = p.get("mode_of_payment") or ""
-            if mop_name not in _valid_mops:
-                continue
-            p_row = {"mode_of_payment": mop_name, "amount": flt(p.get("amount", 0))}
+            mop_name = str(p.get("mode_of_payment") or "").strip()
+            if mop_name == exchange_payment_mode:
+                frappe.throw(_("Exchange payment amount is controlled by the server."))
+            if mop_name not in profile_payment_modes:
+                frappe.throw(_("Payment mode {0} is not configured on this POS Profile.").format(mop_name))
+            payment_amount = flt(p.get("amount", 0))
+            if payment_amount < 0:
+                frappe.throw(_("Payment amount cannot be negative."))
+            p_row = {"mode_of_payment": mop_name, "amount": payment_amount}
             for src_key, dest_key in (
                 ("upi_transaction_id", "custom_upi_transaction_id"),
                 ("card_reference", "custom_card_reference"),
@@ -3594,19 +3685,61 @@ def create_pos_invoice(
             inv.append("payments", p_row)
 
         if not inv.get("payments"):
-            default_mop = "Cash"
-            for pm in profile.payments or []:
-                if cint(pm.default):
-                    default_mop = pm.mode_of_payment
-                    break
-            inv.append("payments", {"mode_of_payment": default_mop, "amount": 0})
+            inv.append("payments", {"mode_of_payment": default_profile_mop, "amount": 0})
 
     elif mode_of_payment:
+        if mode_of_payment == exchange_payment_mode:
+            frappe.throw(_("Exchange payment amount is controlled by the server."))
+        if mode_of_payment not in profile_payment_modes:
+            frappe.throw(
+                _("Payment mode {0} is not configured on this POS Profile.").format(
+                    mode_of_payment
+                )
+            )
+        if flt(amount_paid) < 0:
+            frappe.throw(_("Payment amount cannot be negative."))
         inv.append("payments", {"mode_of_payment": mode_of_payment, "amount": flt(amount_paid)})
     else:
         frappe.throw(_("Payment mode is required"))
 
+    if exchange_context:
+        inv.append(
+            "payments",
+            {"mode_of_payment": exchange_payment_mode, "amount": exchange_credit},
+        )
+
     if cint(is_credit_sale) and not cint(is_free_sale):
+        estimated_credit_total = sum(
+            flt(row.rate) * flt(row.qty) for row in (inv.items or []) if not row.get("is_free_item")
+        )
+        credit_info = get_customer_credit_info(customer, profile.company)
+        credit_override_required = bool(
+            estimated_credit_total > 0.005
+            and (
+                not credit_info
+                or estimated_credit_total > flt(credit_info.get("available")) + 0.005
+                or cint(credit_info.get("overdue_count")) > 0
+            )
+        )
+        if credit_override_required and is_privileged_user():
+            verified_credit_approver = frappe.session.user
+        elif credit_override_required:
+            from ch_pos.api.manager_approval import consume_action_grant
+
+            credit_grant = consume_action_grant(
+                "credit",
+                credit_approval_token,
+                {
+                    "customer": customer,
+                    "company": profile.company,
+                    "store": profile_anchors.get("store"),
+                },
+            )
+            approved_total = flt(credit_grant.get("cart_total"))
+            if approved_total + 0.01 < estimated_credit_total:
+                frappe.throw(_("Credit approval is for a lower transaction value."), frappe.PermissionError)
+            verified_credit_approver = credit_grant.get("manager_user")
+
         inv.custom_is_credit_sale = 1
         _credit_days = cint(credit_days) or 30
         terms_map = {"Net 15": 15, "Net 30": 30, "Net 45": 45, "Net 60": 60, "Net 90": 90}
@@ -3630,43 +3763,142 @@ def create_pos_invoice(
             inv.custom_credit_grace_period = cint(credit_grace_period)
         if flt(credit_partial_payment) > 0:
             inv.custom_credit_partial_payment = flt(credit_partial_payment)
-        if credit_approved_by:
-            inv.custom_credit_approved_by = str(credit_approved_by)[:140]
+        if verified_credit_approver:
+            inv.custom_credit_approved_by = str(verified_credit_approver)[:140]
 
-    if flt(additional_discount_percentage) > 0:
-        inv.additional_discount_percentage = flt(additional_discount_percentage)
-    elif flt(additional_discount_amount) > 0:
-        inv.discount_amount = flt(inv.discount_amount or 0) + flt(additional_discount_amount)
+    additional_pct = flt(additional_discount_percentage)
+    additional_amount = flt(additional_discount_amount)
+    if additional_pct < 0 or additional_amount < 0 or additional_pct > 100:
+        frappe.throw(_("Additional discount is outside the allowed range."))
+    if additional_pct > 0 and additional_amount > 0:
+        frappe.throw(_("Use either a discount percentage or a discount amount, not both."))
+
+    discount_base_total = sum(
+        flt(row.rate) * flt(row.qty)
+        for row in (inv.items or [])
+        if not row.get("is_free_item")
+    )
+    requested_discount = (
+        flt(discount_base_total * additional_pct / 100)
+        if additional_pct > 0
+        else additional_amount
+    )
+    if requested_discount > discount_base_total + 0.005:
+        frappe.throw(_("Additional discount cannot exceed the transaction value."))
+
+    verified_header_discount_approver = None
+    if requested_discount > 0.005:
+        effective_pct = flt(requested_discount / discount_base_total * 100)
+        if _caller_can_apply_discount(profile_anchors, effective_pct):
+            verified_header_discount_approver = frappe.session.user
+        else:
+            from ch_pos.api.manager_approval import consume_action_grant
+
+            discount_grant = consume_action_grant(
+                "discount",
+                discount_approval_token,
+                {"pos_profile": pos_profile},
+            )
+            if abs(flt(discount_grant.get("net_total")) - discount_base_total) > 0.01:
+                frappe.throw(_("Discount approval does not match this transaction."), frappe.PermissionError)
+            if abs(flt(discount_grant.get("discount_pct")) - additional_pct) > 0.005:
+                frappe.throw(_("Discount approval does not match the percentage."), frappe.PermissionError)
+            if abs(flt(discount_grant.get("discount_amount")) - additional_amount) > 0.01:
+                frappe.throw(_("Discount approval does not match the amount."), frappe.PermissionError)
+            verified_header_discount_approver = discount_grant.get("manager_user")
+
+    if additional_pct > 0:
+        inv.additional_discount_percentage = additional_pct
+    elif additional_amount > 0:
+        inv.discount_amount = flt(inv.discount_amount or 0) + additional_amount
 
     if discount_reason:
         inv.custom_discount_reason = discount_reason
-    if discount_authorized_by and frappe.db.has_column("Sales Invoice", "custom_discount_authorized_by"):
-        inv.custom_discount_authorized_by = discount_authorized_by
+    verified_discount_users = [
+        row["manager_user"] for row in verified_manager_approvals if row.get("manager_user")
+    ]
+    if verified_header_discount_approver:
+        verified_discount_users.append(verified_header_discount_approver)
+    if verified_discount_users and frappe.db.has_column("Sales Invoice", "custom_discount_authorized_by"):
+        inv.custom_discount_authorized_by = ", ".join(
+            dict.fromkeys(verified_discount_users)
+        )[:140]
+
+    if coupon_code and voucher_code:
+        frappe.throw(_("Use either a coupon or a voucher, not both."))
+    if flt(coupon_discount_amount) > 0 and not coupon_code:
+        frappe.throw(_("Coupon code is required for a coupon discount."))
+    if flt(voucher_amount) > 0 and not voucher_code:
+        frappe.throw(_("Voucher code is required for a voucher discount."))
+    if flt(bank_offer_discount) > 0 and not bank_offer_name:
+        frappe.throw(_("A configured bank offer is required for a bank discount."))
+
+    coupon_application = None
+    voucher_application = None
+    bank_offer_application = None
 
     if coupon_code:
-        doc_name = frappe.db.get_value("Coupon Code", {"coupon_code": coupon_code}, "name")
-        if not doc_name and frappe.db.exists("Coupon Code", coupon_code):
-            doc_name = coupon_code
-        if doc_name:
-            inv.custom_coupon_code = doc_name
-            if flt(coupon_discount_amount) > 0:
-                inv.discount_amount = flt(inv.discount_amount or 0) + flt(coupon_discount_amount)
+        coupon_application = _resolve_coupon_discount(
+            coupon_code,
+            customer,
+            discount_base_total,
+            company=profile.company,
+            lock=True,
+        )
+        inv.custom_coupon_code = coupon_application["coupon_name"]
+        inv.custom_coupon_discount_amount = coupon_application["discount_amount"]
 
-    if voucher_code and flt(voucher_amount) > 0:
-        inv.discount_amount = flt(inv.discount_amount or 0) + flt(voucher_amount)
-        inv.custom_voucher_code = voucher_code
-        inv.custom_voucher_amount = flt(voucher_amount)
+    if voucher_code:
+        frappe.has_permission("CH Voucher", "write", throw=True)
+        voucher_application = _resolve_voucher_discount(
+            voucher_code,
+            customer,
+            profile.company,
+            discount_base_total,
+            currency=inv.currency,
+            lock=True,
+        )
+        inv.custom_voucher_code = voucher_application["voucher_code"]
+        inv.custom_voucher_amount = voucher_application["amount"]
+
+    if bank_offer_name:
+        payment_modes = [
+            payment.mode_of_payment
+            for payment in (inv.payments or [])
+            if flt(payment.amount) > 0
+        ]
+        bank_offer_application = _resolve_bank_offer_discount(
+            bank_offer_name,
+            profile.company,
+            discount_base_total,
+            payment_modes,
+        )
+        other_discount = bool(
+            requested_discount > 0.005 or coupon_application or voucher_application
+        )
+        if other_discount and not bank_offer_application["stackable"]:
+            frappe.throw(_("This bank offer cannot be combined with another discount."))
+        inv.custom_bank_offer_name = bank_offer_application["name"]
+        inv.custom_bank_offer_discount = bank_offer_application["discount_amount"]
+
+    promotion_discount = sum(
+        flt(application.get(amount_field))
+        for application, amount_field in (
+            (coupon_application, "discount_amount"),
+            (voucher_application, "amount"),
+            (bank_offer_application, "discount_amount"),
+        )
+        if application
+    )
+    if requested_discount + promotion_discount > discount_base_total + 0.005:
+        frappe.throw(_("Combined discounts cannot exceed the transaction value."))
+    if promotion_discount:
+        inv.discount_amount = flt(inv.discount_amount or 0) + promotion_discount
 
     if cint(redeem_loyalty_points):
         inv.redeem_loyalty_points = 1
         inv.loyalty_points = cint(loyalty_points)
         inv.loyalty_amount = flt(loyalty_amount)
-
-    if flt(bank_offer_discount) > 0:
-        inv.discount_amount = flt(inv.discount_amount or 0) + flt(bank_offer_discount)
-        if bank_offer_name:
-            inv.custom_bank_offer_name = bank_offer_name
-        inv.custom_bank_offer_discount = flt(bank_offer_discount)
 
     if sales_executive:
         inv.custom_sales_executive = sales_executive
@@ -3686,32 +3918,42 @@ def create_pos_invoice(
     if sale_reference:
         inv.custom_ch_sale_reference = sale_reference
 
-    if original_invoice:
-        orig = frappe.db.get_value(
-            "Sales Invoice", original_invoice,
-            ["name", "customer", "docstatus", "is_return", "company"], as_dict=True)
-        if orig and orig.docstatus == 1 and not orig.is_return:
-            inv.custom_original_invoice = original_invoice
-            if original_invoice_reason:
-                inv.custom_original_invoice_reason = original_invoice_reason
-            elif cint(is_free_sale):
-                inv.custom_original_invoice_reason = "Late Free Gift"
+    if original_invoice_doc:
+        inv.custom_original_invoice = original_invoice
+        if original_invoice_reason:
+            inv.custom_original_invoice_reason = original_invoice_reason
+        elif cint(is_free_sale):
+            inv.custom_original_invoice_reason = "Late Free Gift"
 
     if client_request_id:
         inv.custom_client_request_id = str(client_request_id)[:140]
 
+    # ---------- 0b. Customer-advance allocation (down-payment clearing) ----
+    allocated_advance_total = _allocate_customer_advances(
+        inv, advance_amount, inv.customer, inv.company)
+
     # ═══════════════════════════════════════════════════════════════════════
     # Bypass ch_erp15 GL validator — our pipeline uses transitional states
     # ═══════════════════════════════════════════════════════════════════════
-    inv.flags.ignore_permissions                  = True
     inv.flags.ignore_pricing_rule                 = True
     inv.flags.disable_rounded_total               = True
     inv.flags.ignore_gl_balance_check             = True
     inv.flags.ignore_validate_update_after_submit = True
+    inv.flags.ch_pos_verified_manager_approvals   = verified_manager_approvals
 
+    voucher_redeemed = 0
     try:
         # ---------- 1. INSERT ----------
-        inv.insert(ignore_permissions=True)
+        inv.insert()
+
+        if consumed_free_sale_approval:
+            frappe.db.set_value(
+                "CH Free Sale Approval",
+                consumed_free_sale_approval,
+                "used_in_invoice",
+                inv.name,
+                update_modified=False,
+            )
 
         # ---------- 2. Force tax rows from template ----------
         if template_name:
@@ -3728,7 +3970,23 @@ def create_pos_invoice(
                 and not _is_finance_sale):
             rt = flt(totals["grand_total"] if totals else 0)
             total_paid = sum(flt(p.amount) for p in inv.payments)
-            rounding_diff = round(rt) - total_paid
+            # Advances reduce what the payment rows must carry — never
+            # stuff the advance gap into a cash/card row as money that was
+            # never received.
+            expected_paid = round(rt) - flt(allocated_advance_total)
+            rounding_diff = expected_paid - total_paid
+
+            # A genuine rounding gap is < 1 currency unit. Anything larger
+            # is a payment mismatch and must fail loudly, not be absorbed.
+            if abs(rounding_diff) > 1.0:
+                frappe.throw(
+                    _("Payments {0} + advances {1} do not add up to the "
+                      "invoice total {2}.").format(
+                        fmt_money(total_paid),
+                        fmt_money(allocated_advance_total),
+                        fmt_money(rt)),
+                    title=_("Payment Mismatch"),
+                )
 
             if abs(rounding_diff) > 0.001:
                 for p in inv.payments:
@@ -3741,7 +3999,7 @@ def create_pos_invoice(
                         break
                 frappe.db.set_value(
                     "Sales Invoice", inv.name,
-                    {"paid_amount": round(rt), "base_paid_amount": round(rt)},
+                    {"paid_amount": expected_paid, "base_paid_amount": expected_paid},
                     update_modified=False)
 
         # ---------- 4b. Pre-submit header sync ----------
@@ -3749,82 +4007,67 @@ def create_pos_invoice(
 
         # ---------- 5. SUBMIT ----------
         inv.reload()
+        inv.flags.ch_pos_verified_manager_approvals = verified_manager_approvals
         inv.workflow_state = "Approved"
         if hasattr(inv, "custom_si_approval_state"):
             inv.custom_si_approval_state = "Approved"
         inv.flags.ignore_validate                     = True
         inv.flags.ignore_validate_update_after_submit = True
         inv.flags.ignore_gl_balance_check             = True   # persist bypass
-        inv.flags.ignore_permissions                  = True
         inv.submit()
 
-        # ---------- 6. Force child docstatus ----------
-        frappe.db.sql(
-            "UPDATE `tabSales Taxes and Charges` SET docstatus = 1 "
-            "WHERE parent = %s AND docstatus = 0",
-            (inv.name,))
-        frappe.db.sql(
-            "UPDATE `tabSales Invoice Item` SET docstatus = 1 "
-            "WHERE parent = %s AND docstatus = 0",
-            (inv.name,))
-        frappe.db.commit()
+        if voucher_application:
+            from ch_item_master.ch_item_master.voucher_api import redeem_voucher
 
-        # ---------- 7. Restore real tax split + inclusive header ----------
+            redemption = redeem_voucher(
+                voucher_application["voucher_code"],
+                voucher_application["amount"],
+                pos_invoice=inv.name,
+            )
+            voucher_redeemed = flt(redemption.get("redeemed_amount"), 2)
+            if abs(voucher_redeemed - flt(voucher_application["amount"], 2)) > 0.005:
+                frappe.throw(_("Voucher balance changed before the transaction completed."))
+
+        # ---------- 6. Restore real tax split + inclusive header ----------
         _write_tax_rows_and_header(inv.name, totals)
 
-        # ---------- 8. Rewrite GL to final balanced state ----------
+        # ---------- 7. Rewrite GL to final balanced state ----------
         _rewrite_gl_entries(inv.name, totals)
 
         frappe.clear_document_cache("Sales Invoice", inv.name)
 
     except Exception:
-        if inv.name and frappe.db.exists("Sales Invoice", inv.name):
-            try:
-                _doc = frappe.get_doc("Sales Invoice", inv.name)
-                _doc.flags.ignore_gl_balance_check = True
-                _doc.flags.ignore_permissions      = True
-                _doc.flags.ignore_validate         = True
-                if _doc.docstatus == 1:
-                    if hasattr(_doc, "custom_cancel_reason"):
-                        _doc.custom_cancel_reason = "System: auto-rollback"
-                    _doc.cancel()
-                frappe.delete_doc("Sales Invoice", inv.name,
-                                  force=True, ignore_permissions=True)
-            except Exception:
-                frappe.log_error(
-                    frappe.get_traceback(),
-                    f"Draft SI cleanup failed for {inv.name}")
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"POS invoice transaction failed for {inv.name or 'unassigned'}",
+        )
         raise
 
-    if exchange_assessment:
-        frappe.db.set_value("Buyback Assessment", exchange_assessment,
-                            {"linked_pos_invoice": inv.name}, update_modified=False)
+    if exchange_context:
+        frappe.db.set_value(
+            "Buyback Assessment",
+            exchange_context["assessment"].name,
+            {"linked_pos_invoice": inv.name, "exchange_amount": exchange_credit},
+            update_modified=False,
+        )
 
     for _exc_name in exception_request_doc_map.keys():
-        try:
-            frappe.db.set_value("CH Exception Request", _exc_name,
-                                "pos_invoice", inv.name, update_modified=False)
-        except Exception:
-            pass
+        frappe.db.set_value("CH Exception Request", _exc_name,
+                            "pos_invoice", inv.name, update_modified=False)
 
     if warranty_claim:
-        try:
-            frappe.db.set_value("CH Warranty Claim", warranty_claim,
-                                {"processing_fee_invoice": inv.name,
-                                 "processing_fee_status": "Paid"},
-                                update_modified=False)
-        except Exception:
-            pass
+        frappe.db.set_value("CH Warranty Claim", warranty_claim,
+                            {"processing_fee_invoice": inv.name,
+                             "processing_fee_status": "Paid"},
+                            update_modified=False)
 
-    if buyback_order and frappe.db.exists("Buyback Order", buyback_order):
-        try:
-            frappe.db.set_value("Buyback Order", buyback_order,
-                                {"sales_invoice": inv.name, "status": "Closed"},
-                                update_modified=False)
-        except Exception:
-            pass
-
-    frappe.db.commit()
+    if exchange_context and exchange_context.get("order"):
+        frappe.db.set_value(
+            "Buyback Order",
+            exchange_context["order"].name,
+            {"sales_invoice": inv.name, "status": "Closed"},
+            update_modified=False,
+        )
 
     if frappe.flags.in_import and isinstance(items, (list, tuple)):
         try:
@@ -3862,13 +4105,6 @@ def create_pos_invoice(
     # Free sale: reclassify stock cost as promotional expense
     if cint(is_free_sale):
         _post_free_sale_write_off(inv)
-
-    # Redeem voucher after successful submit
-    voucher_redeemed = 0
-    if voucher_code and flt(voucher_amount) > 0:
-        from ch_item_master.ch_item_master.voucher_api import redeem_voucher
-        rv = redeem_voucher(voucher_code, flt(voucher_amount), pos_invoice=inv.name)
-        voucher_redeemed = flt(rv.get("redeemed_amount", 0))
 
     # ── Link billed GoFix service rows back to their Service Requests ────
     # Mirrors the Repair Closure path: stamp the invoice on the SR, flip it
@@ -4044,6 +4280,33 @@ def create_pos_invoice(
             or ""
         )
 
+    def _resolve_generic_device_item_for_plan(plan_doc):
+        """Resolve generic device item for external IMEI sales.
+        
+        Priority:
+        1. Plan-specific external_device_item (if configured)
+        2. Company-level default (via Company custom field)
+        
+        Market-standard parity: Oracle/SAP/Dynamics use a single generic
+        "service asset" or "unknown device" item for customer-provided assets.
+        """
+        # Use plan-specific item if configured
+        if plan_doc.get("external_device_item"):
+            return plan_doc.get("external_device_item")
+        
+        # Fall back to company-level default
+        company = plan_doc.get("company")
+        if company:
+            default_item = frappe.db.get_value(
+                "Company",
+                company,
+                "ch_default_external_device_item",  # Custom field
+            )
+            if default_item:
+                return default_item
+        
+        return None
+
     def _find_device_price(invoice_name, item_code=None, serial_no=None):
         if not invoice_name:
             return 0
@@ -4097,12 +4360,15 @@ def create_pos_invoice(
                 title=frappe._("External IMEI Not Allowed"),
             )
 
-        if not plan_doc.get("external_device_item"):
+        # Resolve generic device item from plan or company-level default
+        generic_device_item = _resolve_generic_device_item_for_plan(plan_doc)
+        if not generic_device_item:
             frappe.throw(
-                frappe._("Plan {0} allows external IMEI but has no External Device Item configured.").format(
-                    wi.get("warranty_plan")
+                frappe._("Plan {0} allows external IMEI but has no generic device item configured. "
+                         "Set an External Device Item on the plan or configure a company-level default in Company settings.").format(
+                    frappe.bold(wi.get("warranty_plan"))
                 ),
-                title=frappe._("External Device Setup Missing"),
+                title=frappe._("External Device Item Missing"),
             )
 
         # Market-standard parity: every service contract activation MUST
@@ -4130,7 +4396,7 @@ def create_pos_invoice(
                 title=frappe._("Purchase Window Proof Required"),
             )
 
-        wi["for_item_code"] = plan_doc.external_device_item
+        wi["for_item_code"] = generic_device_item
         wi["is_external_device"] = 1
         wi["external_device_source"] = "POS Customer-Provided IMEI"
         wi["_plan_doc"] = plan_doc
@@ -4211,24 +4477,18 @@ def create_pos_invoice(
         # the pre-invoice "Offered" xcall was silently dropped (offline
         # POS) or lost its ``pos_invoice`` back-fill. Non-fatal on
         # failure — the sale is already booked.
-        try:
-            _log = frappe.new_doc("CH Attach Log")
-            _log.pos_invoice = inv.name
-            _log.pos_profile = profile.name
-            _log.item_code = wi.get("for_item_code") or None
-            _log.attach_type = "VAS" if wi.get("is_vas") else "Warranty"
-            _log.action = "Accepted"
-            _log.plan_code = wi["warranty_plan"]
-            _log.serial_no = (wi.get("serial_no") or "").strip()
-            _log.offered_by = frappe.session.user
-            _log.offered_at = now_datetime()
-            _log.flags.ignore_permissions = True
-            _log.insert()
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"CH Attach Log write failed for {inv.name} / {wi.get('warranty_plan')}"
-            )
+        frappe.has_permission("CH Attach Log", "create", throw=True)
+        _log = frappe.new_doc("CH Attach Log")
+        _log.pos_invoice = inv.name
+        _log.pos_profile = profile.name
+        _log.item_code = wi.get("for_item_code") or None
+        _log.attach_type = "VAS" if wi.get("is_vas") else "Warranty"
+        _log.action = "Accepted"
+        _log.plan_code = wi["warranty_plan"]
+        _log.serial_no = (wi.get("serial_no") or "").strip()
+        _log.offered_by = frappe.session.user
+        _log.offered_at = now_datetime()
+        _log.insert()
 
     # ── VAS Voucher Generation ────────────────────────────────────────────────
     # Read voucher rules from CH VAS Settings (configurable face value, validity,
@@ -4250,7 +4510,7 @@ def create_pos_invoice(
                 continue
             vas_price = flt(wi["price"])
             voucher_count = int(vas_price // voucher_face_value)
-            for _ in range(voucher_count):
+            for _voucher_index in range(voucher_count):
                 v = issue_voucher(
                     voucher_type="VAS Voucher",
                     amount=voucher_face_value,
@@ -4375,26 +4635,31 @@ def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
     """Send VAS vouchers to customer via email."""
     if not email:
         return
+    invoice = frappe.db.get_value(
+        "Sales Invoice", invoice_name, ["company", "currency"], as_dict=True
+    ) or {}
+    company_name = frappe.utils.escape_html(invoice.get("company") or _("Your Store"))
+    currency = invoice.get("currency")
+    escaped_invoice_name = frappe.utils.escape_html(invoice_name)
     codes_html = "".join(
         f"<tr><td style='padding:8px 16px;font-size:18px;font-family:monospace;letter-spacing:2px;background:#f3f4f6;border-radius:6px;text-align:center'>"
-        f"<b>{v['voucher_code']}</b></td>"
-        f"<td style='padding:8px 12px;color:#6b7280'>₹{int(v['balance'])} · Valid 1 year</td></tr>"
+        f"<b>{frappe.utils.escape_html(v['voucher_code'])}</b></td>"
+        f"<td style='padding:8px 12px;color:#6b7280'>{frappe.utils.escape_html(fmt_money(v['balance'], currency=currency))}</td></tr>"
         for v in vouchers
     )
-    invoice_url = frappe.utils.get_url_to_form("Sales Invoice", invoice_name)
+    invoice_url = frappe.utils.escape_html(frappe.utils.get_url_to_form("Sales Invoice", invoice_name))
     html = f"""
     <div style='font-family:Segoe UI,Arial,sans-serif;max-width:620px;margin:0 auto;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden'>
-        <div style='background:#0f172a;color:#fff;padding:14px 18px;font-size:14px;font-weight:600'>GoGizmo Retail Pvt Ltd</div>
+        <div style='background:#0f172a;color:#fff;padding:14px 18px;font-size:14px;font-weight:600'>{company_name}</div>
         <div style='padding:18px'>
             <h2 style='margin:0 0 10px;color:#111827'>Your VAS Vouchers Are Ready</h2>
-            <p>Thank you for purchasing a VAS plan against invoice <b>{invoice_name}</b>.</p>
-            <p>You have earned <b>{len(vouchers)} × ₹500 voucher(s)</b> for accessory redemption.</p>
+            <p>Thank you for purchasing a VAS plan against invoice <b>{escaped_invoice_name}</b>.</p>
+            <p>You have earned <b>{len(vouchers)} voucher(s)</b> for redemption.</p>
             <table style='width:100%;border-collapse:collapse;margin:16px 0'>
                 {codes_html}
             </table>
             <p style='color:#4b5563;font-size:13px'>
-                Each ₹500 voucher gives you ₹125 off when purchasing accessories.
-                Visit any GoGizmo store and share voucher code at checkout.
+                The value of each voucher is shown above. Share the voucher code at checkout.
             </p>
             <p style='margin-top:18px'>
                 <a href='{invoice_url}' style='background:#0b57d0;color:#fff;text-decoration:none;padding:10px 14px;border-radius:6px;display:inline-block;font-weight:600'>Open Invoice</a>
@@ -4405,7 +4670,7 @@ def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
     try:
         frappe.sendmail(
             recipients=[email],
-            subject=f"Your VAS Vouchers — {invoice_name}",
+            subject=_("Your VAS Vouchers — {0}").format(invoice_name),
             message=html,
         )
     except Exception:
@@ -4421,6 +4686,9 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
     the Active VAS Plans controller's validate/on_submit hooks run properly.
     Enforces purchase_window_hours from the plan master.
     """
+    frappe.has_permission("CH Warranty Plan", "read", throw=True)
+    frappe.has_permission("Active VAS Plans", "create", throw=True)
+    frappe.has_permission("Active VAS Plans", "submit", throw=True)
     plan_doc = frappe.get_cached_doc("CH Warranty Plan", warranty_plan)
 
     # ── 24-hour purchase window validation ────────────────────────────────
@@ -4494,9 +4762,9 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
     sp.is_external_device = cint(is_external_device)
     sp.external_device_source = external_device_source or ""
     if cint(is_external_device):
-        sp.remarks = _("Customer-provided IMEI sold via POS. Not attached to GoGizmo device inventory.")
+        sp.remarks = _("Customer-provided IMEI sold via POS. Not attached to seller device inventory.")
     sp.sold_by = frappe.session.user
-    sp.insert(ignore_permissions=True)
+    sp.insert()
     sp.submit()
 
     # Link active VAS plan back to CH Customer Device — create the device
@@ -4508,43 +4776,36 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
     if serial_no:
         cd_name = frappe.db.get_value("CH Customer Device", {"serial_no": serial_no})
         if not cd_name:
-            try:
-                item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
-                item_brand = frappe.db.get_value("Item", item_code, "brand")
-                cd = frappe.new_doc("CH Customer Device")
-                cd.customer = customer
-                cd.serial_no = serial_no
-                cd.item_code = item_code
-                cd.item_name = item_name
-                if item_brand:
-                    cd.brand = item_brand
-                cd.company = company
-                cd.imei_number = serial_no  # POS mostly deals with IMEI-serialised phones
-                cd.current_status = "Sold"
-                cd.purchase_date = today
-                cd.purchase_invoice = original_invoice or sales_invoice
-                cd.purchase_company = company
-                cd.purchase_price = flt(device_purchase_price)
-                cd.active_warranty_plan = sp.name
-                cd.warranty_status = "In Warranty"
-                cd.warranty_expiry = sp.end_date
-                cd.warranty_plan_name = frappe.db.get_value(
-                    "CH Warranty Plan", warranty_plan, "plan_name"
-                ) or warranty_plan
-                cd.warranty_months = plan_doc.duration_months or 0
-                cd.flags.ignore_permissions = True
-                cd.insert(ignore_permissions=True)
-            except Exception:
-                # Never block a warranty sale on the customer-device ledger —
-                # log for audit; the ledger can be reconciled by a nightly job.
-                frappe.log_error(
-                    frappe.get_traceback(),
-                    f"POS: CH Customer Device auto-create failed for serial {serial_no}",
-                )
+            frappe.has_permission("CH Customer Device", "create", throw=True)
+            item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
+            item_brand = frappe.db.get_value("Item", item_code, "brand")
+            cd = frappe.new_doc("CH Customer Device")
+            cd.customer = customer
+            cd.serial_no = serial_no
+            cd.item_code = item_code
+            cd.item_name = item_name
+            if item_brand:
+                cd.brand = item_brand
+            cd.company = company
+            cd.imei_number = serial_no
+            cd.current_status = "Sold"
+            cd.purchase_date = today
+            cd.purchase_invoice = original_invoice or sales_invoice
+            cd.purchase_company = company
+            cd.purchase_price = flt(device_purchase_price)
+            cd.active_warranty_plan = sp.name
+            cd.warranty_status = "In Warranty"
+            cd.warranty_expiry = sp.end_date
+            cd.warranty_plan_name = frappe.db.get_value(
+                "CH Warranty Plan", warranty_plan, "plan_name"
+            ) or warranty_plan
+            cd.warranty_months = plan_doc.duration_months or 0
+            cd.insert()
         else:
-            frappe.db.set_value(
-                "CH Customer Device", cd_name, "active_warranty_plan", sp.name
-            )
+            cd = frappe.get_doc("CH Customer Device", cd_name)
+            cd.check_permission("write")
+            cd.active_warranty_plan = sp.name
+            cd.save()
 
     return sp
 
@@ -4553,6 +4814,7 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
 def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
     """Return active warranty plans (Own / Extended) applicable to an item."""
     today = nowdate()
+    plan_limit = max(1, min(cint(get_control_setting("warranty_plan_result_limit", 200)), 1000))
     filters = {
         "status": "Active",
         "plan_type": ["in", ["Own Warranty", "Extended Warranty"]],
@@ -4565,7 +4827,9 @@ def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
             "name", "plan_name", "plan_type", "service_item",
             "duration_months", "price", "pricing_mode",
             "percentage_value", "coverage_description", "brand",
+            "valid_from", "valid_to",
         ],
+        limit_page_length=plan_limit,
     )
 
     # Only offer plans whose service_item is a Live (Active-lifecycle) Item —
@@ -4574,26 +4838,27 @@ def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
     _live = filter_sellable_items([p.service_item for p in plans])
     plans = [p for p in plans if not p.service_item or p.service_item in _live]
 
+    device_price = 0
+    if any(plan.pricing_mode == "Percentage of Device Price" for plan in plans):
+        device_price = flt(frappe.db.get_value(
+            "CH Item Price",
+            {"item_code": item_code, "channel": "POS", "status": "Active"},
+            "selling_price",
+        ))
+
     applicable = []
     for plan in plans:
         # Filter by brand if plan specifies one
         if plan.brand and brand and plan.brand != brand:
             continue
         # Filter by date validity
-        valid_from = frappe.db.get_value("CH Warranty Plan", plan.name, "valid_from")
-        valid_to = frappe.db.get_value("CH Warranty Plan", plan.name, "valid_to")
-        if valid_from and str(valid_from) > today:
+        if plan.valid_from and str(plan.valid_from) > today:
             continue
-        if valid_to and str(valid_to) < today:
+        if plan.valid_to and str(plan.valid_to) < today:
             continue
 
         # Calculate actual price
         if plan.pricing_mode == "Percentage of Device Price":
-            device_price = flt(frappe.db.get_value(
-                "CH Item Price",
-                {"item_code": item_code, "channel": "POS", "status": "Active"},
-                "selling_price",
-            ))
             plan.price = flt(device_price * flt(plan.percentage_value) / 100)
 
         applicable.append(plan)
@@ -4624,6 +4889,7 @@ def find_previous_device_invoice(phone, imei) -> dict:
         When multiple invoices match, the most recent submitted, non-return
         invoice is returned.
     """
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     phone = (phone or "").strip()
     imei = (imei or "").strip()
     if not phone or not imei:
@@ -4693,6 +4959,8 @@ def find_previous_device_invoice(phone, imei) -> dict:
         }
 
     row = rows[0]
+    # READ path (purchase-history lookup): tolerate disabled POS Profile.
+    assert_sales_invoice_scope(row["invoice"], allow_disabled=True)
     cust_phone = frappe.db.get_value("Customer", customer, "mobile_no") or ""
     return {
         "found": True,
@@ -4709,7 +4977,9 @@ def find_previous_device_invoice(phone, imei) -> dict:
 
 
 @frappe.whitelist()
-def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None, customer=None) -> dict:
+def lookup_exchange(
+    assessment=None, imei_serial=None, mobile_no=None, customer=None, pos_profile=None
+) -> dict:
     """Find a Buyback Assessment/Order eligible for exchange at POS.
 
     Returns exchange details or None if nothing found.
@@ -4722,6 +4992,8 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None, customer=
     If `customer` is provided we enforce ownership — prevents looking up another
     customer's exchange credit at a busy multi-counter store.
     """
+    frappe.has_permission("Buyback Assessment", "read", throw=True)
+    assert_pos_profile_scope(pos_profile)
     assessment_name = None
 
     # Must match _VALID_EXCHANGE_STATUSES in create_pos_invoice exactly.
@@ -4750,6 +5022,8 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None, customer=
         return None
 
     ba = frappe.get_doc("Buyback Assessment", assessment_name)
+    _assert_buyback_doc_scope(ba, "read")
+    _assert_buyback_profile_match(ba, pos_profile)
 
     # Validate status here too (covers direct assessment-ID lookup where we
     # couldn't pre-filter by status in the dict above).
@@ -4758,6 +5032,8 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None, customer=
 
     # Customer ownership guard — if caller passes the current POS customer,
     # reject assessments that belong to a different customer.
+    if not customer and not is_privileged_user():
+        frappe.throw(_("A named customer is required to apply exchange credit."))
     if customer and ba.customer and ba.customer != customer:
         frappe.throw(
             frappe._("Exchange credit {0} belongs to a different customer and cannot be applied "
@@ -4777,6 +5053,8 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None, customer=
 
     if order_name:
         order = frappe.get_doc("Buyback Order", order_name)
+        _assert_buyback_doc_scope(order, "read")
+        _assert_buyback_profile_match(order, pos_profile)
         buyback_amount = flt(order.final_price)
         condition_grade = order.condition_grade
     else:
@@ -4800,6 +5078,7 @@ def lookup_exchange(assessment=None, imei_serial=None, mobile_no=None, customer=
 def get_vas_plans() -> dict:
     """Return active Value Added Service plans for POS sale."""
     today = nowdate()
+    plan_limit = max(1, min(cint(get_control_setting("warranty_plan_result_limit", 200)), 1000))
     plans = frappe.get_all(
         "CH Warranty Plan",
         filters={
@@ -4809,7 +5088,9 @@ def get_vas_plans() -> dict:
         fields=[
             "name", "plan_name", "plan_type", "service_item",
             "duration_months", "price", "coverage_description",
+            "valid_from", "valid_to",
         ],
+        limit_page_length=plan_limit,
     )
 
     # Only offer plans whose service_item is a Live (Active-lifecycle) Item.
@@ -4819,11 +5100,9 @@ def get_vas_plans() -> dict:
 
     applicable = []
     for plan in plans:
-        valid_from = frappe.db.get_value("CH Warranty Plan", plan.name, "valid_from")
-        valid_to = frappe.db.get_value("CH Warranty Plan", plan.name, "valid_to")
-        if valid_from and str(valid_from) > today:
+        if plan.valid_from and str(plan.valid_from) > today:
             continue
-        if valid_to and str(valid_to) < today:
+        if plan.valid_to and str(plan.valid_to) < today:
             continue
         applicable.append(plan)
 
@@ -4831,144 +5110,88 @@ def get_vas_plans() -> dict:
 
 
 @frappe.whitelist()
-def validate_coupon(coupon_code, customer=None, cart_total=0) -> dict:
-    """Validate a coupon code and return discount details."""
-    cart_total = flt(cart_total)
+def validate_coupon(
+    coupon_code,
+    customer=None,
+    cart_total=0,
+    pos_profile=None,
+) -> dict:
+    """Validate a coupon in the caller's POS scope and price it on the server."""
+    require_authenticated_user()
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
 
-    coupon = frappe.db.get_value(
-        "Coupon Code",
-        {"coupon_code": coupon_code},
-        ["name", "coupon_name", "pricing_rule", "valid_from", "valid_upto",
-         "maximum_use", "used", "coupon_type"],
-        as_dict=True,
-    )
-
-    if not coupon:
-        return {"valid": False, "reason": frappe._("Coupon code not found")}
-
-    today = nowdate()
-    if coupon.valid_from and str(coupon.valid_from) > today:
-        return {"valid": False, "reason": frappe._("Coupon is not yet active")}
-    if coupon.valid_upto and str(coupon.valid_upto) < today:
-        return {"valid": False, "reason": frappe._("Coupon has expired")}
-    if coupon.maximum_use and coupon.used >= coupon.maximum_use:
-        return {"valid": False, "reason": frappe._("Coupon usage limit reached")}
-
-    if not coupon.pricing_rule:
-        return {"valid": False, "reason": frappe._("No pricing rule linked to coupon")}
-
-    # POS-13 fix: Validate linked Pricing Rule still exists and is enabled
-    if not frappe.db.exists("Pricing Rule", coupon.pricing_rule):
-        return {"valid": False, "reason": frappe._("Linked pricing rule no longer exists")}
-
-    pr = frappe.get_cached_doc("Pricing Rule", coupon.pricing_rule)
-
-    if pr.disable:
-        return {"valid": False, "reason": frappe._("Linked pricing rule is disabled")}
-
-    # Check minimum amount
-    if pr.min_amt and cart_total < flt(pr.min_amt):
-        return {"valid": False, "reason": frappe._("Minimum cart amount ₹{0} required").format(pr.min_amt)}
-
-    # Compute discount
-    discount_amount = 0
-    max_disc = flt(getattr(pr, "max_discount", 0) or 0)
-    if flt(pr.discount_percentage) > 0:
-        discount_amount = flt(cart_total * flt(pr.discount_percentage) / 100)
-        if max_disc and discount_amount > max_disc:
-            discount_amount = max_disc
-    elif flt(pr.discount_amount) > 0:
-        discount_amount = flt(pr.discount_amount)
-
-    if discount_amount <= 0:
-        return {"valid": False, "reason": frappe._("Coupon provides no discount for this cart")}
+    try:
+        application = _resolve_coupon_discount(
+            coupon_code,
+            customer,
+            cart_total,
+            company=anchors.get("company"),
+        )
+    except frappe.PermissionError:
+        raise
+    except (frappe.ValidationError, frappe.DoesNotExistError) as exc:
+        return {"valid": False, "reason": str(exc)}
 
     return {
         "valid": True,
-        "coupon_name": coupon.coupon_name,
-        "discount_amount": discount_amount,
-        "pricing_rule": coupon.pricing_rule,
+        "coupon_name": application["coupon_name"],
+        "discount_amount": application["discount_amount"],
+        "pricing_rule": application["pricing_rule"],
     }
 
 
-@frappe.whitelist()
-def apply_coupon_or_voucher(code, customer=None, company=None) -> dict:
-    """Validate a coupon code or CH Voucher code and return discount details."""
-    if not code:
-        frappe.throw(frappe._("No code provided"))
-
-    code = code.strip()
-
-    # ── 1. Check CH Voucher first ──────────────────────────────────────────
-    voucher = frappe.db.get_value(
-        "CH Voucher",
-        {"voucher_code": code, "docstatus": 1},
-        ["name", "status", "original_amount", "balance",
-         "valid_from", "valid_upto", "issued_to"],
-        as_dict=True,
+@frappe.whitelist(methods=["POST"])
+def apply_coupon_or_voucher(
+    code,
+    customer=None,
+    company=None,
+    cart_total=0,
+    pos_profile=None,
+) -> dict:
+    """Validate and server-price a coupon or voucher in one POS profile."""
+    require_authenticated_user()
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+    if company and company != anchors.get("company"):
+        frappe.throw(_("POS Profile belongs to another company."), frappe.PermissionError)
+    company = anchors.get("company")
+    currency = frappe.db.get_value("POS Profile", pos_profile, "currency") or frappe.db.get_value(
+        "Company", company, "default_currency"
     )
-    if voucher:
-        today = nowdate()
-        if voucher.status in ("Fully Used", "Cancelled"):
-            frappe.throw(frappe._("Voucher '{0}' has already been fully used").format(code))
-        if voucher.status == "Expired" or (voucher.valid_upto and str(voucher.valid_upto) < today):
-            frappe.throw(frappe._("Voucher '{0}' has expired").format(code))
-        if voucher.valid_from and str(voucher.valid_from) > today:
-            frappe.throw(frappe._("Voucher '{0}' is not yet active").format(code))
-        balance = flt(voucher.balance)
-        if balance <= 0:
-            frappe.throw(frappe._("Voucher '{0}' has no remaining balance").format(code))
+    code = str(code or "").strip()
+    if not code:
+        frappe.throw(_("No code provided."))
+
+    voucher_name = frappe.db.get_value("CH Voucher", {"voucher_code": code}, "name")
+    if voucher_name or frappe.db.exists("CH Voucher", code):
+        frappe.has_permission("CH Voucher", "read", throw=True)
+        application = _resolve_voucher_discount(
+            code,
+            customer,
+            company,
+            cart_total,
+            currency=currency,
+        )
         return {
             "is_voucher": True,
-            "voucher_name": voucher.name,
-            "amount": balance,
-            "balance": balance,
+            "voucher_name": application["voucher_name"],
+            "amount": application["amount"],
+            "balance": application["balance"],
         }
 
-    # ── 2. Fall back to Coupon Code ────────────────────────────────────────
-    coupon = frappe.db.get_value(
-        "Coupon Code",
-        {"coupon_code": code},
-        ["name", "coupon_name", "pricing_rule", "valid_from", "valid_upto",
-         "maximum_use", "used", "coupon_type"],
-        as_dict=True,
+    application = _resolve_coupon_discount(
+        code,
+        customer,
+        cart_total,
+        company=company,
     )
-    if not coupon:
-        frappe.throw(frappe._("Code '{0}' not found as a voucher or coupon").format(code))
-
-    today = nowdate()
-    if coupon.valid_from and str(coupon.valid_from) > today:
-        frappe.throw(frappe._("Coupon is not yet active"))
-    if coupon.valid_upto and str(coupon.valid_upto) < today:
-        frappe.throw(frappe._("Coupon has expired"))
-    if coupon.maximum_use and coupon.used >= coupon.maximum_use:
-        frappe.throw(frappe._("Coupon usage limit reached"))
-    if not coupon.pricing_rule:
-        frappe.throw(frappe._("No pricing rule linked to coupon"))
-
-    pr = frappe.get_cached_doc("Pricing Rule", coupon.pricing_rule)
-    discount_amount = 0
-    if flt(pr.discount_percentage) > 0:
-        # Return percentage info; caller computes actual amount against cart total
-        return {
-            "is_voucher": False,
-            "coupon_name": coupon.name,
-            "amount": flt(pr.discount_percentage),
-            "is_percentage": True,
-            "max_discount": flt(getattr(pr, "max_discount", 0) or 0),
-            "pricing_rule": coupon.pricing_rule,
-        }
-    elif flt(pr.discount_amount) > 0:
-        discount_amount = flt(pr.discount_amount)
-    else:
-        frappe.throw(frappe._("Coupon provides no discount"))
-
     return {
         "is_voucher": False,
-        "coupon_name": coupon.name,
-        "amount": discount_amount,
+        "coupon_name": application["coupon_name"],
+        "amount": application["discount_amount"],
         "is_percentage": False,
-        "pricing_rule": coupon.pricing_rule,
+        "pricing_rule": application["pricing_rule"],
     }
 
 
@@ -4976,6 +5199,9 @@ def apply_coupon_or_voucher(code, customer=None, company=None) -> dict:
 def get_customer_credit_info(customer, company=None) -> dict:
     """Return credit limit, outstanding, payment history and overdue info for a customer."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    if not company:
+        frappe.throw(_("Company is required to view customer credit information."))
+    _assert_company_scope(company, _("view customer credit information"))
     if not customer or customer == "Walk-in Customer":
         return None
 
@@ -4991,14 +5217,6 @@ def get_customer_credit_info(customer, company=None) -> dict:
         )
         if cl:
             credit_limit = flt(cl)
-
-    # Fallback: scan credit_limits child table without company filter (ERPNext v15 has no
-    # direct credit_limit column on tabCustomer — it lives in the child table only)
-    if not credit_limit:
-        for cl in (frappe.get_cached_doc("Customer", customer).get("credit_limits") or []):
-            if flt(cl.credit_limit):
-                credit_limit = flt(cl.credit_limit)
-                break
 
     if not credit_limit:
         return None
@@ -5017,6 +5235,7 @@ def get_customer_credit_info(customer, company=None) -> dict:
     # Overdue invoices count
     overdue_count = cint(frappe.db.count("Sales Invoice", {
         "customer": customer,
+        "company": company,
         "docstatus": 1,
         "outstanding_amount": [">", 0],
         "due_date": ["<", nowdate()],
@@ -5049,7 +5268,7 @@ def get_customer_credit_info(customer, company=None) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def approve_credit_override(customer, company, manager_pin, override_reason,
                             cart_total=0, store=None) -> dict:
     """Validate manager PIN and approve an over-limit credit sale.
@@ -5057,42 +5276,40 @@ def approve_credit_override(customer, company, manager_pin, override_reason,
     Returns {approved: True, manager_name: "..."} on success.
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    frappe.has_permission("Customer", "read", throw=True)
+    frappe.has_permission("Comment", "create", throw=True)
 
     if not manager_pin or not override_reason:
         return {"approved": False, "message": _("PIN and reason are required")}
+    if not store:
+        return {"approved": False, "message": _("Store is required for manager approval")}
+    if not company or not customer or flt(cart_total) <= 0:
+        return {"approved": False, "message": _("Customer, company, and a positive cart total are required")}
+    assert_store_scope(store=store, company=company)
 
-    # Find a user whose PIN matches — check POS Profile Extension managers
-    # or fall back to checking if the PIN matches any user with Store Manager role
-    manager_user = None
-    manager_name = None
+    from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
 
-    # Method 1: Check against POS-specific manager PINs
-    pins = frappe.get_all(
-        "CH POS Manager PIN",
-        filters={"pin": manager_pin, "disabled": 0},
-        fields=["user", "full_name"],
-        limit=1,
-    ) if frappe.db.exists("DocType", "CH POS Manager PIN") else []
-
-    if pins:
-        manager_user = pins[0].user
-        manager_name = pins[0].full_name
-    else:
-        # Method 2: Check against user password (for managers with Store Manager role)
-        from frappe.utils.password import check_password
-        try:
-            user_doc = check_password(None, manager_pin)
-            if user_doc:
-                user = user_doc if isinstance(user_doc, str) else user_doc.name
-                roles = frappe.get_roles(user)
-                if "Store Manager" in roles or "Sales Manager" in roles or "System Manager" in roles:
-                    manager_user = user
-                    manager_name = frappe.db.get_value("User", user, "full_name")
-        except frappe.AuthenticationError:
-            pass
-
-    if not manager_user:
+    pin_result = verify_manager_pin(
+        manager_pin, store=store, permission="can_approve_discount"
+    )
+    if not pin_result.get("valid"):
         return {"approved": False, "message": _("Invalid PIN or insufficient permissions")}
+    manager_user = pin_result["user"]
+    manager_name = pin_result["name"]
+    from ch_pos.api.manager_approval import issue_action_grant
+
+    approval_token = issue_action_grant(
+        "credit",
+        {
+            "customer": customer,
+            "company": company,
+            "store": store,
+            "cart_total": flt(cart_total),
+            "manager_user": manager_user,
+            "manager_name": manager_name,
+            "reason": str(override_reason)[:500],
+        },
+    )
 
     # Log the override
     frappe.get_doc({
@@ -5105,15 +5322,22 @@ def approve_credit_override(customer, company, manager_pin, override_reason,
             f"Cart: ₹{flt(cart_total):,.0f}, Store: {store or '—'}, "
             f"Reason: {override_reason}"
         ),
-    }).insert(ignore_permissions=True)
+    }).insert()
 
-    return {"approved": True, "manager_user": manager_user, "manager_name": manager_name}
+    return {
+        "approved": True,
+        "manager_user": manager_user,
+        "manager_name": manager_name,
+        "approval_token": approval_token,
+    }
 
 
 @frappe.whitelist()
-def get_customer_advances(customer) -> list:
+def get_customer_advances(customer, company=None) -> list:
     """Return unallocated advance payments for a customer that can be adjusted against a new sale."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    frappe.has_permission("Payment Entry", "read", throw=True)
+    _assert_company_scope(company, _("view customer advances"))
     if not customer or customer == "Walk-in Customer":
         return []
 
@@ -5128,12 +5352,13 @@ def get_customer_advances(customer) -> list:
         FROM `tabPayment Entry` pe
         WHERE pe.party_type = 'Customer'
           AND pe.party = %(customer)s
+          AND pe.company = %(company)s
           AND pe.payment_type = 'Receive'
           AND pe.docstatus = 1
         HAVING balance > 0.01
         ORDER BY pe.posting_date ASC
         LIMIT 10
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company}, as_dict=True)
 
     return advances or []
 
@@ -5142,6 +5367,10 @@ def get_customer_advances(customer) -> list:
 def scan_barcode(barcode, pos_profile=None) -> dict:
     """Look up an item by exact barcode or serial number for POS scanner."""
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    if not pos_profile and not is_privileged_user():
+        frappe.throw(_("POS Profile is required for barcode lookup."), frappe.PermissionError)
+    if pos_profile:
+        assert_pos_profile_scope(pos_profile)
     # Coerce — all-digit barcodes / IMEIs may arrive as JSON numbers.
     barcode = str(barcode or "").strip()
     if not barcode:
@@ -5184,7 +5413,9 @@ def scan_barcode(barcode, pos_profile=None) -> dict:
     # can decide whether to add directly (sell-first serial) or open the
     # IMEI selection dialog (non-oldest serial).
     if item and scanned_serial and scanned_serial_warehouse:
-        oldest_serial, _ = _get_oldest_fifo_serial(item_code, scanned_serial_warehouse)
+        oldest_serial, _oldest_purchase_date = _get_oldest_fifo_serial(
+            item_code, scanned_serial_warehouse
+        )
         item["serial_no"] = scanned_serial
         item["is_oldest_serial"] = 1 if oldest_serial == scanned_serial else 0
 
@@ -5205,19 +5436,25 @@ def search_invoices_for_return(search_term, pos_profile=None) -> list:
 
     if not pos_profile:
         frappe.throw(frappe._("POS Profile is required to search invoices for return."))
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    assert_pos_profile_scope(pos_profile)
 
-    company = frappe.db.get_value("POS Profile", pos_profile, "company")
-    if not company:
+    profile = frappe.db.get_value(
+        "POS Profile",
+        pos_profile,
+        ["company", "warehouse", "custom_return_window_days"],
+        as_dict=True,
+    )
+    if not profile or not profile.company:
         frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
+    company = profile.company
 
     # TC_016 — restrict the Return tab to invoices issued from the same
     # store. Cashier on Store-A must NOT see invoices that originated at
     # Store-B even if the same Customer transacted at both stores. We use
     # the POS Profile's set_warehouse / warehouse as the store anchor and
     # match against Sales Invoice.set_warehouse + each row's warehouse.
-    profile_warehouse = frappe.db.get_value(
-        "POS Profile", pos_profile, "warehouse"
-    )
+    profile_warehouse = profile.warehouse
 
     filters = {
         "docstatus": 1,
@@ -5249,30 +5486,54 @@ def search_invoices_for_return(search_term, pos_profile=None) -> list:
     # store. We accept either the header set_warehouse or any line item
     # warehouse matching the profile's store warehouse.
     if profile_warehouse:
-        kept = []
-        for inv in invoices:
-            if inv.get("set_warehouse") == profile_warehouse:
-                kept.append(inv)
-                continue
-            row_match = frappe.db.exists(
-                "Sales Invoice Item",
-                {"parent": inv["name"], "warehouse": profile_warehouse},
+        invoice_names = [inv.name for inv in invoices]
+        item_warehouse_matches = set()
+        if invoice_names:
+            item_warehouse_matches = set(
+                frappe.get_all(
+                    "Sales Invoice Item",
+                    filters={
+                        "parent": ("in", invoice_names),
+                        "warehouse": profile_warehouse,
+                    },
+                    pluck="parent",
+                    distinct=True,
+                    limit_page_length=len(invoice_names) + 1,
+                )
             )
-            if row_match:
-                kept.append(inv)
-        invoices = kept[:20]
+        invoices = [
+            inv
+            for inv in invoices
+            if inv.get("set_warehouse") == profile_warehouse
+            or inv.name in item_warehouse_matches
+        ][:20]
     else:
         invoices = invoices[:20]
 
     from frappe.utils import date_diff
     today = nowdate()
+    invoice_names = [inv.name for inv in invoices]
+    item_counts = {}
+    if invoice_names:
+        item_counts = {
+            row.parent: cint(row.item_count)
+            for row in frappe.db.sql(
+                """
+                SELECT parent, COUNT(*) AS item_count
+                  FROM `tabSales Invoice Item`
+                 WHERE parent IN %(invoices)s
+                 GROUP BY parent
+                """,
+                {"invoices": invoice_names},
+                as_dict=True,
+            )
+        }
+    return_window_days = max(1, cint(profile.custom_return_window_days) or 30)
     for inv in invoices:
-        inv["items_count"] = frappe.db.count(
-            "Sales Invoice Item", {"parent": inv["name"]}
-        )
+        inv["items_count"] = item_counts.get(inv.name, 0)
         days = cint(date_diff(today, str(inv["posting_date"])))
         inv["days_since_purchase"] = days
-        inv["return_window_expired"] = days > 14
+        inv["return_window_expired"] = days > return_window_days
 
     return invoices
 
@@ -5288,8 +5549,15 @@ def get_invoice_items_for_return(invoice_name) -> dict:
     """
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     inv.check_permission("read")  # SECURITY (H8): IDOR prevention
+    # READ path (history view of returnable items): tolerate disabled profile.
+    assert_sales_invoice_scope(invoice_name, allow_disabled=True)
     if inv.docstatus != 1 or inv.is_return:
         frappe.throw(frappe._("Only submitted non-return invoices can be returned"))
+    max_lines = max(1, min(cint(get_control_setting("return_max_line_items", 100)), 1000))
+    if len(inv.items) > max_lines:
+        frappe.throw(
+            _("Invoice exceeds the configured return limit of {0} item rows.").format(max_lines)
+        )
 
     # Build coverage map: { device_si_row_name: [{plan, service_item, vas_si_row, ...}, ...] }
     plan_links = _get_linked_plans_for_invoice(inv)
@@ -5304,18 +5572,34 @@ def get_invoice_items_for_return(invoice_name) -> dict:
                     "sold_plan": p["sold_plan"],
                 }
 
+    returned_by_source_row = {}
+    returned_rows = frappe.db.sql(
+        """
+        SELECT COALESCE(NULLIF(ri.sales_invoice_item, ''), ri.pos_invoice_item) AS source_row,
+               ri.item_code,
+               ABS(SUM(ri.qty)) AS returned_qty
+          FROM `tabSales Invoice Item` ri
+          JOIN `tabSales Invoice` return_invoice ON return_invoice.name = ri.parent
+         WHERE return_invoice.return_against = %(invoice)s
+           AND return_invoice.docstatus = 1
+           AND (
+                IFNULL(ri.sales_invoice_item, '') != ''
+                OR IFNULL(ri.pos_invoice_item, '') != ''
+           )
+         GROUP BY source_row, ri.item_code
+        """,
+        {"invoice": invoice_name},
+        as_dict=True,
+    )
+    returned_by_source_row = {
+        (row.source_row, row.item_code): flt(row.returned_qty)
+        for row in returned_rows
+        if row.source_row
+    }
+
     returnable = []
     for item in inv.items:
-        # Calculate already-returned qty for this item row
-        already_returned = flt(frappe.db.sql("""
-            SELECT ABS(SUM(ri.qty))
-            FROM `tabSales Invoice Item` ri
-            JOIN `tabSales Invoice` pi ON pi.name = ri.parent
-            WHERE pi.return_against = %s
-              AND pi.docstatus = 1
-              AND ri.item_code = %s
-              AND (ri.sales_invoice_item = %s OR ri.pos_invoice_item = %s)
-        """, (invoice_name, item.item_code, item.name, item.name))[0][0] or 0)
+        already_returned = returned_by_source_row.get((item.name, item.item_code), 0)
 
         returnable_qty = flt(item.qty) - already_returned
         if returnable_qty <= 0:
@@ -5522,26 +5806,77 @@ def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
     ``on_cancel`` which sets status='Cancelled', clears the Serial Lifecycle
     warranty fields, and writes a 'Plan Cancelled' entry to CH VAS Ledger.
 
-    Failures are logged but never raised -- the credit note is already in the
-    ledger and we don't want a coverage-bookkeeping issue to corrupt the GL.
+    The return and plan cancellation share one request transaction, so either
+    both succeed or the framework rolls the request back.
     """
     cancelled = []
     for plan_name in plan_names or []:
-        try:
-            plan = frappe.get_doc("Active VAS Plans", plan_name)
-            if plan.docstatus == 1 and plan.status not in ("Cancelled", "Void"):
-                plan.flags.ignore_permissions = True
-                if hasattr(plan, "remarks"):
-                    suffix = f"\nAuto-cancelled: device returned via {return_invoice_name}"
-                    plan.db_set("remarks", (plan.remarks or "") + suffix, update_modified=False)
-                plan.cancel()
-                cancelled.append(plan_name)
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Auto-cancel of Active VAS Plans {plan_name} failed (return: {return_invoice_name})",
-            )
+        plan = frappe.get_doc("Active VAS Plans", plan_name)
+        if plan.docstatus == 1 and plan.status not in ("Cancelled", "Void"):
+            plan.check_permission("cancel")
+            if hasattr(plan, "remarks"):
+                suffix = f"\nAuto-cancelled: device returned via {return_invoice_name}"
+                plan.remarks = (plan.remarks or "") + suffix
+            plan.cancel()
+            cancelled.append(plan_name)
     return cancelled
+
+
+def _normalize_return_items(orig, return_items) -> list[dict]:
+    if not isinstance(return_items, list) or not return_items:
+        frappe.throw(_("At least one return item is required."))
+    max_rows = max(
+        1,
+        min(cint(get_control_setting("return_max_line_items", 100) or 100), 500),
+    )
+    if len(return_items) > max_rows:
+        frappe.throw(_("A return may contain at most {0} item rows.").format(max_rows))
+
+    rows_by_name = {row.name: row for row in (orig.items or [])}
+    seen_rows = set()
+    normalized = []
+    for item in return_items:
+        if not isinstance(item, dict):
+            frappe.throw(_("Each return item must be an object."))
+        source_name = str(item.get("original_item_row") or "").strip()
+        source = rows_by_name.get(source_name)
+        if not source:
+            frappe.throw(_("Return item does not belong to the original invoice."))
+        if source_name in seen_rows:
+            frappe.throw(_("Original invoice row {0} appears more than once.").format(source_name))
+        seen_rows.add(source_name)
+
+        qty = flt(item.get("qty"))
+        if qty <= 0 or qty > abs(flt(source.qty)) + 0.0001:
+            frappe.throw(_("Invalid return quantity for item {0}.").format(source.item_code))
+        supplied_item = str(item.get("item_code") or source.item_code).strip()
+        if supplied_item != source.item_code:
+            frappe.throw(_("Return item does not match its original invoice row."))
+        if item.get("rate") is not None and abs(flt(item.get("rate")) - flt(source.rate)) > 0.005:
+            frappe.throw(_("Return rate for item {0} must match the original invoice.").format(source.item_code))
+
+        source_serials = set(_split_serial_blob(source.serial_no or ""))
+        requested_serials = _split_serial_blob(item.get("serial_no") or "")
+        if requested_serials and not set(requested_serials).issubset(source_serials):
+            frappe.throw(_("A returned serial number was not sold on the original invoice row."))
+        if source_serials and len(requested_serials) != cint(qty):
+            frappe.throw(_("Returned serial count must match the return quantity."))
+
+        row = dict(item)
+        row.update(
+            {
+                "item_code": source.item_code,
+                "item_name": source.item_name,
+                "qty": qty,
+                "rate": flt(source.rate),
+                "uom": source.uom,
+                "warehouse": source.warehouse,
+                "original_item_row": source.name,
+                "serial_no": "\n".join(requested_serials),
+            }
+        )
+        normalized.append(row)
+    return normalized
 
 
 def _extract_phase4_return_context(return_doc) -> dict:
@@ -5659,7 +5994,7 @@ def _apply_phase4_return_side_effects(return_doc) -> dict:
 
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_pos_return(original_invoice, return_items, sales_executive=None,
                       return_reason=None, return_remarks=None,
                       manager_pin=None, credit_only=0,
@@ -5696,6 +6031,19 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     if physical_condition not in ("Resalable", "Damaged", "Refurbish Required", "Dead on Arrival"):
         frappe.throw(frappe._("Invalid physical condition: {0}").format(physical_condition))
 
+    orig = frappe.get_doc("Sales Invoice", original_invoice)
+    orig.check_permission("read")
+    assert_sales_invoice_scope(original_invoice)
+    if orig.docstatus != 1 or orig.is_return:
+        frappe.throw(frappe._("Can only create returns for submitted non-return invoices"))
+    return_items = _normalize_return_items(orig, return_items)
+    orig_store = frappe.db.get_value(
+        "POS Profile Extension", {"pos_profile": orig.pos_profile}, "store"
+    ) if orig.pos_profile else None
+    if not orig_store and orig.pos_profile:
+        orig_warehouse = frappe.db.get_value("POS Profile", orig.pos_profile, "warehouse")
+        orig_store = frappe.db.get_value("CH Store", {"warehouse": orig_warehouse}, "name")
+
     # ── Mandatory remarks/reason (SAP "Reason for Rejection" parity) ───
     return_reason = (return_reason or "").strip()
     return_remarks = (return_remarks or "").strip()
@@ -5713,9 +6061,11 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     # Phase D — credit-only returns (no stock reversal) require manager auth
     # because we are issuing a credit without physical goods coming back.
     if cint(credit_only):
-        _user_roles = set(frappe.get_roles(frappe.session.user))
-        _is_mgr = bool({"POS Manager", "Accounts Manager", "System Manager"} & _user_roles)
-        _pin_ok = bool(manager_pin) and _verify_manager_pin(manager_pin)
+        _is_mgr = has_configured_roles(
+            "return_approval_roles", ("POS Manager", "Accounts Manager")
+        )
+        _pin_result = _verify_manager_pin(manager_pin, store=orig_store) if manager_pin else None
+        _pin_ok = bool(_pin_result)
         if not (_is_mgr or _pin_ok):
             frappe.throw(
                 frappe._(
@@ -5726,17 +6076,13 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
                 title=frappe._("Manager Authorization Required"),
             )
 
-    orig = frappe.get_doc("Sales Invoice", original_invoice)
-    orig.check_permission("read")  # SECURITY (H8): IDOR prevention
-    if orig.docstatus != 1 or orig.is_return:
-        frappe.throw(frappe._("Can only create returns for submitted non-return invoices"))
-
     # Auto-include any VAS / Extended Warranty rows that are bound to the
     # devices being returned (parity with Apple Care, Samsung Care+ behavior).
     # If the cashier returns a device, the protection plans sold against that
     # device on the same invoice are automatically refunded and their
     # corresponding Active VAS Plans rows are cancelled below (after submit).
     return_items, _auto_added_plans = _auto_include_bound_vas_rows(orig, return_items)
+    return_items = _normalize_return_items(orig, return_items)
     # Plans we'll cancel after the return is submitted. We collect them upfront
     # so we know which to void even if the cashier explicitly added the VAS row
     # (instead of relying on auto-include).
@@ -5875,11 +6221,10 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     })
     ret.paid_amount = correct_payment
 
-    ret.flags.ignore_permissions = True
     # Insert first with default Draft workflow state so _doc_before_save is
     # populated before we transition to Approved (matches create_pos_invoice
     # pattern at line ~846).
-    ret.insert(ignore_permissions=True)
+    ret.insert()
 
     # ── Persist the captured reason/remarks for audit ────────────────
     update_kwargs = {}
@@ -5892,8 +6237,12 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     if credit_only_flag and _si_meta.has_field("custom_credit_only_return"):
         update_kwargs["custom_credit_only_return"] = 1
     if replacement_invoice and _si_meta.has_field("custom_replacement_invoice"):
-        if frappe.db.exists("Sales Invoice", replacement_invoice):
-            update_kwargs["custom_replacement_invoice"] = replacement_invoice
+        replacement_doc = frappe.get_doc("Sales Invoice", replacement_invoice)
+        replacement_doc.check_permission("read")
+        assert_sales_invoice_scope(replacement_invoice)
+        if replacement_doc.company != orig.company or replacement_doc.customer != orig.customer:
+            frappe.throw(_("Replacement invoice must belong to the same customer and company."))
+        update_kwargs["custom_replacement_invoice"] = replacement_invoice
     # Always echo into the standard remarks field so it is visible on the
     # printed credit note even when the custom field is not yet installed.
     existing_remarks = (ret.get("remarks") or "").strip()
@@ -5910,19 +6259,24 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     if update_kwargs:
         for k, v in update_kwargs.items():
             ret.set(k, v)
-        ret.save(ignore_permissions=True)
+        ret.save()
 
     # ── Maker-Checker gate (SAP credit memo release strategy) ─────────
     requires_approval, reasons = _return_requires_approval(orig, ret, return_items, manager_pin)
-    user_roles = set(frappe.get_roles(frappe.session.user))
-    is_manager = bool({"POS Manager", "Accounts Manager", "System Manager"} & user_roles)
-    pin_ok = bool(manager_pin) and _verify_manager_pin(manager_pin, ret.company)
+    is_manager = has_configured_roles(
+        "return_approval_roles", ("POS Manager", "Accounts Manager")
+    )
+    pin_result = (
+        _verify_manager_pin(manager_pin, company=ret.company, store=orig_store)
+        if manager_pin
+        else None
+    )
+    pin_ok = bool(pin_result)
 
     if requires_approval and not (is_manager or pin_ok):
         ret.workflow_state = "Pending Approval"
         ret.custom_si_approval_state = "Pending Approval"
-        ret.save(ignore_permissions=True)
-        frappe.db.commit()
+        ret.save()
         return {
             "name": ret.name,
             "status": "Pending Approval",
@@ -5940,31 +6294,11 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
         ret.add_comment(
             "Info",
             text=frappe._("Return auto-approved by {0}{1}").format(
-                frappe.session.user,
+                pin_result.get("user") if pin_ok and not is_manager else frappe.session.user,
                 " (manager PIN)" if pin_ok and not is_manager else "",
             ),
         )
-    try:
-        ret.submit()
-    except Exception:
-        # Frappe commits docstatus=1 before on_submit runs, so if GL entry
-        # creation fails the invoice can be left in an inconsistent state.
-        # Attempt to cancel + delete it to keep the DB clean.
-        try:
-            doc = frappe.get_doc("Sales Invoice", ret.name)
-            if doc.docstatus == 1:
-                doc.flags.ignore_permissions = True
-                doc.flags.ignore_validate = True
-                if hasattr(doc, "custom_cancel_reason"):
-                    doc.custom_cancel_reason = "System: auto-rollback on submit failure"
-                doc.cancel()
-            frappe.delete_doc("Sales Invoice", ret.name, force=True, ignore_permissions=True)
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Return invoice cleanup failed for {ret.name}",
-            )
-        raise
+    ret.submit()
 
     # Create return incentive (clawback) entries
     incentive_clawback = 0
@@ -6049,7 +6383,8 @@ def _return_requires_approval(orig_invoice, ret_doc, return_items, manager_pin=N
         if invoice_age_days > return_window:
             reasons.append(f"Original invoice is {invoice_age_days} days old (policy window: {return_window} days)")
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "POS return age verification failed")
+        reasons.append("Original invoice age could not be verified (manager review required)")
 
     orig_total = abs(flt(orig_invoice.grand_total or 0))
     if orig_total and (refund_value / orig_total) > 0.5:
@@ -6058,26 +6393,24 @@ def _return_requires_approval(orig_invoice, ret_doc, return_items, manager_pin=N
     return (bool(reasons), reasons)
 
 
-def _verify_manager_pin(manager_pin, company=None):
+def _verify_manager_pin(manager_pin, company=None, store=None):
     """Lightweight PIN check used for return-override.
 
-    Looks up CH POS Manager PIN; returns True on a clean match. Reuses the
-    same store as `approve_credit_override` for consistency.
+    Uses the canonical scoped CH POS Password verifier.
     """
     if not manager_pin:
-        return False
-    if not frappe.db.exists("DocType", "CH POS Manager PIN"):
-        return False
-    rows = frappe.get_all(
-        "CH POS Manager PIN",
-        filters={"pin": manager_pin, "disabled": 0},
-        fields=["user"],
-        limit=1,
+        return None
+    if not store:
+        return None
+    from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
+
+    result = verify_manager_pin(
+        manager_pin, store=store, permission="can_approve_return"
     )
-    return bool(rows)
+    return result if result.get("valid") else None
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) -> dict:
     """Manager-checker approval that submits a Pending Approval return invoice.
 
@@ -6087,19 +6420,35 @@ def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) 
     frappe.has_permission("Sales Invoice", "submit", throw=True)
 
     doc = frappe.get_doc("Sales Invoice", return_invoice)
+    doc.check_permission("write")
+    assert_sales_invoice_scope(return_invoice)
     if doc.docstatus != 0:
         frappe.throw(frappe._("Return {0} is not in Draft state (current docstatus: {1})").format(
             return_invoice, doc.docstatus))
     if not doc.is_return:
         frappe.throw(frappe._("{0} is not a return invoice").format(return_invoice))
 
-    user_roles = set(frappe.get_roles(frappe.session.user))
-    is_manager = bool({"POS Manager", "Accounts Manager", "System Manager"} & user_roles)
-    pin_ok = bool(manager_pin) and _verify_manager_pin(manager_pin, doc.company)
+    is_manager = has_configured_roles(
+        "return_approval_roles", ("POS Manager", "Accounts Manager")
+    )
+    return_store = frappe.db.get_value(
+        "POS Profile Extension", {"pos_profile": doc.pos_profile}, "store"
+    ) if doc.pos_profile else None
+    pin_result = (
+        _verify_manager_pin(manager_pin, company=doc.company, store=return_store)
+        if manager_pin
+        else None
+    )
+    pin_ok = bool(pin_result)
 
     if not (is_manager or pin_ok):
         frappe.throw(
             frappe._("Only a POS Manager can approve return {0}. Provide a valid manager PIN to override.").format(return_invoice),
+            frappe.PermissionError,
+        )
+    if doc.owner == frappe.session.user and not is_privileged_user() and not pin_ok:
+        frappe.throw(
+            _("The return creator cannot approve the same return."),
             frappe.PermissionError,
         )
 
@@ -6112,16 +6461,14 @@ def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) 
     doc.add_comment(
         "Workflow",
         text=frappe._("Return approved by {0}{1}: {2}").format(
-            frappe.session.user,
+            pin_result.get("user") if pin_ok and not is_manager else frappe.session.user,
             " (manager PIN)" if pin_ok and not is_manager else "",
             approval_remarks,
         ),
     )
-    doc.flags.ignore_permissions = True
     doc.save()
     doc.submit()
     phase4_side_effects = _apply_phase4_return_side_effects(doc)
-    frappe.db.commit()
 
     return {
         "name": doc.name,
@@ -6136,6 +6483,11 @@ def approve_pos_return(return_invoice, manager_pin=None, approval_remarks=None) 
 @frappe.whitelist()
 def get_pending_return_approvals(pos_profile=None, limit=20) -> list:
     """List Sales Invoice returns waiting on manager approval (for the dashboard)."""
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    if not pos_profile and not is_privileged_user():
+        frappe.throw(_("POS Profile is required."), frappe.PermissionError)
+    if pos_profile:
+        assert_pos_profile_scope(pos_profile)
     filters = {
         "docstatus": 0,
         "is_return": 1,
@@ -6167,12 +6519,15 @@ def preview_return_with_replacement(original_invoice, return_items,
     Mirrors how Oracle Xstore / SAP Retail / MS D365 Commerce present the
     'tender summary' before the cashier clicks Pay.
     """
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    assert_sales_invoice_scope(original_invoice)
     if isinstance(return_items, str):
         return_items = frappe.parse_json(return_items)
     return_items = return_items or []
 
     # Compute return value (taxes inclusive) using original invoice item rates
     orig = frappe.get_doc("Sales Invoice", original_invoice)
+    return_items = _normalize_return_items(orig, return_items)
     return_subtotal = 0.0
     for ri in return_items:
         return_subtotal += flt(ri.get("qty", 0)) * flt(ri.get("rate", 0))
@@ -6182,6 +6537,8 @@ def preview_return_with_replacement(original_invoice, return_items,
     tax_factor = (flt(orig.grand_total) / base_total) if base_total else 1.0
     return_value = round(return_subtotal * tax_factor, 2)
     replacement_total = flt(replacement_total)
+    if replacement_total < 0:
+        frappe.throw(_("Replacement total cannot be negative."))
 
     delta = round(replacement_total - return_value, 2)
     if delta > 0.5:
@@ -6216,7 +6573,7 @@ def preview_return_with_replacement(original_invoice, return_items,
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def process_return_with_replacement(
     original_invoice,
     return_items,
@@ -6262,6 +6619,8 @@ def process_return_with_replacement(
     Raises:
         ValidationError if the settlement does not match the computed delta.
     """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_sales_invoice_scope(original_invoice)
     if isinstance(return_items, str):
         return_items = frappe.parse_json(return_items)
     if isinstance(replacement_payload, str):
@@ -6277,8 +6636,15 @@ def process_return_with_replacement(
             "Replacement payload with at least one item is required. "
             "For pure returns without replacement, use create_pos_return instead."
         ))
+    replacement_anchors = assert_pos_profile_scope(replacement_payload.get("pos_profile"))
 
     orig = frappe.get_doc("Sales Invoice", original_invoice)
+    orig.check_permission("read")
+    return_items = _normalize_return_items(orig, return_items)
+    if replacement_anchors.get("company") != orig.company:
+        frappe.throw(_("Replacement POS Profile must belong to the original invoice company."))
+    if replacement_payload.get("customer") != orig.customer:
+        frappe.throw(_("Replacement sale must use the original invoice customer."))
 
     # ── 1. Compute provisional totals to determine net delta ───────────────
     replacement_items = replacement_payload.get("items") or []
@@ -6341,8 +6707,18 @@ def process_return_with_replacement(
         original_invoice=original_invoice,
         return_items=return_items,
         sales_executive=sales_executive,
+        return_reason="Replacement Exchange",
+        return_remarks=_("Processed as a replacement exchange against {0}.").format(original_invoice),
     )
     return_inv_name = return_result["name"]
+    if return_result.get("requires_approval"):
+        return {
+            "return_invoice": return_inv_name,
+            "replacement_invoice": None,
+            "status": "Pending Approval",
+            "approval_reasons": return_result.get("approval_reasons") or [],
+            "settled": False,
+        }
     actual_return_value = abs(flt(return_result["grand_total"]))
 
     # ── 4. Build the replacement-invoice payload ───────────────────────────
@@ -6380,50 +6756,39 @@ def process_return_with_replacement(
     rp["sales_executive"] = sales_executive
 
     # ── 5. Create the replacement invoice ──────────────────────────────────
-    try:
-        replacement_result = create_pos_invoice(**rp)
-    except Exception:
-        # Replacement failed -- roll back the return so the customer's
-        # original invoice is restored.
-        try:
-            ri_doc = frappe.get_doc("Sales Invoice", return_inv_name)
-            if ri_doc.docstatus == 1:
-                ri_doc.flags.ignore_permissions = True
-                if hasattr(ri_doc, "custom_cancel_reason"):
-                    ri_doc.custom_cancel_reason = (
-                        "System: auto-rollback -- replacement leg failed"
-                    )
-                ri_doc.cancel()
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Return rollback failed for {return_inv_name}",
-            )
-        raise
+    replacement_result = create_pos_invoice(**rp)
 
     replacement_inv_name = replacement_result["name"]
+    actual_replacement_value = flt(
+        replacement_result.get("rounded_total") or replacement_result.get("grand_total")
+    )
+    actual_delta = round(actual_replacement_value - actual_return_value, 2)
+    if abs(actual_delta - delta) > 0.5:
+        frappe.throw(
+            _("Final replacement pricing changed the settlement amount. Refresh and retry."),
+            title=_("Settlement Changed"),
+        )
+    delta = actual_delta
 
     # Phase D — cross-link return ↔ replacement so finance can navigate both
     # directions and net the credit against the new invoice. Best-effort:
     # failures here do not roll back the already-submitted invoices.
-    try:
-        _si_meta = frappe.get_meta("Sales Invoice")
-        if _si_meta.has_field("custom_replacement_invoice"):
-            frappe.db.set_value(
-                "Sales Invoice", return_inv_name,
-                "custom_replacement_invoice", replacement_inv_name,
-                update_modified=False,
-            )
-        if _si_meta.has_field("custom_original_invoice"):
-            frappe.db.set_value(
-                "Sales Invoice", replacement_inv_name,
-                "custom_original_invoice", return_inv_name,
-                update_modified=False,
-            )
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"Return/replacement cross-link failed for {return_inv_name} ↔ {replacement_inv_name}",
+    return_doc = frappe.get_doc("Sales Invoice", return_inv_name)
+    replacement_doc = frappe.get_doc("Sales Invoice", replacement_inv_name)
+    return_doc.check_permission("write")
+    replacement_doc.check_permission("write")
+    _si_meta = frappe.get_meta("Sales Invoice")
+    if _si_meta.has_field("custom_replacement_invoice"):
+        frappe.db.set_value(
+            "Sales Invoice", return_inv_name,
+            "custom_replacement_invoice", replacement_inv_name,
+            update_modified=False,
+        )
+    if _si_meta.has_field("custom_original_invoice"):
+        frappe.db.set_value(
+            "Sales Invoice", replacement_inv_name,
+            "custom_original_invoice", return_inv_name,
+            update_modified=False,
         )
 
     # ── 6. If we owe the customer, create a refund Payment Entry ───────────
@@ -6437,38 +6802,20 @@ def process_return_with_replacement(
                     refund_mop = p.mode_of_payment
                     break
             refund_mop = refund_mop or "Cash"
-        try:
-            from erpnext.accounts.doctype.payment_entry.payment_entry import (
-                get_payment_entry,
-            )
-            pe = get_payment_entry("Sales Invoice", return_inv_name)
-            pe.payment_type = "Pay"  # paying the customer
-            pe.paid_amount = refund_amount
-            pe.received_amount = refund_amount
-            pe.mode_of_payment = refund_mop
-            pe.reference_no = f"REFUND-{return_inv_name}"
-            pe.reference_date = nowdate()
-            pe.flags.ignore_permissions = True
-            pe.insert()
-            pe.submit()
-            refund_pe_name = pe.name
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Refund Payment Entry failed for {return_inv_name}",
-            )
-            # Don't roll back -- the return + replacement are already valid.
-            # Surface as an explicit error so cashier resolves the refund manually.
-            frappe.throw(
-                frappe._(
-                    "Return and replacement processed, but the refund Payment Entry "
-                    "for {0} failed. Issue the {1} refund manually before closing the till."
-                ).format(
-                    fmt_money(refund_amount, currency=_cur),
-                    fmt_money(refund_amount, currency=_cur),
-                ),
-                title=frappe._("Manual Refund Required"),
-            )
+        frappe.has_permission("Payment Entry", "create", throw=True)
+        frappe.has_permission("Payment Entry", "submit", throw=True)
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+        pe = get_payment_entry("Sales Invoice", return_inv_name)
+        pe.payment_type = "Pay"
+        pe.paid_amount = refund_amount
+        pe.received_amount = refund_amount
+        pe.mode_of_payment = refund_mop
+        pe.reference_no = f"REFUND-{return_inv_name}"
+        pe.reference_date = nowdate()
+        pe.insert()
+        pe.submit()
+        refund_pe_name = pe.name
 
     # ── 7. Audit ───────────────────────────────────────────────────────────
     try:
@@ -6508,6 +6855,10 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
     When allow_fifo_override=1 the FIFO check is skipped (user has already
     confirmed the override in the UI); the exception is logged via log_fifo_override.
     """
+    assert_store_scope(
+        warehouse=warehouse,
+        company=frappe.db.get_value("Warehouse", warehouse, "company"),
+    )
     # IMEIs / barcodes are stored as strings; coerce in case the client sent
     # a JSON number for an all-digit IMEI (e.g. 35600220100003).
     serial_no = str(serial_no or "").strip()
@@ -6601,13 +6952,19 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
 
     return {"valid": True, "serial_no": serial_no, "item_code": item_code}
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_date, pos_profile=None) -> dict:
     """Record a cashier-confirmed FIFO override exception.
 
     Called from the JS confirm dialog when the user chooses to proceed despite
     the FIFO warning.  Logs to CH Business Audit Log and notifies RSM/ASM.
     """
+    assert_store_scope(
+        warehouse=warehouse,
+        company=frappe.db.get_value("Warehouse", warehouse, "company"),
+    )
+    if pos_profile:
+        assert_pos_profile_scope(pos_profile)
     serial_no = str(serial_no or "").strip()
     oldest_serial = str(oldest_serial or "").strip()
     frappe.has_permission("Sales Invoice", "create", throw=True)
@@ -6649,6 +7006,36 @@ def check_serial_returnable(serial_no, original_invoice=None) -> dict:
     serial_no = str(serial_no or "").strip()
     if not frappe.db.exists("Serial No", serial_no):
         return {"returnable": False, "reason": frappe._("Serial No {0} does not exist").format(serial_no)}
+    frappe.has_permission("Serial No", "read", throw=True)
+
+    if original_invoice:
+        invoice = frappe.get_doc("Sales Invoice", original_invoice)
+        if not is_privileged_user():
+            invoice.check_permission("read")
+        # READ path (returnability check): tolerate disabled POS Profile.
+        assert_sales_invoice_scope(original_invoice, allow_disabled=True)
+        serial_on_invoice = frappe.db.sql(
+            """
+            SELECT 1
+              FROM `tabSales Invoice Item`
+             WHERE parent = %(invoice)s
+               AND FIND_IN_SET(
+                    %(serial_no)s,
+                    REPLACE(REPLACE(IFNULL(serial_no, ''), CHAR(13), ''), CHAR(10), ',')
+               ) > 0
+             LIMIT 1
+            """,
+            {"invoice": original_invoice, "serial_no": serial_no},
+        )
+        if not serial_on_invoice:
+            return {
+                "returnable": False,
+                "reason": _("Serial No {0} does not belong to invoice {1}.").format(
+                    serial_no, original_invoice
+                ),
+            }
+    elif not is_privileged_user():
+        frappe.throw(_("Original invoice is required to check a serial return."), frappe.PermissionError)
 
     sn = frappe.db.get_value(
         "Serial No", serial_no,
@@ -6724,7 +7111,7 @@ def check_serial_returnable(serial_no, original_invoice=None) -> dict:
 
 
 # ── Repair / Job Assignment from POS ────────────────────────
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_repair_job_from_pos(service_request) -> dict:
     """Accept a Service Request and create Job Assignment in one step from POS."""
     frappe.has_permission("Service Request", "write", throw=True)
@@ -6762,8 +7149,10 @@ def create_repair_job_from_pos(service_request) -> dict:
 @frappe.whitelist()
 def get_store_repairs(pos_profile) -> dict:
     """Get open Service Requests and Job Assignments for the store."""
+    assert_pos_profile_scope(pos_profile)
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     warehouse = profile.warehouse
+    repair_limit = max(1, min(cint(get_control_setting("store_repair_result_limit", 50)), 200))
 
     # Open Service Requests for this store
     service_requests = frappe.db.get_all(
@@ -6775,36 +7164,60 @@ def get_store_repairs(pos_profile) -> dict:
         fields=[
             "name", "customer", "customer_name", "device_item", "serial_no",
             "issue_category", "status", "decision", "priority",
-            "service_order", "creation",
+            "service_order", "creation", "estimated_cost", "service_invoice",
         ],
         order_by="creation desc",
-        limit=30,
+        limit_page_length=repair_limit,
     )
 
-    # Enrich with Job Assignment info
+    service_orders = sorted({sr.service_order for sr in service_requests if sr.service_order})
+    assignments_by_order = {}
+    if service_orders:
+        assignments = frappe.db.sql(
+            """
+            SELECT service_order, name, assignment_status, service_engineer
+              FROM (
+                    SELECT service_order, name, assignment_status, service_engineer,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY service_order
+                               ORDER BY creation DESC, name DESC
+                           ) AS rn
+                      FROM `tabJob Assignment`
+                     WHERE service_order IN %(service_orders)s
+                   ) ranked
+             WHERE rn = 1
+            """,
+            {"service_orders": service_orders},
+            as_dict=True,
+        )
+        assignments_by_order = {row.service_order: row for row in assignments}
+
+    request_names = [sr.name for sr in service_requests]
+    legacy_billed = set()
+    if request_names:
+        legacy_billed = set(frappe.db.sql(
+            """
+            SELECT DISTINCT sr.name
+              FROM `tabService Request` sr
+              JOIN `tabSales Invoice Item` sii
+                ON sii.docstatus = 1
+               AND sii.description LIKE CONCAT('%%', sr.name, '%%')
+             WHERE sr.name IN %(request_names)s
+             LIMIT %(repair_limit)s
+            """,
+            {"request_names": request_names, "repair_limit": repair_limit},
+            pluck=True,
+        ))
+
     for sr in service_requests:
         sr["job_assignment"] = None
-        sr["billed"] = False
-        sr["estimated_cost"] = frappe.db.get_value("Service Request", sr.name, "estimated_cost") or 0
-        if sr.service_order:
-            ja = frappe.db.get_value(
-                "Job Assignment",
-                {"service_order": sr.service_order},
-                ["name", "assignment_status", "service_engineer"],
-                as_dict=True,
-            )
-            if ja:
-                sr["job_assignment"] = ja.name
-                sr["job_status"] = ja.assignment_status
-                sr["technician"] = ja.service_engineer
-        # Check if already billed via Sales Invoice or Sales Invoice
-        sr["billed"] = bool(frappe.db.get_value(
-            "Sales Invoice Item",
-            {"description": ["like", f"%{sr.name}%"], "docstatus": 1},
-            "parent",
-        ) or frappe.db.get_value(
-            "Service Request", sr.name, "service_invoice"
-        ))
+        sr["estimated_cost"] = flt(sr.estimated_cost)
+        ja = assignments_by_order.get(sr.service_order)
+        if ja:
+            sr["job_assignment"] = ja.name
+            sr["job_status"] = ja.assignment_status
+            sr["technician"] = ja.service_engineer
+        sr["billed"] = bool(sr.service_invoice or sr.name in legacy_billed)
 
     return service_requests
 
@@ -6892,7 +7305,7 @@ def _validate_service_cart_rows(service_billing, customer):
         _enforce_service_billing_floor(sr_doc, flt(amount))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile,
                            customer="Walk-in Customer", service_order=None, upi_txn_id=None,
                            remote_otp=None) -> dict:
@@ -6901,12 +7314,25 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     Marks Service Request as billed after invoice submission.
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "submit", throw=True)
+    assert_pos_profile_scope(pos_profile)
     amount = flt(amount)
     if amount <= 0:
         frappe.throw(frappe._("Repair charge must be greater than zero"))
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    sr_doc = frappe.get_doc("Service Request", service_request)
+    sr_doc = _assert_service_request_scope(service_request, permission="write")
+    if sr_doc.get("company") and sr_doc.company != profile.company:
+        frappe.throw(_("Service Request belongs to another company."), frappe.PermissionError)
+    if customer != sr_doc.customer:
+        frappe.throw(_("Repair payment customer must match the Service Request."), frappe.PermissionError)
+    if service_order and service_order != sr_doc.service_order:
+        frappe.throw(_("Service Order does not match the Service Request."), frappe.PermissionError)
+    configured_modes = {
+        row.mode_of_payment for row in (profile.payments or []) if row.mode_of_payment
+    }
+    if mode_of_payment not in configured_modes:
+        frappe.throw(_("Payment mode is not configured on this POS Profile."))
 
     # Guard: bill at the device's home store, or with customer OTP consent
     try:
@@ -6983,7 +7409,7 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
         if _active and _active.get("name"):
             inv.custom_ch_pos_session = _active.get("name")
 
-    inv.insert(ignore_permissions=True)
+    inv.insert()
     # BRD POS exception: POS invoices bypass Maker-Checker (BRD Section 3.1).
     # Use the workflow's own "POS Direct Submit" action — force-setting
     # workflow_state trips validate_workflow's direct-transition guard.
@@ -7002,10 +7428,15 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
         inv.submit()
 
     # Mark service request as billed
-    try:
-        frappe.db.set_value("Service Request", service_request, "service_invoice", inv.name, update_modified=False)
-    except Exception:
-        pass  # custom field may not exist yet
+    if not sr_doc.meta.has_field("service_invoice"):
+        frappe.throw(_("Service Request billing link is not configured."))
+    frappe.db.set_value(
+        "Service Request",
+        service_request,
+        "service_invoice",
+        inv.name,
+        update_modified=False,
+    )
 
     # Billed repairs close their Service Order (submit + workflow Closed) so
     # they don't linger as drafts with a QC-Pass badge.
@@ -7020,19 +7451,23 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     try:
         _get_active_session = _get_active_session_log(pos_profile)
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Repair invoice session activity log failed")
 
     return {"invoice": inv.name, "grand_total": inv.grand_total}
 
 
 @frappe.whitelist()
-def get_repair_closure_data(service_request) -> dict:
+def get_repair_closure_data(service_request, pos_profile=None) -> dict:
     """Return all data needed by the Repair Closure Dialog:
     technician, spare parts, service items, solutions, estimated cost, customer, SO/JA names.
     """
-    sr = frappe.get_doc("Service Request", service_request)
+    sr = _assert_service_request_scope(service_request, permission="read")
+    if pos_profile:
+        anchors = assert_pos_profile_scope(pos_profile)
+        if sr.get("company") and sr.company != anchors.get("company"):
+            frappe.throw(_("Service Request belongs to another company."), frappe.PermissionError)
 
-    # Get store-specific users from CH Store mapping; fall back to role-based global list
+    # Get store-specific users from the CH Store mapping.
     _sr_warehouse = sr.source_warehouse or ""
     _store_name = None
     if _sr_warehouse:
@@ -7051,12 +7486,7 @@ def get_repair_closure_data(service_request) -> dict:
                 r.full_name = frappe.db.get_value("User", r.name, "full_name") or r.name
         eng_users = _rows
     else:
-        eng_users = frappe.db.sql("""
-            SELECT DISTINCT u.name, u.full_name FROM `tabUser` u
-            JOIN `tabHas Role` hr ON hr.parent = u.name
-            WHERE hr.role IN ('Service Engineer','Service Manager','Technician') AND u.enabled=1
-            ORDER BY u.full_name
-        """, as_dict=True)
+        eng_users = []
 
     # --- Spare parts: prefer spare_lines (new), fall back to spare_parts (legacy) ---
     spare_parts = []
@@ -7182,7 +7612,71 @@ def _repair_billing_location(sr) -> dict:
         return {"at_home_store": True, "requires_remote_otp": False, "otp_verified": False}
 
 
-@frappe.whitelist()
+def _normalize_repair_spare_parts(sr, requested_parts) -> list[dict]:
+    if not isinstance(requested_parts, list):
+        frappe.throw(_("Spare parts must be a list."))
+    max_rows = max(
+        1,
+        min(cint(get_control_setting("repair_max_spare_rows", 100) or 100), 500),
+    )
+    if len(requested_parts) > max_rows:
+        frappe.throw(_("A repair closure may contain at most {0} spare rows.").format(max_rows))
+
+    authorized = {}
+    for row in sr.get("spare_lines", []) or []:
+        if row.status == "Damaged" or not row.spare_item:
+            continue
+        authorized[row.spare_item] = {
+            "item_code": row.spare_item,
+            "item_name": row.item_name or row.spare_item,
+            "qty": flt(row.qty) or 1,
+            "uom": row.get("uom") or "Nos",
+            "rate": flt(row.rate),
+        }
+    for row in sr.get("spare_parts", []) or []:
+        if not row.spare_part_item:
+            continue
+        authorized.setdefault(
+            row.spare_part_item,
+            {
+                "item_code": row.spare_part_item,
+                "item_name": row.item_name or row.spare_part_item,
+                "qty": flt(row.qty) or 1,
+                "uom": row.get("uom") or "Nos",
+                "rate": flt(row.rate),
+            },
+        )
+
+    normalized = []
+    seen = set()
+    for part in requested_parts:
+        if not isinstance(part, dict):
+            frappe.throw(_("Each spare part must be an object."))
+        item_code = str(part.get("spare_part_item") or "").strip()
+        source = authorized.get(item_code)
+        if not source:
+            frappe.throw(_("Spare part {0} is not authorized on this Service Request.").format(item_code))
+        if item_code in seen:
+            frappe.throw(_("Spare part {0} appears more than once.").format(item_code))
+        seen.add(item_code)
+        qty = flt(part.get("qty"))
+        if qty <= 0 or qty > source["qty"] + 0.0001:
+            frappe.throw(_("Invalid quantity for spare part {0}.").format(item_code))
+        if part.get("rate") is not None and abs(flt(part.get("rate")) - source["rate"]) > 0.005:
+            frappe.throw(_("Spare part rate must match the authorized Service Request rate."))
+        normalized.append(
+            {
+                "spare_part_item": item_code,
+                "item_name": source["item_name"],
+                "qty": qty,
+                "uom": source["uom"],
+                "rate": source["rate"],
+            }
+        )
+    return normalized
+
+
+@frappe.whitelist(methods=["POST"])
 def close_repair_order(service_request, pos_profile, payments, qc_result,
                        qc_remarks="", delivery_ack=0, delivery_note="",
                        technician="", spare_parts=None, service_charge=0,
@@ -7202,6 +7696,8 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     qc_result: "Pass" | "Fail" | "Not Repairable" | "Customer Cancelled"
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
+    frappe.has_permission("Sales Invoice", "submit", throw=True)
+    assert_pos_profile_scope(pos_profile)
 
     if isinstance(payments, str):
         payments = frappe.parse_json(payments)
@@ -7211,19 +7707,28 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     payments = payments or []
     spare_parts = spare_parts or []
     service_charge = flt(service_charge)
+    if qc_result not in ("Pass", "Fail", "Not Repairable", "Customer Cancelled"):
+        frappe.throw(_("Invalid QC result."))
 
-    total_parts = sum(flt(p.get("qty", 1)) * flt(p.get("rate", 0)) for p in spare_parts)
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    sr = _assert_service_request_scope(service_request, permission="write")
+    if sr.get("company") and sr.company != profile.company:
+        frappe.throw(_("Service Request belongs to another company."), frappe.PermissionError)
+    spare_parts = _normalize_repair_spare_parts(sr, spare_parts)
+    total_parts = sum(flt(p["qty"]) * flt(p["rate"]) for p in spare_parts)
     grand_total = service_charge + total_parts
     payment_total = sum(flt(p.get("amount", 0)) for p in payments)
-
     if grand_total <= 0:
         frappe.throw(frappe._("Total charge must be greater than zero"))
+    _enforce_service_billing_floor(sr, grand_total)
     if abs(payment_total - grand_total) > 0.01:
         frappe.throw(frappe._("Payment total {0} does not match invoice total {1}").format(
             fmt_money(payment_total), fmt_money(grand_total)))
-
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    sr = frappe.get_doc("Service Request", service_request)
+    configured_modes = {
+        row.mode_of_payment for row in (profile.payments or []) if row.mode_of_payment
+    }
+    if any((p.get("mode_of_payment") or "").strip() not in configured_modes for p in payments):
+        frappe.throw(_("Every payment mode must be configured on this POS Profile."))
 
     # Guard: don't double-bill
     if frappe.db.get_value("Service Request", service_request, "service_invoice"):
@@ -7239,32 +7744,22 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
 
     # 1 — Assign technician
     if technician and sr.service_order:
+        source_warehouse = sr.get("source_warehouse") or profile.warehouse
+        source_store = frappe.db.get_value("CH Store", {"warehouse": source_warehouse}, "name")
+        if not source_store or not frappe.db.exists(
+            "CH Store User",
+            {
+                "parent": source_store,
+                "parenttype": "CH Store",
+                "user": technician,
+            },
+        ):
+            frappe.throw(_("Technician is not assigned to the Service Request store."))
         ja = frappe.db.get_value("Job Assignment", {"service_order": sr.service_order}, "name")
         if ja:
+            ja_doc = frappe.get_doc("Job Assignment", ja)
+            ja_doc.check_permission("write")
             frappe.db.set_value("Job Assignment", ja, "service_engineer", technician, update_modified=False)
-
-    # 2 — Update spare parts on Service Request
-    if spare_parts:
-        frappe.db.delete("Service Request Spare Part", {
-            "parent": service_request, "parenttype": "Service Request"
-        })
-        for idx, part in enumerate(spare_parts, start=1):
-            qty = flt(part.get("qty", 1))
-            rate = flt(part.get("rate", 0))
-            frappe.get_doc({
-                "doctype": "Service Request Spare Part",
-                "parent": service_request,
-                "parentfield": "spare_parts",
-                "parenttype": "Service Request",
-                "idx": idx,
-                "spare_part_item": part.get("spare_part_item"),
-                "item_name": (part.get("item_name")
-                              or frappe.db.get_value("Item", part.get("spare_part_item"), "item_name")),
-                "qty": qty,
-                "uom": part.get("uom") or "Nos",
-                "rate": rate,
-                "amount": qty * rate,
-            }).db_insert()
 
     # 3 — Update QC on Sales Order
     qc_wf_map = {
@@ -7274,6 +7769,13 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
         "Customer Cancelled": ("Customer Cancelled", "Customer Cancelled"),
     }
     if sr.service_order and qc_result in qc_wf_map:
+        service_order_doc = frappe.get_doc("Sales Order", sr.service_order)
+        service_order_doc.check_permission("write")
+        service_warehouses = [service_order_doc.get("set_warehouse")]
+        service_warehouses.extend(
+            row.warehouse for row in (service_order_doc.items or []) if row.warehouse
+        )
+        assert_any_warehouse_scope(service_warehouses, company=service_order_doc.company)
         qc_status, wf_state = qc_wf_map[qc_result]
         frappe.db.set_value("Sales Order", sr.service_order, {
             "qc_status": qc_status,
@@ -7359,7 +7861,7 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     if getattr(profile, "taxes_and_charges", None):
         inv.taxes_and_charges = profile.taxes_and_charges
 
-    inv.insert(ignore_permissions=True)
+    inv.insert()
     # BRD POS exception: POS invoices bypass Maker-Checker (BRD Section 3.1)
     inv.workflow_state = "Approved"
     inv.custom_si_approval_state = "Approved"
@@ -7368,30 +7870,26 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     # 5 — Stock Entry for spare parts consumption
     stock_entry_name = None
     if spare_parts and profile.warehouse:
-        try:
-            se = frappe.new_doc("Stock Entry")
-            se.stock_entry_type = "Material Issue"
-            se.company = profile.company
-            se.posting_date = nowdate()
-            se.remarks = f"Spare parts consumed for {service_request}"
-            for part in spare_parts:
-                if not flt(part.get("qty", 0)):
-                    continue
-                se.append("items", {
-                    "item_code": part["spare_part_item"],
-                    "qty": flt(part.get("qty", 1)),
-                    "uom": part.get("uom") or "Nos",
-                    "s_warehouse": profile.warehouse,
-                    "basic_rate": flt(part.get("rate", 0)),
-                })
-            se.insert(ignore_permissions=True)
-            se.submit()
-            stock_entry_name = se.name
-        except Exception as e:
-            frappe.log_error(
-                f"Repair closure stock entry failed for {service_request}: {e}",
-                "Repair Closure",
-            )
+        frappe.has_permission("Stock Entry", "create", throw=True)
+        frappe.has_permission("Stock Entry", "submit", throw=True)
+        se = frappe.new_doc("Stock Entry")
+        se.stock_entry_type = "Material Issue"
+        se.company = profile.company
+        se.posting_date = nowdate()
+        se.remarks = f"Spare parts consumed for {service_request}"
+        for part in spare_parts:
+            if not flt(part.get("qty", 0)):
+                continue
+            se.append("items", {
+                "item_code": part["spare_part_item"],
+                "qty": flt(part.get("qty", 1)),
+                "uom": part.get("uom") or "Nos",
+                "s_warehouse": profile.warehouse,
+                "basic_rate": flt(part.get("rate", 0)),
+            })
+        se.insert()
+        se.submit()
+        stock_entry_name = se.name
 
     # 6 — Mark SR closed
     sr_updates = {"service_invoice": inv.name, "status": "Completed"}
@@ -7424,21 +7922,20 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
 @frappe.whitelist()
 def check_imei_blacklist(imei) -> dict:
     """Pre-check if an IMEI is blacklisted before starting a buyback assessment."""
+    frappe.has_permission("Buyback Assessment", "create", throw=True)
     if not imei:
         return {"blacklisted": False}
-    try:
-        from buyback.buyback.doctype.buyback_imei_blacklist.buyback_imei_blacklist import is_imei_blacklisted
-        entry = is_imei_blacklisted(imei)
-        if entry:
-            return {"blacklisted": True, "reason": entry.reason, "reference": entry.reference_number or ""}
-    except ImportError:
-        pass
+    from buyback.buyback.doctype.buyback_imei_blacklist.buyback_imei_blacklist import is_imei_blacklisted
+
+    entry = is_imei_blacklisted(imei)
+    if entry:
+        return {"blacklisted": True, "reason": entry.reason, "reference": entry.reference_number or ""}
     return {"blacklisted": False}
 
 
 @frappe.whitelist()
 def calculate_buyback_valuation(item_code, condition_checks) -> dict:
-    """Calculate buyback valuation using ch_erp_buyback's centralized pricing engine.
+    """Calculate buyback valuation using the configured buyback pricing engine.
 
     condition_checks: dict with keys like screen, body, buttons, charging,
     camera, speaker_mic — each True (pass) or False (fail).
@@ -7446,104 +7943,64 @@ def calculate_buyback_valuation(item_code, condition_checks) -> dict:
     """
     if isinstance(condition_checks, str):
         condition_checks = frappe.parse_json(condition_checks)
+    condition_checks = condition_checks or {}
+    frappe.has_permission("Buyback Assessment", "create", throw=True)
 
-    # Auto-grade from condition checks
-    check_labels = {
-        "screen": "Screen", "body": "Body", "buttons": "Buttons",
-        "charging": "Charging", "camera": "Camera", "speaker_mic": "Speaker/Mic",
-    }
-    fail_count = sum(1 for v in condition_checks.values() if not v)
-    fail_pct = (fail_count / max(len(condition_checks), 1)) * 100
-
-    if fail_count == 0:
-        grade = "A"
-    elif fail_count <= 1 and fail_pct <= 20:
-        grade = "B"
-    elif fail_count <= 2 and fail_pct <= 40:
-        grade = "C"
-    elif fail_pct <= 60:
-        grade = "D"
-    else:
-        grade = "F"
-
-    # Build diagnostic test format for pricing engine
-    diagnostic_tests = []
-    for key, label in check_labels.items():
-        passed = condition_checks.get(key, True)
-        diagnostic_tests.append({
-            "test_code": key,
+    diagnostic_tests = [
+        {
+            "test_code": str(test_code),
             "result": "Pass" if passed else "Fail",
-        })
+        }
+        for test_code, passed in sorted(condition_checks.items())
+    ]
 
     # Get item metadata for the pricing engine
     brand = frappe.db.get_value("Item", item_code, "brand")
     item_group = frappe.db.get_value("Item", item_code, "item_group")
 
-    try:
-        from buyback.buyback.pricing.engine import calculate_estimated_price
+    provisional_grade = frappe.db.get_value(
+        "Grade Master", {"grade_name": "A"}, "name"
+    )
+    if not provisional_grade:
+        frappe.throw(_("Grade Master is not configured for buyback pricing."))
 
-        result = calculate_estimated_price(
-            item_code=item_code,
-            grade=grade,
-            diagnostic_tests=diagnostic_tests,
-            brand=brand,
-            item_group=item_group,
+    from buyback.buyback.pricing.engine import calculate_estimated_price
+
+    result = calculate_estimated_price(
+        item_code=item_code,
+        grade=provisional_grade,
+        diagnostic_tests=diagnostic_tests,
+        brand=brand,
+        item_group=item_group,
+    )
+    base_price = flt(result.get("base_price", 0))
+    final_price = flt(result.get("estimated_price", 0))
+    grade = result.get("grade_letter")
+    if not base_price or not grade:
+        frappe.throw(
+            _("Buyback pricing is not configured for item {0}.").format(item_code),
+            title=_("Pricing Configuration Required"),
         )
-        return {
-            "base_price": flt(result.get("base_price", 0)),
-            "deductions": result.get("deductions", []),
-            "total_deduction": flt(result.get("total_deductions", 0)),
-            "final_price": flt(result.get("estimated_price", 0)),
-            "grade": grade,
-        }
-    except ImportError:
-        frappe.log_error(
-            "ch_erp_buyback not installed — using fallback buyback pricing",
-            "POS Buyback Fallback",
-        )
-        return _fallback_buyback_valuation(item_code, grade, condition_checks)
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "POS Buyback Pricing Error")
-        return _fallback_buyback_valuation(item_code, grade, condition_checks)
-
-
-def _fallback_buyback_valuation(item_code, grade, condition_checks):
-    """Fallback when ch_erp_buyback pricing engine is unavailable."""
-    base_price = flt(frappe.db.get_value(
-        "CH Item Price",
-        {"item_code": item_code, "channel": "Buyback", "status": "Active"},
-        "selling_price",
-    ))
-    if not base_price:
-        selling = flt(frappe.db.get_value(
-            "CH Item Price",
-            {"item_code": item_code, "channel": "POS", "status": "Active"},
-            "selling_price",
-        ))
-        base_price = flt(selling * 0.4)
-
-    # Simple grade-based deduction as fallback
-    grade_pct = {"A": 0, "B": 10, "C": 25, "D": 40, "F": 70}
-    deduction_pct = grade_pct.get(grade, 50)
-    total_deduction = flt(base_price * deduction_pct / 100)
-    final_price = max(0, flt(base_price - total_deduction))
-
     return {
         "base_price": base_price,
-        "deductions": [{"label": f"Grade {grade} adjustment", "pct": deduction_pct, "amount": total_deduction}],
-        "total_deduction": total_deduction,
+        "deductions": result.get("deductions", []),
+        "total_deduction": flt(result.get("total_deductions", 0)),
         "final_price": final_price,
         "grade": grade,
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_buyback_assessment_with_grading(
     mobile_no, item_code, imei_serial=None, customer=None,
-    condition_checks=None, kyc_id_type=None, kyc_id_number=None, kyc_name=None
+    condition_checks=None, kyc_id_type=None, kyc_id_number=None, kyc_name=None,
+    pos_profile=None,
 ) -> dict:
     """Create a Buyback Assessment with condition grading and KYC from POS."""
     frappe.has_permission("Buyback Assessment", "create", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+    if customer:
+        _assert_customer_pos_access(customer, pos_profile, action=_("use"))
     if isinstance(condition_checks, str):
         condition_checks = frappe.parse_json(condition_checks)
     condition_checks = condition_checks or {}
@@ -7575,13 +8032,9 @@ def create_buyback_assessment_with_grading(
 
     doc = frappe.new_doc("Buyback Assessment")
     doc.source = "Store Manual"
-    _pos_profile = frappe.form_dict.get("pos_profile") or ""
-    _store = ""
-    if _pos_profile:
-        _store = frappe.db.get_value("POS Profile", _pos_profile, "warehouse") or ""
-    if not _store:
-        _store = frappe.defaults.get_user_default("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse") or ""
-    doc.store = _store
+    doc.store = anchors.get("warehouse") or anchors.get("store") or ""
+    if doc.meta.has_field("company"):
+        doc.company = anchors.get("company")
     doc.mobile_no = mobile_no
     doc.customer = customer or ""
     doc.item = item_code
@@ -7634,80 +8087,83 @@ def _build_grading_remarks(condition_checks, valuation, kyc_id_type, kyc_id_numb
         lines.append(f"\n=== KYC ===")
         lines.append(f"  Name: {kyc_name or 'N/A'}")
         lines.append(f"  ID Type: {kyc_id_type}")
-        lines.append(f"  ID Number: {kyc_id_number}")
+        masked_id = "*" * max(len(str(kyc_id_number)) - 4, 0) + str(kyc_id_number)[-4:]
+        lines.append(f"  ID Number: {masked_id}")
 
     return "\n".join(lines)
 
 
 # ── Governance: Manager Approval at POS ──────────────────────────────
 
-@frappe.whitelist()
-def request_manager_approval(mobile_no, purpose, reference_doctype=None, reference_name=None) -> dict:
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=10, seconds=300, methods=["POST"], ip_based=True)
+def request_manager_approval(
+    mobile_no,
+    purpose,
+    pos_profile=None,
+    item_code=None,
+    rate=None,
+    qty=1,
+    reference_doctype=None,
+    reference_name=None,
+) -> dict:
     """Generate an OTP for manager approval at POS.
 
     Used when a discount exceeds limits, exchange override is needed, etc.
     The OTP is sent to the store manager's mobile and must be verified
     before the transaction can proceed.
     """
-    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
     from ch_pos.audit import log_business_event
+    from ch_pos.api.manager_approval import request_approval
 
-    mobile_no = validate_indian_phone(mobile_no, "Manager Mobile Number")
-    if not (purpose or "").strip():
-        frappe.throw(frappe._("Approval purpose is required."), title=frappe._("Missing Purpose"))
-
-    otp = CHOTPLog.generate_otp(
+    result = request_approval(
         mobile_no=mobile_no,
         purpose=purpose,
+        pos_profile=pos_profile,
+        item_code=item_code,
+        rate=rate,
+        qty=qty,
         reference_doctype=reference_doctype,
         reference_name=reference_name,
     )
     try:
         log_business_event(
             event_type="Other",
-            ref_doctype=reference_doctype or "CH OTP Log",
-            ref_name=reference_name,
+            ref_doctype=reference_doctype or "POS Profile",
+            ref_name=reference_name or pos_profile,
             before="OTP Requested",
             after=purpose,
             remarks=f"Manager approval OTP requested for {purpose}",
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Manager approval request audit failed")
-    # Send OTP across all channels — SMS, WhatsApp and email.
-    channels = {}
-    try:
-        from buyback.buyback.whatsapp_notifications import send_otp as _send_otp
-        channels = _send_otp(mobile_no, otp, purpose,
-                             ref_doctype=reference_doctype or "CH OTP Log",
-                             ref_name=reference_name or "")
-    except Exception:
-        frappe.log_error(title="Manager OTP delivery failed")
-    return {"sent": True, "mobile": mobile_no[:3] + "****" + mobile_no[-3:],
-            "otp_generated": bool(otp), "channels": channels}
+    return result
 
 
-@frappe.whitelist()
-def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None, reference_name=None, approval_reason=None) -> dict:
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=15, seconds=300, methods=["POST"], ip_based=True)
+def verify_manager_approval(
+    mobile_no=None,
+    purpose=None,
+    otp_code=None,
+    reference_doctype=None,
+    reference_name=None,
+    approval_reason=None,
+    approval_request=None,
+) -> dict:
     """Verify a manager OTP for POS approval.
 
     Returns {"valid": True/False, "message": str}.
     """
-    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
     from ch_pos.audit import log_business_event
+    from ch_pos.api.manager_approval import verify_approval
 
-    mobile_no = validate_indian_phone(mobile_no, "Manager Mobile Number")
-    result = CHOTPLog.verify_otp(
-        mobile_no=mobile_no,
-        purpose=purpose,
-        otp_code=otp_code,
-        reference_doctype=reference_doctype,
-        reference_name=reference_name,
-    )
+    result = verify_approval(approval_request=approval_request, otp_code=otp_code)
 
     try:
         log_business_event(
             event_type="Exception Approved" if result.get("valid") else "Other",
-            ref_doctype=reference_doctype or "CH OTP Log",
+            ref_doctype=reference_doctype or "POS Profile",
             ref_name=reference_name,
             before="OTP Pending",
             after="Verified" if result.get("valid") else "Rejected",
@@ -7718,11 +8174,19 @@ def verify_manager_approval(mobile_no, purpose, otp_code, reference_doctype=None
     return result
 
 
-@frappe.whitelist()
-def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification", customer_name="Customer", email_id=None) -> dict:
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=5, seconds=300, methods=["POST"], ip_based=True)
+def request_customer_whatsapp_otp(
+    mobile_no,
+    customer_name="Customer",
+    email_id=None,
+    company=None,
+) -> dict:
     """Generate and send OTP for customer WhatsApp verification before quick create."""
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
 
+    frappe.has_permission("Customer", "create", throw=True)
+    _assert_company_scope(company, _("request customer verification"))
     mobile_no = validate_indian_phone(mobile_no)
     to_email = (email_id or "").strip()
     if to_email:
@@ -7748,8 +8212,7 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
     sent_email = False
     try:
         from ch_item_master.ch_core.whatsapp import get_whatsapp_settings, send_template_message
-        _company = frappe.defaults.get_user_default("Company")
-        wa_settings = get_whatsapp_settings(_company)
+        wa_settings = get_whatsapp_settings(company)
         if wa_settings and cint(wa_settings.enabled):
             template_name = wa_settings.get("general_otp") or "ch_otp_verification"
             send_template_message(
@@ -7760,7 +8223,7 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
                 ref_doctype="Customer",
                 ref_name="",
                 enqueue=False,
-                company=_company,
+                company=company,
             )
             sent_whatsapp = True
     except Exception:
@@ -7792,7 +8255,8 @@ def request_customer_whatsapp_otp(mobile_no, purpose="POS Customer Verification"
 
 # ── Discount Authorisation ───────────────────────────────────────────────────
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=5, seconds=300, methods=["POST"], ip_based=True)
 def verify_discount_auth(
     pos_profile: str,
     authorizer_executive: str,
@@ -7813,18 +8277,26 @@ def verify_discount_auth(
     from frappe.utils.password import check_password
     from ch_pos.audit import log_business_event
 
-    # Resolve store from POS Profile Extension
-    store = frappe.db.get_value("POS Profile Extension", {"pos_profile": pos_profile}, "store")
+    anchors = assert_pos_profile_scope(pos_profile)
+    store = anchors.get("store")
+    if not store:
+        frappe.throw(_("POS Profile has no CH Store mapping."), frappe.PermissionError)
 
     # Get executive record — must belong to this store and be active
-    filters = {"name": authorizer_executive, "is_active": 1}
-    if store:
-        filters["store"] = store
+    filters = {
+        "name": authorizer_executive,
+        "is_active": 1,
+        "store": store,
+        "company": anchors.get("company"),
+    }
 
     exec_doc = frappe.db.get_value(
         "POS Executive",
         filters,
-        ["name", "executive_name", "user", "role", "can_give_discount", "max_discount_pct"],
+        [
+            "name", "executive_name", "user", "role", "store", "company",
+            "can_give_discount", "max_discount_pct",
+        ],
         as_dict=True,
     )
     if not exec_doc:
@@ -7835,6 +8307,13 @@ def verify_discount_auth(
             frappe._("No Frappe user linked to {0}. Contact administrator.").format(exec_doc.executive_name),
             title=frappe._("Configuration Error"),
         )
+
+    assert_store_scope(
+        store=exec_doc.store,
+        warehouse=anchors.get("warehouse"),
+        company=exec_doc.company,
+        user=exec_doc.user,
+    )
 
     # Verify password
     try:
@@ -7853,6 +8332,14 @@ def verify_discount_auth(
     effective_pct = flt(discount_pct)
     if effective_pct <= 0 and flt(discount_amount) > 0 and flt(net_total) > 0:
         effective_pct = flt(discount_amount) / flt(net_total) * 100
+    if (
+        flt(net_total) <= 0
+        or effective_pct <= 0
+        or effective_pct > 100
+        or flt(discount_amount) < 0
+        or (flt(discount_pct) > 0 and flt(discount_amount) > 0)
+    ):
+        frappe.throw(_("Discount authorization request is invalid."))
 
     max_pct = flt(exec_doc.max_discount_pct)
     if max_pct > 0 and effective_pct > max_pct:
@@ -7862,6 +8349,20 @@ def verify_discount_auth(
             ),
             title=frappe._("Exceeds Limit"),
         )
+
+    from ch_pos.api.manager_approval import issue_action_grant
+
+    approval_token = issue_action_grant(
+        "discount",
+        {
+            "pos_profile": pos_profile,
+            "discount_pct": flt(discount_pct),
+            "discount_amount": flt(discount_amount),
+            "net_total": flt(net_total),
+            "manager_user": exec_doc.user,
+            "manager_executive": exec_doc.name,
+        },
+    )
 
     # Audit trail
     try:
@@ -7880,13 +8381,14 @@ def verify_discount_auth(
         "authorized": True,
         "authorized_executive": exec_doc.name,
         "authorized_by_name": exec_doc.executive_name,
+        "approval_token": approval_token,
         "role": exec_doc.role,
         "max_pct": max_pct,
         "message": frappe._("Authorised by {0}").format(exec_doc.executive_name),
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Verification") -> dict:
     """Verify customer OTP used during POS quick customer creation."""
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
@@ -7894,27 +8396,52 @@ def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Veri
     mobile_no = validate_indian_phone(mobile_no)
     purpose = "POS Customer Verification"
 
-    return CHOTPLog.verify_otp(
+    result = CHOTPLog.verify_otp(
         mobile_no=mobile_no,
         purpose=purpose,
         otp_code=str(otp_code or "").strip(),
         reference_doctype="Customer",
         reference_name="",
     )
+    if not result.get("valid"):
+        return result
+    if result.get("shadow_live"):
+        frappe.throw(
+            _("A live customer OTP is required."),
+            frappe.PermissionError,
+        )
+    from ch_pos.api.manager_approval import issue_action_grant
+
+    return {
+        "valid": True,
+        "message": result.get("message") or _("OTP verified."),
+        "verification_token": issue_action_grant(
+            "customer_otp",
+            {"mobile_no": mobile_no},
+        ),
+    }
 
 
 def _resolve_pos_city_state(city, state):
     city = (city or "").strip()
     state = (state or "").strip()
+    if state and frappe.db.exists("DocType", "CH State"):
+        state_row = frappe.db.get_value(
+            "CH State",
+            {"state_name": state},
+            ["name", "state_name"],
+            as_dict=True,
+        ) or frappe.db.get_value(
+            "CH State",
+            state,
+            ["name", "state_name"],
+            as_dict=True,
+        )
+        if not state_row:
+            frappe.throw(_("State {0} is not configured.").format(state))
+        state = state_row.state_name or state_row.name
+
     if not city or not frappe.db.exists("DocType", "CH City"):
-        # Even without a city we still want to canonicalise + ensure the
-        # CH State master row exists when a state was supplied.
-        if state and frappe.db.exists("DocType", "CH State"):
-            try:
-                from ch_item_master.ch_core.doctype.ch_state.ch_state import ensure_state
-                state = ensure_state(state) or state
-            except Exception:
-                pass
         return city, state
 
     city_row = frappe.db.get_value("CH City", city, ["city_name", "state"], as_dict=True)
@@ -7925,34 +8452,39 @@ def _resolve_pos_city_state(city, state):
             ["city_name", "state"],
             as_dict=True,
         )
-    if city_row:
-        city = city_row.city_name or city
-        state = state or city_row.state or ""
-
-    # Canonicalise state via CH State master so customer.state always points
-    # at a valid Link target (Oracle TCA / Dynamics 365 reference-data pattern).
-    if state and frappe.db.exists("DocType", "CH State"):
-        try:
-            from ch_item_master.ch_core.doctype.ch_state.ch_state import ensure_state
-            state = ensure_state(state) or state
-        except Exception:
-            pass
+    if not city_row:
+        frappe.throw(_("City {0} is not configured.").format(city))
+    city = city_row.city_name or city
+    if city_row.state and state and city_row.state != state:
+        frappe.throw(_("City and state do not match."))
+    state = state or city_row.state or ""
 
     return city, state
 
 
 @frappe.whitelist()
-def get_customer_loyalty(customer, company=None) -> dict:
+def get_customer_loyalty(customer, company=None, pos_profile=None) -> dict:
     """Get loyalty balance for a customer using the active company's redemption rate."""
     from ch_item_master.ch_customer_master.loyalty import get_ch_loyalty_info
-    if not company:
-        company = frappe.defaults.get_user_default("Company")
+    frappe.has_permission("Customer", "read", throw=True)
+    if pos_profile:
+        anchors = assert_pos_profile_scope(pos_profile)
+        if company and company != anchors.get("company"):
+            frappe.throw(_("POS Profile belongs to another company."), frappe.PermissionError)
+        company = anchors.get("company")
+        _assert_customer_pos_access(customer, pos_profile, action=_("view"))
+    elif not is_privileged_user():
+        frappe.throw(_("POS Profile is required to view customer loyalty."), frappe.PermissionError)
+    _assert_company_scope(company, _("view customer loyalty"))
     return get_ch_loyalty_info(customer, company=company)
 
 
 @frappe.whitelist()
-def imei_history(serial_no) -> dict:
+def imei_history(serial_no, pos_profile=None) -> dict:
     """Full lifecycle of a serial number / IMEI: sales, returns, service, buyback."""
+    frappe.has_permission("Serial No", "read", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+
     # Coerce — all-digit IMEIs can arrive as JSON numbers.
     serial_no = str(serial_no or "").strip()
 
@@ -7969,6 +8501,38 @@ def imei_history(serial_no) -> dict:
             return {"error": f"No serial number or barcode found for '{serial_no}'"}
 
     sn = frappe.get_doc("Serial No", serial_no)
+    serial_at_profile = sn.warehouse == anchors.get("warehouse")
+    if not serial_at_profile:
+        serial_at_profile = bool(frappe.db.sql(
+            """
+            SELECT 1
+              FROM `tabSales Invoice Item` sii
+              JOIN `tabSales Invoice` si ON si.name = sii.parent
+             WHERE si.docstatus = 1
+               AND si.company = %(company)s
+               AND si.pos_profile = %(pos_profile)s
+               AND FIND_IN_SET(
+                    %(serial_no)s,
+                    REPLACE(REPLACE(IFNULL(sii.serial_no, ''), CHAR(13), ''), CHAR(10), ',')
+               ) > 0
+             LIMIT 1
+            """,
+            {
+                "company": anchors.get("company"),
+                "pos_profile": pos_profile,
+                "serial_no": serial_no,
+            },
+        ))
+    if not serial_at_profile and not is_privileged_user():
+        frappe.throw(_("This serial number is outside the active store."), frappe.PermissionError)
+
+    history_params = {
+        "serial_no": serial_no,
+        "company": anchors.get("company"),
+        "pos_profile": pos_profile,
+        "warehouse": anchors.get("warehouse"),
+        "store": anchors.get("store") or "",
+    }
     out = {
         "serial_no": sn.name,
         "item_code": sn.item_code,
@@ -7988,10 +8552,15 @@ def imei_history(serial_no) -> dict:
                pi.customer, pi.customer_name, pi.posting_date as date
         FROM `tabSales Invoice Item` pii
         JOIN `tabSales Invoice` pi ON pi.name = pii.parent
-        WHERE pii.serial_no LIKE %(sn_pattern)s
+        WHERE FIND_IN_SET(
+                  %(serial_no)s,
+                  REPLACE(REPLACE(IFNULL(pii.serial_no, ''), CHAR(13), ''), CHAR(10), ',')
+              ) > 0
+          AND pi.company = %(company)s
+          AND pi.pos_profile = %(pos_profile)s
           AND pi.docstatus = 1 AND pi.is_return = 0
         ORDER BY pi.posting_date DESC
-    """, {"sn_pattern": f"%{serial_no}%"}, as_dict=True)
+    """, history_params, as_dict=True)
 
     # Returns
     out["returns"] = frappe.db.sql("""
@@ -7999,23 +8568,15 @@ def imei_history(serial_no) -> dict:
                pi.customer, pi.customer_name, pi.posting_date as date
         FROM `tabSales Invoice Item` pii
         JOIN `tabSales Invoice` pi ON pi.name = pii.parent
-        WHERE pii.serial_no LIKE %(sn_pattern)s
+        WHERE FIND_IN_SET(
+                  %(serial_no)s,
+                  REPLACE(REPLACE(IFNULL(pii.serial_no, ''), CHAR(13), ''), CHAR(10), ',')
+              ) > 0
+          AND pi.company = %(company)s
+          AND pi.pos_profile = %(pos_profile)s
           AND pi.docstatus = 1 AND pi.is_return = 1
         ORDER BY pi.posting_date DESC
-    """, {"sn_pattern": f"%{serial_no}%"}, as_dict=True)
-
-    # Sales Invoice items (non-POS)
-    si_sales = frappe.db.sql("""
-        SELECT sii.parent as invoice, sii.item_code, sii.item_name, sii.rate,
-               si.customer, si.customer_name, si.posting_date as date
-        FROM `tabSales Invoice Item` sii
-        JOIN `tabSales Invoice` si ON si.name = sii.parent
-        WHERE sii.serial_no LIKE %(sn_pattern)s
-          AND si.docstatus = 1 AND si.is_return = 0 AND si.is_pos = 0
-        ORDER BY si.posting_date DESC
-    """, {"sn_pattern": f"%{serial_no}%"}, as_dict=True)
-    out["sales"].extend(si_sales)
-    out["sales"].sort(key=lambda x: x.get("date", ""), reverse=True)
+    """, history_params, as_dict=True)
 
     # Service requests  
     out["services"] = frappe.db.sql("""
@@ -8023,18 +8584,23 @@ def imei_history(serial_no) -> dict:
                issue_description, decision, status, service_date as date, estimated_cost
         FROM `tabService Request`
         WHERE (actual_imei = %(sn)s OR serial_no = %(sn)s)
+          AND company = %(company)s
+          AND source_warehouse = %(warehouse)s
           AND docstatus < 2
         ORDER BY creation DESC
-    """, {"sn": serial_no}, as_dict=True)
+    """, {"sn": serial_no, **history_params}, as_dict=True)
 
     # Buyback assessments
     out["buybacks"] = frappe.db.sql("""
         SELECT name, item_name, brand, estimated_grade, estimated_price,
                quoted_price, status, creation as date
         FROM `tabBuyback Assessment`
-        WHERE imei_serial = %(sn)s AND docstatus < 2
+        WHERE imei_serial = %(sn)s
+          AND company = %(company)s
+          AND (store = %(store)s OR store = %(warehouse)s)
+          AND docstatus < 2
         ORDER BY creation DESC
-    """, {"sn": serial_no}, as_dict=True)
+    """, {"sn": serial_no, **history_params}, as_dict=True)
     for b in out["buybacks"]:
         b["price"] = flt(b.get("quoted_price") or b.get("estimated_price"))
         b["grade"] = b.get("estimated_grade", "")
@@ -8043,14 +8609,19 @@ def imei_history(serial_no) -> dict:
 
 
 @frappe.whitelist()
-def customer_360(identifier, company=None) -> dict:
+def customer_360(identifier, company=None, pos_profile=None) -> dict:
     """Complete customer profile: purchases, service requests, buybacks, loyalty."""
     identifier = (identifier or "").strip()
     if not identifier:
         return {"error": "Please enter a phone number, name, or customer ID"}
 
-    if not company:
-        company = frappe.defaults.get_user_default("Company")
+    frappe.has_permission("Customer", "read", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+    if company and company != anchors.get("company"):
+        frappe.throw(_("POS Profile belongs to another company."), frappe.PermissionError)
+    company = anchors.get("company")
+    warehouse = anchors.get("warehouse")
+    store = anchors.get("store")
 
     # Find customer
     customer = None
@@ -8101,6 +8672,8 @@ def customer_360(identifier, company=None) -> dict:
     if not customer:
         return {"error": f"No customer found for '{identifier}'"}
 
+    _assert_customer_pos_access(customer, pos_profile, action=_("view"))
+
     cust_doc = frappe.get_doc("Customer", customer)
     out = {
         "customer": cust_doc.name,
@@ -8142,20 +8715,12 @@ def customer_360(identifier, company=None) -> dict:
         SELECT name, posting_date, grand_total, status,
                (SELECT COUNT(*) FROM `tabSales Invoice Item` WHERE parent = pi.name) as items_count
         FROM `tabSales Invoice` pi
-        WHERE customer = %(customer)s AND docstatus = 1
+        WHERE customer = %(customer)s
+          AND company = %(company)s
+          AND pos_profile = %(pos_profile)s
+          AND docstatus = 1
         ORDER BY posting_date DESC LIMIT 50
-    """, {"customer": customer}, as_dict=True)
-
-    # Also check Sales Invoices (non-POS)
-    si_invoices = frappe.db.sql("""
-        SELECT name, posting_date, grand_total, status,
-               (SELECT COUNT(*) FROM `tabSales Invoice Item` WHERE parent = si.name) as items_count
-        FROM `tabSales Invoice` si
-        WHERE customer = %(customer)s AND docstatus = 1 AND is_pos = 0
-        ORDER BY posting_date DESC LIMIT 20
-    """, {"customer": customer}, as_dict=True)
-    out["invoices"].extend(si_invoices)
-    out["invoices"].sort(key=lambda x: x.get("posting_date", ""), reverse=True)
+    """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
 
     out["total_invoices"] = len(out["invoices"])
     out["total_spent"] = sum(flt(i.get("grand_total", 0)) for i in out["invoices"] if i.get("status") != "Return")
@@ -8165,9 +8730,12 @@ def customer_360(identifier, company=None) -> dict:
         SELECT name, customer_name, device_item_name, issue_category,
                decision, status, service_date, creation, estimated_cost
         FROM `tabService Request`
-        WHERE customer = %(customer)s AND docstatus < 2
+        WHERE customer = %(customer)s
+          AND company = %(company)s
+          AND source_warehouse = %(warehouse)s
+          AND docstatus < 2
         ORDER BY creation DESC LIMIT 30
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company, "warehouse": warehouse}, as_dict=True)
 
     # Buyback Assessments — by customer or mobile
     mobile = cust_doc.mobile_no or ""
@@ -8176,44 +8744,55 @@ def customer_360(identifier, company=None) -> dict:
                quoted_price, status, creation
         FROM `tabBuyback Assessment`
         WHERE (customer = %(customer)s OR mobile_no = %(mobile)s)
+          AND company = %(company)s
+          AND (store = %(store)s OR store = %(warehouse)s)
           AND docstatus < 2
         ORDER BY creation DESC LIMIT 20
-    """, {"customer": customer, "mobile": mobile}, as_dict=True)
+    """, {
+        "customer": customer,
+        "mobile": mobile,
+        "company": company,
+        "store": store or "",
+        "warehouse": warehouse or "",
+    }, as_dict=True)
 
     # Active warranties / VAS (Active VAS Plans)
     out["warranties"] = frappe.db.sql("""
         SELECT name, plan_title, warranty_plan, plan_type, item_code, item_name,
                start_date, end_date, status, sales_invoice
         FROM `tabActive VAS Plans`
-        WHERE customer = %(customer)s AND docstatus = 1
+        WHERE customer = %(customer)s AND company = %(company)s AND docstatus = 1
         ORDER BY end_date DESC LIMIT 30
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company}, as_dict=True)
 
     # Warranty Claims
     out["warranty_claims"] = frappe.db.sql("""
         SELECT name, claim_date, item_name, serial_no, coverage_type,
                claim_status, issue_category, repair_status
         FROM `tabCH Warranty Claim`
-        WHERE customer = %(customer)s
+        WHERE customer = %(customer)s AND company = %(company)s
         ORDER BY claim_date DESC LIMIT 20
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company}, as_dict=True)
 
     # Vouchers issued to customer
     out["vouchers"] = frappe.db.sql("""
         SELECT name, voucher_code, voucher_type, original_amount,
                balance, status, valid_upto, source_type
         FROM `tabCH Voucher`
-        WHERE issued_to = %(customer)s AND docstatus = 1
+        WHERE issued_to = %(customer)s AND company = %(company)s AND docstatus = 1
         ORDER BY creation DESC LIMIT 20
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company}, as_dict=True)
 
     # Refund / return invoices
     out["refunds"] = frappe.db.sql("""
         SELECT name, posting_date, grand_total, return_against, status
         FROM `tabSales Invoice`
-        WHERE customer = %(customer)s AND docstatus = 1 AND is_return = 1
+        WHERE customer = %(customer)s
+          AND company = %(company)s
+          AND pos_profile = %(pos_profile)s
+          AND docstatus = 1 AND is_return = 1
         ORDER BY posting_date DESC LIMIT 20
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
 
     # Swap / exchange invoices (sale_type driven)
     # Defensively handled: custom_ch_sale_type column requires bench migrate after
@@ -8223,10 +8802,13 @@ def customer_360(identifier, company=None) -> dict:
             SELECT name, posting_date, grand_total, custom_ch_sale_type,
                    custom_ch_sale_sub_type, custom_exchange_assessment, status
             FROM `tabSales Invoice`
-            WHERE customer = %(customer)s AND docstatus = 1
+            WHERE customer = %(customer)s
+              AND company = %(company)s
+              AND pos_profile = %(pos_profile)s
+              AND docstatus = 1
               AND custom_exchange_assessment IS NOT NULL AND custom_exchange_assessment != ''
             ORDER BY posting_date DESC LIMIT 20
-        """, {"customer": customer}, as_dict=True)
+        """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
     except Exception: 
         out["swap_invoices"] = []
 
@@ -8235,10 +8817,13 @@ def customer_360(identifier, company=None) -> dict:
     if frappe.db.has_column("Sales Invoice", "custom_coupon_code"):
          out["coupon_usage"] = frappe.db.sql("""
              SELECT name, posting_date, custom_coupon_code AS coupon_code, grand_total FROM `tabSales Invoice`
-        WHERE customer = %(customer)s AND docstatus = 1
+        WHERE customer = %(customer)s
+          AND company = %(company)s
+          AND pos_profile = %(pos_profile)s
+          AND docstatus = 1
           AND custom_coupon_code IS NOT NULL AND custom_coupon_code != ''
         ORDER BY posting_date DESC LIMIT 20
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
     else:
          out["coupon_usage"] = []
 
@@ -8248,8 +8833,10 @@ def customer_360(identifier, company=None) -> dict:
                reference_doctype, reference_name
         FROM `tabCH Exception Request`
         WHERE customer = %(customer)s
+          AND company = %(company)s
+          AND pos_profile = %(pos_profile)s
         ORDER BY creation DESC LIMIT 20
-    """, {"customer": customer}, as_dict=True)
+    """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
 
     # Loyalty — cross-company balance, company-specific redemption rate
     try:
@@ -8268,6 +8855,12 @@ def _dashboard_date_range(date=None, from_date=None, to_date=None):
     end = getdate(to_date or date or from_date or nowdate())
     if start > end:
         start, end = end, start
+    max_days = max(
+        1,
+        min(cint(get_control_setting("store_hub_max_days", 93) or 93), 730),
+    )
+    if (end - start).days > max_days:
+        frappe.throw(_("Dashboard range cannot exceed {0} days.").format(max_days))
     return str(start), str(end)
 
 
@@ -8278,6 +8871,9 @@ def store_dashboard(pos_profile, date=None, from_date=None, to_date=None, salesm
     ``date`` is retained for older clients. New callers can pass ``from_date``,
     ``to_date`` and ``salesman`` (POS Executive) for dashboard filtering.
     """
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    frappe.has_permission("POS Executive", "read", throw=True)
+    assert_pos_profile_scope(pos_profile)
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     from_date, to_date = _dashboard_date_range(date=date, from_date=from_date, to_date=to_date)
     salesman = (salesman or "").strip()
@@ -8285,57 +8881,10 @@ def store_dashboard(pos_profile, date=None, from_date=None, to_date=None, salesm
     si_meta = frappe.get_meta("Sales Invoice")
     has_salesman_field = si_meta.has_field("custom_sales_executive")
 
-    invoice_filters = {
-        "pos_profile": pos_profile,
-        "posting_date": ["between", [from_date, to_date]],
-        "docstatus": 1,
-        "is_return": 0,
-    }
-    if salesman and has_salesman_field:
-        invoice_filters["custom_sales_executive"] = salesman
-
-    invoice_fields = ["name", "grand_total", "owner"]
-    if has_salesman_field:
-        invoice_fields.append("custom_sales_executive")
-
-    invoices = frappe.get_all(
-        "Sales Invoice",
-        filters=invoice_filters,
-        fields=invoice_fields,
-    )
-    total_revenue = sum(flt(inv.grand_total) for inv in invoices)
-    total_invoices = len(invoices)
-
-    # Items sold for the selected period.
-    items_sold = 0
-    if invoices:
-        inv_names = [inv.name for inv in invoices]
-        items_sold = frappe.db.sql(
-            """SELECT COALESCE(SUM(ii.qty), 0)
-               FROM `tabSales Invoice Item` ii
-               WHERE ii.parent IN %(parents)s""",
-            {"parents": tuple(inv_names)},
-        )[0][0] or 0
-
-    # Returns for the selected period.
-    return_filters = {
-        "pos_profile": pos_profile,
-        "posting_date": ["between", [from_date, to_date]],
-        "docstatus": 1,
-        "is_return": 1,
-    }
-    if salesman and has_salesman_field:
-        return_filters["custom_sales_executive"] = salesman
-    total_returns = frappe.db.count(
-        "Sales Invoice",
-        filters=return_filters,
-    )
-
-    sales_conditions = [
+    invoice_conditions = [
         "pi.pos_profile = %(pos_profile)s",
         "pi.posting_date BETWEEN %(from_date)s AND %(to_date)s",
         "pi.docstatus = 1",
-        "pi.is_return = 0",
     ]
     sales_params = {
         "pos_profile": pos_profile,
@@ -8343,13 +8892,43 @@ def store_dashboard(pos_profile, date=None, from_date=None, to_date=None, salesm
         "to_date": to_date,
     }
     if salesman and has_salesman_field:
-        sales_conditions.append("pi.custom_sales_executive = %(salesman)s")
+        invoice_conditions.append("pi.custom_sales_executive = %(salesman)s")
         sales_params["salesman"] = salesman
+    invoice_where = " AND ".join(invoice_conditions)
+    summary = frappe.db.sql(
+        f"""
+        SELECT COALESCE(SUM(CASE WHEN pi.is_return = 0 THEN pi.grand_total ELSE 0 END), 0)
+                   AS total_revenue,
+               SUM(CASE WHEN pi.is_return = 0 THEN 1 ELSE 0 END) AS total_invoices,
+               SUM(CASE WHEN pi.is_return = 1 THEN 1 ELSE 0 END) AS total_returns
+          FROM `tabSales Invoice` pi
+         WHERE {invoice_where}
+        """,
+        sales_params,
+        as_dict=True,
+    )[0]
+    total_revenue = flt(summary.total_revenue)
+    total_invoices = cint(summary.total_invoices)
+    total_returns = cint(summary.total_returns)
+
+    sales_conditions = [*invoice_conditions, "pi.is_return = 0"]
     sales_where = " AND ".join(sales_conditions)
+
+    items_sold = 0
+    if total_invoices:
+        items_sold = frappe.db.sql(
+            f"""
+            SELECT COALESCE(SUM(ii.qty), 0)
+              FROM `tabSales Invoice Item` ii
+              JOIN `tabSales Invoice` pi ON pi.name = ii.parent
+             WHERE {sales_where}
+            """,
+            sales_params,
+        )[0][0] or 0
 
     # Top selling items for the selected period.
     top_items = []
-    if invoices:
+    if total_invoices:
         top_items_raw = frappe.db.sql(
             f"""SELECT ii.item_name, SUM(ii.qty) AS qty, SUM(ii.amount) AS revenue
                FROM `tabSales Invoice Item` ii
@@ -8364,29 +8943,41 @@ def store_dashboard(pos_profile, date=None, from_date=None, to_date=None, salesm
         top_items = [{"item_name": r.item_name, "qty": flt(r.qty), "revenue": flt(r.revenue)} for r in top_items_raw]
 
     # Staff performance: prefer POS Executive attribution, fall back to cashier.
-    exec_names = []
+    staff_limit = max(
+        1,
+        min(cint(get_control_setting("store_dashboard_staff_limit", 100)), 500),
+    )
     if has_salesman_field:
-        exec_names = [inv.custom_sales_executive for inv in invoices if inv.get("custom_sales_executive")]
-    exec_labels = {}
-    if exec_names:
-        exec_rows = frappe.get_all(
-            "POS Executive",
-            filters={"name": ["in", list(set(exec_names))]},
-            fields=["name", "executive_name"],
-            ignore_permissions=True,
+        staff_key = "COALESCE(NULLIF(pi.custom_sales_executive, ''), pi.owner)"
+        staff_label = (
+            "CASE WHEN IFNULL(pi.custom_sales_executive, '') != '' "
+            "THEN COALESCE(NULLIF(pe.executive_name, ''), pi.custom_sales_executive) "
+            "ELSE COALESCE(NULLIF(u.full_name, ''), pi.owner) END"
         )
-        exec_labels = {r.name: (r.executive_name or r.name) for r in exec_rows}
-
-    staff_map = {}
-    for inv in invoices:
-        exec_name = inv.get("custom_sales_executive") if has_salesman_field else None
-        key = exec_name or inv.owner
-        label = exec_labels.get(exec_name) if exec_name else (frappe.utils.get_fullname(inv.owner) or inv.owner)
-        if key not in staff_map:
-            staff_map[key] = {"cashier": label or key, "invoices": 0, "revenue": 0}
-        staff_map[key]["invoices"] += 1
-        staff_map[key]["revenue"] += flt(inv.grand_total)
-    staff_performance = sorted(staff_map.values(), key=lambda x: x["revenue"], reverse=True)
+        executive_join = "LEFT JOIN `tabPOS Executive` pe ON pe.name = pi.custom_sales_executive"
+    else:
+        staff_key = "pi.owner"
+        staff_label = "COALESCE(NULLIF(u.full_name, ''), pi.owner)"
+        executive_join = ""
+    staff_rows = frappe.db.sql(
+        f"""
+        SELECT {staff_key} AS staff_key, {staff_label} AS cashier,
+               COUNT(*) AS invoices, COALESCE(SUM(pi.grand_total), 0) AS revenue
+          FROM `tabSales Invoice` pi
+          LEFT JOIN `tabUser` u ON u.name = pi.owner
+          {executive_join}
+         WHERE {sales_where}
+         GROUP BY {staff_key}, {staff_label}
+         ORDER BY revenue DESC, staff_key ASC
+         LIMIT %(staff_limit)s
+        """,
+        {**sales_params, "staff_limit": staff_limit},
+        as_dict=True,
+    )
+    staff_performance = [
+        {"cashier": row.cashier or row.staff_key, "invoices": cint(row.invoices), "revenue": flt(row.revenue)}
+        for row in staff_rows
+    ]
 
     # Inventory alerts — items with low stock or zero stock in this warehouse
     inventory_alerts = []
@@ -8408,7 +8999,6 @@ def store_dashboard(pos_profile, date=None, from_date=None, to_date=None, salesm
         # Also include stock items that have NO Bin entry at all (effectively 0 stock)
         remaining = 15 - len(inventory_alerts)
         if remaining > 0:
-            existing_codes = [r.item_code for r in low_stock]
             no_bin_items = frappe.db.sql(
                 """SELECT i.name AS item_code, i.item_name, 0 AS qty
                    FROM `tabItem` i
@@ -8429,7 +9019,7 @@ def store_dashboard(pos_profile, date=None, from_date=None, to_date=None, salesm
 
     # Hourly sales breakdown for bar chart.
     hourly_sales = []
-    if invoices:
+    if total_invoices:
         hourly_raw = frappe.db.sql(
             f"""SELECT HOUR(pi.posting_time) AS hr, SUM(pi.grand_total) AS revenue,
                       COUNT(*) AS cnt
@@ -8567,7 +9157,7 @@ def _get_material_request_due_datetime(urgency=None, required_by_date=None, requ
         try:
             due_dt = get_datetime(f"{required_by_date} {time_value}")
         except Exception:
-            pass
+            frappe.throw(_("Required-by date or time is invalid."))
 
     return due_dt
 
@@ -8586,7 +9176,7 @@ def _format_delay_minutes(minutes):
     return " ".join(parts)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None,
                             required_by_date=None, required_by_time=None) -> dict:
     """Create a Store Material Request from POS for stock replenishment.
@@ -8594,6 +9184,7 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
     Source warehouse is auto-resolved from the store's zone if not provided.
     A due date + time is captured so teams can track delivery delays precisely.
     """
+    assert_pos_profile_scope(pos_profile)
     from ch_erp15.ch_erp15.store_request_api import create_store_material_request
 
     urgency = (urgency or "Standard").title()
@@ -8614,13 +9205,24 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
 @frappe.whitelist()
 def get_draft_material_requests(pos_profile) -> dict:
     """Get Draft MRs for this POS store (store exec can append items to these)."""
+    assert_pos_profile_scope(pos_profile)
     from ch_erp15.ch_erp15.store_request_api import get_draft_requests
     return get_draft_requests(pos_profile=pos_profile)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def add_items_to_material_request(request_name, items) -> dict:
     """Add items to an existing Draft Material Request from POS."""
+    mr = frappe.get_doc("Material Request", request_name)
+    mr.check_permission("write")
+    warehouses = [mr.get("set_warehouse")]
+    warehouses.extend(
+        value
+        for row in (mr.items or [])
+        for value in (row.get("warehouse"), row.get("from_warehouse"))
+        if value
+    )
+    assert_any_warehouse_scope(warehouses, company=mr.company)
     from ch_erp15.ch_erp15.store_request_api import add_items_to_draft
     return add_items_to_draft(request_name=request_name, items=items)
 
@@ -8628,6 +9230,7 @@ def add_items_to_material_request(request_name, items) -> dict:
 @frappe.whitelist()
 def check_material_request_capacity(pos_profile, items) -> dict:
     """Check Warehouse Capacity limits for requested items."""
+    assert_pos_profile_scope(pos_profile)
     from ch_erp15.ch_erp15.store_request_api import check_request_capacity
     return check_request_capacity(pos_profile=pos_profile, items=items)
 
@@ -8635,6 +9238,7 @@ def check_material_request_capacity(pos_profile, items) -> dict:
 @frappe.whitelist()
 def get_store_zone_info(pos_profile) -> dict:
     """Get zone and source warehouse info for the POS store."""
+    assert_pos_profile_scope(pos_profile)
     from ch_erp15.ch_erp15.store_request_api import get_zone_source_warehouse
     return get_zone_source_warehouse(pos_profile=pos_profile)
 
@@ -8647,6 +9251,7 @@ def get_transfer_warehouse_scope(pos_profile) -> dict:
     - Source warehouse is the POS Profile warehouse (current store)
     - Target warehouses are nearby stores resolved with zone-first fallback
     """
+    assert_pos_profile_scope(pos_profile)
     from ch_pos.api.search import _get_nearby_warehouses
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
@@ -8670,6 +9275,7 @@ def get_transfer_warehouse_scope(pos_profile) -> dict:
 @frappe.whitelist()
 def get_pending_material_requests(pos_profile) -> list:
     """Get recent Material Requests for this POS store with unified tracking."""
+    assert_pos_profile_scope(pos_profile)
     from ch_erp15.ch_erp15.store_request_api import get_store_material_requests
 
     requests = get_store_material_requests(pos_profile=pos_profile, include_closed=0)
@@ -8708,7 +9314,7 @@ def get_pending_material_requests(pos_profile) -> list:
                     delay_label = _format_delay_minutes(abs(delta_minutes))
                     delay_state = "due"
             except Exception:
-                pass
+                frappe.log_error(frappe.get_traceback(), "Procurement SLA display calculation failed")
 
         entry = {
             "name": req["name"],
@@ -8735,6 +9341,7 @@ def get_pending_material_requests(pos_profile) -> list:
 @frappe.whitelist()
 def get_stock_transfers(pos_profile, direction="incoming") -> dict:
     """Get recent stock transfers (Stock Entries of type Material Transfer)."""
+    assert_pos_profile_scope(pos_profile)
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     warehouse = profile.warehouse
     entries = []
@@ -8822,6 +9429,10 @@ def scan_for_stock_transfer(barcode, from_warehouse):
         return {"ok": False, "code": "empty", "message": _("Empty scan")}
     if not from_warehouse:
         return {"ok": False, "code": "no_source", "message": _("Select Source Warehouse first")}
+    assert_store_scope(
+        warehouse=from_warehouse,
+        company=frappe.db.get_value("Warehouse", from_warehouse, "company"),
+    )
 
     barcode = (barcode or "").strip()
     # Resolve serial — exact case first, then loose match (mirrors safe_get_serial).
@@ -8891,7 +9502,11 @@ def scan_for_stock_transfer(barcode, from_warehouse):
 # Days past the requested delivery/pickup date that a pre-booking IMEI stays
 # reserved. After this grace window the reservation lapses and the device
 # returns to sellable stock (professional-ERP reservation-expiry behaviour).
-PREBOOK_HOLD_GRACE_DAYS = 2
+def _prebook_hold_grace_days() -> int:
+    return max(
+        0,
+        min(cint(get_control_setting("prebook_hold_grace_days", 2) or 0), 365),
+    )
 
 
 def _reserved_serials_on_so(so) -> set:
@@ -8959,46 +9574,53 @@ def release_expired_prebook_reservations() -> int:
     """
     from frappe.utils import add_days, getdate
 
-    cutoff = add_days(getdate(), -PREBOOK_HOLD_GRACE_DAYS)
-    sos = frappe.get_all(
-        "Sales Order",
-        filters={
-            "docstatus": 1,
-            "status": ("not in", ["Closed", "Cancelled", "Completed", "On Hold"]),
-            "reserve_stock": 1,
-            "delivery_date": ("<", cutoff),
-            "per_billed": ("<", 100),
-        },
-        fields=["name", "delivery_date", "advance_paid", "customer", "customer_name", "grand_total"],
-        limit_page_length=200,
+    grace_days = _prebook_hold_grace_days()
+    cutoff = add_days(getdate(), -grace_days)
+    batch_limit = max(1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000))
+    sos = frappe.db.sql(
+        """
+        SELECT so.name, so.company, so.delivery_date, so.advance_paid,
+               so.customer, so.customer_name, so.grand_total
+        FROM `tabSales Order` so
+        WHERE so.docstatus = 1
+          AND so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
+          AND COALESCE(so.reserve_stock, 0) = 1
+          AND so.delivery_date < %(cutoff)s
+          AND COALESCE(so.per_billed, 0) < 100
+          AND EXISTS (
+              SELECT 1
+              FROM `tabSales Order Item` soi
+              WHERE soi.parent = so.name
+                AND IFNULL(soi.custom_serial_no, '') != ''
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM `tabStock Reservation Entry` sre
+              WHERE sre.voucher_type = 'Sales Order'
+                AND sre.voucher_no = so.name
+                AND sre.status NOT IN ('Delivered', 'Cancelled')
+                AND sre.docstatus = 1
+          )
+        ORDER BY so.delivery_date ASC, so.name ASC
+        LIMIT %(limit)s
+        """,
+        {"cutoff": cutoff, "limit": batch_limit},
+        as_dict=True,
     )
     released = 0
     with_advance = []
-    for so in sos:
-        has_serial = frappe.db.sql(
-            """SELECT 1 FROM `tabSales Order Item`
-               WHERE parent = %s AND IFNULL(custom_serial_no, '') != '' LIMIT 1""",
-            so.name,
-        )
-        if not has_serial:
-            continue
-        # Only act on orders still holding a live reservation — this makes the
-        # job self-limiting (no re-processing / re-alerting once released).
-        active_sre = frappe.db.exists("Stock Reservation Entry", {
-            "voucher_type": "Sales Order",
-            "voucher_no": so.name,
-            "status": ("not in", ["Delivered", "Cancelled"]),
-            "docstatus": 1,
-        })
-        if not active_sre:
-            continue
+    for index, so in enumerate(sos):
+        savepoint = f"release_prebook_{index}"
+        frappe.db.savepoint(savepoint)
         try:
             from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
                 cancel_stock_reservation_entries,
             )
             cancel_stock_reservation_entries("Sales Order", so.name)
         except Exception:
+            frappe.db.rollback(save_point=savepoint)
             frappe.log_error(frappe.get_traceback(), f"Prebook unreserve failed for {so.name}")
+            continue
         try:
             frappe.get_doc({
                 "doctype": "Comment",
@@ -9008,16 +9630,14 @@ def release_expired_prebook_reservations() -> int:
                 "content": _(
                     "Reserved IMEI(s) released — pre-booking validity passed "
                     "(delivery date {0} + {1} day grace). Device(s) returned to sellable stock."
-                ).format(so.delivery_date, PREBOOK_HOLD_GRACE_DAYS),
-            }).insert(ignore_permissions=True)
+                ).format(so.delivery_date, grace_days),
+            }).insert()
         except Exception:
-            pass
+            frappe.log_error(frappe.get_traceback(), f"Prebook release audit comment failed for {so.name}")
         if flt(so.advance_paid) > 0:
             with_advance.append(so)
         released += 1
 
-    if released:
-        frappe.db.commit()
     if with_advance:
         try:
             _notify_expired_prebook_advances(with_advance)
@@ -9051,26 +9671,38 @@ def _send_expired_prebook_email(company, rows) -> None:
         from ch_erp15.ch_erp15.notification_router import management_digest_users
         recipients.update(management_digest_users() or [])
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Management digest recipient resolution failed")
 
     # Accounts team of the owning company only (fail-closed on unknown scope).
+    finance_roles = sorted(
+        get_configured_roles("finance_notification_roles", ("Accounts Manager", "Accounts User"))
+    )
     try:
         from ch_erp15.ch_erp15.notification_router import scoped_role_emails
-        recipients.update(scoped_role_emails(["Accounts Manager", "Accounts User"], company=company or None))
+        recipients.update(scoped_role_emails(finance_roles, company=company or None))
     except ImportError:
-        acct_users = frappe.get_all(
-            "Has Role",
-            filters={"role": ("in", ["Accounts Manager", "Accounts User"]), "parenttype": "User"},
-            pluck="parent",
+        frappe.log_error(
+            "CH ERP notification router is unavailable; finance notification skipped.",
+            "Finance Recipient Resolution Failed",
         )
-        for u in set(acct_users):
-            if u in ("Administrator", "Guest"):
-                continue
-            if not frappe.db.get_value("User", u, "enabled"):
-                continue
-            email = frappe.db.get_value("User", u, "email")
-            if email:
-                recipients.add(email)
+
+    recipient_limit = max(
+        1,
+        min(cint(get_control_setting("scheduler_notification_recipient_limit", 50)), 500),
+    )
+    recipients = set(
+        frappe.get_all(
+            "User",
+            filters={
+                "name": ("in", sorted(recipients)),
+                "enabled": 1,
+                "user_type": "System User",
+            },
+            pluck="name",
+            order_by="name asc",
+            limit_page_length=recipient_limit,
+        )
+    ) if recipients else set()
 
     if not recipients:
         return
@@ -9130,7 +9762,7 @@ def _get_blocked_serials_for_sale(
     so_item_meta = frappe.get_meta("Sales Order Item")
     if so_item_meta.has_field("custom_serial_no"):
         warehouse_filter = ""
-        params = {"grace": PREBOOK_HOLD_GRACE_DAYS}
+        params = {"grace": _prebook_hold_grace_days()}
         if warehouse:
             warehouse_filter = (
                 " AND (IFNULL(soi.warehouse, '') = %(warehouse)s"
@@ -9213,7 +9845,7 @@ def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | N
     return reserved.get(serial_no)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_stock_transfer(from_warehouse, to_warehouse, items,
                           courier_name=None, courier_tracking=None,
                           handover_notes=None, expected_delivery_date=None) -> dict:
@@ -9229,6 +9861,11 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     zero extra writes.
     """
     frappe.has_permission("Stock Entry", "create", throw=True)
+    require_configured_roles(
+        "stock_transfer_roles",
+        defaults=("Store Manager", "Stock Manager", "Stock User"),
+        action=_("create a stock transfer"),
+    )
     import json
     if isinstance(items, str):
         items = json.loads(items)
@@ -9238,7 +9875,29 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     if from_warehouse == to_warehouse:
         frappe.throw(frappe._("Source and destination warehouses must be different"))
 
-    company = frappe.db.get_value("Warehouse", from_warehouse, "company") or frappe.defaults.get_global_default("company")
+    company = frappe.db.get_value("Warehouse", from_warehouse, "company")
+    if not company:
+        frappe.throw(_("Source warehouse has no company configured."))
+    destination_company = frappe.db.get_value("Warehouse", to_warehouse, "company")
+    if destination_company != company:
+        frappe.throw(_("Cross-company stock transfers are not permitted."))
+    assert_store_scope(warehouse=from_warehouse, company=company)
+    if not is_privileged_user():
+        source_pos_profile = frappe.db.get_value(
+            "POS Profile",
+            {"warehouse": from_warehouse, "company": company, "disabled": 0},
+            "name",
+        )
+        if not source_pos_profile:
+            frappe.throw(_("Source warehouse is not linked to an active POS Profile."), frappe.PermissionError)
+        allowed_targets = set(
+            get_transfer_warehouse_scope(source_pos_profile).get("target_warehouses") or []
+        )
+        if to_warehouse not in allowed_targets:
+            frappe.throw(
+                _("Destination warehouse is outside the configured transfer network."),
+                frappe.PermissionError,
+            )
 
     se = frappe.new_doc("Stock Entry")
     se.stock_entry_type = "Material Transfer"
@@ -9314,24 +9973,29 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
     return se.name
 
 
-CROSS_STORE_TRANSFER_ROLES = {"Store Manager", "Stock Manager", "System Manager"}
-
-
 @frappe.whitelist()
 def check_nearby_stock(pos_profile, item_code) -> list:
     """Check stock availability at other store warehouses for cross-store transfer."""
     if not pos_profile or not item_code:
         frappe.throw(frappe._("POS Profile and Item Code are required"))
+    assert_pos_profile_scope(pos_profile)
 
     my_warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
     if not my_warehouse:
         return []
 
     company = frappe.db.get_value("Warehouse", my_warehouse, "company")
-    # Get all POS Profile warehouses in the same company
+    transfer_scope = get_transfer_warehouse_scope(pos_profile)
+    allowed_warehouses = list(transfer_scope.get("target_warehouses") or [])
+    if not allowed_warehouses:
+        return []
     other_profiles = frappe.get_all(
         "POS Profile",
-        filters={"disabled": 0, "warehouse": ["!=", my_warehouse], "company": company},
+        filters={
+            "disabled": 0,
+            "warehouse": ("in", allowed_warehouses),
+            "company": company,
+        },
         fields=["name", "warehouse"],
     )
 
@@ -9348,19 +10012,19 @@ def check_nearby_stock(pos_profile, item_code) -> list:
     return results
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=None) -> dict:
     """Create a Material Request for inter-store stock transfer.
 
     Restricted to Store Manager and above roles only.
     """
-    user_roles = set(frappe.get_roles())
-    if not user_roles.intersection(CROSS_STORE_TRANSFER_ROLES):
-        frappe.throw(
-            frappe._("Cross-store transfers require Store Manager or above role."),
-            title=frappe._("Insufficient Permissions"),
-            exc=frappe.PermissionError,
-        )
+    require_configured_roles(
+        "cross_store_transfer_roles",
+        defaults=("Store Manager", "Stock Manager"),
+        action=_("create a cross-store transfer request"),
+    )
+    frappe.has_permission("Material Request", "create", throw=True)
+    assert_pos_profile_scope(pos_profile)
 
     import json as _json
     if isinstance(items, str):
@@ -9375,6 +10039,13 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
         frappe.throw(frappe._("Invalid POS Profile warehouse configuration"))
     if my_warehouse == source_warehouse:
         frappe.throw(frappe._("Source and destination warehouses must be different"))
+
+    transfer_scope = get_transfer_warehouse_scope(pos_profile)
+    if source_warehouse not in set(transfer_scope.get("target_warehouses") or []):
+        frappe.throw(
+            _("The source store is outside the configured transfer network for this store."),
+            frappe.PermissionError,
+        )
 
     company = frappe.db.get_value("Warehouse", my_warehouse, "company")
 
@@ -9413,7 +10084,6 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
     if mr.meta.has_field("custom_requested_by"):
         mr.custom_requested_by = frappe.session.user
 
-    mr.flags.ignore_permissions = True
     mr.insert()
 
     # POS-14 fix: Notify store manager of the source store for approval
@@ -9423,27 +10093,36 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
         )
         if source_store_mgr:
             request_url = frappe.utils.get_url_to_form("Material Request", mr.name)
+            company_label = (
+                frappe.get_cached_value("Company", company, "company_name")
+                or company
+                or _("Our Store")
+            )
             frappe.sendmail(
                 recipients=[source_store_mgr],
                 subject=frappe._("Cross-Store Transfer Request {0} — Approval Required").format(mr.name),
                 message=frappe._(
                     """
                     <div style='font-family:Segoe UI,Arial,sans-serif;max-width:620px;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden'>
-                        <div style='background:#0f172a;color:#ffffff;padding:14px 18px;font-weight:600'>Congruence Holdings</div>
+                        <div style='background:#0f172a;color:#ffffff;padding:14px 18px;font-weight:600'>{0}</div>
                         <div style='padding:18px'>
                             <h3 style='margin:0 0 10px'>Cross-Store Transfer Approval Required</h3>
-                            <p>A cross-store transfer request <strong>{0}</strong> has been raised and requires your approval.</p>
+                            <p>A cross-store transfer request <strong>{1}</strong> has been raised and requires your approval.</p>
                             <p style='margin-top:16px'>
-                                <a href='{1}' style='background:#0b57d0;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:6px;display:inline-block;font-weight:600'>Open Material Request</a>
+                                <a href='{2}' style='background:#0b57d0;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:6px;display:inline-block;font-weight:600'>Open Material Request</a>
                             </p>
                         </div>
                     </div>
                     """
-                ).format(mr.name, request_url),
+                ).format(
+                    frappe.utils.escape_html(company_label),
+                    frappe.utils.escape_html(mr.name),
+                    frappe.utils.escape_html(request_url),
+                ),
                 now=True,
             )
     except Exception:
-        pass  # Non-critical — notification is best-effort
+        frappe.log_error(frappe.get_traceback(), "Cross-store transfer notification failed")
 
     return {
         "name": mr.name,
@@ -9457,6 +10136,15 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
 def get_stock_transfer_items(stock_entry) -> dict:
     """Return line items of a Stock Entry for the receive dialog."""
     se = frappe.get_doc("Stock Entry", stock_entry)
+    se.check_permission("read")
+    warehouses = [se.from_warehouse, se.to_warehouse]
+    warehouses.extend(
+        value
+        for row in (se.items or [])
+        for value in (row.s_warehouse, row.t_warehouse)
+        if value
+    )
+    assert_any_warehouse_scope(warehouses, company=se.company)
     if se.stock_entry_type != "Material Transfer":
         frappe.throw(frappe._("Not a Material Transfer"))
 
@@ -9482,7 +10170,7 @@ def get_stock_transfer_items(stock_entry) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def receive_stock_transfer(stock_entry, received_items) -> dict:
     """Accept a stock transfer with (optionally) reduced quantities.
 
@@ -9496,6 +10184,9 @@ def receive_stock_transfer(stock_entry, received_items) -> dict:
         received_items = json.loads(received_items)
 
     se = frappe.get_doc("Stock Entry", stock_entry)
+    target_warehouses = [se.to_warehouse]
+    target_warehouses.extend(row.t_warehouse for row in (se.items or []) if row.t_warehouse)
+    assert_any_warehouse_scope(target_warehouses, company=se.company)
     if se.docstatus == 2:
         frappe.throw(frappe._("Stock Entry {0} is cancelled").format(stock_entry))
     if se.stock_entry_type != "Material Transfer":
@@ -9547,24 +10238,36 @@ def receive_stock_transfer(stock_entry, received_items) -> dict:
     return {"name": se.name, "partial": is_partial}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_scan_receive(stock_entry, barcode) -> dict:
     """Scan a barcode/IMEI during POS receive. Delegates to ch_erp15 transit workflow."""
+    se = frappe.get_doc("Stock Entry", stock_entry)
+    se.check_permission("read")
+    assert_any_warehouse_scope(
+        [se.to_warehouse] + [row.t_warehouse for row in (se.items or []) if row.t_warehouse],
+        company=se.company,
+    )
     from ch_erp15.ch_erp15.custom.stock_entry import pos_scan_receive as _scan
     return _scan(stock_entry=stock_entry, barcode=barcode)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_confirm_receive(stock_entry) -> dict:
     """Confirm receive after scanning. Delegates to ch_erp15 transit workflow."""
+    se = frappe.get_doc("Stock Entry", stock_entry)
+    se.check_permission("submit")
+    assert_any_warehouse_scope(
+        [se.to_warehouse] + [row.t_warehouse for row in (se.items or []) if row.t_warehouse],
+        company=se.company,
+    )
     from ch_erp15.ch_erp15.custom.stock_entry import pos_confirm_receive as _confirm
     return _confirm(stock_entry=stock_entry)
 
 
-@frappe.whitelist()
 def backfill_draft_documents() -> dict:
     """One-time patch: submit all existing Draft POS Kiosk Tokens and Service Requests
     that were created from POS but left unsubmitted."""
+    require_privileged_user(_("run the draft-document backfill"))
     submitted = {"POS Kiosk Token": 0, "Service Request": 0}
 
     # POS Kiosk Tokens
@@ -9596,11 +10299,47 @@ def backfill_draft_documents() -> dict:
 
 
 # ── Model Comparison ──────────────────────────────────────
+def _require_model_comparison_access(pos_profile=None) -> dict:
+    require_configured_roles(
+        "model_comparison_roles",
+        defaults=("POS User", "POS Manager", "Store Manager", "Sales User", "Sales Manager", "Stock User"),
+        action=_("view model comparisons"),
+    )
+    frappe.has_permission("Item", ptype="read", throw=True)
+    frappe.has_permission("POS Profile", ptype="read", throw=True)
+    if not pos_profile:
+        if is_privileged_user():
+            return {"pos_profile": None, "company": None, "warehouse": None, "store": None}
+        frappe.throw(_("POS Profile is required for model comparison."), frappe.PermissionError)
+    return assert_pos_profile_scope(pos_profile)
+
+
+def _comparison_related_rows(doctype, limit, label, **kwargs):
+    kwargs["limit_page_length"] = limit + 1
+    rows = frappe.db.get_all(doctype, **kwargs)
+    if len(rows) > limit:
+        frappe.throw(
+            _("{0} exceeds the configured model-comparison limit of {1} rows.").format(
+                label, limit
+            )
+        )
+    return rows
+
+
 @frappe.whitelist()
-def get_comparison_filters() -> dict:
+def get_comparison_filters(pos_profile=None) -> dict:
     """Return available filter options for model comparison."""
+    _require_model_comparison_access(pos_profile)
+    filter_limit = max(
+        1,
+        min(cint(get_control_setting("model_comparison_filter_limit", 200)), 1000),
+    )
     brands = frappe.db.get_all(
-        "Brand", fields=["name"], order_by="name", pluck="name"
+        "Brand",
+        fields=["name"],
+        order_by="name",
+        pluck="name",
+        limit_page_length=filter_limit,
     )
 
     # Get RAM/Storage values from Item Attribute values
@@ -9614,6 +10353,7 @@ def get_comparison_filters() -> dict:
                 fields=["attribute_value"],
                 order_by="idx",
                 pluck="attribute_value",
+                limit_page_length=filter_limit,
             )
             if attr_name == "RAM":
                 ram_values = vals
@@ -9632,7 +10372,16 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
     """Return items matching filters with specs, prices, stock and active offers."""
     from ch_item_master.ch_item_master.governance import filter_sellable_items
 
+    anchors = _require_model_comparison_access(pos_profile)
     today = frappe.utils.today()
+    related_limit = max(
+        1,
+        min(
+            cint(get_control_setting("model_comparison_related_row_limit", 5000))
+            or 5000,
+            20000,
+        ),
+    )
 
     # Build item filters
     item_filters = {
@@ -9642,7 +10391,16 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
     if brand:
         item_filters["brand"] = brand
 
-    # Get template items
+    search_text = str(search_text or "").strip()
+    query_args = {}
+    if search_text:
+        pattern = f"%{search_text}%"
+        query_args["or_filters"] = {
+            "item_name": ("like", pattern),
+            "brand": ("like", pattern),
+            "name": ("like", pattern),
+        }
+    row_limit = max(1, min(cint(get_control_setting("model_comparison_limit", 50)) or 50, 200))
     items = frappe.db.get_all(
         "Item",
         filters=item_filters,
@@ -9650,228 +10408,242 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
             "name", "item_name", "brand", "image",
             "ch_model", "item_group",
         ],
-        limit=200,
+        limit=row_limit,
+        order_by="modified desc, name asc",
+        **query_args,
     )
 
     if not items:
         return []
 
-    # Filter by search text
-    if search_text:
-        search_lower = search_text.lower()
-        items = [i for i in items if search_lower in (i.item_name or "").lower()
-                 or search_lower in (i.brand or "").lower()
-                 or search_lower in (i.name or "").lower()]
-
     # Get warehouse for stock check + nearby store warehouses
-    warehouse = None
+    warehouse = anchors.get("warehouse")
     nearby_profiles = []  # [{name, warehouse}] for other stores in same company
-    if pos_profile:
-        warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
-        if warehouse:
-            company = frappe.db.get_value("Warehouse", warehouse, "company")
-            if company:
-                nearby_profiles = frappe.db.get_all(
-                    "POS Profile",
-                    filters={"disabled": 0, "warehouse": ["!=", warehouse], "company": company},
-                    fields=["name", "warehouse"],
-                )
+    if warehouse and anchors.get("company"):
+        nearby_profiles = _comparison_related_rows(
+            "POS Profile",
+            related_limit,
+            _("Nearby POS profiles"),
+            filters={"disabled": 0, "warehouse": ["!=", warehouse], "company": anchors["company"]},
+            fields=["name", "warehouse"],
+        )
+        if not is_privileged_user():
+            try:
+                from ch_erp15.ch_erp15.scope import get_user_scope
+
+                allowed_warehouses = set(get_user_scope().get("warehouses") or ())
+            except (ImportError, ModuleNotFoundError):
+                allowed_warehouses = set()
+            nearby_profiles = [row for row in nearby_profiles if row.warehouse in allowed_warehouses]
+
+    template_codes = [item.name for item in items]
+    model_names = sorted({item.ch_model for item in items if item.ch_model})
+    specs_by_model = {}
+    features_by_model = {}
+    if model_names:
+        for row in _comparison_related_rows(
+            "CH Model Spec Value",
+            related_limit,
+            _("Model specification rows"),
+            filters={"parent": ("in", model_names)},
+            fields=["parent", "spec", "spec_value"],
+        ):
+            specs_by_model.setdefault(row.parent, {})[row.spec] = row.spec_value
+        for row in _comparison_related_rows(
+            "CH Item Feature",
+            related_limit,
+            _("Model feature rows"),
+            filters={"parent": ("in", model_names), "parenttype": "CH Model"},
+            fields=["parent", "feature_group", "feature_name", "feature_value"],
+        ):
+            features_by_model.setdefault(row.parent, {}).setdefault(row.feature_group, []).append({
+                "feature": row.feature_name,
+                "value": row.feature_value,
+            })
+
+    all_variants = _comparison_related_rows(
+        "Item",
+        related_limit,
+        _("Model variants"),
+        filters={"variant_of": ("in", template_codes), "disabled": 0},
+        fields=["name", "item_name", "variant_of"],
+        order_by="variant_of, name",
+    )
+    sellable_codes = set(filter_sellable_items([row.name for row in all_variants])) if all_variants else set()
+    all_variants = [row for row in all_variants if row.name in sellable_codes]
+    variants_by_template = {}
+    for row in all_variants:
+        variants_by_template.setdefault(row.variant_of, []).append(row)
+    all_variant_codes = [row.name for row in all_variants]
+
+    prices_by_variant = {}
+    attrs_by_variant = {}
+    if all_variant_codes:
+        for row in _comparison_related_rows(
+            "CH Item Price",
+            related_limit,
+            _("Variant prices"),
+            filters={
+                "item_code": ("in", all_variant_codes),
+                "channel": "POS",
+                "status": "Active",
+            },
+            fields=["item_code", "selling_price", "mrp", "mop"],
+        ):
+            existing = prices_by_variant.get(row.item_code)
+            if not existing or flt(row.selling_price) > existing["selling_price"]:
+                prices_by_variant[row.item_code] = {
+                    "selling_price": flt(row.selling_price),
+                    "mrp": flt(row.mrp),
+                    "mop": flt(row.mop),
+                }
+        for row in _comparison_related_rows(
+            "Item Variant Attribute",
+            related_limit,
+            _("Variant attributes"),
+            filters={"parent": ("in", all_variant_codes)},
+            fields=["parent", "attribute", "attribute_value"],
+        ):
+            attrs_by_variant.setdefault(row.parent, {})[row.attribute] = row.attribute_value
+
+    warehouse_names = list(dict.fromkeys(
+        [warehouse] + [row.warehouse for row in nearby_profiles if row.warehouse]
+    )) if warehouse else []
+    bin_qty = {}
+    if all_variant_codes and warehouse_names:
+        for row in _comparison_related_rows(
+            "Bin",
+            related_limit,
+            _("Variant stock rows"),
+            filters={"item_code": ("in", all_variant_codes), "warehouse": ("in", warehouse_names)},
+            fields=["item_code", "warehouse", "actual_qty"],
+        ):
+            key = (row.item_code, row.warehouse)
+            bin_qty[key] = bin_qty.get(key, 0) + flt(row.actual_qty)
+
+    brands = sorted({item.brand for item in items if item.brand})
+    item_groups = sorted({item.item_group for item in items if item.item_group})
+    offer_params = {"today": today}
+    offer_matches = ["offer_level = 'Bill'"]
+
+    def add_offer_match(field, values, prefix, discriminator):
+        if not values:
+            return
+        placeholders = []
+        for idx, value in enumerate(values):
+            key = f"{prefix}_{idx}"
+            offer_params[key] = value
+            placeholders.append(f"%({key})s")
+        offer_matches.append(
+            f"(apply_on = '{discriminator}' AND {field} IN ({', '.join(placeholders)}))"
+        )
+
+    add_offer_match("item_code", template_codes, "offer_item", "Item Code")
+    add_offer_match("target_brand", brands, "offer_brand", "Brand")
+    add_offer_match("target_item_group", item_groups, "offer_group", "Item Group")
+    all_offers = frappe.db.sql(
+        f"""SELECT name, offer_name, offer_type, value_type, value,
+                   bank_name, card_type, min_bill_amount, payment_mode, priority,
+                   apply_on, item_code, target_brand, target_item_group, offer_level
+            FROM `tabCH Item Offer`
+            WHERE status = 'Active'
+              AND start_date <= %(today)s
+              AND end_date >= %(today)s
+              AND (channel = 'POS' OR channel IS NULL OR channel = '')
+              AND ({' OR '.join(offer_matches)})
+            ORDER BY offer_type, priority, name
+            LIMIT %(related_limit)s""",
+        {**offer_params, "related_limit": related_limit + 1},
+        as_dict=True,
+    )
+    if len(all_offers) > related_limit:
+        frappe.throw(
+            _("Active offers exceed the configured model-comparison limit of {0} rows.").format(
+                related_limit
+            )
+        )
+    global_offers = [row for row in all_offers if row.offer_level == "Bill"]
+    offers_by_item = {}
+    offers_by_brand = {}
+    offers_by_group = {}
+    for row in all_offers:
+        if row.apply_on == "Item Code" and row.item_code:
+            offers_by_item.setdefault(row.item_code, []).append(row)
+        elif row.apply_on == "Brand" and row.target_brand:
+            offers_by_brand.setdefault(row.target_brand, []).append(row)
+        elif row.apply_on == "Item Group" and row.target_item_group:
+            offers_by_group.setdefault(row.target_item_group, []).append(row)
 
     results = []
     for item in items:
-        # Get model spec values (RAM, Storage, etc.)
-        spec_values = {}
-        if item.ch_model:
-            model_specs = frappe.db.get_all(
-                "CH Model Spec Value",
-                filters={"parent": item.ch_model},
-                fields=["spec", "spec_value"],
-            )
-            for ms in model_specs:
-                spec_values[ms.spec] = ms.spec_value
-
-        # Filter by RAM
+        spec_values = specs_by_model.get(item.ch_model, {})
         if ram and spec_values.get("RAM") != ram:
             continue
-        # Filter by Storage
         if storage and spec_values.get("Storage") != storage:
             continue
-
-        # Get model features (Display, Camera, etc.)
-        features = {}
-        if item.ch_model:
-            model_features = frappe.db.get_all(
-                "CH Item Feature",
-                filters={"parent": item.ch_model, "parenttype": "CH Model"},
-                fields=["feature_group", "feature_name", "feature_value"],
-            )
-            for mf in model_features:
-                features.setdefault(mf.feature_group, []).append({
-                    "feature": mf.feature_name,
-                    "value": mf.feature_value,
-                })
-
-        # Get variants of this template (each variant = one SKU on the model)
-        variants = frappe.db.get_all(
-            "Item",
-            filters={"variant_of": item.name, "disabled": 0},
-            fields=["name", "item_name"],
-        )
-        # Only surface sellable variants: Active, or Obsolete-with-stock
-        # (sell-down of old inventory). Draft / Pending Review / Blocked variants
-        # are rejected at Sales Invoice ("Activate the item first"), so they must
-        # not appear as sellable comparison rows. variant_count below then
-        # reflects only sellable SKUs, so a template whose variants are all
-        # non-sellable is skipped like an empty one.
-        if variants:
-            _sellable_v = filter_sellable_items([v.name for v in variants])
-            variants = [v for v in variants if v.name in _sellable_v]
-
+        features = features_by_model.get(item.ch_model, {})
+        variants = variants_by_template.get(item.name, [])
         min_price = 0
         max_price = 0
         total_stock = 0
         variant_count = len(variants)
-        variant_rows = []  # per-variant breakdown for side-by-side comparison
-
-        # A template (has_variants=1) with no enabled variants is not sellable
-        # and has nothing to compare — skip it. This also filters out the
-        # half-configured / test template stubs (e.g. _Test, VAS-TPL) that
-        # otherwise clutter the comparison with ₹0 rows.
+        variant_rows = []
         if variant_count == 0:
             continue
 
         variant_codes = [v.name for v in variants]
-        # Map variant_code → variant doc (for stitching prices/stock back)
         variant_lookup = {v.name: v for v in variants}
 
         if variant_codes:
-            # Get prices from CH Item Price (channel='POS') — the POS-aware
-            # price source. Vanilla `Item Price` is empty in this deployment
-            # so the previous query produced N/A for every model.
-            prices = frappe.db.get_all(
-                "CH Item Price",
-                filters={
-                    "item_code": ["in", variant_codes],
-                    "channel": "POS",
-                    "status": "Active",
-                },
-                fields=["item_code", "selling_price", "mrp", "mop"],
-            )
-            price_by_variant = {}
-            for p in prices:
-                # Keep the highest selling_price per variant if multiple active rows exist
-                existing = price_by_variant.get(p.item_code)
-                if not existing or flt(p.selling_price) > flt(existing.get("selling_price")):
-                    price_by_variant[p.item_code] = {
-                        "selling_price": flt(p.selling_price),
-                        "mrp": flt(p.mrp),
-                        "mop": flt(p.mop),
-                    }
-            price_vals = [v["selling_price"] for v in price_by_variant.values() if v["selling_price"]]
+            price_by_variant = {
+                code: prices_by_variant.get(code, {}) for code in variant_codes
+            }
+            price_vals = [v.get("selling_price") for v in price_by_variant.values() if v.get("selling_price")]
             if price_vals:
                 min_price = min(price_vals)
                 max_price = max(price_vals)
 
-            # Get stock in store warehouse, per variant
-            stock_by_variant = {}
-            if warehouse:
-                stock_data = frappe.db.get_all(
-                    "Bin",
-                    filters={
-                        "item_code": ["in", variant_codes],
-                        "warehouse": warehouse,
-                    },
-                    fields=["item_code", "actual_qty"],
-                )
-                for s in stock_data:
-                    stock_by_variant[s.item_code] = stock_by_variant.get(s.item_code, 0) + flt(s.actual_qty)
-                total_stock = sum(stock_by_variant.values())
+            stock_by_variant = {
+                code: bin_qty.get((code, warehouse), 0) if warehouse else 0
+                for code in variant_codes
+            }
+            total_stock = sum(stock_by_variant.values())
 
-            # Per-variant attribute values (e.g. Storage=64GB, Colour=Black)
-            variant_attrs = {}
-            if variants:
-                for av in frappe.db.get_all(
-                    "Item Variant Attribute",
-                    filters={"parent": ["in", variant_codes]},
-                    fields=["parent", "attribute", "attribute_value"],
-                ):
-                    variant_attrs.setdefault(av.parent, {})[av.attribute] = av.attribute_value
-
-            # Build per-variant rows for the comparison detail view
             for vcode in variant_codes:
                 vdoc = variant_lookup.get(vcode)
                 pinfo = price_by_variant.get(vcode, {})
                 variant_rows.append({
                     "item_code": vcode,
                     "item_name": (vdoc.item_name if vdoc else vcode),
-                    "attributes": variant_attrs.get(vcode, {}),
+                    "attributes": attrs_by_variant.get(vcode, {}),
                     "selling_price": pinfo.get("selling_price", 0),
                     "mrp": pinfo.get("mrp", 0),
                     "mop": pinfo.get("mop", 0),
                     "stock": stock_by_variant.get(vcode, 0),
                 })
-            # Sort variants by selling price ascending (cheapest first)
             variant_rows.sort(key=lambda r: (r["selling_price"] or float("inf"), r["item_code"]))
 
-            # Get stock at nearby stores (batch query)
             nearby_stock = []
-            if nearby_profiles:
-                nearby_wh_names = [p.warehouse for p in nearby_profiles if p.warehouse]
-                if nearby_wh_names:
-                    nearby_bins = frappe.db.get_all(
-                        "Bin",
-                        filters={
-                            "item_code": ["in", variant_codes],
-                            "warehouse": ["in", nearby_wh_names],
-                            "actual_qty": [">", 0],
-                        },
-                        fields=["warehouse", "actual_qty"],
-                    )
-                    # Aggregate by warehouse
-                    wh_qty = {}
-                    for b in nearby_bins:
-                        wh_qty[b.warehouse] = wh_qty.get(b.warehouse, 0) + flt(b.actual_qty)
-                    # Build result with profile name
-                    wh_to_profile = {p.warehouse: p.name for p in nearby_profiles if p.warehouse}
-                    for wh, qty in wh_qty.items():
-                        if qty > 0:
-                            nearby_stock.append({
-                                "warehouse": wh,
-                                "pos_profile": wh_to_profile.get(wh, wh),
-                                "qty": qty,
-                            })
+            for profile in nearby_profiles:
+                qty = sum(bin_qty.get((code, profile.warehouse), 0) for code in variant_codes)
+                if qty > 0:
+                    nearby_stock.append({
+                        "warehouse": profile.warehouse,
+                        "pos_profile": profile.name,
+                        "qty": qty,
+                    })
 
-        # Get active offers for this item (by item_code, brand, item_group)
-        # Skip items with no stock when in_stock_only filter is set
         if cint(in_stock_only) and total_stock <= 0:
             continue
 
-        offers = frappe.db.sql(
-            """SELECT name, offer_name, offer_type, value_type, value,
-                      bank_name, card_type, min_bill_amount, payment_mode
-               FROM `tabCH Item Offer`
-               WHERE status = 'Active'
-                 AND start_date <= %(today)s
-                 AND end_date >= %(today)s
-                 AND (channel = 'POS' OR channel IS NULL OR channel = '')
-                 AND (
-                    (apply_on = 'Item Code' AND item_code = %(item_code)s)
-                    OR (apply_on = 'Brand' AND target_brand = %(brand)s)
-                    OR (apply_on = 'Item Group' AND target_item_group = %(item_group)s)
-                    OR offer_level = 'Bill'
-                 )
-               ORDER BY offer_type, priority
-            """,
-            {
-                "today": today,
-                "item_code": item.name,
-                "brand": item.brand or "",
-                "item_group": item.item_group or "",
-            },
-            as_dict=True,
-        )
-
-        # Group offers by type
+        candidates = [
+            *global_offers,
+            *offers_by_item.get(item.name, []),
+            *offers_by_brand.get(item.brand, []),
+            *offers_by_group.get(item.item_group, []),
+        ]
+        offers = list({row.name: row for row in candidates}.values())
+        offers.sort(key=lambda row: (row.offer_type or "", cint(row.priority), row.name))
         brand_offers = [o for o in offers if o.offer_type == "Brand Offer"]
         bank_offers = [o for o in offers if o.offer_type == "Bank Offer"]
         other_offers = [o for o in offers if o.offer_type not in ("Brand Offer", "Bank Offer")]
@@ -9903,7 +10675,7 @@ def get_model_comparison(brand=None, ram=None, storage=None, search_text=None, p
 
 # ── Customer POS Info ──────────────────────────────────────────
 @frappe.whitelist()
-def get_customer_pos_info(customer, company=None) -> dict:
+def get_customer_pos_info(customer, company=None, pos_profile=None) -> dict:
     """Get customer info for POS: price list, credit rules, loyalty, group type.
 
     Used when a named customer is selected to auto-apply correct pricing.
@@ -9919,8 +10691,12 @@ def get_customer_pos_info(customer, company=None) -> dict:
     if customer in (None, "", "create_new__link_option", "__create_new__"):
         return {}
 
-    if not company:
-        company = frappe.defaults.get_user_default("Company")
+    frappe.has_permission("Customer", "read", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+    if company and company != anchors.get("company"):
+        frappe.throw(_("POS Profile belongs to another company."), frappe.PermissionError)
+    company = anchors.get("company")
+    _assert_customer_pos_access(customer, pos_profile, action=_("view"))
 
     cust = frappe.get_cached_doc("Customer", customer)
     customer_group = cust.customer_group or ""
@@ -10000,7 +10776,7 @@ def get_customer_pos_info(customer, company=None) -> dict:
         info = get_ch_loyalty_info(customer, company=company)
         loyalty = info if info.get("loyalty_program") else None
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Customer loyalty summary lookup failed")
 
     return {
         "customer": customer,
@@ -10035,6 +10811,10 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7) -> dict:
         return {"eligible": False, "reason": frappe._("Invoice {0} not found").format(invoice_name)}
 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if not is_privileged_user():
+        inv.check_permission("read")
+    # READ path (swap-eligibility check): tolerate disabled POS Profile.
+    assert_sales_invoice_scope(invoice_name, allow_disabled=True)
 
     if inv.docstatus != 1:
         return {"eligible": False, "reason": frappe._("Invoice is not submitted")}
@@ -10119,6 +10899,64 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
     cart_items = cart_items or []
+    if not isinstance(cart_items, list):
+        frappe.throw(_("Cart items must be a list."))
+    cart_item_limit = max(1, min(cint(get_control_setting("vas_cart_item_limit", 100)), 500))
+    if len(cart_items) > cart_item_limit:
+        frappe.throw(_("VAS eligibility accepts at most {0} cart items.").format(cart_item_limit))
+
+    device_rows = []
+    device_item_codes = set()
+    for cart_item in cart_items:
+        if not isinstance(cart_item, dict):
+            frappe.throw(_("Each cart item must be an object."))
+        if cart_item.get("is_warranty") or cart_item.get("is_vas"):
+            continue
+        device_rows.append(cart_item)
+        if cart_item.get("item_code"):
+            device_item_codes.add(cart_item["item_code"])
+
+    item_categories = {}
+    if device_item_codes:
+        item_categories = {
+            row.name: row.ch_category
+            for row in frappe.get_all(
+                "Item",
+                filters={"name": ("in", sorted(device_item_codes))},
+                fields=["name", "ch_category"],
+                order_by="name ASC",
+                limit_page_length=cart_item_limit,
+            )
+        }
+
+    fallback_prices = {}
+    price_item_codes = sorted({
+        row.get("item_code")
+        for row in device_rows
+        if row.get("item_code")
+        and not flt(row.get("rate") or row.get("price") or row.get("selling_price") or row.get("amount"))
+    })
+    if price_item_codes:
+        price_rows = frappe.db.sql(
+            """
+            SELECT item_code, selling_price
+              FROM (
+                    SELECT item_code, selling_price,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY item_code
+                               ORDER BY modified DESC, name DESC
+                           ) AS rn
+                      FROM `tabCH Item Price`
+                     WHERE item_code IN %(item_codes)s
+                       AND channel = 'POS'
+                       AND status = 'Active'
+                   ) ranked
+             WHERE rn = 1
+            """,
+            {"item_codes": price_item_codes},
+            as_dict=True,
+        )
+        fallback_prices = {row.item_code: flt(row.selling_price) for row in price_rows}
 
     # Check if cart has any device (non-service, non-warranty item) and track
     # the highest device price in the cart. ``max_device_price`` drives both the
@@ -10126,29 +10964,22 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
     # device-price band filter further below; prefer the actual cart line rate
     # and fall back to the item's active POS selling price.
     has_device = False
-    device_item_codes = []
     device_categories = set()
     max_device_price = 0.0
-    for ci in cart_items:
-        if ci.get("is_warranty") or ci.get("is_vas"):
-            continue
+    for ci in device_rows:
         has_device = True
         ic = ci.get("item_code")
-        device_item_codes.append(ic)
-        ch_category = frappe.db.get_value("Item", ic, "ch_category")
+        ch_category = item_categories.get(ic)
         if ch_category:
             device_categories.add(ch_category)
         rate = flt(ci.get("rate") or ci.get("price") or ci.get("selling_price") or ci.get("amount"))
         if not rate and ic:
-            rate = flt(frappe.db.get_value(
-                "CH Item Price",
-                {"item_code": ic, "channel": "POS", "status": "Active"},
-                "selling_price",
-            ))
+            rate = fallback_prices.get(ic, 0)
         if rate > max_device_price:
             max_device_price = rate
 
     today = nowdate()
+    plan_limit = max(1, min(cint(get_control_setting("warranty_plan_result_limit", 200)), 1000))
 
     plan_rows = frappe.get_all(
         "CH Warranty Plan",
@@ -10162,6 +10993,8 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             "min_device_price", "max_device_price",
             "partner", "auto_attach",
         ],
+        order_by="price ASC, name ASC",
+        limit_page_length=plan_limit,
     )
 
     # Only offer plans whose backing service_item is a Live (Active-lifecycle)
@@ -10172,6 +11005,26 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
     from ch_item_master.ch_item_master.governance import filter_sellable_items
     _live = filter_sellable_items([r.get("service_item") for r in plan_rows])
     plan_rows = [r for r in plan_rows if not r.get("service_item") or r.get("service_item") in _live]
+
+    plan_categories = {}
+    plan_names = [row.name for row in plan_rows]
+    if plan_names:
+        category_row_limit = max(
+            plan_limit,
+            min(cint(get_control_setting("warranty_plan_category_row_limit", 5000)), 10000),
+        )
+        category_rows = frappe.get_all(
+            "CH Warranty Plan Category",
+            filters={"parent": ("in", plan_names)},
+            fields=["parent", "category"],
+            order_by="parent ASC, idx ASC",
+            limit_page_length=category_row_limit + 1,
+        )
+        if len(category_rows) > category_row_limit:
+            frappe.throw(_("Warranty plan category configuration exceeds the safe row limit."))
+        for category_row in category_rows:
+            if category_row.category:
+                plan_categories.setdefault(category_row.parent, []).append(category_row.category)
 
     def _resolve_price(fixed_price, pricing_mode, pct):
         """Effective sellable rate for a plan.
@@ -10263,15 +11116,11 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
 
         # Category filtering (CH Warranty Plan Category child table).
         if not plan.get("blocked"):
-            plan_categories = frappe.get_all(
-                "CH Warranty Plan Category",
-                filters={"parent": plan.name},
-                pluck="category",
-            )
-            if plan_categories:
-                plan["applicable_categories"] = plan_categories
+            applicable_categories = plan_categories.get(plan.name, [])
+            if applicable_categories:
+                plan["applicable_categories"] = applicable_categories
                 if device_categories:
-                    if not device_categories.intersection(set(plan_categories)):
+                    if not device_categories.intersection(applicable_categories):
                         plan["blocked"] = True
                         plan["blocked_reason"] = frappe._("Not applicable for {0}").format(
                             ", ".join(device_categories)
@@ -10283,23 +11132,50 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
 
         applicable.append(plan)
 
-    return applicable
+    return applicable[:plan_limit]
 
 
 # ── Quick Job Card from POS ──────────────────────────────────
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_quick_job_card(customer, contact_number, device_item,
                           issue_description, serial_no=None,
                           issue_category=None, warranty_status=None,
                           priority="Medium", estimated_hours=None,
                           device_condition=None, accessories_received=None,
-                          data_backup_disclaimer=0) -> dict:
+                          data_backup_disclaimer=0, pos_profile=None) -> dict:
     """Create a Service Request, accept it, and create Job Assignment in one call.
 
     This is the 'quick job card' flow for walk-in repairs from POS.
     Returns: {service_request, service_order, job_assignment}
     """
+    require_configured_roles(
+        "repair_operation_roles",
+        defaults=("POS User", "POS Manager"),
+        action=_("create a POS repair job"),
+    )
     frappe.has_permission("Service Request", "create", throw=True)
+    frappe.has_permission("Service Request", "submit", throw=True)
+    frappe.has_permission("Customer", "read", throw=True)
+    frappe.has_permission("Item", "read", throw=True)
+    if not pos_profile:
+        frappe.throw(_("POS Profile is required."))
+    anchors = assert_pos_profile_scope(pos_profile)
+    _assert_customer_pos_access(customer, pos_profile, action=_("create a repair for"))
+    contact_number = validate_indian_phone(contact_number, "Contact Number")
+    if not frappe.db.exists("Item", {"name": device_item, "disabled": 0}):
+        frappe.throw(_("Device item is unavailable."))
+    issue_description = str(issue_description or "").strip()
+    if not issue_description or len(issue_description) > 2000:
+        frappe.throw(_("Issue description is required and must not exceed 2,000 characters."))
+    if priority not in ("Low", "Medium", "High", "Urgent"):
+        frappe.throw(_("Invalid repair priority."))
+    if estimated_hours is not None:
+        max_hours = max(
+            1,
+            min(cint(get_control_setting("repair_max_estimated_hours", 720) or 720), 8760),
+        )
+        if flt(estimated_hours) <= 0 or flt(estimated_hours) > max_hours:
+            frappe.throw(_("Estimated hours must be between 0 and {0}.").format(max_hours))
     # 1. Create Service Request
     sr = frappe.new_doc("Service Request")
     sr.customer = customer
@@ -10313,13 +11189,12 @@ def create_quick_job_card(customer, contact_number, device_item,
     sr.accessories_received = accessories_received or ""
     sr.data_backup_disclaimer = cint(data_backup_disclaimer)
     sr.mode_of_service = "Walk-in"
-    sr.company = frappe.defaults.get_global_default("company") or ""
-    sr.source_warehouse = frappe.form_dict.get("warehouse") or ""
+    sr.company = anchors.get("company") or ""
+    sr.source_warehouse = anchors.get("warehouse") or ""
     sr.service_date = nowdate()
     sr.decision = "Draft"
     sr.priority = priority or "Medium"
     sr.walkin_source = "POS Counter"
-    sr.flags.ignore_permissions = True
     sr.insert()
     sr.submit()
 
@@ -10355,8 +11230,10 @@ def create_quick_job_card(customer, contact_number, device_item,
 @frappe.whitelist()
 def get_central_warehouses(company=None) -> dict:
     """Return warehouses suitable as source for stock requests (non-POS, non-store)."""
+    frappe.has_permission("Warehouse", "read", throw=True)
     if not company:
-        company = frappe.defaults.get_global_default("company")
+        frappe.throw(_("Company is required."))
+    _assert_company_scope(company, _("view central warehouses"))
 
     warehouses = frappe.db.get_all(
         "Warehouse",
@@ -10373,48 +11250,64 @@ def get_central_warehouses(company=None) -> dict:
 
 # ── Executive Access & Incentive APIs ────────────────────────────
 
-# Canonical mode lists — single source of truth (no JS duplication).
-# Shared modes (imei, customer360, reports) are always included.
-_SHARED_MODES = ["imei", "customer360", "reports"]
-
-COMPANY_MODE_MAP = {
-    "retail": [
-        "sell", "returns", "buyback", "material_request", "inbound_receive",
-        "stock_transfer", "guided", "model_compare", "claims", "exceptions",
-        "queue", "prebook", "pickup", "stock_audit",
-    ] + _SHARED_MODES,
-    "service": [
-        "sell", "returns", "buyback", "repair", "queue", "service",
-        "guided", "exceptions", "prebook", "pickup", "stock_audit",
-        "inbound_receive",
-    ] + _SHARED_MODES,
-}
+def _configured_company_modes(company_type):
+    fieldname = {
+        "retail": "retail_company_modes",
+        "service": "service_company_modes",
+        "hybrid": None,
+    }.get(company_type)
+    mode_values = []
+    if company_type == "hybrid":
+        for capability_field in ("retail_company_modes", "service_company_modes"):
+            mode_values.extend(
+                value.strip()
+                for value in re.split(r"[,\n]", str(get_control_setting(capability_field, "") or ""))
+                if value.strip()
+            )
+    elif fieldname:
+        mode_values.extend(
+            value.strip()
+            for value in re.split(r"[,\n]", str(get_control_setting(fieldname, "") or ""))
+            if value.strip()
+        )
+    if company_type:
+        mode_values.extend(
+            value.strip()
+            for value in re.split(
+                r"[,\n]", str(get_control_setting("shared_company_modes", "") or "")
+            )
+            if value.strip()
+        )
+    # Unconfigured mode lists must mean "no restriction", not "hide every
+    # module": CH POS Control Settings ships with these fields empty, and an
+    # empty list here rendered a completely BLANK sidebar for every
+    # non-privileged cashier. Navigation visibility is UX shaping — each
+    # module's server APIs enforce their own scope/role guards regardless.
+    return list(dict.fromkeys(mode_values)) or None
 
 
 def _get_company_type(company, stores=None):
-    """Resolve company type ('retail' or 'service') from CH Store flags,
-    falling back to a name heuristic if flags aren't set.
-
-    Checks stores that *belong to* this company (via CH Store.company),
-    not the user's current store.
-    """
-    # Check CH Store capability flags for stores owned by this company
-    store_caps = frappe.db.get_all(
-        "CH Store",
-        filters={"company": company, "disabled": 0},
-        fields=["is_retail_enabled", "is_service_enabled"],
-    )
-    for cap in store_caps:
-        if cint(cap.is_service_enabled) and not cint(cap.is_retail_enabled):
-            return "service"
-        if cint(cap.is_retail_enabled) and not cint(cap.is_service_enabled):
-            return "retail"
-
-    # Fallback: name heuristic (single place — not duplicated in JS)
-    lc = (company or "").lower()
-    if "gofix" in lc or "service" in lc:
+    """Resolve explicit retail/service capabilities from the company's CH Stores."""
+    store_caps = stores
+    if store_caps is None:
+        row_limit = max(
+            1, min(cint(get_control_setting("executive_access_row_limit", 500)), 5000)
+        )
+        store_caps = frappe.db.get_all(
+            "CH Store",
+            filters={"company": company, "disabled": 0},
+            fields=["is_retail_enabled", "is_service_enabled"],
+            limit_page_length=row_limit,
+        )
+    retail_enabled = any(cint(cap.is_retail_enabled) for cap in store_caps)
+    service_enabled = any(cint(cap.is_service_enabled) for cap in store_caps)
+    if retail_enabled and service_enabled:
+        return "hybrid"
+    if retail_enabled:
+        return "retail"
+    if service_enabled:
         return "service"
-    return "retail"
+    return None
 
 
 def _get_executive_access(user, warehouse):
@@ -10426,52 +11319,91 @@ def _get_executive_access(user, warehouse):
       - store_executives: list of all active executives at this store (for billing-by selector)
       - own_executive: the current user's POS Executive record(s)
     """
+    row_limit = max(
+        1, min(cint(get_control_setting("executive_access_row_limit", 500)), 5000)
+    )
+
     # Find store(s) linked to this warehouse
     stores = frappe.db.get_all(
         "CH Store",
         filters={"warehouse": warehouse, "disabled": 0},
         pluck="name",
+        limit_page_length=row_limit,
     )
     if not stores:
-        # Also try POS Profile Extension store link
-        store_from_ext = frappe.db.get_all(
-            "POS Profile Extension",
-            filters={"store": ("is", "set")},
-            pluck="store",
+        # Resolve only extensions whose POS Profile uses this warehouse. The
+        # former global fallback exposed every store when one mapping was absent.
+        store_from_ext = frappe.db.sql(
+            """
+            SELECT DISTINCT ext.store
+              FROM `tabPOS Profile Extension` ext
+              JOIN `tabPOS Profile` profile ON profile.name = ext.pos_profile
+             WHERE profile.warehouse = %(warehouse)s
+               AND IFNULL(ext.store, '') != ''
+             ORDER BY ext.store
+             LIMIT %(limit)s
+            """,
+            {"warehouse": warehouse, "limit": row_limit},
+            pluck=True,
         )
         stores = list(set(store_from_ext))
 
     # Get all executives at these stores
-    all_execs = frappe.db.get_all(
-        "POS Executive",
-        filters={"store": ("in", stores), "is_active": 1} if stores else {"is_active": 1},
-        fields=["name", "executive_name", "user", "store", "company", "role",
-                "can_give_discount", "max_discount_pct", "sales_person"],
-        order_by="company, executive_name",
-    )
+    all_execs = []
+    if stores:
+        all_execs = frappe.db.get_all(
+            "POS Executive",
+            filters={"store": ("in", stores), "is_active": 1},
+            fields=["name", "executive_name", "user", "store", "company", "role",
+                    "can_give_discount", "max_discount_pct", "sales_person"],
+            order_by="company, executive_name",
+            limit_page_length=row_limit,
+        )
+
+    privileged = is_privileged_user(user)
 
     # Current user's executive records
     own = [e for e in all_execs if e.user == user]
     own_companies = {e.company for e in own}
-    is_manager = any(e.role == "Manager" for e in own)
+    is_manager = has_configured_roles(
+        "session_override_roles",
+        ("Store Manager", "POS Manager"),
+        user=user,
+    )
 
     # A manager sees ALL companies at the store; non-manager sees only their company
-    if is_manager:
+    if privileged:
+        accessible_companies = frappe.get_all(
+            "Company", pluck="name", order_by="name asc", limit_page_length=row_limit
+        )
+    elif is_manager:
         accessible_companies = list({e.company for e in all_execs})
     else:
         accessible_companies = list(own_companies)
+
+    capability_rows = []
+    if accessible_companies:
+        capability_rows = frappe.get_all(
+            "CH Store",
+            filters={"company": ("in", accessible_companies), "disabled": 0},
+            fields=["company", "is_retail_enabled", "is_service_enabled"],
+            limit_page_length=row_limit,
+        )
+    capabilities_by_company = {}
+    for row in capability_rows:
+        capabilities_by_company.setdefault(row.company, []).append(row)
 
     # Build company-role map with server-resolved type and allowed modes
     company_roles = []
     for comp in accessible_companies:
         user_exec = next((e for e in own if e.company == comp), None)
-        role = user_exec.role if user_exec else "Manager"
-        ctype = _get_company_type(comp)
+        role = user_exec.role if user_exec else None
+        ctype = _get_company_type(comp, capabilities_by_company.get(comp, []))
         company_roles.append({
             "company": comp,
             "role": role,
-            "company_type": ctype,
-            "allowed_modes": COMPANY_MODE_MAP.get(ctype, COMPANY_MODE_MAP["retail"]),
+            "company_type": ctype or "unconfigured",
+            "allowed_modes": _configured_company_modes(ctype),
         })
 
     # Store executives grouped by company (for the "billed by" selector)
@@ -10513,6 +11445,9 @@ def _get_executive_access(user, warehouse):
     return {
         "companies": company_roles,
         "is_manager": is_manager,
+        "is_privileged": privileged,
+        "can_manage_session": is_manager,
+        "can_select_all_companies": privileged,
         "store_executives": store_execs_by_company,
         "own_executive": own_default,
         "own_by_company": own_by_company,
@@ -10523,15 +11458,26 @@ def _get_executive_access(user, warehouse):
 @frappe.whitelist()
 def get_store_executives(warehouse=None, company=None) -> dict:
     """Return active executives for a store, optionally filtered by company."""
-    filters = {"is_active": 1}
-
+    frappe.has_permission("POS Executive", "read", throw=True)
+    if not warehouse and not is_privileged_user():
+        frappe.throw(_("Warehouse is required to list store executives."), frappe.PermissionError)
+    warehouse_company = frappe.db.get_value("Warehouse", warehouse, "company") if warehouse else company
+    if company and warehouse_company and company != warehouse_company:
+        frappe.throw(_("Warehouse belongs to another company."), frappe.PermissionError)
+    company = warehouse_company
     if warehouse:
-        stores = frappe.db.get_all("CH Store", filters={"warehouse": warehouse, "disabled": 0}, pluck="name")
-        if stores:
-            filters["store"] = ("in", stores)
+        assert_store_scope(warehouse=warehouse, company=company)
 
+    filters = {"is_active": 1}
     if company:
         filters["company"] = company
+    if warehouse:
+        stores = frappe.db.get_all(
+            "CH Store", filters={"warehouse": warehouse, "disabled": 0}, pluck="name"
+        )
+        if not stores:
+            return []
+        filters["store"] = ("in", stores)
 
     return frappe.db.get_all(
         "POS Executive",
@@ -10545,6 +11491,19 @@ def get_store_executives(warehouse=None, company=None) -> dict:
 @frappe.whitelist()
 def get_executive_incentive_summary(pos_executive, from_date=None, to_date=None) -> dict:
     """Return incentive summary for an executive — used in the POS dashboard."""
+    frappe.has_permission("POS Incentive Ledger", "read", throw=True)
+    executive = frappe.db.get_value(
+        "POS Executive", pos_executive, ["user", "store", "company"], as_dict=True
+    )
+    if not executive:
+        frappe.throw(_("POS Executive was not found."), frappe.DoesNotExistError)
+    assert_store_scope(store=executive.store, company=executive.company)
+    if executive.user != frappe.session.user and not is_privileged_user():
+        require_configured_roles(
+            "incentive_report_roles",
+            defaults=("Accounts Manager", "Accounts User", "POS Manager"),
+            action=_("view another executive's incentives"),
+        )
     if not from_date:
         from_date = frappe.utils.get_first_day(nowdate())
     if not to_date:
@@ -10633,7 +11592,20 @@ def _find_incentive_slab(company, item_group, brand, billing_amount, transaction
     return best
 
 
-def _create_incentive_entries(invoice, pos_executive, transaction_type="Sale"):
+def _insert_incentive_entry(ledger):
+    previous = frappe.flags.get("incentive_engine_write")
+    frappe.flags.incentive_engine_write = True
+    try:
+        ledger.insert()
+    finally:
+        frappe.flags.incentive_engine_write = previous
+
+
+def _create_incentive_entries(
+    invoice,
+    pos_executive,
+    transaction_type="Sale",
+):
     """Create POS Incentive Ledger entries for each item in the invoice.
 
     Returns total incentive amount earned.
@@ -10719,8 +11691,7 @@ def _create_incentive_entries(invoice, pos_executive, transaction_type="Sale"):
         ledger.incentive_amount = flt(incentive_amount, 2)
         ledger.status = "Pending"
         ledger.payout_month = payout_month
-        ledger.flags.ignore_permissions = True
-        ledger.save()
+        _insert_incentive_entry(ledger)
 
         total_incentive += flt(incentive_amount, 2)
 
@@ -10819,16 +11790,21 @@ def _create_return_incentive_entries(return_invoice, pos_executive):
         ledger.incentive_amount = flt(clawback, 2)
         ledger.status = "Pending"
         ledger.payout_month = payout_month
-        ledger.flags.ignore_permissions = True
-        ledger.save()
+        _insert_incentive_entry(ledger)
 
         total_clawback += flt(clawback, 2)
 
     return total_clawback
 
 
-@frappe.whitelist()
-def backfill_missing_incentive_ledger(from_date=None, to_date=None, company=None) -> dict:
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=3, seconds=60)
+def backfill_missing_incentive_ledger(
+    from_date=None,
+    to_date=None,
+    company=None,
+    pos_profile=None,
+) -> dict:
     """Backfill POS Incentive Ledger for submitted invoices missing entries.
 
     Safe behavior:
@@ -10836,31 +11812,107 @@ def backfill_missing_incentive_ledger(from_date=None, to_date=None, company=None
     - Requires linked custom_sales_executive
     - Skips invoices that already have ledger rows for same invoice+executive
     """
-    if not any(r in frappe.get_roles() for r in ("System Manager", "POS Manager", "Accounts Manager")):
-        frappe.throw(frappe._("Not permitted"), frappe.PermissionError)
+    require_configured_roles(
+        "incentive_rebuild_roles",
+        defaults=("POS Manager", "Accounts Manager"),
+        action=_("rebuild incentive ledger entries"),
+    )
 
-    conditions = ["docstatus = 1", "IFNULL(custom_sales_executive, '') != ''", "IFNULL(is_return, 0) = 0"]
-    values = {}
+    company = (company or "").strip()
+    if not company:
+        frappe.throw(_("Company is required."), frappe.ValidationError)
 
-    if from_date:
-        conditions.append("posting_date >= %(from_date)s")
-        values["from_date"] = from_date
-    if to_date:
-        conditions.append("posting_date <= %(to_date)s")
-        values["to_date"] = to_date
-    if company:
-        conditions.append("company = %(company)s")
-        values["company"] = company
+    frappe.has_permission("Company", "read", company, throw=True)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    frappe.has_permission("POS Executive", "read", throw=True)
+    frappe.has_permission("POS Incentive Ledger", "read", throw=True)
+    frappe.has_permission("POS Incentive Ledger", "create", throw=True)
+
+    from ch_erp15.ch_erp15.data_access import resolve_data_scope
+
+    access = resolve_data_scope(company=company)
+    profile_anchors = None
+    if pos_profile:
+        frappe.has_permission("POS Profile", "read", pos_profile, throw=True)
+        profile_anchors = assert_pos_profile_scope(pos_profile)
+        if profile_anchors.get("company") != company:
+            frappe.throw(_("POS Profile belongs to another company."), frappe.PermissionError)
+    elif not access.get("bypass") and company not in set(access.get("direct_companies") or ()):
+        frappe.throw(
+            _("POS Profile is required when access is limited to assigned stores."),
+            frappe.PermissionError,
+        )
+
+    to_date = getdate(to_date or nowdate())
+    from_date = getdate(from_date or add_days(to_date, -30))
+    if from_date > to_date:
+        frappe.throw(_("From Date cannot be after To Date."), frappe.ValidationError)
+
+    max_days = max(1, cint(get_control_setting("incentive_rebuild_max_days", 366)) or 366)
+    if (to_date - from_date).days + 1 > max_days:
+        frappe.throw(
+            _("Date range cannot exceed {0} days.").format(max_days),
+            frappe.ValidationError,
+        )
+
+    batch_limit = max(
+        1,
+        min(cint(get_control_setting("incentive_rebuild_batch_limit", 200)) or 200, 1000),
+    )
+
+    conditions = [
+        "si.docstatus = 1",
+        "IFNULL(si.custom_sales_executive, '') != ''",
+        "IFNULL(si.is_return, 0) = 0",
+        "si.posting_date BETWEEN %(from_date)s AND %(to_date)s",
+        "si.company = %(company)s",
+    ]
+    values = {
+        "from_date": from_date,
+        "to_date": to_date,
+        "company": company,
+        "limit": batch_limit,
+    }
+    if pos_profile:
+        conditions.append("si.pos_profile = %(pos_profile)s")
+        values["pos_profile"] = pos_profile
 
     invoices = frappe.db.sql(
         """
-        SELECT name, custom_sales_executive
-        FROM `tabSales Invoice`
+        SELECT si.name, si.company, si.pos_profile, si.custom_sales_executive
+        FROM `tabSales Invoice` si
         WHERE {conditions}
-        ORDER BY posting_date, creation
+        ORDER BY si.posting_date, si.creation
+        LIMIT %(limit)s
         """.format(conditions=" AND ".join(conditions)),
         values,
         as_dict=True,
+    )
+
+    invoice_names = [row.name for row in invoices]
+    existing_pairs = set()
+    if invoice_names:
+        existing_pairs = {
+            (entry.invoice, entry.pos_executive)
+            for entry in frappe.get_all(
+                "POS Incentive Ledger",
+                filters={"invoice": ("in", invoice_names)},
+                fields=["invoice", "pos_executive"],
+            )
+        }
+
+    executive_names = sorted({row.custom_sales_executive for row in invoices})
+    executives = (
+        {
+            executive.name: executive
+            for executive in frappe.get_all(
+                "POS Executive",
+                filters={"name": ("in", executive_names)},
+                fields=["name", "store", "company"],
+            )
+        }
+        if executive_names
+        else {}
     )
 
     stats = {
@@ -10873,25 +11925,77 @@ def backfill_missing_incentive_ledger(from_date=None, to_date=None, company=None
 
     for row in invoices:
         try:
-            exists = frappe.db.exists("POS Incentive Ledger", {
-                "invoice": row.name,
-                "pos_executive": row.custom_sales_executive,
-            })
-            if exists:
+            pair = (row.name, row.custom_sales_executive)
+            if pair in existing_pairs:
                 stats["skipped_existing"] += 1
                 continue
 
+            frappe.db.sql(
+                "SELECT name FROM `tabSales Invoice` WHERE name = %s FOR UPDATE",
+                row.name,
+            )
+            if frappe.db.exists(
+                "POS Incentive Ledger",
+                {"invoice": row.name, "pos_executive": row.custom_sales_executive},
+            ):
+                stats["skipped_existing"] += 1
+                continue
+
+            if not frappe.has_permission("Sales Invoice", "read", row.name):
+                frappe.throw(
+                    _("No permission to read Sales Invoice {0}.").format(row.name),
+                    frappe.PermissionError,
+                )
+            assert_sales_invoice_scope(row.name)
+
+            executive = executives.get(row.custom_sales_executive)
+            if not executive or executive.company != row.company:
+                frappe.throw(
+                    _("Sales executive on invoice {0} is not valid for its company.").format(row.name),
+                    frappe.ValidationError,
+                )
+            if profile_anchors and executive.store not in {
+                profile_anchors.get("store"),
+                profile_anchors.get("warehouse"),
+            }:
+                frappe.throw(
+                    _("Sales executive on invoice {0} belongs to another store.").format(row.name),
+                    frappe.PermissionError,
+                )
+
             inv = frappe.get_doc("Sales Invoice", row.name)
-            earned = flt(_create_incentive_entries(inv, row.custom_sales_executive, transaction_type="Sale"))
+            earned = flt(
+                _create_incentive_entries(
+                    inv,
+                    row.custom_sales_executive,
+                    transaction_type="Sale",
+                )
+            )
             stats["processed"] += 1
             if earned or frappe.db.exists("POS Incentive Ledger", {"invoice": row.name}):
                 stats["created"] += 1
+        except frappe.PermissionError:
+            raise
         except Exception:
             stats["errors"] += 1
             frappe.log_error(frappe.get_traceback(), f"Incentive backfill failed for {row.name}")
 
-    frappe.db.commit()
     return stats
+
+
+def _best_attach_rate_slab(slabs, attach_pct):
+    best = None
+    best_score = -1
+    for slab in slabs:
+        if flt(slab.from_amount) > attach_pct or flt(slab.to_amount) < attach_pct:
+            continue
+        if slab.item_group or slab.brand:
+            continue
+        score = cint(slab.priority) * 100
+        if score > best_score:
+            best = slab
+            best_score = score
+    return best
 
 
 def calculate_attach_rate_bonus(company=None, payout_month=None):
@@ -10905,75 +12009,118 @@ def calculate_attach_rate_bonus(company=None, payout_month=None):
     Returns list of {executive, attach_pct, bonus_amount}.
     """
     if not payout_month:
-        payout_month = str(getdate(nowdate()))[:7]  # YYYY-MM
+        payout_month = str(getdate(nowdate()))[:7]
 
     year, month = payout_month.split("-")
     from_date = f"{year}-{month}-01"
     to_date = str(get_last_day(getdate(from_date)))
+    next_date = str(add_days(getdate(to_date), 1))
+    batch_limit = max(1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000))
 
-    executives = frappe.get_all("POS Executive",
-        filters={"is_active": 1, "company": company} if company else {"is_active": 1},
-        fields=["name", "executive_name", "store", "company", "user"],
+    company_condition = "AND pe.company = %(company)s" if company else ""
+    executives = frappe.db.sql(
+        f"""
+        SELECT pe.name, pe.executive_name, pe.store, pe.company, pe.user,
+               SUM(CASE WHEN al.action = 'Offered' THEN 1 ELSE 0 END) AS total_offered,
+               SUM(CASE WHEN al.action = 'Accepted' THEN 1 ELSE 0 END) AS total_accepted
+        FROM `tabPOS Executive` pe
+        JOIN `tabCH Attach Log` al
+          ON al.offered_by = pe.user
+         AND al.offered_at >= %(from_date)s
+         AND al.offered_at < %(next_date)s
+        WHERE pe.is_active = 1
+          AND IFNULL(pe.user, '') != ''
+          {company_condition}
+          AND NOT EXISTS (
+              SELECT 1
+              FROM `tabPOS Incentive Ledger` pil
+              WHERE pil.pos_executive = pe.name
+                AND pil.transaction_type = 'Attach Rate'
+                AND pil.payout_month = %(payout_month)s
+          )
+        GROUP BY pe.name, pe.executive_name, pe.store, pe.company, pe.user
+        HAVING total_offered > 0
+        ORDER BY pe.name ASC
+        LIMIT %(limit)s
+        """,
+        {
+            "company": company,
+            "from_date": from_date,
+            "next_date": next_date,
+            "payout_month": payout_month,
+            "limit": batch_limit,
+        },
+        as_dict=True,
     )
+
+    if not executives:
+        return []
+
+    companies = sorted({row.company for row in executives if row.company})
+    slab_limit = max(1, min(cint(get_control_setting("attach_bonus_slab_limit", 2000)), 10000))
+    slabs = frappe.get_all(
+        "POS Incentive Slab",
+        filters={
+            "company": ("in", companies),
+            "applicable_on": "Attach Rate",
+            "is_active": 1,
+        },
+        fields=[
+            "name",
+            "company",
+            "item_group",
+            "brand",
+            "from_amount",
+            "to_amount",
+            "incentive_type",
+            "incentive_value",
+            "priority",
+        ],
+        order_by="company asc, priority desc, name asc",
+        limit_page_length=slab_limit + 1,
+    ) if companies else []
+    if len(slabs) > slab_limit:
+        frappe.log_error(
+            f"Active attach-rate slabs exceed configured limit {slab_limit}.",
+            "Attach Rate Bonus Scheduler Stopped",
+        )
+        return []
+
+    slabs_by_company = {}
+    for slab in slabs:
+        slabs_by_company.setdefault(slab.company, []).append(slab)
+
+    users = sorted({row.user for row in executives if row.user})
+    monthly_sales = {
+        row.owner: flt(row.total_sales)
+        for row in frappe.db.sql(
+            """
+            SELECT owner, COALESCE(SUM(grand_total), 0) AS total_sales
+            FROM `tabSales Invoice`
+            WHERE docstatus = 1
+              AND is_pos = 1
+              AND owner IN %(users)s
+              AND posting_date BETWEEN %(from_date)s AND %(to_date)s
+            GROUP BY owner
+            """,
+            {"users": users, "from_date": from_date, "to_date": to_date},
+            as_dict=True,
+        )
+    } if users else {}
 
     results = []
     for exec_doc in executives:
-        user = exec_doc.user
-        if not user:
-            continue
-
-        # Count device sales (items offered for attach)
-        total_offered = frappe.db.count("CH Attach Log", filters={
-            "offered_by": user,
-            "action": "Offered",
-            "offered_at": ["between", [from_date, to_date]],
-        })
-
-        if total_offered == 0:
-            continue
-
-        total_accepted = frappe.db.count("CH Attach Log", filters={
-            "offered_by": user,
-            "action": "Accepted",
-            "offered_at": ["between", [from_date, to_date]],
-        })
-
-        attach_pct = flt(total_accepted / total_offered * 100, 1)
-
-        # Find matching Attach Rate incentive slab
-        slab = _find_incentive_slab(
-            company=exec_doc.company,
-            item_group="",
-            brand="",
-            billing_amount=attach_pct,  # Use attach % as the slab range
-            transaction_type="Attach Rate",
-        )
+        attach_pct = flt(flt(exec_doc.total_accepted) / flt(exec_doc.total_offered) * 100, 1)
+        slab = _best_attach_rate_slab(slabs_by_company.get(exec_doc.company, ()), attach_pct)
 
         bonus = 0
         if slab:
             if slab.incentive_type == "Percentage":
-                # % of total sales amount for the month
-                monthly_sales = flt(frappe.db.sql("""
-                    SELECT COALESCE(SUM(si.grand_total), 0)
-                    FROM `tabSales Invoice` si
-                    WHERE si.docstatus = 1 AND si.is_pos = 1
-                        AND si.owner = %(user)s
-                        AND si.posting_date BETWEEN %(from)s AND %(to)s
-                """, {"user": user, "from": from_date, "to": to_date})[0][0])
-                bonus = monthly_sales * flt(slab.incentive_value) / 100
+                bonus = monthly_sales.get(exec_doc.user, 0) * flt(slab.incentive_value) / 100
             else:
                 bonus = flt(slab.incentive_value)
 
         if bonus <= 0:
-            continue
-
-        # Check if already created for this month
-        existing = frappe.db.exists("POS Incentive Ledger", {
-            "pos_executive": exec_doc.name,
-            "transaction_type": "Attach Rate",
-            "payout_month": payout_month,
-        })
-        if existing:
             continue
 
         ledger = frappe.new_doc("POS Incentive Ledger")
@@ -10992,8 +12139,7 @@ def calculate_attach_rate_bonus(company=None, payout_month=None):
         ledger.incentive_amount = flt(bonus, 2)
         ledger.status = "Pending"
         ledger.payout_month = payout_month
-        ledger.flags.ignore_permissions = True
-        ledger.save()
+        _insert_incentive_entry(ledger)
 
         results.append({
             "executive": exec_doc.executive_name,
@@ -11005,10 +12151,10 @@ def calculate_attach_rate_bonus(company=None, payout_month=None):
 
 
 # ── Update Customer Details (from POS) ───────────────────────────
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_customer_details(customer, mobile_no=None, email_id=None,
                            customer_name=None, alternate_phone=None,
-                           whatsapp_number=None, pan_number=None) -> dict:
+                           whatsapp_number=None, pan_number=None, pos_profile=None) -> dict:
     """Update customer details from POS Customer 360 view.
 
     Only updates fields that are explicitly passed (non-None).
@@ -11019,6 +12165,7 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
 
     if not customer or not frappe.db.exists("Customer", customer):
         frappe.throw(frappe._("Customer {0} not found").format(customer))
+    _assert_customer_pos_access(customer, pos_profile)
 
     cust = frappe.get_doc("Customer", customer)
     changed = False
@@ -11062,7 +12209,6 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
         return {"ok": True, "message": "No changes detected"}
 
     # Save triggers validate hooks: phone format, dedup, phone change tracking
-    cust.flags.ignore_permissions = True
     cust.save()
 
     return {
@@ -11078,8 +12224,8 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
         "pan": cust.get("ch_pan_number") or cust.get("pan") or "",
     }
 
-@frappe.whitelist()
-def update_customer_complete(customer, payload):
+@frappe.whitelist(methods=["POST"])
+def update_customer_complete(customer, payload, pos_profile=None):
     """
     Single atomic update for Customer + Billing Address + Shipping Address + Extras.
     Handles everything in ONE transaction → no deadlocks.
@@ -11092,6 +12238,7 @@ def update_customer_complete(customer, payload):
 
     if not customer or not frappe.db.exists("Customer", customer):
         frappe.throw(_("Customer {0} not found").format(customer))
+    _assert_customer_pos_access(customer, pos_profile)
 
     # ──────────────────────────────────────────────
     # 1. UPDATE CUSTOMER DOC
@@ -11177,7 +12324,6 @@ def update_customer_complete(customer, payload):
 
     # 3. NOW save Customer (address exists >>>>validation passes)
     if cust_changed:
-        cust.flags.ignore_permissions = True
         cust.save()
 
     # 4. SHIPPING ADDRESS
@@ -11208,40 +12354,6 @@ def update_customer_complete(customer, payload):
                 link_field=None,
             )
 
-    # ... shipping address code above ...
-
-    # ── Clear caches so next fetch returns fresh data ──
-    frappe.clear_document_cache("Customer", customer)
-    primary_addr = frappe.db.get_value("Customer", customer, "customer_primary_address")
-    # 🔥 Update Customer's primary_address display text (this is what search shows)
-    if primary_addr:
-        addr_doc = frappe.db.get_value("Address", primary_addr, 
-            ["address_line1", "address_line2", "city", "state", "pincode", "country"], 
-            as_dict=True)
-        
-        if addr_doc:
-            # Build the display string like Frappe does
-            parts = [
-                addr_doc.address_line1,
-                addr_doc.address_line2,
-                addr_doc.city,
-                addr_doc.state,
-                addr_doc.pincode,
-                addr_doc.country
-            ]
-            display = "\n".join([p for p in parts if p])
-            
-            # Update Customer.primary_address with new display
-            frappe.db.sql("""
-                UPDATE `tabCustomer`
-                SET primary_address = %s,
-                    modified = NOW(),
-                    modified_by = %s
-                WHERE name = %s
-            """, (display, frappe.session.user, customer))
-            
-
-    frappe.db.commit()
     frappe.clear_document_cache("Customer", customer)
 
     return {
@@ -11250,11 +12362,48 @@ def update_customer_complete(customer, payload):
         "customer_name": cust.customer_name,
     }
 
+
+@frappe.whitelist()
+def lookup_pincode(pincode, pos_profile=None):
+    require_authenticated_user()
+    frappe.has_permission("CH Pincode", "read", throw=True)
+    if pos_profile:
+        assert_pos_profile_scope(pos_profile)
+    elif not is_privileged_user():
+        frappe.throw(_("POS Profile is required to look up a pincode."), frappe.PermissionError)
+
+    normalized = str(pincode or "").strip()
+    if not re.fullmatch(r"\d{6}", normalized):
+        frappe.throw(_("Pincode must contain exactly 6 digits."), frappe.ValidationError)
+
+    provider = str(get_control_setting("pincode_lookup_provider", "Disabled") or "Disabled").strip()
+    if provider == "Disabled":
+        return {"found": False, "provider": provider}
+    if provider != "Local Master":
+        frappe.throw(
+            _("Pincode Lookup Provider is not configured correctly."),
+            frappe.ValidationError,
+        )
+
+    location = frappe.db.get_value(
+        "CH Pincode",
+        {"pincode": normalized, "disabled": 0},
+        ["pincode", "city", "state", "country"],
+        as_dict=True,
+    )
+    if not location:
+        return {"found": False, "provider": provider, "pincode": normalized}
+    return {
+        "found": True,
+        "provider": provider,
+        "pincode": location.pincode,
+        "city": location.city,
+        "state": location.state,
+        "country": location.country,
+    }
+
 def _upsert_address(customer, customer_name, address_type, is_primary, is_shipping, data, link_field=None):
-    """
-    Find/create address using DIRECT SQL to bypass all hooks/validations
-    that silently revert changes.
-    """
+    """Create or update one customer address through the standard document lifecycle."""
     addr_name = None
 
     # Find existing address
@@ -11274,139 +12423,47 @@ def _upsert_address(customer, customer_name, address_type, is_primary, is_shippi
         if existing:
             addr_name = existing[0].name
 
-    # Get values to save
-    city = (data.get("city") or "").strip()
-    state = (data.get("state") or "").strip()
+    city, state = _resolve_pos_city_state(data.get("city"), data.get("state"))
     pincode = (data.get("pincode") or "").strip()
-    address_line1 = (data.get("address_line1") or "").strip() or "N/A"
+    address_line1 = (data.get("address_line1") or "").strip()
     address_line2 = (data.get("address_line2") or "").strip()
+    if not address_line1:
+        frappe.throw(_("Address Line 1 is required."))
 
-
-
-    # Auto-create CH State if missing
-    if state and not frappe.db.exists("CH State", state):
-        try:
-            new_state = frappe.new_doc("CH State")
-            meta = frappe.get_meta("CH State")
-            if meta.has_field("state_name"):
-                new_state.state_name = state
-            elif meta.has_field("state"):
-                new_state.state = state
-            new_state.flags.ignore_permissions = True
-            new_state.insert(ignore_if_duplicate=True)
-            print(f"Created CH State: {state}")
-        except Exception as e:
-            print(f"CH State create failed: {e}")
-
-    # Auto-create CH City if missing
-    if city and not frappe.db.exists("CH City", city):
-        try:
-            new_city = frappe.new_doc("CH City")
-            meta = frappe.get_meta("CH City")
-            if meta.has_field("city_name"):
-                new_city.city_name = city
-            elif meta.has_field("city"):
-                new_city.city = city
-            if state and meta.has_field("state"):
-                new_city.state = state
-            new_city.flags.ignore_permissions = True
-            new_city.insert(ignore_if_duplicate=True)
-            print(f"Created CH City: {city}")
-        except Exception as e:
-            print(f"CH City create failed: {e}")
-
-    # Sync CH City state
-    if city and state and frappe.db.exists("CH City", city):
-        try:
-            current = frappe.db.get_value("CH City", city, "state")
-            if current != state:
-                frappe.db.set_value("CH City", city, "state", state, update_modified=False)
-        except Exception:
-            pass
-
-    # ── CASE 1: Address exists — UPDATE via direct SQL ──
     if addr_name:
-        
-        try:
-            # Direct SQL UPDATE — bypasses ALL Frappe hooks/validations
-            frappe.db.sql("""
-                UPDATE `tabAddress`
-                SET city = %s,
-                    state = %s,
-                    pincode = %s,
-                    address_line1 = %s,
-                    address_line2 = %s,
-                    is_primary_address = %s,
-                    is_shipping_address = %s,
-                    modified = NOW()
-                WHERE name = %s
-            """, (city, state, pincode, address_line1, address_line2, 
-                  is_primary, is_shipping, addr_name))
-            
-            frappe.db.commit()
-            
-            # Verify
-            check = frappe.db.sql("""
-                SELECT city, state, pincode FROM `tabAddress` WHERE name = %s
-            """, addr_name, as_dict=True)
-            print(f"Verified DB now has: {check}\n")
-            
-        except Exception as e:
-            print(f"Direct SQL update failed: {e}")
-            raise
-
-    # ── CASE 2: New address — INSERT via Frappe ──
+        addr = frappe.get_doc("Address", addr_name)
+        addr.check_permission("write")
     else:
+        frappe.has_permission("Address", "create", throw=True)
         addr = frappe.new_doc("Address")
         addr.address_title = f"{customer_name}-{address_type}"
         addr.address_type = address_type
-        addr.address_line1 = address_line1
-        addr.address_line2 = address_line2
-        addr.city = city
-        addr.state = state
-        addr.pincode = pincode
-        addr.country = "India"
-        addr.is_primary_address = is_primary
-        addr.is_shipping_address = is_shipping
         addr.append("links", {
             "link_doctype": "Customer",
             "link_name": customer,
         })
-        
-        addr.flags.ignore_permissions = True
-        try:
-            addr.insert()
-            addr_name = addr.name
-        except frappe.ValidationError as e:
-            err_msg = str(e)
-            if "Postal Code" in err_msg or "Postal" in err_msg:
-                addr = frappe.new_doc("Address")
-                addr.address_title = f"{customer_name}-{address_type}"
-                addr.address_type = address_type
-                addr.address_line1 = address_line1
-                addr.address_line2 = address_line2
-                addr.city = city
-                addr.state = state
-                addr.pincode = ""  # cleared
-                addr.country = "India"
-                addr.is_primary_address = is_primary
-                addr.is_shipping_address = is_shipping
-                addr.append("links", {
-                    "link_doctype": "Customer",
-                    "link_name": customer,
-                })
-                addr.flags.ignore_permissions = True
-                addr.insert()
-                addr_name = addr.name
-            else:
-                raise
+
+    addr.address_line1 = address_line1
+    addr.address_line2 = address_line2
+    addr.city = city
+    addr.state = state
+    addr.pincode = pincode
+    if not addr.country:
+        addr.country = frappe.db.get_single_value("System Settings", "country")
+    if not addr.country:
+        frappe.throw(_("Configure the default country in System Settings."))
+    addr.is_primary_address = is_primary
+    addr.is_shipping_address = is_shipping
+    addr.save()
+    addr_name = addr.name
 
     # Link as primary for billing
     if address_type == "Billing" and addr_name:
-        frappe.db.set_value(
-            "Customer", customer, "customer_primary_address", addr_name,
-            update_modified=False
-        )
+        customer_doc = frappe.get_doc("Customer", customer)
+        customer_doc.check_permission("write")
+        if customer_doc.customer_primary_address != addr_name:
+            customer_doc.customer_primary_address = addr_name
+            customer_doc.save()
 
     # Clear Address cache
     if addr_name:
@@ -11478,8 +12535,10 @@ def _find_existing_customer_by_phone_suffix(phone_suffix):
 
 
 @frappe.whitelist()
-def find_existing_customer_by_phone(phone_no):
+def find_existing_customer_by_phone(phone_no, company=None):
     """Check whether a customer already exists for the given phone number."""
+    frappe.has_permission("Customer", "read", throw=True)
+    _assert_company_scope(company, _("check for an existing customer"))
     suffix = _phone_suffix_10(phone_no)
     if not suffix:
         return {"exists": False}
@@ -11499,7 +12558,7 @@ def find_existing_customer_by_phone(phone_no):
 
 
 # ── Quick Customer Creation ──────────────────────────────────────
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def quick_create_customer(customer_name, mobile_no="", email_id="",
                           customer_group="Individual", company=None,
                           alternate_phone="", whatsapp_number="",
@@ -11508,16 +12567,22 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
                           pan_number="",
                           same_as_billing=1,
                           shipping_address_line1="", shipping_city="",
-                          shipping_state="", shipping_pincode="") -> dict:
+                          shipping_state="", shipping_pincode="",
+                          otp_verification_token=None) -> dict:
     """Create a new Customer quickly from the POS interface."""
     frappe.has_permission("Customer", "create", throw=True)
+    _assert_company_scope(company, _("create a customer"))
 
     if not (mobile_no or "").strip():
         frappe.throw(_("Mobile Number is mandatory"), title=_("Missing Mobile Number"))
     if not (state or "").strip():
         frappe.throw(_("State is mandatory"), title=_("Missing State"))
+    if not (whatsapp_number or "").strip():
+        frappe.throw(_("WhatsApp Number is mandatory"), title=_("Missing WhatsApp Number"))
 
     city, state = _resolve_pos_city_state(city, state)
+    mobile_no = validate_indian_phone(mobile_no, "Mobile Number")
+    whatsapp_number = validate_indian_phone(whatsapp_number, "WhatsApp Number")
 
     mobile_suffix = _phone_suffix_10(mobile_no)
     whatsapp_suffix = _phone_suffix_10(whatsapp_number)
@@ -11549,6 +12614,14 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
                 title=_("Duplicate Customer"),
             )
 
+    from ch_pos.api.manager_approval import consume_action_grant
+
+    consume_action_grant(
+        "customer_otp",
+        otp_verification_token,
+        {"mobile_no": whatsapp_number},
+    )
+
     cust = frappe.new_doc("Customer")
     cust.customer_name = customer_name
     cust.customer_group = customer_group or "Individual"
@@ -11565,8 +12638,6 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         cust.ch_alternate_phone = alternate_phone.strip()
     if whatsapp_number:
         cust.ch_whatsapp_number = whatsapp_number.strip()
-    cust.flags.ignore_permissions = True
-    cust.flags.ignore_mandatory = True
     # Store GSTIN + PAN directly on Customer master for instant lookup
     if gstin:
         cust.custom_gstin = gstin.strip().upper()
@@ -11574,10 +12645,11 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         pan_clean = pan_number.strip().upper()
         cust.pan = pan_clean
         cust.ch_pan_number = pan_clean
-    cust.save()
+    cust.insert()
 
     # Add contact details if provided
     if mobile_no or email_id:
+        frappe.has_permission("Contact", "create", throw=True)
         contact = frappe.new_doc("Contact")
         contact.first_name = customer_name
         if email_id:
@@ -11585,41 +12657,41 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         if mobile_no:
             contact.append("phone_nos", {"phone": mobile_no, "is_primary_mobile_no": 1})
         contact.append("links", {"link_doctype": "Customer", "link_name": cust.name})
-        contact.flags.ignore_permissions = True
-        contact.save()
+        contact.insert()
 
     # Create billing address if provided
     if address_line1 or city or pincode:
-        billing = frappe.new_doc("Address")
-        billing.address_title = customer_name
-        billing.address_type = "Billing"
-        billing.address_line1 = address_line1 or customer_name
-        billing.address_line2 = address_line2
-        billing.city = city or ""
-        billing.state = state or ""
-        billing.pincode = pincode or ""
-        if area:
-            billing.county = area  # Use county field for area/locality
-        if gstin:
-            billing.gstin = gstin
-        billing.append("links", {"link_doctype": "Customer", "link_name": cust.name})
-        billing.flags.ignore_permissions = True
-        billing.flags.ignore_mandatory = True
-        billing.save()
+        _upsert_address(
+            customer=cust.name,
+            customer_name=customer_name,
+            address_type="Billing",
+            is_primary=1,
+            is_shipping=0,
+            data={
+                "address_line1": address_line1 or customer_name,
+                "address_line2": address_line2,
+                "city": city,
+                "state": state,
+                "pincode": pincode,
+            },
+        )
 
         # Create separate shipping address if not same as billing
         if not cint(same_as_billing) and shipping_address_line1:
-            shipping = frappe.new_doc("Address")
-            shipping.address_title = customer_name
-            shipping.address_type = "Shipping"
-            shipping.address_line1 = shipping_address_line1
-            shipping.city = shipping_city or ""
-            shipping.state = shipping_state or ""
-            shipping.pincode = shipping_pincode or ""
-            shipping.append("links", {"link_doctype": "Customer", "link_name": cust.name})
-            shipping.flags.ignore_permissions = True
-            shipping.flags.ignore_mandatory = True
-            shipping.save()
+            _upsert_address(
+                customer=cust.name,
+                customer_name=customer_name,
+                address_type="Shipping",
+                is_primary=0,
+                is_shipping=1,
+                data={
+                    "address_line1": shipping_address_line1,
+                    "address_line2": "",
+                    "city": shipping_city,
+                    "state": shipping_state,
+                    "pincode": shipping_pincode,
+                },
+            )
 
     return cust.name
 
@@ -11638,7 +12710,7 @@ def _get_active_session_log(pos_profile):
     )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def log_walkin(pos_profile, source="POS Counter") -> dict:
     """Increment walk-in counter on the active session log.
 
@@ -11646,6 +12718,12 @@ def log_walkin(pos_profile, source="POS Counter") -> dict:
         pos_profile: Current POS Profile
         source: 'POS Counter' | 'Kiosk'
     """
+    assert_pos_profile_scope(pos_profile)
+    require_configured_roles(
+        "token_operation_roles",
+        defaults=("POS User", "POS Manager"),
+        action=_("record store footfall"),
+    )
     session_log = _get_active_session_log(pos_profile)
     if not session_log:
         return {"ok": False, "reason": "No active session log"}
@@ -11666,9 +12744,15 @@ def log_walkin(pos_profile, source="POS Counter") -> dict:
     return {"ok": True, "session_log": session_log, "walkin_count": cint(new_walkin), "kiosk_count": cint(new_kiosk)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def increment_repair_intake_count(pos_profile) -> dict:
     """Increment repair intake counter on active session log."""
+    assert_pos_profile_scope(pos_profile)
+    require_configured_roles(
+        "token_operation_roles",
+        defaults=("POS User", "POS Manager"),
+        action=_("record repair footfall"),
+    )
     session_log = _get_active_session_log(pos_profile)
     if session_log:
         frappe.db.sql(
@@ -11678,9 +12762,15 @@ def increment_repair_intake_count(pos_profile) -> dict:
     return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def increment_buyback_count(pos_profile) -> dict:
     """Increment buyback assessment counter on active session log."""
+    assert_pos_profile_scope(pos_profile)
+    require_configured_roles(
+        "token_operation_roles",
+        defaults=("POS User", "POS Manager"),
+        action=_("record buyback footfall"),
+    )
     session_log = _get_active_session_log(pos_profile)
     if session_log:
         frappe.db.sql(
@@ -11698,6 +12788,13 @@ def get_today_footfall(pos_profile, date=None, from_date=None, to_date=None, sal
     (System / Tablet), kiosk-specific counters are forced to zero so that
     counter-only stores never see misleading kiosk widgets.
     """
+    assert_pos_profile_scope(pos_profile)
+    require_configured_roles(
+        "token_view_roles",
+        defaults=("POS User", "POS Manager", "Store Manager", "Technician"),
+        action=_("view store footfall"),
+    )
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     from_date, to_date = _dashboard_date_range(date=date, from_date=from_date, to_date=to_date)
     salesman = (salesman or "").strip()
     start_dt = f"{from_date} 00:00:00"
@@ -11799,7 +12896,7 @@ def get_today_footfall(pos_profile, date=None, from_date=None, to_date=None, sal
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def flag_reprint_needed(pos_invoice, reason="Print failed") -> dict:
     """Mark an invoice as needing reprint.
 
@@ -11808,9 +12905,19 @@ def flag_reprint_needed(pos_invoice, reason="Print failed") -> dict:
     """
     if not frappe.db.exists("Sales Invoice", pos_invoice):
         frappe.throw(frappe._("Sales Invoice {0} not found").format(pos_invoice))
+    frappe.get_doc("Sales Invoice", pos_invoice).check_permission("read")
+    # READ-side reprint path: tolerate a since-disabled POS Profile.
+    assert_sales_invoice_scope(pos_invoice, allow_disabled=True)
+    require_configured_roles(
+        "reprint_roles",
+        defaults=("POS User", "POS Manager", "Store Manager"),
+        action=_("queue an invoice reprint"),
+    )
 
     # Append to session log reprint queue if session log linked
     session_log = frappe.db.get_value("POS Session Log", {"pos_profile": frappe.db.get_value("Sales Invoice", pos_invoice, "pos_profile"), "status": ["!=", "Closed"], "docstatus": 1}, "name")
+    if not session_log:
+        frappe.throw(_("No active POS Session Log is available for this invoice."))
 
     frappe.db.sql("""
         INSERT INTO `tabPOS Reprint Queue`
@@ -11819,7 +12926,7 @@ def flag_reprint_needed(pos_invoice, reason="Print failed") -> dict:
                 %(inv)s, %(reason)s, NOW(), 'Pending')
     """, {
         "n": frappe.generate_hash(length=10),
-        "p": session_log or "",
+        "p": session_log,
         "inv": pos_invoice,
         "reason": (reason or "Print failed")[:200],
     })
@@ -11832,6 +12939,13 @@ def get_pending_reprints(pos_profile, limit=20) -> list:
 
     Used by the store manager workspace shortcut.
     """
+    assert_pos_profile_scope(pos_profile)
+    require_configured_roles(
+        "reprint_roles",
+        defaults=("POS User", "POS Manager", "Store Manager"),
+        action=_("view pending invoice reprints"),
+    )
+    limit = max(1, min(cint(limit) or 20, 100))
     return frappe.db.sql("""
         SELECT rq.name, rq.pos_invoice, rq.reason, rq.requested_at, rq.status
         FROM `tabPOS Reprint Queue` rq
@@ -11840,12 +12954,26 @@ def get_pending_reprints(pos_profile, limit=20) -> list:
           AND rq.status = 'Pending'
         ORDER BY rq.requested_at DESC
         LIMIT %(limit)s
-    """, {"pos": pos_profile, "limit": int(limit)}, as_dict=True)
+    """, {"pos": pos_profile, "limit": limit}, as_dict=True)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def mark_reprint_done(reprint_name) -> dict:
     """Mark a reprint queue item as completed."""
+    row = frappe.db.get_value(
+        "POS Reprint Queue", reprint_name, ["name", "parent"], as_dict=True
+    )
+    if not row:
+        frappe.throw(_("Reprint request was not found."), frappe.DoesNotExistError)
+    pos_profile = frappe.db.get_value("POS Session Log", row.parent, "pos_profile")
+    if not pos_profile:
+        frappe.throw(_("Reprint request has no POS Profile scope."), frappe.PermissionError)
+    assert_pos_profile_scope(pos_profile)
+    require_configured_roles(
+        "reprint_roles",
+        defaults=("POS User", "POS Manager", "Store Manager"),
+        action=_("complete an invoice reprint"),
+    )
     frappe.db.set_value("POS Reprint Queue", reprint_name, "status", "Done",
         update_modified=False)
     return {"status": "done"}
@@ -11855,6 +12983,18 @@ def mark_reprint_done(reprint_name) -> dict:
 # Buyback POS Full-Flow APIs
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+def _mask_sensitive_value(value, visible_characters=4):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    visible_characters = max(0, min(cint(visible_characters), len(text)))
+    if len(text) <= visible_characters:
+        return "*" * len(text)
+    suffix = text[-visible_characters:] if visible_characters else ""
+    return "*" * (len(text) - visible_characters) + suffix
+
+
 @frappe.whitelist(methods=["GET", "POST"])
 def get_pos_buyback_detail(assessment_name) -> dict:
     """Return full buyback detail for POS: assessment + linked order + diagnostics.
@@ -11863,21 +13003,11 @@ def get_pos_buyback_detail(assessment_name) -> dict:
     """
     a = frappe.get_doc("Buyback Assessment", assessment_name)
 
-    # SECURITY: this payload carries KYC (ID numbers/images) + payout bank
-    # details. Raw frappe.get_doc does NOT enforce doctype permissions, so gate
-    # explicitly on read permission AND the caller's store scope — an
-    # authenticated user must not read buybacks belonging to another store.
-    a.check_permission("read")
-    from ch_pos.api.scope_guard import assert_store_scope
-    assert_store_scope(
-        store=a.store, warehouse=a.store, company=a.company,
-        msg=frappe._("You are not entitled to view this buyback."),
+    _assert_buyback_doc_scope(a, "read")
+    can_view_sensitive_data = has_configured_roles(
+        "buyback_sensitive_data_roles",
+        defaults=("Buyback Store Manager", "Buyback Manager", "Buyback Admin", "Accounts Manager"),
     )
-
-    # Fix status stuck at Draft when already Frappe-submitted
-    if a.docstatus == 1 and a.status == "Draft":
-        a.db_set("status", "Submitted")
-        a.status = "Submitted"
 
     # Linked Buyback Order (if any)
     order = None
@@ -11889,6 +13019,7 @@ def get_pos_buyback_detail(assessment_name) -> dict:
     )
     if order_name:
         o = frappe.get_doc("Buyback Order", order_name)
+        _assert_buyback_doc_scope(o, "read")
         order = {
             "name": o.name,
             "status": o.status,
@@ -11904,20 +13035,41 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "base_price": flt(o.base_price),
             "settlement_type": o.settlement_type or "",
             "customer_payout_mode": o.customer_payout_mode or "",
-            "customer_cash_receiver_name": o.customer_cash_receiver_name or "",
-            "customer_upi_id": o.customer_upi_id or "",
-            "customer_bank_account_holder": o.customer_bank_account_holder or "",
-            "customer_bank_account_number": o.customer_bank_account_number or "",
-            "customer_bank_ifsc": o.customer_bank_ifsc or "",
-            "customer_bank_name": o.customer_bank_name or "",
-            "customer_payout_notes": o.customer_payout_notes or "",
+            "sensitive_payout_data_visible": can_view_sensitive_data,
+            "customer_cash_receiver_name": (
+                o.customer_cash_receiver_name or "" if can_view_sensitive_data else ""
+            ),
+            "customer_upi_id": (
+                o.customer_upi_id or ""
+                if can_view_sensitive_data else _mask_sensitive_value(o.customer_upi_id)
+            ),
+            "customer_bank_account_holder": (
+                o.customer_bank_account_holder or "" if can_view_sensitive_data else ""
+            ),
+            "customer_bank_account_number": (
+                o.customer_bank_account_number or ""
+                if can_view_sensitive_data else _mask_sensitive_value(o.customer_bank_account_number)
+            ),
+            "customer_bank_ifsc": o.customer_bank_ifsc or "" if can_view_sensitive_data else "",
+            "customer_bank_name": o.customer_bank_name or "" if can_view_sensitive_data else "",
+            "customer_payout_notes": o.customer_payout_notes or "" if can_view_sensitive_data else "",
             "customer_payout_updated_at": str(o.customer_payout_updated_at) if o.customer_payout_updated_at else "",
             "customer_payout_updated_by": o.customer_payout_updated_by or "",
             "customer_id_type": getattr(o, "customer_id_type", "") or "",
-            "customer_id_number": getattr(o, "customer_id_number", "") or "",
-            "customer_id_front": getattr(o, "customer_id_front", "") or "",
-            "customer_id_back": getattr(o, "customer_id_back", "") or "",
-            "customer_photo": getattr(o, "customer_photo", "") or "",
+            "customer_id_number": (
+                getattr(o, "customer_id_number", "") or ""
+                if can_view_sensitive_data
+                else _mask_sensitive_value(getattr(o, "customer_id_number", ""))
+            ),
+            "customer_id_front": (
+                getattr(o, "customer_id_front", "") or "" if can_view_sensitive_data else ""
+            ),
+            "customer_id_back": (
+                getattr(o, "customer_id_back", "") or "" if can_view_sensitive_data else ""
+            ),
+            "customer_photo": (
+                getattr(o, "customer_photo", "") or "" if can_view_sensitive_data else ""
+            ),
             "kyc_verified": cint(getattr(o, "kyc_verified", 0)),
             "kyc_verified_by": getattr(o, "kyc_verified_by", "") or "",
             "kyc_verified_at": (
@@ -11940,8 +13092,10 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             ),
             "imei_validation_remarks": o.imei_validation_remarks or "",
             "ownership_proof_type": o.ownership_proof_type or "",
-            "ownership_proof_document": o.ownership_proof_document or "",
-            "ownership_proof_remarks": o.ownership_proof_remarks or "",
+            "ownership_proof_document": (
+                o.ownership_proof_document or "" if can_view_sensitive_data else ""
+            ),
+            "ownership_proof_remarks": o.ownership_proof_remarks or "" if can_view_sensitive_data else "",
             "account_lock_cleared": cint(o.account_lock_cleared),
             "account_lock_check_notes": o.account_lock_check_notes or "",
             "require_ownership_proof_above": flt(
@@ -11967,7 +13121,9 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             "indemnity_signature_type": getattr(o, "indemnity_signature_type", "") or "",
             "indemnity_signed_by_name": getattr(o, "indemnity_signed_by_name", "") or "",
             "indemnity_captured_by": getattr(o, "indemnity_captured_by", "") or "",
-            "indemnity_attachment": getattr(o, "indemnity_attachment", "") or "",
+            "indemnity_attachment": (
+                getattr(o, "indemnity_attachment", "") or "" if can_view_sensitive_data else ""
+            ),
             "latest_pickup_appointment": getattr(o, "latest_pickup_appointment", "") or "",
             "pickup_attempts_count": cint(getattr(o, "pickup_attempts_count", 0)),
             "pickup_completed_at": (
@@ -12007,10 +13163,15 @@ def get_pos_buyback_detail(assessment_name) -> dict:
     if a.buyback_inspection:
         try:
             ins = frappe.get_doc("Buyback Inspection", a.buyback_inspection)
+            _assert_buyback_doc_scope(ins, "read")
             # Grade options for selector
             grades = frappe.get_all(
                 "Grade Master", fields=["name", "grade_name"],
                 order_by="name asc",
+                limit_page_length=max(
+                    1,
+                    min(cint(get_control_setting("buyback_grade_result_limit", 100)), 500),
+                ),
             )
             # Inspection responses with side-by-side data
             ins_responses = []
@@ -12105,7 +13266,7 @@ def get_pos_buyback_detail(assessment_name) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, inspector_notes=None,
                             account_lock_cleared=0, account_lock_check_notes="") -> dict:
     """Create a Buyback Order from a Buyback Assessment in POS.
@@ -12119,7 +13280,15 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
     When an Inspection IS linked, its own (already-required) value is carried
     forward instead and these params are ignored.
     """
+    from buyback.utils import require_configured_role
+
+    require_configured_role("order_operation_roles", action=_("create a Buyback order"))
     frappe.has_permission("Buyback Order", "create", throw=True)
+    frappe.has_permission("Buyback Order", "submit", throw=True)
+    assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+    _assert_buyback_doc_scope(assessment, "read")
+    anchors = _assert_buyback_profile_match(assessment, pos_profile)
+
     # Return existing order if already created
     existing = frappe.db.get_value(
         "Buyback Order",
@@ -12127,15 +13296,28 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
         "name",
     )
     if existing:
-        if final_price:
-            frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
+        existing_doc = frappe.get_doc("Buyback Order", existing)
+        _assert_buyback_doc_scope(existing_doc, "write")
+        _assert_buyback_profile_match(existing_doc, pos_profile)
         return {"order_name": existing, "created": False}
 
-    assessment = frappe.get_doc("Buyback Assessment", assessment_name)
-    warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse") or ""
-    company = frappe.db.get_value("POS Profile", pos_profile, "company") or frappe.defaults.get_global_default("company")
+    warehouse = anchors.get("warehouse") or ""
+    company = anchors.get("company") or ""
 
-    price = flt(final_price) or flt(assessment.quoted_price) or flt(assessment.estimated_price)
+    authoritative_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
+    if assessment.buyback_inspection:
+        authoritative_price = flt(
+            frappe.db.get_value(
+                "Buyback Inspection",
+                assessment.buyback_inspection,
+                "revised_price",
+            )
+        ) or authoritative_price
+    if authoritative_price <= 0:
+        frappe.throw(_("An authoritative Buyback price could not be resolved."))
+    if final_price is not None and abs(flt(final_price) - authoritative_price) > 0.01:
+        frappe.throw(_("Final price must match the assessment or inspection price."), frappe.PermissionError)
+    price = authoritative_price
 
     order = frappe.new_doc("Buyback Order")
     order.buyback_assessment = assessment_name
@@ -12182,7 +13364,6 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
         order.account_lock_cleared = 1
         order.account_lock_check_notes = account_lock_check_notes or ""
 
-    order.flags.ignore_permissions = True
     try:
         order.insert()
     except frappe.UniqueValidationError:
@@ -12193,8 +13374,9 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
             "name",
         )
         if existing:
-            if final_price:
-                frappe.db.set_value("Buyback Order", existing, "final_price", flt(final_price))
+            existing_doc = frappe.get_doc("Buyback Order", existing)
+            _assert_buyback_doc_scope(existing_doc, "write")
+            _assert_buyback_profile_match(existing_doc, pos_profile)
             return {"order_name": existing, "created": False}
         raise
     order.submit()
@@ -12202,35 +13384,15 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
     return {"order_name": order.name, "created": True}
 
 
-@frappe.whitelist()
-def pos_update_buyback_price(order_name, final_price, inspector_notes=None) -> dict:
-    """Update the final buyback price on an existing Buyback Order."""
-    frappe.has_permission("Buyback Order", "write", throw=True)
-
-    doc = frappe.get_doc("Buyback Order", order_name)
-    if doc.docstatus == 2:
-        frappe.throw(frappe._("Cannot update a cancelled order."))
-
-    doc.final_price = flt(final_price)
-    if inspector_notes:
-        doc.remarks = (str(doc.remarks or "") + "\n" + str(inspector_notes))[:1000]
-
-    doc.flags.ignore_permissions = True
-    doc.save()
-
-    return {
-        "order_name": doc.name,
-        "final_price": doc.final_price,
-        "status": doc.status,
-    }
-
-
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=5, seconds=300, methods=["POST"], ip_based=True)
 def pos_send_customer_otp(order_name) -> dict:
     """Generate and send an OTP to the customer's mobile for buyback price approval."""
-    from buyback.api import _as_system_user
-
     doc = frappe.get_doc("Buyback Order", order_name)
+    _assert_buyback_doc_scope(doc, "write")
+    from buyback.utils import require_configured_role
+
+    require_configured_role("order_operation_roles", action=_("send Buyback customer OTP"))
     mobile_no = doc.mobile_no
     if not mobile_no:
         frappe.throw(frappe._("No mobile number on this Buyback Order."))
@@ -12239,9 +13401,7 @@ def pos_send_customer_otp(order_name) -> dict:
     # delivery logic stay in one place. Using "Buyback Customer Approval" here
     # previously caused a mismatch with BuybackOrder.verify_otp() which looks up
     # purpose="Buyback Confirmation".
-    doc.flags.ignore_permissions = True
-    with _as_system_user():
-        doc.send_otp()
+    doc.send_otp()
 
     return {
         "sent": True,
@@ -12250,18 +13410,20 @@ def pos_send_customer_otp(order_name) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=10, seconds=300, methods=["POST"], ip_based=True)
 def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
     """Verify OTP entered by cashier on behalf of customer.
 
     Called from the POS "Awaiting OTP" stage when cashier types the OTP
     the customer received on their mobile.
     """
-    from buyback.api import _as_system_user
-
     doc = frappe.get_doc("Buyback Order", order_name)
-    with _as_system_user():
-        result = doc.verify_otp(otp_code=otp_code)
+    _assert_buyback_doc_scope(doc, "write")
+    from buyback.utils import require_configured_role
+
+    require_configured_role("order_operation_roles", action=_("verify Buyback customer OTP"))
+    result = doc.verify_otp(otp_code=otp_code)
 
     if not result.get("valid"):
         frappe.throw(result.get("message") or frappe._("Invalid or expired OTP."))
@@ -12269,7 +13431,7 @@ def pos_verify_otp_direct(order_name: str, otp_code: str) -> dict:
     return {"verified": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_submit_assessment_imei_validation(assessment_name: str, status: str, screenshot: str | None = None,
                                            remarks: str | None = None) -> dict:
     """POS-side wrapper for the Sanchar Saathi IMEI check at intake (Buyback Assessment).
@@ -12279,10 +13441,11 @@ def pos_submit_assessment_imei_validation(assessment_name: str, status: str, scr
     `create_inspection`/`pos_create_inspection` hard-block on this.
     """
     doc = frappe.get_doc("Buyback Assessment", assessment_name)
+    _assert_buyback_doc_scope(doc, "write")
     return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_submit_imei_validation(order_name: str, status: str, screenshot: str | None = None,
                                 remarks: str | None = None) -> dict:
     """POS-side wrapper for the Sanchar Saathi IMEI validation step.
@@ -12295,10 +13458,11 @@ def pos_submit_imei_validation(order_name: str, status: str, screenshot: str | N
     `get_pos_buyback_detail()`.
     """
     doc = frappe.get_doc("Buyback Order", order_name)
+    _assert_buyback_doc_scope(doc, "write")
     return doc.submit_imei_validation(status=status, screenshot=screenshot, remarks=remarks)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
     """Skip OTP for in-store customer approval.
 
@@ -12307,10 +13471,16 @@ def bypass_otp_instore(name: str, remarks: str | None = None) -> dict:
     pattern, but xcall to a whitelisted function is simpler from JS).
     """
     doc = frappe.get_doc("Buyback Order", name)
+    _assert_buyback_doc_scope(doc, "write")
+    require_configured_roles(
+        "buyback_otp_bypass_roles",
+        defaults=("POS Manager", "Store Manager"),
+        action=_("bypass customer OTP for an in-store buyback"),
+    )
     return doc.bypass_otp_instore(remarks=remarks)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @rate_limit(limit=20, seconds=300, ip_based=True)
 def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_code=None,
                                  kyc_id_type=None, kyc_id_number=None,
@@ -12336,16 +13506,13 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
     ``buyback.api.customer_approve_via_token`` / ``verify_otp`` flow.
     """
     doc = frappe.get_doc("Buyback Order", order_name)
+    _assert_buyback_doc_scope(doc, "write")
+    from buyback.utils import require_configured_role
 
-    # Bind the operator to this order's store — a POS user may only approve
-    # buybacks at a store/warehouse within their CH User Scope.
-    from ch_pos.api.scope_guard import assert_store_scope
-    assert_store_scope(
-        store=doc.store, warehouse=doc.store, company=doc.company,
-        msg=frappe._("You are not entitled to approve buybacks at this store."),
+    require_configured_role(
+        "order_operation_roles",
+        action=_("record customer Buyback approval"),
     )
-
-    doc.flags.ignore_permissions = True
 
     def _normalize_kyc_type(id_type):
         raw = (id_type or "").strip()
@@ -12371,22 +13538,31 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
             )
         return normalized
 
-    def _get_safe_actor() -> str:
-        actor = (frappe.session.user or "").strip()
-        if not actor or actor in {"Guest", "None"}:
-            actor = "Administrator"
-        if not frappe.db.exists("User", actor):
-            actor = "Administrator"
-        return actor
-
-    safe_actor = _get_safe_actor()
+    safe_actor = (frappe.session.user or "").strip()
+    if not safe_actor or safe_actor == "Guest" or not frappe.db.exists("User", safe_actor):
+        frappe.throw(_("A valid signed-in user is required."), frappe.AuthenticationError)
     # Keep the raw caller-supplied value for OTP routing BEFORE normalization,
     # because _normalize_customer_approval_method("OTP") → "App Confirmation"
     # which would make the `if method == "OTP"` branch unreachable.
     raw_method = (method or "").strip()
     method = _normalize_customer_approval_method(method)
+    if raw_method not in ("OTP", "In-Store Signature"):
+        frappe.throw(_("Staff approval must use OTP or In-Store Signature."), frappe.PermissionError)
     is_submitted = cint(doc.docstatus) == 1
     update_after_submit = {}
+
+    if payout_mode:
+        from buyback.api import _validate_customer_payout_inputs
+
+        _validate_customer_payout_inputs(
+            payout_mode=payout_mode,
+            cash_receiver_name=(doc.customer_name or doc.customer) if payout_mode == "Cash" else None,
+            upi_id=upi_id,
+            bank_account_holder=bank_account_holder,
+            bank_account_number=bank_account_number,
+            bank_ifsc=bank_ifsc,
+            bank_name=bank_name,
+        )
 
     if raw_method == "OTP":
         if not otp_code:
@@ -12435,6 +13611,12 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
             update_after_submit["customer_payout_mode"] = payout_mode
         else:
             doc.customer_payout_mode = payout_mode
+        if payout_mode == "Cash":
+            receiver_name = doc.customer_name or doc.customer
+            if is_submitted:
+                update_after_submit["customer_cash_receiver_name"] = receiver_name
+            else:
+                doc.customer_cash_receiver_name = receiver_name
     if upi_id:
         if is_submitted:
             update_after_submit["customer_upi_id"] = upi_id
@@ -12468,16 +13650,6 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
             doc.customer_payout_updated_at = frappe.utils.now_datetime()
             doc.customer_payout_updated_by = safe_actor
 
-    if kyc_id_type and kyc_id_number:
-        if is_submitted:
-            update_after_submit["kyc_verified"] = 1
-            update_after_submit["kyc_verified_by"] = safe_actor
-            update_after_submit["kyc_verified_at"] = frappe.utils.now_datetime()
-        else:
-            doc.kyc_verified = 1
-            doc.kyc_verified_by = safe_actor
-            doc.kyc_verified_at = frappe.utils.now_datetime()
-
     if ownership_proof_type:
         if is_submitted:
             update_after_submit["ownership_proof_type"] = ownership_proof_type
@@ -12495,10 +13667,14 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
             doc.ownership_proof_remarks = ownership_proof_remarks
 
     if is_submitted and update_after_submit:
-        doc.db_set(update_after_submit, update_modified=True)
+        for fieldname, value in update_after_submit.items():
+            doc.set(fieldname, value)
+        doc.save()
         doc.reload()
 
-    doc.flags.ignore_permissions = True
+    if kyc_id_type and kyc_id_number:
+        doc.verify_kyc()
+        doc.reload()
     if raw_method != "OTP":
         if doc.status in ("Approved", "Awaiting Customer Approval"):
             doc.customer_approve(method=method)
@@ -12518,7 +13694,8 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=5, seconds=300, methods=["POST"], ip_based=True)
 def pos_send_approval_link(order_name) -> dict:
     """Send a customer-facing approval link via WhatsApp + Email.
 
@@ -12526,6 +13703,7 @@ def pos_send_approval_link(order_name) -> dict:
     masked mobile number so the UI can confirm which number was contacted.
     """
     doc = frappe.get_doc("Buyback Order", order_name)
+    _assert_buyback_doc_scope(doc, "write")
 
     if not doc.mobile_no:
         frappe.throw(frappe._("No mobile number on this Buyback Order."))
@@ -12581,39 +13759,46 @@ def pos_send_approval_link(order_name) -> dict:
             )
 
         if customer_email:
-                        subject = f"Congruence Holdings | GoGizmo Buyback Approval | {doc.name}"
-                        html = f"""
-                        <div style="font-family:Segoe UI,Arial,sans-serif;max-width:620px;margin:auto;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
-                            <div style="background:#0f172a;color:#ffffff;padding:12px 16px;font-weight:600">Congruence Holdings - GoGizmo Buyback</div>
-                            <div style="padding:16px">
-                                <h2 style="color:#1a1a2e;margin-top:0">Buyback Offer for Your Approval</h2>
-                                <p>Hi {frappe.utils.escape_html(customer_name)},</p>
-                                <p>We have evaluated your <strong>{frappe.utils.escape_html(item_label)}</strong>
-                                   and are offering <strong>{price_fmt}</strong>.</p>
-                                <p>Please review and approve the offer by clicking the button below:</p>
-                                <p style="text-align:center;margin:24px 0">
-                                    <a href="{frappe.utils.escape_html(approval_url)}"
-                                       style="background:#28a745;color:#fff;padding:12px 32px;
-                                       text-decoration:none;border-radius:6px;font-size:16px;
-                                       display:inline-block">
-                                        Review &amp; Approve
-                                    </a>
-                                </p>
-                                <p style="color:#6b7280;font-size:13px">
-                                    Or copy this link: {frappe.utils.escape_html(approval_url)}
-                                </p>
-                                <p style="color:#6b7280;font-size:12px">
-                                    Order: {doc.name} | This link is unique to your transaction.
-                                </p>
-                            </div>
-                        </div>
-                        """
-                        frappe.sendmail(
-                            recipients=[customer_email],
-                            subject=subject,
-                            message=html,
-                        )
-                        frappe.logger().info(f"[pos_send_approval_link] Email sent to {customer_email}")
+            company_label = (
+                frappe.get_cached_value("Company", doc.company, "company_name")
+                or doc.company
+                or _("Our Store")
+            )
+            company_subject = str(company_label).replace("\r", " ").replace("\n", " ")
+            company_html = frappe.utils.escape_html(company_label)
+            subject = f"{company_subject} | Buyback Approval | {doc.name}"
+            html = f"""
+            <div style="font-family:Segoe UI,Arial,sans-serif;max-width:620px;margin:auto;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
+                <div style="background:#0f172a;color:#ffffff;padding:12px 16px;font-weight:600">{company_html} - Buyback</div>
+                <div style="padding:16px">
+                    <h2 style="color:#1a1a2e;margin-top:0">Buyback Offer for Your Approval</h2>
+                    <p>Hi {frappe.utils.escape_html(customer_name)},</p>
+                    <p>We have evaluated your <strong>{frappe.utils.escape_html(item_label)}</strong>
+                       and are offering <strong>{price_fmt}</strong>.</p>
+                    <p>Please review and approve the offer by clicking the button below:</p>
+                    <p style="text-align:center;margin:24px 0">
+                        <a href="{frappe.utils.escape_html(approval_url)}"
+                           style="background:#28a745;color:#fff;padding:12px 32px;
+                           text-decoration:none;border-radius:6px;font-size:16px;
+                           display:inline-block">
+                            Review &amp; Approve
+                        </a>
+                    </p>
+                    <p style="color:#6b7280;font-size:13px">
+                        Or copy this link: {frappe.utils.escape_html(approval_url)}
+                    </p>
+                    <p style="color:#6b7280;font-size:12px">
+                        Order: {frappe.utils.escape_html(doc.name)} | This link is unique to your transaction.
+                    </p>
+                </div>
+            </div>
+            """
+            frappe.sendmail(
+                recipients=[customer_email],
+                subject=subject,
+                message=html,
+            )
+            frappe.logger().info(f"[pos_send_approval_link] Email sent to {customer_email}")
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"Buyback approval email failed for {doc.name}")
 
@@ -12633,7 +13818,7 @@ def pos_send_approval_link(order_name) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     """Mark a buyback order as settled via direct cashback to customer.
 
@@ -12641,7 +13826,13 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     Idempotent — if already Paid/Closed, returns current state.
     """
     frappe.has_permission("Buyback Order", "write", throw=True)
+    require_configured_roles(
+        "buyback_settlement_roles",
+        defaults=("Accounts User", "Accounts Manager", "POS Manager"),
+        action=_("settle a buyback payout"),
+    )
     doc = frappe.get_doc("Buyback Order", order_name)
+    _assert_buyback_doc_scope(doc, "write")
     payout_mode = (payment_method or "Cash").strip()
     if payout_mode not in ("Cash", "UPI", "Bank Transfer"):
         frappe.throw(frappe._("Invalid buyback payout method: {0}").format(payout_mode))
@@ -12673,7 +13864,7 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     doc.settlement_type = "Buyback"
     doc.customer_payout_mode = payout_mode
     doc.customer_payout_updated_at = now_datetime()
-    doc.customer_payout_updated_by = frappe.session.user or "Administrator"
+    doc.customer_payout_updated_by = frappe.session.user
 
     # Avoid duplicate payments. The order may already have payment rows from
     # another flow (customer-portal payout capture, manual entry, prior call
@@ -12692,7 +13883,6 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
             "payment_date": now_datetime(),
             "transaction_reference": txn_ref,
         })
-    doc.flags.ignore_permissions = True
     doc.save()
 
     # mark_paid validates payment_status == "Paid" first
@@ -12702,12 +13892,8 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
 
     # Auto-close after successful cashback — triggers lifecycle update
     if doc.status == "Paid":
-        try:
-            doc.status = "Closed"
-            doc.flags.ignore_permissions = True
-            doc.save()
-        except Exception:
-            frappe.log_error(title=f"Buyback auto-close failed for {doc.name}")
+        doc.status = "Closed"
+        doc.save()
 
     try:
         from ch_pos.audit import log_business_event
@@ -12719,7 +13905,7 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
             store=doc.store, company=doc.company,
         )
     except Exception:
-        pass
+        frappe.log_error(frappe.get_traceback(), "Buyback cashback audit failed")
 
     return {
         "order_name": doc.name,
@@ -12739,37 +13925,28 @@ def _resolve_buyback_payment_mode(payout_mode: str) -> str:
     named exactly "UPI"; use sensible configured fallbacks instead.
     """
     payout_mode = (payout_mode or "Cash").strip()
-    exact = payout_mode if frappe.db.exists("Mode of Payment", payout_mode) else ""
-    if exact:
-        return exact
-
-    candidates = {
-        "Cash": ["Cash"],
-        "UPI": ["UPI", "Wallet", "Wire Transfer", "Bank Draft", "Cheque"],
-        "Bank Transfer": ["Bank Transfer", "Wire Transfer", "Bank Draft", "Cheque"],
-    }.get(payout_mode, [])
-
-    for candidate in candidates:
-        if frappe.db.exists("Mode of Payment", candidate):
-            return candidate
-
-    wanted_type = "Cash" if payout_mode == "Cash" else "Bank"
-    fallback = frappe.db.get_value("Mode of Payment", {"type": wanted_type}, "name", order_by="name asc")
-    if fallback:
-        return fallback
-
-    frappe.throw(
-        frappe._("No Mode of Payment is configured for buyback payout mode {0}.").format(
-            frappe.bold(payout_mode)
+    fieldname = {
+        "Cash": "buyback_cash_mode_of_payment",
+        "UPI": "buyback_upi_mode_of_payment",
+        "Bank Transfer": "buyback_bank_mode_of_payment",
+    }.get(payout_mode)
+    if not fieldname:
+        frappe.throw(_("Invalid Buyback payout mode."))
+    mode_of_payment = str(get_control_setting(fieldname, "") or "").strip()
+    if not mode_of_payment or not frappe.db.exists("Mode of Payment", mode_of_payment):
+        frappe.throw(
+            _("Configure a valid Mode of Payment for Buyback payout mode {0}.").format(
+                frappe.bold(payout_mode)
+            )
         )
-    )
+    return mode_of_payment
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_submit_assessment(assessment_name) -> dict:
     """Submit a Draft Buyback Assessment from POS."""
     doc = frappe.get_doc("Buyback Assessment", assessment_name)
-    doc.check_permission("write")
+    _assert_buyback_doc_scope(doc, "write")
 
     # If already Frappe-submitted (docstatus=1) but status stuck at Draft,
     # just update the status field directly.
@@ -12784,25 +13961,28 @@ def pos_submit_assessment(assessment_name) -> dict:
     return {"name": doc.name, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_create_inspection(assessment_name) -> dict:
     """Create or retrieve a Buyback Inspection from an assessment.
 
     Idempotent — if inspection already exists, returns its current data.
     Returns pre-fill data for the inline POS inspection panel.
     """
+    assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+    _assert_buyback_doc_scope(assessment, "write")
+
     # Check if inspection already exists on the assessment
     existing_inspection = frappe.db.get_value(
         "Buyback Assessment", assessment_name, "buyback_inspection"
     )
     if existing_inspection:
         ins = frappe.get_doc("Buyback Inspection", existing_inspection)
+        _assert_buyback_doc_scope(ins, "write")
     else:
         # Auto-submit if still Draft (POS quick-assessments skip manual submit)
-        ba = frappe.get_doc("Buyback Assessment", assessment_name)
+        ba = assessment
         if ba.docstatus == 0:
             ba.submit()
-            frappe.db.commit()
         from buyback.api import create_inspection_from_assessment
         # Pick a default checklist template (first active one) so the form opens pre-filled
         default_template = frappe.db.get_value(
@@ -12812,7 +13992,14 @@ def pos_create_inspection(assessment_name) -> dict:
         ins = frappe.get_doc("Buyback Inspection", result["name"])
 
     # Also get grade options for the inline form selector
-    grades = frappe.get_all("Grade Master", fields=["name", "grade_name"], order_by="name asc")
+    grades = frappe.get_all(
+        "Grade Master",
+        fields=["name", "grade_name"],
+        order_by="name asc",
+        limit_page_length=max(
+            1, min(cint(get_control_setting("buyback_grade_result_limit", 100)), 500)
+        ),
+    )
 
     # Build rich response data with answer options for inspector dropdowns
     ins_responses = []
@@ -12880,7 +14067,7 @@ def pos_create_inspection(assessment_name) -> dict:
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_complete_inspection(inspection_name, condition_grade, final_price,
                             price_override_reason="", remarks="",
                             account_lock_cleared=0, account_lock_check_notes="") -> dict:
@@ -12891,8 +14078,11 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
     """
     from buyback.api import complete_inspection
 
+    inspection = frappe.get_doc("Buyback Inspection", inspection_name)
+    _assert_buyback_doc_scope(inspection, "write")
+
     # Auto-start inspection if still in Draft (POS inline flow)
-    ins_status = frappe.db.get_value("Buyback Inspection", inspection_name, "status")
+    ins_status = inspection.status
     if ins_status == "Draft":
         from buyback.api import start_inspection
         start_inspection(inspection_name)
@@ -12910,6 +14100,9 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         revised_price=flt(final_price),
         price_override_reason=price_override_reason or None,
     )
+    authoritative_price = flt(result.get("revised_price"))
+    if abs(flt(final_price) - authoritative_price) > 0.01:
+        frappe.throw(_("Final price changed during inspection recalculation. Refresh and retry."))
 
     # Update remarks on the inspection if provided
     if remarks:
@@ -12917,6 +14110,8 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
 
     # Get the linked assessment
     assessment_name = frappe.db.get_value("Buyback Inspection", inspection_name, "buyback_assessment")
+    assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+    _assert_buyback_doc_scope(assessment, "read")
 
     # Create Buyback Order (idempotent — return existing if already present)
     existing_order = frappe.db.get_value(
@@ -12925,11 +14120,14 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         "name",
     )
     if existing_order:
+        existing_doc = frappe.get_doc("Buyback Order", existing_order)
+        _assert_buyback_doc_scope(existing_doc, "write")
         order_name = existing_order
-        order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+        order_status = existing_doc.status
     else:
+        frappe.has_permission("Buyback Order", "create", throw=True)
         ins = frappe.get_doc("Buyback Inspection", inspection_name)
-        assessment = frappe.get_doc("Buyback Assessment", assessment_name)
+        _assert_buyback_doc_scope(ins, "write")
 
         order = frappe.new_doc("Buyback Order")
         order.buyback_assessment = assessment_name
@@ -12937,8 +14135,8 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         order.customer = ins.customer or assessment.customer or ""
         order.customer_name = ins.customer_name or assessment.customer_name or ""
         order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
-        order.store = ins.store or assessment.store or frappe.defaults.get_user_default("warehouse") or ""
-        order.company = assessment.company or ins.company or frappe.defaults.get_global_default("company")
+        order.store = ins.store or assessment.store or ""
+        order.company = assessment.company or ins.company or ""
         order.item = ins.item or assessment.item or ""
         order.item_name = ins.item_name or assessment.item_name or ""
         order.brand = assessment.brand or ""
@@ -12946,7 +14144,7 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         order.warranty_status = assessment.warranty_status or ""
         order.condition_grade = condition_grade
         order.base_price = flt(assessment.estimated_price)
-        order.final_price = flt(final_price)
+        order.final_price = authoritative_price
         order.original_quoted_price = flt(assessment.quoted_price) or flt(assessment.estimated_price)
         if remarks:
             order.remarks = str(remarks)[:500]
@@ -12965,7 +14163,6 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
             order.account_lock_cleared = ins.account_lock_cleared
             order.account_lock_check_notes = ins.account_lock_check_notes
 
-        order.flags.ignore_permissions = True
         try:
             order.insert()
         except frappe.UniqueValidationError:
@@ -12976,8 +14173,10 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
                 "name",
             )
             if existing_order:
-                order_name = existing_order
-                order_status = frappe.db.get_value("Buyback Order", order_name, "status")
+                existing_doc = frappe.get_doc("Buyback Order", existing_order)
+                _assert_buyback_doc_scope(existing_doc, "write")
+                order_name = existing_doc.name
+                order_status = existing_doc.status
                 return {
                     "inspection_name": inspection_name,
                     "status": result.get("status"),
@@ -13050,20 +14249,36 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
     if not pos_profile:
         frappe.throw(frappe._("POS Profile is required."))
 
-    company = frappe.db.get_value("POS Profile", pos_profile, "company")
+    anchors = assert_pos_profile_scope(pos_profile)
+    require_configured_roles(
+        "reprint_roles",
+        defaults=("POS User", "POS Manager", "Store Manager"),
+        action=_("view printable POS documents"),
+    )
+    company = anchors.get("company")
+    warehouse = anchors.get("warehouse")
     if not company:
         frappe.throw(frappe._("POS Profile {0} has no Company set.").format(pos_profile))
+    if not warehouse:
+        frappe.throw(frappe._("POS Profile {0} has no Warehouse set.").format(pos_profile))
 
     doc_key = (doc_type or "Invoice").strip().lower()
     if doc_key in ("proforma", "quotation"):
-        return _get_proforma_quotations(company, date=date, phone=phone, invoice_no=invoice_no)
+        frappe.has_permission("Quotation", "read", throw=True)
+        return _get_proforma_quotations(
+            company, warehouse, date=date, phone=phone, invoice_no=invoice_no
+        )
     if doc_key in ("advance receipt", "advance_receipt", "receipt", "prebooking receipt"):
+        frappe.has_permission("Payment Entry", "read", throw=True)
         return _get_prebooking_advance_receipts(
             company=company,
+            warehouse=warehouse,
             date=date,
             phone=phone,
             invoice_no=invoice_no,
         )
+
+    frappe.has_permission("Sales Invoice", "read", throw=True)
 
     if invoice_no:
         invoice_no = (invoice_no or "").strip()
@@ -13166,7 +14381,9 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
     return _stamp_sales_invoice_print_metadata(rows, company=company)
 
 
-def _get_prebooking_advance_receipts(company, date=None, phone=None, invoice_no=None) -> list:
+def _get_prebooking_advance_receipts(
+    company, warehouse, date=None, phone=None, invoice_no=None
+) -> list:
     """Return pre-booking advance receipts (Payment Entries) for Reprint.
 
     Only customer-receive Payment Entries linked to Sales Orders are returned,
@@ -13203,6 +14420,13 @@ def _get_prebooking_advance_receipts(company, date=None, phone=None, invoice_no=
           AND pe.docstatus != 2
           AND pe.payment_type = 'Receive'
           AND pe.party_type = 'Customer'
+          AND EXISTS (
+              SELECT 1
+                FROM `tabSales Order` so
+                LEFT JOIN `tabSales Order Item` soi ON soi.parent = so.name
+               WHERE so.name = per.reference_name
+                 AND (so.set_warehouse = %(warehouse)s OR soi.warehouse = %(warehouse)s)
+          )
     """
 
     if invoice_no:
@@ -13213,7 +14437,11 @@ def _get_prebooking_advance_receipts(company, date=None, phone=None, invoice_no=
                 ORDER BY pe.posting_date DESC, pe.creation DESC
                 LIMIT 50
             """,
-            {"company": company, "needle": f"%{(invoice_no or '').strip()}%"},
+            {
+                "company": company,
+                "warehouse": warehouse,
+                "needle": f"%{(invoice_no or '').strip()}%",
+            },
             as_dict=True,
         )
 
@@ -13226,13 +14454,22 @@ def _get_prebooking_advance_receipts(company, date=None, phone=None, invoice_no=
         )
         if not customers:
             return []
-        cust_placeholders = ", ".join(["%s"] * len(customers))
+        customer_params = {
+            f"customer_{index}": customer for index, customer in enumerate(customers)
+        }
+        cust_placeholders = ", ".join(
+            f"%(customer_{index})s" for index in range(len(customers))
+        )
         sql = (
             "SELECT" + select_cols + from_clause + where_base
             + f" AND pe.party IN ({cust_placeholders}) "
             + "GROUP BY pe.name ORDER BY pe.posting_date DESC, pe.creation DESC LIMIT 50"
         )
-        return frappe.db.sql(sql, [company] + customers, as_dict=True)
+        return frappe.db.sql(
+            sql,
+            {"company": company, "warehouse": warehouse, **customer_params},
+            as_dict=True,
+        )
 
     filter_date = getdate(date) if date else getdate(nowdate())
     return frappe.db.sql(
@@ -13241,12 +14478,14 @@ def _get_prebooking_advance_receipts(company, date=None, phone=None, invoice_no=
             GROUP BY pe.name
             ORDER BY pe.creation DESC
         """,
-        {"company": company, "d": filter_date},
+        {"company": company, "warehouse": warehouse, "d": filter_date},
         as_dict=True,
     )
 
 
-def _get_proforma_quotations(company, date=None, phone=None, invoice_no=None) -> list:
+def _get_proforma_quotations(
+    company, warehouse, date=None, phone=None, invoice_no=None
+) -> list:
     """Return submitted Quotations (POS proformas) for the Reprint dialog.
 
     Returns the same row shape as Sales-Invoice rows so the UI template can be
@@ -13278,6 +14517,12 @@ def _get_proforma_quotations(company, date=None, phone=None, invoice_no=None) ->
         WHERE q.company = %(company)s
           AND q.docstatus = 1
           AND q.quotation_to = 'Customer'
+          AND EXISTS (
+              SELECT 1
+                FROM `tabQuotation Item` scoped_qi
+               WHERE scoped_qi.parent = q.name
+                 AND scoped_qi.warehouse = %(warehouse)s
+          )
     """
 
     if invoice_no:
@@ -13288,7 +14533,11 @@ def _get_proforma_quotations(company, date=None, phone=None, invoice_no=None) ->
                 ORDER BY q.transaction_date DESC, q.creation DESC
                 LIMIT 50
             """,
-            {"company": company, "needle": f"%{(invoice_no or '').strip()}%"},
+            {
+                "company": company,
+                "warehouse": warehouse,
+                "needle": f"%{(invoice_no or '').strip()}%",
+            },
             as_dict=True,
         )
         return rows
@@ -13302,13 +14551,22 @@ def _get_proforma_quotations(company, date=None, phone=None, invoice_no=None) ->
         )
         if not customers:
             return []
-        cust_placeholders = ", ".join(["%s"] * len(customers))
+        customer_params = {
+            f"customer_{index}": customer for index, customer in enumerate(customers)
+        }
+        cust_placeholders = ", ".join(
+            f"%(customer_{index})s" for index in range(len(customers))
+        )
         sql = (
             "SELECT" + select_cols + from_clause + where_base
             + f" AND q.party_name IN ({cust_placeholders}) "
             + "GROUP BY q.name ORDER BY q.transaction_date DESC, q.creation DESC LIMIT 50"
         )
-        rows = frappe.db.sql(sql, [company] + customers, as_dict=True)
+        rows = frappe.db.sql(
+            sql,
+            {"company": company, "warehouse": warehouse, **customer_params},
+            as_dict=True,
+        )
         return rows
 
     filter_date = getdate(date) if date else getdate(nowdate())
@@ -13318,7 +14576,7 @@ def _get_proforma_quotations(company, date=None, phone=None, invoice_no=None) ->
             GROUP BY q.name
             ORDER BY q.creation DESC
         """,
-        {"company": company, "d": filter_date},
+        {"company": company, "warehouse": warehouse, "d": filter_date},
         as_dict=True,
     )
     return rows
@@ -13406,7 +14664,7 @@ def _get_oldest_fifo_serial(item_code, warehouse):
 
 
 def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_serial, cashier):
-    """Create Notification Log entries for RSM/ASM/Stock Managers on FIFO violation."""
+    """Notify configured, store-scoped recipients about a FIFO violation."""
     subject = frappe._("FIFO Violation: Serial {0} selected out of order").format(selected_serial)
     message = frappe._(
         "FIFO violation at <b>{warehouse}</b>: cashier <b>{cashier}</b> is attempting to sell "
@@ -13420,34 +14678,37 @@ def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_ser
         oldest=oldest_serial,
     )
 
-    # Notify users with RSM / ASM / Stock Manager / System Manager roles
-    alert_roles = ["RSM", "ASM", "Stock Manager", "System Manager", "Purchase Manager"]
-    notified = set()
-
-    for role in alert_roles:
-        users = frappe.db.sql(
-            "SELECT DISTINCT parent FROM `tabHas Role` WHERE role = %s AND parenttype = 'User'",
-            role, as_dict=True
+    alert_roles = sorted(
+        get_configured_roles(
+            "fifo_alert_roles", ("RSM", "ASM", "Stock Manager", "Purchase Manager")
         )
-        for u in users:
-            uid = u.parent
-            if uid in notified or uid == "Administrator":
-                continue
-            notified.add(uid)
-            try:
-                frappe.get_doc({
-                    "doctype": "Notification Log",
-                    "subject": subject,
-                    "email_content": message,
-                    "type": "Alert",
-                    "document_type": "Sales Invoice",
-                    "document_name": "",
-                    "from_user": frappe.session.user,
-                    "for_user": uid,
-                    "read": 0,
-                }).insert(ignore_permissions=True)
-            except Exception:
-                pass
+    )
+    company = frappe.db.get_value("Warehouse", warehouse, "company")
+    store = frappe.db.get_value(
+        "CH Store", {"warehouse": warehouse, "disabled": 0}, "name"
+    )
+    recipients = []
+    try:
+        from ch_erp15.ch_erp15.notification_router import (
+            filter_users_by_company,
+            get_scoped_users,
+        )
+
+        recipients = filter_users_by_company(
+            get_scoped_users(alert_roles, store=store), company
+        )
+    except ImportError:
+        frappe.log_error(
+            "Scoped notification routing is unavailable; FIFO alert recipients were suppressed.",
+            "POS FIFO Alert Routing",
+        )
+
+    for recipient in sorted(set(recipients)):
+        frappe.publish_realtime(
+            "ch_pos_fifo_violation",
+            {"subject": subject, "message": message},
+            user=recipient,
+        )
 
     frappe.log_error(
         message=f"FIFO Violation — warehouse={warehouse} cashier={cashier} "
@@ -13573,14 +14834,15 @@ def _post_free_sale_write_off(inv) -> None:
     settings = frappe.get_cached_doc("CH POS Control Settings")
     promo_account = settings.get("promotional_expense_account")
     if not promo_account:
-        frappe.log_error(
-            f"Free sale write-off GL skipped for {inv.name}: "
-            "'Promotional Expense Account' not set in CH POS Control Settings → GL Accounts.",
-            "Free Sale GL"
+        frappe.throw(
+            _("Configure Promotional Expense Account before processing a free sale."),
+            title=_("Free Sale Accounting Not Configured"),
         )
-        return
 
     company = inv.company
+    promo_account_company = frappe.db.get_value("Account", promo_account, "company")
+    if promo_account_company != company:
+        frappe.throw(_("Promotional Expense Account must belong to the invoice company."))
     cost_center = frappe.db.get_value("Company", company, "cost_center")
     total_cost = flt(0)
     je_accounts = []
@@ -13627,33 +14889,42 @@ def _post_free_sale_write_off(inv) -> None:
         "reference_name": inv.name,
     })
 
-    try:
-        je = frappe.new_doc("Journal Entry")
-        je.update({
-            "voucher_type": "Journal Entry",
-            "company": company,
-            "posting_date": inv.posting_date or frappe.utils.today(),
-            "cheque_no": inv.name,
-            "cheque_date": inv.posting_date or frappe.utils.today(),
-            "remark": frappe._("Free sale promotional write-off — {0}").format(inv.name),
-            "accounts": je_accounts,
-        })
-        je.flags.ignore_permissions = True
-        je.insert(ignore_permissions=True)
-        je.submit()
-        frappe.db.set_value(
-            "Sales Invoice", inv.name,
-            "custom_promo_write_off_je", je.name,
-            update_modified=False,
-        )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(),
-                         f"Free sale write-off GL failed for {inv.name}")
+    frappe.has_permission("Journal Entry", "create", throw=True)
+    frappe.has_permission("Journal Entry", "submit", throw=True)
+    je = frappe.new_doc("Journal Entry")
+    je.update({
+        "voucher_type": "Journal Entry",
+        "company": company,
+        "posting_date": inv.posting_date or frappe.utils.today(),
+        "cheque_no": inv.name,
+        "cheque_date": inv.posting_date or frappe.utils.today(),
+        "remark": frappe._("Free sale promotional write-off — {0}").format(inv.name),
+        "accounts": je_accounts,
+    })
+    je.insert()
+    je.submit()
+    frappe.db.set_value(
+        "Sales Invoice", inv.name,
+        "custom_promo_write_off_je", je.name,
+        update_modified=False,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # Pickup Queue — Convert Pre-Booking (Sales Order) → POS Sales Invoice
 # ──────────────────────────────────────────────────────────────────────────
+
+@frappe.whitelist()
+def get_prebook_ui_capabilities(pos_profile) -> dict:
+    """Return pickup actions from configured roles and exact profile scope."""
+    _get_pos_document_read_scope(pos_profile, "Sales Order")
+    return {
+        "can_reassign_reserved": has_configured_roles(
+            "prebook_reassign_roles",
+            defaults=("Store Manager", "Stock Manager"),
+        )
+    }
+
 
 @frappe.whitelist()
 def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
@@ -13666,13 +14937,11 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
       - status NOT IN ('Closed', 'Cancelled', 'Completed')
       - company matches the POS Profile's company
     """
-    frappe.has_permission("Sales Order", "read", throw=True)
-
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
-
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company
+    anchors = _get_pos_document_read_scope(pos_profile, "Sales Order")
+    company = anchors["company"]
+    warehouse = anchors["warehouse"]
     overdue_only = cint(overdue_only)
     try:
         days_ahead = int(days_ahead)
@@ -13683,10 +14952,15 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
     conditions = [
         "so.docstatus = 1",
         "so.company = %(company)s",
+        "EXISTS (SELECT 1 FROM `tabSales Order Item` scope_soi "
+        "WHERE scope_soi.parent = so.name AND scope_soi.warehouse = %(warehouse)s)",
+        "NOT EXISTS (SELECT 1 FROM `tabSales Order Item` foreign_soi "
+        "WHERE foreign_soi.parent = so.name AND IFNULL(foreign_soi.warehouse, '') != '' "
+        "AND foreign_soi.warehouse != %(warehouse)s)",
         "so.per_billed < 100",
         "so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')",
     ]
-    params = {"company": company}
+    params = {"company": company, "warehouse": warehouse}
 
     if overdue_only:
         conditions.append("so.delivery_date <= %(today)s")
@@ -13733,11 +15007,6 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
             ORDER BY soi.idx""",
         {"p": tuple(so_names)}, as_dict=True,
     )
-
-    def _split_serials(raw):
-        if not raw:
-            return []
-        return [s.strip() for s in str(raw).replace("\r", "").split("\n") if s.strip()]
 
     items_by_parent = {}
     serials_by_parent = {}
@@ -13792,7 +15061,6 @@ def list_reserved_serials(pos_profile, search=None, limit=300):
     cashier to verify physical pickup against the reservation — mirrors the
     Reserved Items view in SAP Retail / Oracle Xstore / Tally Shoper POS.
     """
-    frappe.has_permission("Sales Order", "read", throw=True)
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
 
@@ -13800,19 +15068,24 @@ def list_reserved_serials(pos_profile, search=None, limit=300):
     if not soi_meta.has_field("custom_serial_no"):
         return []
 
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company
+    anchors = _get_pos_document_read_scope(pos_profile, "Sales Order")
+    company = anchors["company"]
+    warehouse = anchors["warehouse"]
     limit = min(max(cint(limit) or 300, 1), 1000)
 
     conditions = [
         "so.docstatus = 1",
         "so.company = %(company)s",
+        "soi.warehouse = %(warehouse)s",
+        "NOT EXISTS (SELECT 1 FROM `tabSales Order Item` foreign_soi "
+        "WHERE foreign_soi.parent = so.name AND IFNULL(foreign_soi.warehouse, '') != '' "
+        "AND foreign_soi.warehouse != %(warehouse)s)",
         "so.per_billed < 100",
         "so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')",
         "COALESCE(so.reserve_stock, 0) = 1",
         "IFNULL(soi.custom_serial_no, '') != ''",
     ]
-    params = {"company": company}
+    params = {"company": company, "warehouse": warehouse}
     if search:
         conditions.append(
             "(soi.custom_serial_no LIKE %(q)s OR so.customer LIKE %(q)s "
@@ -13871,14 +15144,12 @@ def get_prebook_pickup_kpis(pos_profile, days=7):
     Mirrors the cashier dashboards in SAP Retail, Oracle Xstore Office and
     GoFrugal POS, kept lightweight so it can be refreshed on every tab open.
     """
-    frappe.has_permission("Quotation", "read", throw=True)
-    frappe.has_permission("Sales Order", "read", throw=True)
-
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
-
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company
+    anchors = _get_pos_document_read_scope(pos_profile, "Quotation")
+    frappe.has_permission("Sales Order", "read", throw=True)
+    company = anchors["company"]
+    warehouse = anchors["warehouse"]
     try:
         days = int(days)
     except (TypeError, ValueError):
@@ -13892,16 +15163,28 @@ def get_prebook_pickup_kpis(pos_profile, days=7):
         """SELECT COUNT(*) AS n, COALESCE(SUM(grand_total), 0) AS v
              FROM `tabQuotation`
             WHERE company = %(company)s AND docstatus = 1
-              AND transaction_date = %(today)s""",
-        {"company": company, "today": today}, as_dict=True,
+              AND transaction_date = %(today)s
+              AND EXISTS (SELECT 1 FROM `tabQuotation Item` qi
+                           WHERE qi.parent = `tabQuotation`.name AND qi.warehouse = %(warehouse)s)
+              AND NOT EXISTS (SELECT 1 FROM `tabQuotation Item` qi
+                              WHERE qi.parent = `tabQuotation`.name
+                                AND IFNULL(qi.warehouse, '') != ''
+                                AND qi.warehouse != %(warehouse)s)""",
+        {"company": company, "warehouse": warehouse, "today": today}, as_dict=True,
     )[0]
     qtn_window = frappe.db.sql(
         """SELECT status, COUNT(*) AS n, COALESCE(SUM(grand_total), 0) AS v
              FROM `tabQuotation`
             WHERE company = %(company)s AND docstatus = 1
               AND transaction_date >= %(start)s
+              AND EXISTS (SELECT 1 FROM `tabQuotation Item` qi
+                           WHERE qi.parent = `tabQuotation`.name AND qi.warehouse = %(warehouse)s)
+              AND NOT EXISTS (SELECT 1 FROM `tabQuotation Item` qi
+                              WHERE qi.parent = `tabQuotation`.name
+                                AND IFNULL(qi.warehouse, '') != ''
+                                AND qi.warehouse != %(warehouse)s)
          GROUP BY status""",
-        {"company": company, "start": window_start}, as_dict=True,
+        {"company": company, "warehouse": warehouse, "start": window_start}, as_dict=True,
     )
     qtn_status = {row.status: {"count": cint(row.n), "value": flt(row.v)} for row in qtn_window}
 
@@ -13911,8 +15194,14 @@ def get_prebook_pickup_kpis(pos_profile, days=7):
              FROM `tabSales Order`
             WHERE company = %(company)s AND docstatus = 1
               AND per_billed < 100
-              AND status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')""",
-        {"company": company}, as_dict=True,
+              AND status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
+              AND EXISTS (SELECT 1 FROM `tabSales Order Item` soi
+                           WHERE soi.parent = `tabSales Order`.name AND soi.warehouse = %(warehouse)s)
+              AND NOT EXISTS (SELECT 1 FROM `tabSales Order Item` soi
+                              WHERE soi.parent = `tabSales Order`.name
+                                AND IFNULL(soi.warehouse, '') != ''
+                                AND soi.warehouse != %(warehouse)s)""",
+        {"company": company, "warehouse": warehouse}, as_dict=True,
     )[0]
     so_overdue = frappe.db.sql(
         """SELECT COUNT(*) AS n
@@ -13920,8 +15209,14 @@ def get_prebook_pickup_kpis(pos_profile, days=7):
             WHERE company = %(company)s AND docstatus = 1
               AND per_billed < 100
               AND status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
-              AND delivery_date < %(today)s""",
-        {"company": company, "today": today}, as_dict=True,
+              AND delivery_date < %(today)s
+              AND EXISTS (SELECT 1 FROM `tabSales Order Item` soi
+                           WHERE soi.parent = `tabSales Order`.name AND soi.warehouse = %(warehouse)s)
+              AND NOT EXISTS (SELECT 1 FROM `tabSales Order Item` soi
+                              WHERE soi.parent = `tabSales Order`.name
+                                AND IFNULL(soi.warehouse, '') != ''
+                                AND soi.warehouse != %(warehouse)s)""",
+        {"company": company, "warehouse": warehouse, "today": today}, as_dict=True,
     )[0]
     so_billed_today = frappe.db.sql(
         """SELECT COUNT(DISTINCT si.name) AS n,
@@ -13929,9 +15224,10 @@ def get_prebook_pickup_kpis(pos_profile, days=7):
              FROM `tabSales Invoice` si
              JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
             WHERE si.company = %(company)s AND si.docstatus = 1
+              AND si.pos_profile = %(pos_profile)s
               AND si.posting_date = %(today)s
               AND IFNULL(sii.sales_order, '') != ''""",
-        {"company": company, "today": today}, as_dict=True,
+        {"company": company, "pos_profile": pos_profile, "today": today}, as_dict=True,
     )[0]
 
     # ── Reserved Serials ─────────────────────────────────────────────
@@ -13946,8 +15242,13 @@ def get_prebook_pickup_kpis(pos_profile, days=7):
                   AND so.per_billed < 100
                   AND so.status NOT IN ('Closed', 'Cancelled', 'Completed', 'On Hold')
                   AND COALESCE(so.reserve_stock, 0) = 1
+                  AND soi.warehouse = %(warehouse)s
+                  AND NOT EXISTS (SELECT 1 FROM `tabSales Order Item` foreign_soi
+                                   WHERE foreign_soi.parent = so.name
+                                     AND IFNULL(foreign_soi.warehouse, '') != ''
+                                     AND foreign_soi.warehouse != %(warehouse)s)
                   AND IFNULL(soi.custom_serial_no, '') != ''""",
-            {"company": company}, as_dict=True,
+            {"company": company, "warehouse": warehouse}, as_dict=True,
         )
         for r in reserved_rows:
             reserved_count += sum(
@@ -13990,26 +15291,32 @@ def list_my_proformas(pos_profile, status=None, search=None,
     cashier sees what they personally raised — matching cashier-centric
     dashboards in retail POS suites.
     """
-    frappe.has_permission("Quotation", "read", throw=True)
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
-
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
-    company = profile.company
+    anchors = _get_pos_document_read_scope(pos_profile, "Quotation")
+    company = anchors["company"]
+    warehouse = anchors["warehouse"]
     try:
         days = int(days)
     except (TypeError, ValueError):
         days = 30
     days = max(1, min(days, 365))
-    limit = min(max(cint(limit) or 100, 1), 500)
+    result_limit = max(1, min(cint(get_control_setting("proforma_result_limit", 100)), 500))
+    limit = min(max(cint(limit) or result_limit, 1), result_limit)
 
     conditions = [
         "q.docstatus = 1",
         "q.company = %(company)s",
+        "EXISTS (SELECT 1 FROM `tabQuotation Item` scope_qi "
+        "WHERE scope_qi.parent = q.name AND scope_qi.warehouse = %(warehouse)s)",
+        "NOT EXISTS (SELECT 1 FROM `tabQuotation Item` foreign_qi "
+        "WHERE foreign_qi.parent = q.name AND IFNULL(foreign_qi.warehouse, '') != '' "
+        "AND foreign_qi.warehouse != %(warehouse)s)",
         "q.transaction_date >= %(start)s",
     ]
     params = {
         "company": company,
+        "warehouse": warehouse,
         "start": frappe.utils.add_days(nowdate(), -days),
     }
 
@@ -14019,6 +15326,12 @@ def list_my_proformas(pos_profile, status=None, search=None,
     if cint(only_mine):
         conditions.append("q.owner = %(me)s")
         params["me"] = frappe.session.user
+    else:
+        require_configured_roles(
+            "session_report_roles",
+            defaults=("Store Manager", "POS Manager", "Accounts Manager"),
+            action=_("view other users' proformas"),
+        )
     if search:
         conditions.append(
             "(q.name LIKE %(q)s OR q.party_name LIKE %(q)s "
@@ -14026,11 +15339,19 @@ def list_my_proformas(pos_profile, status=None, search=None,
         )
         params["q"] = f"%{search}%"
 
+    try:
+        has_advance_received = frappe.get_meta("Quotation").has_field("custom_advance_received")
+    except Exception:
+        has_advance_received = False
+    advance_select = (
+        "q.custom_advance_received AS advance_received"
+        if has_advance_received else "0 AS advance_received"
+    )
     rows = frappe.db.sql(
         f"""
         SELECT q.name, q.party_name, q.customer_name, q.transaction_date,
                q.valid_till, q.grand_total, q.status, q.owner,
-               q.contact_mobile, q.contact_email
+               q.contact_mobile, q.contact_email, {advance_select}
           FROM `tabQuotation` q
          WHERE {' AND '.join(conditions)}
          ORDER BY q.transaction_date DESC, q.creation DESC
@@ -14058,13 +15379,7 @@ def list_my_proformas(pos_profile, status=None, search=None,
     for r in rows:
         vt = getdate(r.valid_till) if r.valid_till else None
         days_left = (vt - today).days if vt else None
-        advance = 0.0
-        try:
-            advance = flt(frappe.db.get_value(
-                "Quotation", r.name, "custom_advance_received"
-            ) or 0)
-        except Exception:
-            advance = 0.0
+        advance = flt(r.advance_received)
         out.append({
             "name": r.name,
             "customer": r.party_name,
@@ -14101,23 +15416,17 @@ def load_sales_order_to_cart(pos_profile, sales_order):
     ``so_detail`` so ``per_billed`` / advance allocation / stock reservation
     behave exactly like ``make_sales_invoice(source=SO)``.
     """
-    frappe.has_permission("Sales Order", "read", throw=True)
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
     if not sales_order:
         frappe.throw(_("Sales Order is required"))
 
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    anchors = _get_pos_document_read_scope(pos_profile, "Sales Order")
     so = frappe.get_doc("Sales Order", sales_order)
+    _assert_document_matches_pos_profile(so, anchors)
 
     if so.docstatus != 1:
         frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
-    if so.company != profile.company:
-        frappe.throw(
-            _("Sales Order company ({0}) does not match POS Profile company ({1})").format(
-                so.company, profile.company
-            )
-        )
     if flt(so.per_billed) >= 100:
         frappe.throw(_("Sales Order {0} is already fully billed").format(sales_order))
 
@@ -14152,11 +15461,6 @@ def load_sales_order_to_cart(pos_profile, sales_order):
             as_dict=True,
         )
         item_meta = {r.item_code: r for r in rows}
-
-    def _split_serials(raw):
-        if not raw:
-            return []
-        return [s.strip() for s in str(raw).replace("\r", "").split("\n") if s.strip()]
 
     cart_items = []
     all_reserved = []
@@ -14216,13 +15520,13 @@ def load_sales_order_to_cart(pos_profile, sales_order):
             # If reserved count < SO qty, fill remainder as unserialised slots
             # the cashier must scan.
             extra = int(remaining_qty) - len(reserved)
-            for _ in range(max(extra, 0)):
+            for _missing_serial_index in range(max(extra, 0)):
                 row = dict(base_row)
                 row["qty"] = 1
                 row["serial_no"] = ""
                 cart_items.append(row)
         elif has_serial:
-            for _ in range(int(remaining_qty) or 1):
+            for _missing_serial_index in range(int(remaining_qty) or 1):
                 row = dict(base_row)
                 row["qty"] = 1
                 row["serial_no"] = ""
@@ -14279,23 +15583,17 @@ def load_quotation_to_cart(pos_profile, quotation):
       * Zoho / Odoo / GoFrugal / Tally — "Convert to Invoice" / "Make Bill"
       * ERPNext core ``make_sales_invoice`` / ``make_sales_order`` mappers
     """
-    frappe.has_permission("Quotation", "read", throw=True)
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
     if not quotation:
         frappe.throw(_("Quotation is required"))
 
-    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    anchors = _get_pos_document_read_scope(pos_profile, "Quotation")
     qtn = frappe.get_doc("Quotation", quotation)
+    _assert_document_matches_pos_profile(qtn, anchors)
 
     if qtn.docstatus != 1:
         frappe.throw(_("Quotation {0} is not submitted").format(quotation))
-    if qtn.company != profile.company:
-        frappe.throw(
-            _("Quotation company ({0}) does not match POS Profile company ({1})").format(
-                qtn.company, profile.company
-            )
-        )
     if (qtn.status or "").lower() in ("lost", "cancelled"):
         frappe.throw(_("Quotation {0} is {1} — cannot convert").format(quotation, qtn.status))
     if qtn.valid_till and getdate(qtn.valid_till) < getdate(nowdate()):
@@ -14369,7 +15667,7 @@ def load_quotation_to_cart(pos_profile, quotation):
         # Serial-backed items: expand one row per qty so the cashier scans
         # an IMEI per unit at billing time (proforma never carries IMEIs).
         if has_serial:
-            for _ in range(int(flt(d.qty)) or 1):
+            for _missing_serial_index in range(int(flt(d.qty)) or 1):
                 row = dict(base_row)
                 row["qty"] = 1
                 row["serial_no"] = ""
@@ -14395,7 +15693,7 @@ def load_quotation_to_cart(pos_profile, quotation):
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def convert_prebooking_to_invoice(pos_profile, sales_order,
                                   mode_of_payment=None, paid_amount=None,
                                   apply_advance=1, client_request_id=None,
@@ -14413,6 +15711,7 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
         frappe.throw(_("POS Profile is required"))
     if not sales_order:
         frappe.throw(_("Sales Order is required"))
+    assert_pos_profile_scope(pos_profile)
 
     # Session guard
     from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
@@ -14433,16 +15732,25 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
         )
         if existing:
             inv = frappe.get_doc("Sales Invoice", existing[0].name)
+            inv.check_permission("read")
+            assert_sales_invoice_scope(inv.name)
             return _pickup_invoice_response(inv, status="duplicate_prevented")
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     so = frappe.get_doc("Sales Order", sales_order)
+    so.check_permission("read")
 
     if so.docstatus != 1:
         frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
     if so.company != profile.company:
         frappe.throw(_("Sales Order company ({0}) does not match POS Profile company ({1})").format(
             so.company, profile.company))
+    order_warehouses = [so.get("set_warehouse")]
+    order_warehouses.extend(row.warehouse for row in (so.items or []) if row.warehouse)
+    assert_any_warehouse_scope(order_warehouses, company=so.company)
+    effective_order_warehouses = {warehouse for warehouse in order_warehouses if warehouse}
+    if not effective_order_warehouses or effective_order_warehouses != {profile.warehouse}:
+        frappe.throw(_("Sales Order belongs to another store."), frappe.PermissionError)
     if flt(so.per_billed) >= 100:
         frappe.throw(_("Sales Order {0} is already fully billed").format(sales_order))
 
@@ -14557,7 +15865,6 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
                 "amount": flt(paid_amount),
             })
 
-    inv.flags.ignore_permissions = False
     inv.insert()
     inv.submit()
 
@@ -14600,10 +15907,12 @@ def _pickup_invoice_response(inv, status="ok"):
 
 
 @frappe.whitelist()
-def get_customer_full_details(customer, **kwargs):
+def get_customer_full_details(customer, pos_profile=None, **kwargs):
     """Fetch fresh customer details with robust address lookup."""
     if not customer:
         return {}
+    frappe.has_permission("Customer", "read", throw=True)
+    _assert_customer_pos_access(customer, pos_profile, action=_("view"))
 
     # ⚡ Clear cache first to guarantee fresh data
     frappe.clear_document_cache("Customer", customer)
@@ -14651,11 +15960,6 @@ def get_customer_full_details(customer, **kwargs):
         """, customer, as_dict=True)
         if existing:
             billing_addr_name = existing[0].name
-            # Also set as customer_primary_address for next time
-            frappe.db.set_value(
-                "Customer", customer, "customer_primary_address", billing_addr_name,
-                update_modified=False
-            )
 
     if billing_addr_name and frappe.db.exists("Address", billing_addr_name):
         # Read directly from DB to bypass cache

@@ -27,6 +27,7 @@
   "column_break_approval",
   "approved_by",
   "approved_at",
+  "approval_signature",
   "amended_from",
   "gl_entry"
  ],
@@ -172,8 +173,9 @@
   },
   {
    "fieldname": "approved_by",
-   "fieldtype": "Data",
+   "fieldtype": "Link",
    "label": "Approved By (Manager)",
+   "options": "User",
    "read_only": 1,
    "description": "Manager who approved this movement"
   },
@@ -181,6 +183,15 @@
    "fieldname": "approved_at",
    "fieldtype": "Datetime",
    "label": "Approved At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "approval_signature",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Approval Signature",
+   "no_copy": 1,
+   "permlevel": 1,
    "read_only": 1
   },
   {
@@ -213,27 +224,35 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
-   "read": 1,
-   "report": 1,
-   "role": "System Manager",
    "submit": 1,
    "cancel": 1,
-   "write": 1
+   "amend": 1,
+   "import": 1,
+   "report": 1
   },
   {
-   "create": 1,
-   "read": 1,
    "role": "Sales User",
-   "submit": 1,
-   "write": 1
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1
   },
   {
-   "create": 1,
-   "read": 1,
    "role": "POS User",
-   "submit": 1,
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
    "write": 1
   }
  ],

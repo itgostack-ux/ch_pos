@@ -207,10 +207,16 @@ def test_06_get_guided_recommendations_empty_responses():
             _skip(FLOW, "06 recommendations empty responses", "No CH Sub Category configured")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "06 recommendations empty responses", "No active POS Profile configured")
+            return
+
         from ch_pos.api.guided import get_guided_recommendations
         result = get_guided_recommendations(
             sub_category=sub_cat.name,
             responses=[],
+            pos_profile=profile.name,
         )
 
         assert isinstance(result, list), "Recommendations should be a list"
@@ -229,6 +235,9 @@ def test_07_get_guided_recommendations_with_budget():
             return
 
         profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "07 recommendations with budget", "No active POS Profile configured")
+            return
         from ch_pos.api.guided import get_guided_recommendations
 
         responses = [
@@ -237,7 +246,8 @@ def test_07_get_guided_recommendations_with_budget():
         result = get_guided_recommendations(
             sub_category=sub_cat.name,
             responses=responses,
-            warehouse=profile.warehouse if profile else None,
+            warehouse=profile.warehouse,
+            pos_profile=profile.name,
             limit=5,
         )
 
@@ -273,13 +283,17 @@ def test_08_get_guided_recommendations_brand_preference():
             return
 
         profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "08 recommendations brand preference", "No active POS Profile configured")
+            return
         from ch_pos.api.guided import get_guided_recommendations
 
         # Get all recs without preference
         all_recs = get_guided_recommendations(
             sub_category=sub_cat.name,
             responses=[],
-            warehouse=profile.warehouse if profile else None,
+            warehouse=profile.warehouse,
+            pos_profile=profile.name,
         )
 
         if not all_recs:
@@ -296,7 +310,8 @@ def test_08_get_guided_recommendations_brand_preference():
         brand_recs = get_guided_recommendations(
             sub_category=sub_cat.name,
             responses=[{"key": "brand", "question": "Brand?", "answer": top_brand}],
-            warehouse=profile.warehouse if profile else None,
+            warehouse=profile.warehouse,
+            pos_profile=profile.name,
         )
 
         assert isinstance(brand_recs, list), "Should return list"
@@ -322,11 +337,17 @@ def test_09_recommendations_limit_respected():
             _skip(FLOW, "09 recommendations limit", "No CH Sub Category configured")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "09 recommendations limit", "No active POS Profile configured")
+            return
+
         from ch_pos.api.guided import get_guided_recommendations
 
         result = get_guided_recommendations(
             sub_category=sub_cat.name,
             responses=[],
+            pos_profile=profile.name,
             limit=2,
         )
 
@@ -344,8 +365,13 @@ def test_10_compare_items_static_fallback():
             _skip(FLOW, "10 compare_items static fallback", "Not enough items for comparison")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "10 compare_items static fallback", "No active POS Profile configured")
+            return
+
         from ch_pos.api.ai import compare_items
-        result = compare_items(item_codes=items[:2])
+        result = compare_items(item_codes=items[:2], pos_profile=profile.name)
 
         assert isinstance(result, dict), "compare_items should return dict"
         assert "comparison_result" in result, "Should have comparison_result key"
@@ -369,9 +395,14 @@ def test_11_compare_items_requires_minimum_2():
             _skip(FLOW, "11 compare_items min 2", "No items available")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "11 compare_items min 2", "No active POS Profile configured")
+            return
+
         from ch_pos.api.ai import compare_items
         try:
-            compare_items(item_codes=[items[0]])
+            compare_items(item_codes=[items[0]], pos_profile=profile.name)
             _fail(FLOW, "11 compare_items min 2", "Should have raised error for <2 items")
         except frappe.exceptions.ValidationError:
             _ok(FLOW, "11 compare_items min 2", "Correctly requires minimum 2 items")
@@ -399,8 +430,13 @@ def test_12_compare_items_max_3():
             _skip(FLOW, "12 compare_items max 3", "Not enough items to test cap")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "12 compare_items max 3", "No active POS Profile configured")
+            return
+
         from ch_pos.api.ai import compare_items
-        result = compare_items(item_codes=item_codes)  # pass 4-5 items
+        result = compare_items(item_codes=item_codes, pos_profile=profile.name)  # pass 4-5 items
 
         assert isinstance(result, dict), "Should return dict"
         cr = result.get("comparison_result", [])
@@ -425,8 +461,17 @@ def test_13_get_upsell_suggestions():
             _skip(FLOW, "13 get_upsell_suggestions", "No items in system")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "13 get_upsell_suggestions", "No active POS Profile configured")
+            return
+
         from ch_pos.api.ai import get_upsell_suggestions
-        result = get_upsell_suggestions(item_code=items[0].name, cart_items=[])
+        result = get_upsell_suggestions(
+            item_code=items[0].name,
+            cart_items=[],
+            pos_profile=profile.name,
+        )
 
         assert isinstance(result, list), "get_upsell_suggestions should return list"
 
@@ -457,11 +502,20 @@ def test_14_get_upsell_excludes_cart_items():
             _skip(FLOW, "14 upsell excludes cart", "Not enough items")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "14 upsell excludes cart", "No active POS Profile configured")
+            return
+
         from ch_pos.api.ai import get_upsell_suggestions
 
         # Pass second item as already in cart
         cart_items = [{"item_code": items[1].name}]
-        result = get_upsell_suggestions(item_code=items[0].name, cart_items=cart_items)
+        result = get_upsell_suggestions(
+            item_code=items[0].name,
+            cart_items=cart_items,
+            pos_profile=profile.name,
+        )
 
         assert isinstance(result, list), "Should return list"
         suggested_codes = {s.get("item_code") for s in result}
@@ -476,8 +530,13 @@ def test_14_get_upsell_excludes_cart_items():
 def test_15_explain_offers_empty_cart():
     """explain_offers returns a safe message for an empty cart."""
     try:
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "15 explain_offers empty cart", "No active POS Profile configured")
+            return
+
         from ch_pos.api.ai import explain_offers
-        result = explain_offers(cart={"items": []})
+        result = explain_offers(cart={"items": []}, pos_profile=profile.name)
 
         assert isinstance(result, str), "explain_offers should return string"
         assert len(result) > 0, "Result should not be empty string"
@@ -500,13 +559,18 @@ def test_16_explain_offers_with_items():
             _skip(FLOW, "16 explain_offers with items", "No items in system")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "16 explain_offers with items", "No active POS Profile configured")
+            return
+
         from ch_pos.api.ai import explain_offers
         cart = {
             "items": [
                 {"item_code": items[0].name, "item_name": items[0].item_name, "qty": 1, "amount": 10000},
             ]
         }
-        result = explain_offers(cart=cart)
+        result = explain_offers(cart=cart, pos_profile=profile.name)
 
         assert isinstance(result, str), "explain_offers should return string"
         assert len(result) > 0, "Result should not be empty"
@@ -530,6 +594,9 @@ def test_17_save_guided_session():
             return
 
         profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "17 save_guided_session", "No active POS Profile configured")
+            return
         from ch_pos.api.guided import save_guided_session
 
         responses = [
@@ -537,7 +604,7 @@ def test_17_save_guided_session():
             {"key": "brand", "question": "Brand?", "answer": "Samsung"},
         ]
         result = save_guided_session(
-            pos_profile=profile.name if profile else None,
+            pos_profile=profile.name,
             category=sub_cat.category,
             sub_category=sub_cat.name,
             responses=responses,
@@ -571,9 +638,18 @@ def test_18_save_guided_session_requires_sub_category():
             _skip(FLOW, "18 save_guided_session requires sub_cat", "POS Guided Session not installed")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "18 save_guided_session requires sub_cat", "No active POS Profile configured")
+            return
+
         from ch_pos.api.guided import save_guided_session
         try:
-            save_guided_session(sub_category=None, responses=[])
+            save_guided_session(
+                pos_profile=profile.name,
+                sub_category=None,
+                responses=[],
+            )
             _fail(FLOW, "18 save_guided_session requires sub_cat", "Should have raised error")
         except (frappe.exceptions.ValidationError, Exception) as e:
             if "sub" in str(e).lower() or "category" in str(e).lower() or "required" in str(e).lower():
@@ -609,6 +685,11 @@ def test_19_save_guided_session_with_recommendations():
             _skip(FLOW, "19 save_guided_session with recs", "No items available")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "19 save_guided_session with recs", "No active POS Profile configured")
+            return
+
         from ch_pos.api.guided import save_guided_session
 
         recommendations = [
@@ -617,6 +698,7 @@ def test_19_save_guided_session_with_recommendations():
         ]
 
         result = save_guided_session(
+            pos_profile=profile.name,
             sub_category=sub_cat.name,
             responses=[{"key": "budget", "question": "Budget?", "answer": 20000}],
             recommendations=recommendations,
@@ -654,10 +736,16 @@ def test_20_update_existing_guided_session():
             _skip(FLOW, "20 update existing session", "No CH Sub Category")
             return
 
+        profile = _get_pos_profile()
+        if not profile:
+            _skip(FLOW, "20 update existing session", "No active POS Profile configured")
+            return
+
         from ch_pos.api.guided import save_guided_session
 
         # Create initial session
         result1 = save_guided_session(
+            pos_profile=profile.name,
             sub_category=sub_cat.name,
             responses=[{"key": "budget", "question": "Budget?", "answer": 10000}],
             status="In Progress",
@@ -668,6 +756,7 @@ def test_20_update_existing_guided_session():
         # Update the same session
         result2 = save_guided_session(
             session_name=session_name,
+            pos_profile=profile.name,
             sub_category=sub_cat.name,
             responses=[
                 {"key": "budget", "question": "Budget?", "answer": 10000},

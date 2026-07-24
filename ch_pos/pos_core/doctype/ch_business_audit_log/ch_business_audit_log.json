@@ -126,28 +126,29 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "Store Manager",
+   "read": 1,
+   "write": 0,
    "create": 1,
    "delete": 0,
    "email": 0,
    "export": 1,
    "print": 0,
-   "read": 1,
    "report": 1,
-   "role": "Store Manager",
-   "share": 0,
-   "write": 0
+   "share": 0
   },
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
-   "delete": 0,
+   "delete": 1,
    "email": 0,
    "export": 1,
+   "import": 1,
    "print": 0,
-   "read": 1,
    "report": 1,
-   "role": "System Manager",
-   "share": 0,
-   "write": 0
+   "share": 0
   }
  ],
  "sort_field": "timestamp",

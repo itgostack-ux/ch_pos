@@ -1,11 +1,16 @@
-"""CH POS Password — quick PIN authentication for in-store approvals."""
+"""CH POS Password — scoped, rate-limited approval authentication."""
 
 import hashlib
+import hmac
 
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import cint
 from frappe.utils.password import get_decrypted_password
+
+from ch_pos.config import get_configured_roles, get_control_setting, is_privileged_user
+from ch_pos.rate_limits import clear_fixed_window, increment_fixed_window
 
 
 class CHPOSPassword(Document):
@@ -13,6 +18,35 @@ class CHPOSPassword(Document):
         pin = self.get_password("pin_hash") or ""
         if not pin.isdigit() or len(pin) < 4 or len(pin) > 6:
             frappe.throw(_("PIN must be 4-6 digits"), title=_("CH POS Password Error"))
+
+
+def _pin_attempt_key(store=None) -> str:
+    request_ip = getattr(frappe.local, "request_ip", None) or "unknown"
+    user = getattr(getattr(frappe.local, "session", None), "user", None) or "Guest"
+    digest = hashlib.sha256(f"{request_ip}:{user}:{store or 'no-store'}".encode()).hexdigest()
+    return f"ch_pos_pin_attempts:{digest}"
+
+
+def _check_pin_rate_limit(store=None) -> str:
+    key = _pin_attempt_key(store)
+    attempt_limit = max(
+        1, min(cint(get_control_setting("manager_pin_attempt_limit", 5)), 100)
+    )
+    lockout_seconds = max(
+        30, min(cint(get_control_setting("manager_pin_lockout_seconds", 900)), 86400)
+    )
+    attempts = increment_fixed_window("manager-pin", key, lockout_seconds)
+    if attempts > attempt_limit:
+        frappe.throw(
+            _("Too many invalid approval attempts. Try again later."),
+            frappe.RateLimitExceededError,
+            title=_("Approval Temporarily Locked"),
+        )
+    return key
+
+
+def _clear_pin_failures(key: str) -> None:
+    clear_fixed_window("manager-pin", key)
 
 
 def verify_manager_pin(pin, store=None, permission=None):
@@ -30,35 +64,119 @@ def verify_manager_pin(pin, store=None, permission=None):
     if not pin or not pin.strip().isdigit():
         return {"valid": False, "message": _("Invalid PIN format")}
 
-    # TC_007: Manager PINs are no longer scoped per store; the `store` argument
-    # is accepted for backward compatibility but is not used as a filter.
-    filters = {"is_active": 1}
+    attempt_key = _check_pin_rate_limit(store)
+    permission_fields = {
+        "can_approve_opening",
+        "can_approve_closing",
+        "can_approve_cash_drop",
+        "can_override_business_date",
+        "can_approve_discount",
+        "can_approve_return",
+        "can_force_close_session",
+    }
+    if permission and permission not in permission_fields:
+        frappe.throw(_("Unsupported manager approval permission."), frappe.ValidationError)
 
-    managers = frappe.get_all(
-        "CH POS Password",
-        filters=filters,
-        fields=["name", "user", "employee_name", "pin_hash"],
+    has_store_field = frappe.db.has_column("CH POS Password", "store")
+    candidate_limit = max(
+        1, min(cint(get_control_setting("manager_pin_candidate_limit", 100)), 1000)
     )
+    allowed_roles = sorted(
+        get_configured_roles(
+            "manager_pin_roles", ("Store Manager", "POS Manager", "Sales Manager")
+        )
+        | {"System Manager"}
+    )
+    values = {"roles": allowed_roles, "limit": candidate_limit + 1}
+    store_select = "p.store" if has_store_field else "NULL AS store"
+    store_condition = ""
+    if has_store_field and store:
+        store_condition = "AND (IFNULL(p.store, '') = '' OR p.store = %(store)s)"
+        values["store"] = store
+    elif has_store_field:
+        store_condition = "AND (u.name = 'Administrator' OR system_role.parent IS NOT NULL)"
 
+    managers = frappe.db.sql(
+        f"""
+        SELECT p.name, p.user, p.employee_name, {store_select},
+               {f'p.`{permission}`' if permission else '1'} AS requested_permission
+          FROM `tabCH POS Password` p
+          JOIN `tabUser` u ON u.name = p.user AND u.enabled = 1
+          LEFT JOIN `tabHas Role` system_role
+            ON system_role.parent = u.name
+           AND system_role.parenttype = 'User'
+           AND system_role.role = 'System Manager'
+         WHERE p.is_active = 1
+           {store_condition}
+           AND (
+                u.name = 'Administrator'
+                OR system_role.parent IS NOT NULL
+                OR EXISTS (
+                    SELECT 1
+                      FROM `tabHas Role` allowed_role
+                     WHERE allowed_role.parent = u.name
+                       AND allowed_role.parenttype = 'User'
+                       AND allowed_role.role IN %(roles)s
+                )
+           )
+         ORDER BY p.name
+         LIMIT %(limit)s
+        """,
+        values,
+        as_dict=True,
+    )
+    if len(managers) > candidate_limit:
+        frappe.throw(
+            _("Manager PIN candidates exceed the configured store limit. Assign each manager to a store or raise the limit."),
+            frappe.PermissionError,
+        )
+
+    matches = []
     for mgr in managers:
+        manager_is_privileged = is_privileged_user(mgr.user)
+        manager_store = mgr.get("store") if has_store_field else None
+        if not manager_is_privileged:
+            if not store or (manager_store and manager_store != store):
+                continue
+            try:
+                from ch_pos.api.scope_guard import assert_store_scope
+
+                assert_store_scope(store=store, user=mgr.user)
+            except frappe.PermissionError:
+                continue
+        if permission and not cint(mgr.requested_permission):
+            continue
+
         stored_pin = get_decrypted_password(
             "CH POS Password", mgr.name, "pin_hash"
         )
-        if stored_pin == pin:
-            # Check specific permission if requested
-            if permission:
-                has_perm = frappe.db.get_value("CH POS Password", mgr.name, permission)
-                if not has_perm:
-                    return {
-                        "valid": False,
-                        "message": _("{0} does not have {1} permission").format(
-                            mgr.employee_name, permission
-                        ),
-                    }
-            return {
-                "valid": True,
-                "user": mgr.user,
-                "name": mgr.employee_name,
-            }
+        if not hmac.compare_digest(str(stored_pin or ""), str(pin)):
+            continue
 
+        matches.append((mgr, manager_store))
+
+    if len(matches) > 1 and store:
+        # Most-specific assignment wins (SAP org-level parity): a PIN row
+        # explicitly bound to THIS store beats floating (store-NULL) rows.
+        # Shared PINs across floating rows remain ambiguous and are refused
+        # below — the durable fix is one distinct PIN per manager.
+        store_bound = [m for m in matches if (m[1] or "") == store]
+        if len(store_bound) == 1:
+            matches = store_bound
+
+    if len(matches) == 1:
+        mgr, manager_store = matches[0]
+        _clear_pin_failures(attempt_key)
+        return {
+            "valid": True,
+            "user": mgr.user,
+            "name": mgr.employee_name,
+            "store": manager_store,
+        }
+
+    if len(matches) > 1:
+        return {"valid": False, "message": _(
+            "This PIN belongs to more than one authorized manager here. "
+            "Assign each manager a distinct PIN (or bind their PIN to a store)."
+        )}
     return {"valid": False, "message": _("Invalid PIN")}

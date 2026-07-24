@@ -96,6 +96,7 @@ export class ModelCompareWorkspace {
 	_load_filters() {
 		frappe.call({
 			method: "ch_pos.api.pos_api.get_comparison_filters",
+			args: { pos_profile: PosState.pos_profile || undefined },
 			async: true,
 			callback: (r) => {
 				if (!r.message) return;

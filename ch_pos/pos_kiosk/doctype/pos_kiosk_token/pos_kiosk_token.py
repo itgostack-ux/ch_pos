@@ -1,12 +1,33 @@
+import hashlib
+
 import frappe
 from frappe.model.document import Document
-from frappe.utils import add_to_date, cint, flt, get_datetime, now_datetime, time_diff_in_seconds
+from frappe.utils import (
+    add_to_date,
+    cint,
+    flt,
+    get_datetime,
+    getdate,
+    now_datetime,
+    time_diff_in_seconds,
+)
 
 
 from buyback.utils import validate_indian_phone
+from ch_pos.config import get_control_setting
 
 
 class POSKioskToken(Document):
+    def before_validate(self):
+        if (
+            self.meta.has_field("token_scope_key")
+            and self.pos_profile
+            and self.token_display
+        ):
+            token_date = getdate(self.creation or now_datetime()).isoformat()
+            material = f"{self.pos_profile}\x1f{token_date}\x1f{self.token_display}"
+            self.token_scope_key = hashlib.sha256(material.encode()).hexdigest()
+
     def validate(self):
         if self.customer_phone:
             self.customer_phone = validate_indian_phone(self.customer_phone, "Customer Phone")
@@ -50,12 +71,19 @@ class POSKioskToken(Document):
 
 def expire_old_tokens():
     """Scheduler job: mark expired tokens."""
+    batch_limit = max(1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000))
     tokens = frappe.get_all(
         "POS Kiosk Token",
         filters={"status": ("in", ["Waiting", "Engaged"]), "expires_at": ("<", now_datetime()), "docstatus": 1},
         pluck="name",
+        order_by="expires_at asc, name asc",
+        limit_page_length=batch_limit,
     )
-    for name in tokens:
-        frappe.db.set_value("POS Kiosk Token", name, "status", "Expired")
     if tokens:
-        frappe.db.commit()
+        frappe.db.set_value(
+            "POS Kiosk Token",
+            {"name": ("in", tokens)},
+            "status",
+            "Expired",
+            update_modified=False,
+        )

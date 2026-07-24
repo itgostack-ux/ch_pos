@@ -224,13 +224,15 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
-   "read": 1,
-   "role": "System Manager",
    "submit": 1,
    "cancel": 1,
-   "write": 1
+   "amend": 1,
+   "import": 1
   }
  ],
  "sort_field": "creation",

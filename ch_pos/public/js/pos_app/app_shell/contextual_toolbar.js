@@ -94,7 +94,7 @@ export class ContextualToolbar {
 			}
 		});
 
-		// Phase 2 — Camera scan button (lazy-loads ZXing on first click)
+		// Phase 2 — Camera scan button (lazy-loads the local scanner asset)
 		panel.on("click", ".ch-pos-cam-scan", (e) => {
 			e.preventDefault();
 			if (!(window.ch_pos && window.ch_pos.open_camera_scan)) {
@@ -254,7 +254,7 @@ export class ContextualToolbar {
 				if (!code) return;
 				frappe.call({
 					method: "ch_pos.api.gift_redemption.lookup_gift_code",
-					args: { code },
+					args: { code, pos_profile: PosState.pos_profile },
 					callback: (r) => {
 						if (!r.message) return;
 						d.hide();

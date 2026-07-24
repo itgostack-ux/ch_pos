@@ -283,6 +283,7 @@ export class GuidedWorkspace {
 			sub_category: this.selected_sub_category,
 			responses,
 			warehouse: PosState.warehouse,
+			pos_profile: PosState.pos_profile,
 			limit: 8,
 		}).then((rows) => {
 			this.recommendations = rows || [];

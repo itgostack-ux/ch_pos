@@ -25,7 +25,8 @@ def run() -> dict:
         raise AssertionError(f"TC_001 guard failed in API markers: {missing_tc001}")
 
     tc002_needles = [
-        "and not discount_authorized_by",
+        "consume_approval_grant",
+        "row_authorized = bool(",
         "Below Minimum Selling Price",
         "custom_discount_authorized_by",
         "fields=[\"selling_price\", \"mop\", \"status\", \"channel\"]",

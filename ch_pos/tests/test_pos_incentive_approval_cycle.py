@@ -14,6 +14,7 @@ from ch_pos.pos_core.doctype.pos_incentive_ledger.pos_incentive_ledger import (
 	cancel_incentive,
 	mark_incentive_paid,
 )
+from ch_pos.api.pos_api import _insert_incentive_entry
 
 
 def _pick_pos_executive() -> str:
@@ -30,10 +31,15 @@ def _pick_pos_executive() -> str:
 
 def run():
 	exec_name = _pick_pos_executive()
+	executive = frappe.db.get_value(
+		"POS Executive", exec_name, ["store", "company"], as_dict=True
+	)
 	doc = frappe.get_doc(
 		{
 			"doctype": "POS Incentive Ledger",
 			"pos_executive": exec_name,
+			"store": executive.store,
+			"company": executive.company,
 			"posting_date": nowdate(),
 			"transaction_type": "Sale",
 			"qty": 1,
@@ -42,8 +48,7 @@ def run():
 			"status": "Pending",
 		}
 	)
-	doc.flags.ignore_permissions = True
-	doc.insert(ignore_permissions=True)
+	_insert_incentive_entry(doc)
 
 	try:
 		# Cannot pay directly from Pending.

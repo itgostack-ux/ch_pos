@@ -21,9 +21,6 @@ class CHAttachRule(Document):
 		self._set_trigger_doctype()
 		super()._validate_links()
 
-	def validate(self):
-		pass
-
 	def _set_trigger_doctype(self):
 		"""Map trigger_type select value to the actual DocType for Dynamic Link."""
 		if self.trigger_type:

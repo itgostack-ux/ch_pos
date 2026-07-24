@@ -342,7 +342,7 @@ export class SessionOpeningScreen {
 					fieldname: "info",
 					fieldtype: "HTML",
 					options: `<div class="alert alert-info" style="margin-bottom:10px">
-						${__("You have System Manager access. Select a store to continue.")}
+						${__("You have administrative access. Select a store to continue.")}
 					</div>`,
 				},
 				{

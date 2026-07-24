@@ -13,6 +13,7 @@ Why this override exists:
 """
 
 import frappe
+from frappe import _
 from frappe.utils import flt
 
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import (
@@ -21,6 +22,9 @@ from erpnext.accounts.doctype.pos_invoice.pos_invoice import (
     get_product_bundle_stock_availability,
 )
 from erpnext.stock.stock_ledger import is_negative_stock_allowed
+
+from ch_pos.api.scope_guard import assert_store_scope
+from ch_pos.config import require_configured_roles
 
 
 def _get_pos_reserved_qty_from_table(child_table, item_code, warehouse):
@@ -81,6 +85,22 @@ def get_stock_availability(item_code, warehouse) -> dict:
     Overrides erpnext.accounts.doctype.pos_invoice.pos_invoice.get_stock_availability
     using the corrected _get_pos_reserved_qty_from_table above.
     """
+    require_configured_roles(
+        "stock_availability_roles",
+        defaults=("POS User", "POS Manager", "Store Manager", "Stock User", "Stock Manager"),
+        action=_("view store stock availability"),
+    )
+    if not item_code or not warehouse:
+        frappe.throw(_("Item and Warehouse are required."))
+    frappe.has_permission("Item", "read", item_code, throw=True)
+    frappe.has_permission("Warehouse", "read", warehouse, throw=True)
+    warehouse_row = frappe.db.get_value(
+        "Warehouse", warehouse, ["company", "is_group", "disabled"], as_dict=True
+    )
+    if not warehouse_row or warehouse_row.is_group or warehouse_row.disabled:
+        frappe.throw(_("Select an active leaf Warehouse."))
+    assert_store_scope(warehouse=warehouse, company=warehouse_row.company)
+
     if frappe.db.get_value("Item", item_code, "is_stock_item"):
         bin_qty = get_bin_qty(item_code, warehouse)
         pos_sales_qty = _get_pos_reserved_qty(item_code, warehouse)
@@ -91,6 +111,7 @@ def get_stock_availability(item_code, warehouse) -> dict:
         )
     else:
         if frappe.db.exists("Product Bundle", {"name": item_code, "disabled": 0}):
+            frappe.has_permission("Product Bundle", "read", item_code, throw=True)
             return get_bundle_availability(item_code, warehouse), True, False
         else:
             return 0, False, False

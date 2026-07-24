@@ -16,6 +16,113 @@
   "column_break_bdate",
   "enable_denomination_count",
   "lock_after_session_close",
+  "access_control_section",
+  "app_access_roles",
+  "closed_session_reopen_roles",
+  "session_override_roles",
+  "session_report_roles",
+  "store_hub_max_days",
+  "store_dashboard_staff_limit",
+  "store_insight_low_stock_qty",
+  "store_insight_return_rate_alert",
+  "store_insight_aging_ratio_alert",
+  "store_insight_no_sales_hour",
+  "store_insight_stale_hours",
+  "store_insight_max_cards",
+  "manager_approval_request_ttl_seconds",
+  "manager_approval_grant_ttl_seconds",
+  "token_create_rate_limit_max",
+  "token_create_rate_limit_window_seconds",
+  "manager_pin_attempt_limit",
+  "manager_pin_lockout_seconds",
+  "manager_pin_candidate_limit",
+  "gift_redemption_default_ttl_hours",
+  "walkin_insight_max_days",
+  "walkin_insight_low_conversion_pct",
+  "walkin_insight_high_conversion_pct",
+  "walkin_insight_unengaged_pct",
+  "walkin_insight_missed_brand_min_requests",
+  "walkin_insight_staff_min_tokens",
+  "walkin_insight_staff_variance_pct",
+  "manager_pin_roles",
+  "prebook_reassign_roles",
+  "prebook_cancel_roles",
+  "prebook_refund_roles",
+  "prebook_hold_grace_days",
+  "cross_store_transfer_roles",
+  "stock_transfer_roles",
+  "stock_availability_roles",
+  "model_comparison_roles",
+  "model_comparison_limit",
+  "model_comparison_filter_limit",
+  "model_comparison_related_row_limit",
+  "pos_search_related_row_limit",
+  "nearby_store_result_limit",
+  "guided_catalog_result_limit",
+  "guided_candidate_limit",
+  "guided_related_row_limit",
+  "guided_spec_option_limit",
+  "pos_ai_roles",
+  "pos_ai_requests_per_user",
+  "pos_ai_requests_per_ip",
+  "pos_ai_rate_window_seconds",
+  "pos_ai_max_payload_chars",
+  "pos_ai_max_cart_items",
+  "pos_ai_related_row_limit",
+  "store_override_roles",
+  "settlement_correction_roles",
+  "cancellation_override_roles",
+  "inbound_receive_roles",
+  "token_operation_roles",
+  "token_view_roles",
+  "token_assignee_roles",
+  "token_assignment_roles",
+  "token_queue_result_limit",
+  "token_report_row_limit",
+  "token_report_max_days",
+  "token_profile_result_limit",
+  "session_report_row_limit",
+  "active_store_result_limit",
+  "edc_reconciliation_roles",
+  "payment_gateway_roles",
+  "payment_gateway_allowed_hosts",
+  "payment_gateway_timeout_seconds",
+  "payment_gateway_response_max_bytes",
+  "pincode_lookup_provider",
+  "invoice_share_roles",
+  "invoice_recipient_override_roles",
+  "einvoice_generation_roles",
+  "reprint_roles",
+  "free_sale_request_roles",
+  "free_sale_review_roles",
+  "gift_redemption_roles",
+  "customer_override_roles",
+  "test_utility_roles",
+  "return_approval_roles",
+  "return_max_line_items",
+  "repair_operation_roles",
+  "repair_max_spare_rows",
+  "repair_max_estimated_hours",
+  "credit_override_roles",
+  "discount_approval_roles",
+  "buyback_otp_bypass_roles",
+  "buyback_settlement_roles",
+  "buyback_sensitive_data_roles",
+  "buyback_grade_result_limit",
+  "executive_access_row_limit",
+  "retail_company_modes",
+  "service_company_modes",
+  "shared_company_modes",
+  "cutoff_override_roles",
+  "incentive_approval_roles",
+  "incentive_payment_roles",
+  "incentive_cancellation_roles",
+  "incentive_report_roles",
+  "incentive_rebuild_roles",
+  "incentive_rebuild_batch_limit",
+  "incentive_rebuild_max_days",
+  "finance_notification_roles",
+  "fifo_alert_roles",
   "cash_variance_account",
   "isolation_section",
   "enforce_device_company_isolation",
@@ -31,7 +138,22 @@
   "petty_expense_account",
   "col_break_gl_accounts",
   "promotional_expense_account",
-  "approval_token_ttl_hours"
+  "buyback_exchange_mode_of_payment",
+  "buyback_cash_mode_of_payment",
+  "buyback_upi_mode_of_payment",
+  "buyback_bank_mode_of_payment",
+  "approval_token_ttl_hours",
+  "free_sale_max_cart_items",
+  "scheduler_batch_limit",
+  "stale_billing_timeout_minutes",
+  "scheduler_notification_recipient_limit",
+  "attach_bonus_slab_limit",
+  "warranty_plan_result_limit",
+  "warranty_plan_category_row_limit",
+  "vas_cart_item_limit",
+  "store_repair_result_limit",
+  "proforma_result_limit",
+  "guest_payload_max_bytes"
  ],
  "fields": [
   {
@@ -105,6 +227,759 @@
    "fieldtype": "Check",
    "label": "Lock After Session Close",
    "description": "Block all POS operations after session close until next day"
+  },
+  {
+   "fieldname": "access_control_section",
+   "fieldtype": "Section Break",
+   "label": "Sensitive Action Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager\nTechnician\nSales User\nSales Manager\nStock User\nStock Manager\nAccounts User\nAccounts Manager",
+   "description": "Roles allowed to see the CH POS app. Administrator and System Manager always retain access.",
+   "fieldname": "app_access_roles",
+   "fieldtype": "Small Text",
+   "label": "App Access Roles"
+  },
+  {
+   "default": "System Manager\nAccounts Manager",
+   "description": "Roles allowed to reopen a closed POS session. Enter one role per line. Administrator always retains emergency access.",
+   "fieldname": "closed_session_reopen_roles",
+   "fieldtype": "Small Text",
+   "label": "Closed Session Reopen Roles"
+  },
+  {
+   "default": "Store Manager\nPOS Manager",
+   "description": "Roles allowed to operate a POS session owned by another cashier. Administrator and System Manager always retain access.",
+   "fieldname": "session_override_roles",
+   "fieldtype": "Small Text",
+   "label": "Session Override Roles"
+  },
+  {
+   "default": "Store Manager\nPOS Manager\nAccounts Manager",
+   "description": "Roles allowed to view reports for other cashiers or an entire store.",
+   "fieldname": "session_report_roles",
+   "fieldtype": "Small Text",
+   "label": "Session Report Roles"
+  },
+  {
+   "default": "366",
+   "description": "Maximum reporting period accepted by the Store Hub.",
+   "fieldname": "store_hub_max_days",
+   "fieldtype": "Int",
+   "label": "Store Hub Maximum Days"
+  },
+  {
+   "default": "100",
+   "description": "Maximum staff performance rows returned by one store dashboard request.",
+   "fieldname": "store_dashboard_staff_limit",
+   "fieldtype": "Int",
+   "label": "Store Dashboard Staff Limit"
+  },
+  {
+   "default": "5",
+   "description": "Available quantity at or below which an item is shown as low stock.",
+   "fieldname": "store_insight_low_stock_qty",
+   "fieldtype": "Int",
+   "label": "Store Insight Low Stock Quantity",
+   "reqd": 1
+  },
+  {
+   "default": "15",
+   "description": "Return-to-sale ratio above which the dashboard raises a return-rate insight.",
+   "fieldname": "store_insight_return_rate_alert",
+   "fieldtype": "Percent",
+   "label": "Store Insight Return Rate Alert",
+   "reqd": 1
+  },
+  {
+   "default": "20",
+   "description": "Aged-stock value ratio above which the dashboard raises an aging insight.",
+   "fieldname": "store_insight_aging_ratio_alert",
+   "fieldtype": "Percent",
+   "label": "Store Insight Aging Ratio Alert",
+   "reqd": 1
+  },
+  {
+   "default": "11",
+   "description": "Local hour (0-23) after which a no-sales-today insight may be shown.",
+   "fieldname": "store_insight_no_sales_hour",
+   "fieldtype": "Int",
+   "label": "Store Insight No-Sales Hour",
+   "reqd": 1
+  },
+  {
+   "default": "24",
+   "description": "Age in hours after which draft transfers and pending requests are treated as stale.",
+   "fieldname": "store_insight_stale_hours",
+   "fieldtype": "Int",
+   "label": "Store Insight Stale Document Hours",
+   "reqd": 1
+  },
+  {
+   "default": "6",
+   "description": "Maximum recommendation cards returned by the store-insights endpoint.",
+   "fieldname": "store_insight_max_cards",
+   "fieldtype": "Int",
+   "label": "Store Insight Maximum Cards",
+   "reqd": 1
+  },
+  {
+   "default": "300",
+   "description": "Lifetime of an unverified manager approval request.",
+   "fieldname": "manager_approval_request_ttl_seconds",
+   "fieldtype": "Int",
+   "label": "Manager Approval Request TTL (Seconds)",
+   "reqd": 1
+  },
+  {
+   "default": "600",
+   "description": "Lifetime of a verified, single-use manager approval grant.",
+   "fieldname": "manager_approval_grant_ttl_seconds",
+   "fieldtype": "Int",
+   "label": "Manager Approval Grant TTL (Seconds)",
+   "reqd": 1
+  },
+  {
+   "default": "10",
+   "description": "Maximum kiosk token-creation requests per IP and POS Profile in one window.",
+   "fieldname": "token_create_rate_limit_max",
+   "fieldtype": "Int",
+   "label": "Token Creation Rate Limit",
+   "reqd": 1
+  },
+  {
+   "default": "3600",
+   "description": "Fixed window used by the per-IP and POS Profile token-creation limit.",
+   "fieldname": "token_create_rate_limit_window_seconds",
+   "fieldtype": "Int",
+   "label": "Token Creation Rate Window (Seconds)",
+   "reqd": 1
+  },
+  {
+   "default": "5",
+   "description": "Maximum manager PIN attempts before the caller is temporarily locked.",
+   "fieldname": "manager_pin_attempt_limit",
+   "fieldtype": "Int",
+   "label": "Manager PIN Attempt Limit",
+   "reqd": 1
+  },
+  {
+   "default": "900",
+   "description": "Duration of the manager PIN attempt window and lockout.",
+   "fieldname": "manager_pin_lockout_seconds",
+   "fieldtype": "Int",
+   "label": "Manager PIN Lockout (Seconds)",
+   "reqd": 1
+  },
+  {
+   "default": "100",
+   "description": "Maximum store-scoped manager records considered by one PIN verification.",
+   "fieldname": "manager_pin_candidate_limit",
+   "fieldtype": "Int",
+   "label": "Manager PIN Candidate Limit",
+   "reqd": 1
+  },
+  {
+   "default": "168",
+   "description": "Fallback redemption lifetime when a gamified offer does not define one.",
+   "fieldname": "gift_redemption_default_ttl_hours",
+   "fieldtype": "Int",
+   "label": "Gift Redemption Default TTL (Hours)",
+   "reqd": 1
+  },
+  {
+   "default": "366",
+   "description": "Maximum history period accepted by walk-in insights.",
+   "fieldname": "walkin_insight_max_days",
+   "fieldtype": "Int",
+   "label": "Walk-In Insight Maximum Days",
+   "reqd": 1
+  },
+  {
+   "default": "30",
+   "fieldname": "walkin_insight_low_conversion_pct",
+   "fieldtype": "Percent",
+   "label": "Walk-In Low Conversion Alert",
+   "reqd": 1
+  },
+  {
+   "default": "1048576",
+   "description": "Maximum bytes accepted from a payment gateway response. Values above 10 MiB are capped.",
+   "fieldname": "payment_gateway_response_max_bytes",
+   "fieldtype": "Int",
+   "label": "Payment Gateway Response Limit (bytes)",
+   "reqd": 1
+  },
+  {
+   "default": "50",
+   "fieldname": "walkin_insight_high_conversion_pct",
+   "fieldtype": "Percent",
+   "label": "Walk-In Strong Conversion Threshold",
+   "reqd": 1
+  },
+  {
+   "default": "15",
+   "fieldname": "walkin_insight_unengaged_pct",
+   "fieldtype": "Percent",
+   "label": "Walk-In Unengaged Alert",
+   "reqd": 1
+  },
+  {
+   "default": "3",
+   "fieldname": "walkin_insight_missed_brand_min_requests",
+   "fieldtype": "Int",
+   "label": "Missed Brand Minimum Requests",
+   "reqd": 1
+  },
+  {
+   "default": "5",
+   "fieldname": "walkin_insight_staff_min_tokens",
+   "fieldtype": "Int",
+   "label": "Staff Insight Minimum Tokens",
+   "reqd": 1
+  },
+  {
+   "default": "20",
+   "fieldname": "walkin_insight_staff_variance_pct",
+   "fieldtype": "Percent",
+   "label": "Staff Conversion Variance Alert",
+   "reqd": 1
+  },
+  {
+   "default": "Store Manager\nPOS Manager\nSales Manager",
+   "fieldname": "manager_pin_roles",
+   "fieldtype": "Small Text",
+   "label": "Manager PIN Roles"
+  },
+  {
+   "default": "Store Manager\nStock Manager\nSystem Manager",
+   "fieldname": "prebook_reassign_roles",
+   "fieldtype": "Small Text",
+   "label": "Pre-Booking Reassignment Roles"
+  },
+  {
+   "default": "Store Manager\nPOS Manager\nAccounts Manager",
+   "fieldname": "prebook_cancel_roles",
+   "fieldtype": "Small Text",
+   "label": "Pre-Booking Cancellation Roles"
+  },
+  {
+   "default": "Store Manager\nAccounts Manager",
+   "fieldname": "prebook_refund_roles",
+   "fieldtype": "Small Text",
+   "label": "Pre-Booking Refund Roles"
+  },
+  {
+   "default": "2",
+   "description": "Days after the promised delivery date before an uncollected IMEI reservation expires.",
+   "fieldname": "prebook_hold_grace_days",
+   "fieldtype": "Int",
+   "label": "Pre-Book Hold Grace Days"
+  },
+  {
+   "default": "Store Manager\nStock Manager\nSystem Manager",
+   "fieldname": "cross_store_transfer_roles",
+   "fieldtype": "Small Text",
+   "label": "Cross-Store Transfer Roles"
+  },
+  {
+   "default": "Store Manager\nStock Manager\nStock User",
+   "fieldname": "stock_transfer_roles",
+   "fieldtype": "Small Text",
+   "label": "Stock Transfer Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager\nStock User\nStock Manager",
+   "description": "Roles allowed to query stock for warehouses within their assigned store scope.",
+   "fieldname": "stock_availability_roles",
+   "fieldtype": "Small Text",
+   "label": "Stock Availability Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager\nSales User\nSales Manager\nStock User",
+   "description": "Roles allowed to view model comparisons within an assigned POS Profile scope.",
+   "fieldname": "model_comparison_roles",
+   "fieldtype": "Small Text",
+   "label": "Model Comparison Roles"
+  },
+  {
+   "default": "50",
+   "description": "Maximum model templates evaluated by one comparison search.",
+   "fieldname": "model_comparison_limit",
+   "fieldtype": "Int",
+   "label": "Model Comparison Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "200",
+   "description": "Maximum brands or attribute values returned by model-comparison filters.",
+   "fieldname": "model_comparison_filter_limit",
+   "fieldtype": "Int",
+   "label": "Model Comparison Filter Limit",
+   "reqd": 1
+  },
+  {
+   "default": "5000",
+   "description": "Maximum related variants, prices, specifications, stock rows, or offers evaluated by model comparison.",
+   "fieldname": "model_comparison_related_row_limit",
+   "fieldtype": "Int",
+   "label": "Model Comparison Related Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "2000",
+   "description": "Maximum related attribute, price, stock, and offer rows loaded for one paged POS search.",
+   "fieldname": "pos_search_related_row_limit",
+   "fieldtype": "Int",
+   "label": "POS Search Related Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "10",
+   "description": "Maximum nearby stores returned by stock and comparison lookups.",
+   "fieldname": "nearby_store_result_limit",
+   "fieldtype": "Int",
+   "label": "Nearby Store Result Limit",
+   "reqd": 1
+  },
+  {
+   "default": "1000",
+   "description": "Maximum active categories or sub-categories returned by guided selling.",
+   "fieldname": "guided_catalog_result_limit",
+   "fieldtype": "Int",
+   "label": "Guided Catalog Result Limit",
+   "reqd": 1
+  },
+  {
+   "default": "1000",
+   "description": "Maximum sellable items evaluated by one guided recommendation request.",
+   "fieldname": "guided_candidate_limit",
+   "fieldtype": "Int",
+   "label": "Guided Candidate Limit",
+   "reqd": 1
+  },
+  {
+   "default": "10000",
+   "description": "Maximum prices, units, and model specification rows evaluated by guided selling.",
+   "fieldname": "guided_related_row_limit",
+   "fieldtype": "Int",
+   "label": "Guided Related Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "40",
+   "description": "Maximum distinct values exposed for one guided specification question.",
+   "fieldname": "guided_spec_option_limit",
+   "fieldtype": "Int",
+   "label": "Guided Specification Option Limit",
+   "reqd": 1
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager\nSales User\nSales Manager",
+   "description": "Roles allowed to use POS AI features within an assigned POS Profile scope.",
+   "fieldname": "pos_ai_roles",
+   "fieldtype": "Small Text",
+   "label": "POS AI Roles"
+  },
+  {
+   "default": "60",
+   "fieldname": "pos_ai_requests_per_user",
+   "fieldtype": "Int",
+   "label": "POS AI Requests per User",
+   "reqd": 1
+  },
+  {
+   "default": "180",
+   "fieldname": "pos_ai_requests_per_ip",
+   "fieldtype": "Int",
+   "label": "POS AI Requests per IP",
+   "reqd": 1
+  },
+  {
+   "default": "3600",
+   "fieldname": "pos_ai_rate_window_seconds",
+   "fieldtype": "Int",
+   "label": "POS AI Rate Window (Seconds)",
+   "reqd": 1
+  },
+  {
+   "default": "8000",
+   "description": "Maximum serialized preference or cart payload accepted by a POS AI request.",
+   "fieldname": "pos_ai_max_payload_chars",
+   "fieldtype": "Int",
+   "label": "POS AI Maximum Payload Characters",
+   "reqd": 1
+  },
+  {
+   "default": "50",
+   "description": "Maximum cart lines accepted by POS AI suggestion and offer endpoints.",
+   "fieldname": "pos_ai_max_cart_items",
+   "fieldtype": "Int",
+   "label": "POS AI Maximum Cart Items",
+   "reqd": 1
+  },
+  {
+   "default": "1000",
+   "description": "Maximum catalogue, price, plan, and offer rows evaluated by one POS AI request.",
+   "fieldname": "pos_ai_related_row_limit",
+   "fieldtype": "Int",
+   "label": "POS AI Related Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "System Manager",
+   "fieldname": "store_override_roles",
+   "fieldtype": "Small Text",
+   "label": "Store Override Roles"
+  },
+  {
+   "default": "Finance Manager\nStore Manager\nSystem Manager\nAccounts Manager",
+   "fieldname": "settlement_correction_roles",
+   "fieldtype": "Small Text",
+   "label": "Settlement Correction Roles"
+  },
+  {
+   "default": "System Manager",
+   "fieldname": "cancellation_override_roles",
+   "fieldtype": "Small Text",
+   "label": "Cancellation Override Roles"
+  },
+  {
+   "default": "System Manager\nStock Manager\nStock User\nStore Manager\nPOS Manager",
+   "fieldname": "inbound_receive_roles",
+   "fieldtype": "Small Text",
+   "label": "Inbound Receive Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager",
+   "fieldname": "token_operation_roles",
+   "fieldtype": "Small Text",
+   "label": "Token Operation Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager\nTechnician",
+   "fieldname": "token_view_roles",
+   "fieldtype": "Small Text",
+   "label": "Token View Roles"
+  },
+  {
+   "default": "Technician\nPOS User\nPOS Manager\nStore Manager",
+   "fieldname": "token_assignee_roles",
+   "fieldtype": "Small Text",
+   "label": "Token Assignee Roles"
+  },
+  {
+   "default": "POS Manager\nStore Manager",
+   "fieldname": "token_assignment_roles",
+   "fieldtype": "Small Text",
+   "label": "Token Assignment Roles"
+  },
+  {
+   "default": "200",
+   "description": "Maximum queue tokens returned by one interactive queue request.",
+   "fieldname": "token_queue_result_limit",
+   "fieldtype": "Int",
+   "label": "Token Queue Result Limit",
+   "reqd": 1
+  },
+  {
+   "default": "5000",
+   "description": "Maximum token or invoice rows included in one operational report.",
+   "fieldname": "token_report_row_limit",
+   "fieldtype": "Int",
+   "label": "Token Report Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "366",
+   "description": "Maximum history period accepted by token and session reports.",
+   "fieldname": "token_report_max_days",
+   "fieldtype": "Int",
+   "label": "Token Report Maximum Days",
+   "reqd": 1
+  },
+  {
+   "default": "1000",
+   "description": "Maximum POS profiles or eligible users returned by token operations.",
+   "fieldname": "token_profile_result_limit",
+   "fieldtype": "Int",
+   "label": "Token Profile Result Limit",
+   "reqd": 1
+  },
+  {
+   "default": "5000",
+   "description": "Maximum sessions, invoices, or petty-cash rows included in one session report.",
+   "fieldname": "session_report_row_limit",
+   "fieldtype": "Int",
+   "label": "Session Report Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "5000",
+   "description": "Maximum active stores considered by global administrative views.",
+   "fieldname": "active_store_result_limit",
+   "fieldtype": "Int",
+   "label": "Active Store Result Limit",
+   "reqd": 1
+  },
+  {
+   "default": "Accounts Manager\nPOS Manager",
+   "fieldname": "edc_reconciliation_roles",
+   "fieldtype": "Small Text",
+   "label": "EDC Reconciliation Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nAccounts User\nAccounts Manager",
+   "fieldname": "payment_gateway_roles",
+   "fieldtype": "Small Text",
+   "label": "Payment Gateway Roles"
+  },
+  {
+   "default": "pluraluat.v2.pinepg.in\napi.pluralpay.in",
+   "description": "Exact hostnames that payment machines may contact. Enter one hostname per line; schemes, paths, wildcards and non-HTTPS ports are rejected.",
+   "fieldname": "payment_gateway_allowed_hosts",
+   "fieldtype": "Small Text",
+   "label": "Payment Gateway Allowed Hosts",
+   "reqd": 1
+  },
+  {
+   "default": "30",
+   "description": "Maximum duration of one outbound payment gateway request. Values above 120 seconds are capped.",
+   "fieldname": "payment_gateway_timeout_seconds",
+   "fieldtype": "Int",
+   "label": "Payment Gateway Timeout Seconds",
+   "reqd": 1
+  },
+  {
+   "default": "Local Master",
+   "description": "Location source used by POS customer-address pincode lookup. Local Master reads the CH Pincode master without an external browser request.",
+   "fieldname": "pincode_lookup_provider",
+   "fieldtype": "Select",
+   "label": "Pincode Lookup Provider",
+   "options": "Local Master\nDisabled",
+   "reqd": 1
+  },
+  {
+   "default": "POS User\nPOS Manager\nAccounts User\nAccounts Manager",
+   "fieldname": "invoice_share_roles",
+   "fieldtype": "Small Text",
+   "label": "Invoice Share Roles"
+  },
+  {
+   "default": "POS Manager\nAccounts Manager",
+   "fieldname": "invoice_recipient_override_roles",
+   "fieldtype": "Small Text",
+   "label": "Invoice Recipient Override Roles"
+  },
+  {
+   "default": "Accounts Manager",
+   "fieldname": "einvoice_generation_roles",
+   "fieldtype": "Small Text",
+   "label": "E-Invoice Generation Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager",
+   "fieldname": "reprint_roles",
+   "fieldtype": "Small Text",
+   "label": "Invoice Reprint Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nSales User",
+   "fieldname": "free_sale_request_roles",
+   "fieldtype": "Small Text",
+   "label": "Free Sale Request Roles"
+  },
+  {
+   "default": "POS Manager\nStore Manager\nSales Manager",
+   "fieldname": "free_sale_review_roles",
+   "fieldtype": "Small Text",
+   "label": "Free Sale Review Roles"
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager",
+   "fieldname": "gift_redemption_roles",
+   "fieldtype": "Small Text",
+   "label": "Gift Redemption Roles"
+  },
+  {
+   "default": "POS Manager\nStore Manager",
+   "description": "Roles allowed to update customers who have no transaction at the active POS store.",
+   "fieldname": "customer_override_roles",
+   "fieldtype": "Small Text",
+   "label": "Customer Override Roles"
+  },
+  {
+   "default": "System Manager",
+   "fieldname": "test_utility_roles",
+   "fieldtype": "Small Text",
+   "label": "Test Utility Roles"
+  },
+  {
+   "default": "POS Manager\nAccounts Manager\nSystem Manager",
+   "fieldname": "return_approval_roles",
+   "fieldtype": "Small Text",
+   "label": "Return Approval Roles"
+  },
+  {
+   "default": "100",
+   "description": "Maximum original invoice rows accepted in one POS return request.",
+   "fieldname": "return_max_line_items",
+   "fieldtype": "Int",
+   "label": "Return Maximum Line Items"
+  },
+  {
+   "default": "POS User\nPOS Manager",
+   "fieldname": "repair_operation_roles",
+   "fieldtype": "Small Text",
+   "label": "Repair Operation Roles"
+  },
+  {
+   "default": "100",
+   "description": "Maximum authorized spare-part rows accepted in one repair closure.",
+   "fieldname": "repair_max_spare_rows",
+   "fieldtype": "Int",
+   "label": "Repair Maximum Spare Rows"
+  },
+  {
+   "default": "720",
+   "description": "Maximum estimate accepted for a POS repair job.",
+   "fieldname": "repair_max_estimated_hours",
+   "fieldtype": "Int",
+   "label": "Repair Maximum Estimated Hours"
+  },
+  {
+   "default": "Store Manager\nSales Manager\nSystem Manager",
+   "fieldname": "credit_override_roles",
+   "fieldtype": "Small Text",
+   "label": "Credit Override Roles"
+  },
+  {
+   "default": "Store Manager\nSales Manager\nSystem Manager",
+   "fieldname": "discount_approval_roles",
+   "fieldtype": "Small Text",
+   "label": "Discount Approval Roles"
+  },
+  {
+   "default": "POS Manager\nStore Manager",
+   "fieldname": "buyback_otp_bypass_roles",
+   "fieldtype": "Small Text",
+   "label": "Buyback OTP Bypass Roles"
+  },
+  {
+   "default": "Accounts User\nAccounts Manager\nPOS Manager",
+   "fieldname": "buyback_settlement_roles",
+   "fieldtype": "Small Text",
+   "label": "Buyback Settlement Roles"
+  },
+  {
+   "default": "Buyback Store Manager\nBuyback Manager\nBuyback Admin\nAccounts Manager",
+   "description": "Roles allowed to view unmasked buyback payout details, KYC identifiers, and KYC attachments. Administrator and System Manager always retain access.",
+   "fieldname": "buyback_sensitive_data_roles",
+   "fieldtype": "Small Text",
+   "label": "Buyback Sensitive Data Roles"
+  },
+  {
+   "default": "100",
+   "description": "Maximum Grade Master choices returned by POS buyback screens.",
+   "fieldname": "buyback_grade_result_limit",
+   "fieldtype": "Int",
+   "label": "Buyback Grade Result Limit",
+   "reqd": 1
+  },
+  {
+   "default": "500",
+   "description": "Maximum company, store and executive rows loaded into POS executive access controls.",
+   "fieldname": "executive_access_row_limit",
+   "fieldtype": "Int",
+   "label": "Executive Access Row Limit",
+   "reqd": 1
+  },
+  {
+   "default": "sell\nreturns\nbuyback\nmaterial_request\ninbound_receive\nstock_transfer\nguided\nmodel_compare\nclaims\nexceptions\nqueue\nprebook\npickup\nstock_audit",
+   "description": "POS application modes enabled for companies with retail-capable CH Stores.",
+   "fieldname": "retail_company_modes",
+   "fieldtype": "Small Text",
+   "label": "Retail Company Modes"
+  },
+  {
+   "default": "sell\nreturns\nbuyback\nrepair\nqueue\nservice\nguided\nexceptions\nprebook\npickup\nstock_audit\ninbound_receive",
+   "description": "POS application modes enabled for companies with service-capable CH Stores.",
+   "fieldname": "service_company_modes",
+   "fieldtype": "Small Text",
+   "label": "Service Company Modes"
+  },
+  {
+   "default": "imei\ncustomer360\nreports",
+   "description": "POS application modes added to every explicitly configured retail or service company.",
+   "fieldname": "shared_company_modes",
+   "fieldtype": "Small Text",
+   "label": "Shared Company Modes"
+  },
+  {
+   "default": "POS Manager\nSystem Manager",
+   "fieldname": "cutoff_override_roles",
+   "fieldtype": "Small Text",
+   "label": "Cutoff Override Roles"
+  },
+  {
+   "default": "System Manager\nAccounts Manager\nPOS Manager",
+   "fieldname": "incentive_approval_roles",
+   "fieldtype": "Small Text",
+   "label": "Incentive Approval Roles"
+  },
+  {
+   "default": "System Manager\nAccounts Manager",
+   "fieldname": "incentive_payment_roles",
+   "fieldtype": "Small Text",
+   "label": "Incentive Payment Roles"
+  },
+  {
+   "default": "System Manager\nAccounts Manager\nPOS Manager",
+   "fieldname": "incentive_cancellation_roles",
+   "fieldtype": "Small Text",
+   "label": "Incentive Cancellation Roles"
+  },
+  {
+   "default": "System Manager\nAccounts Manager\nAccounts User\nPOS Manager",
+   "fieldname": "incentive_report_roles",
+   "fieldtype": "Small Text",
+   "label": "Incentive Report Roles"
+  },
+  {
+   "default": "System Manager\nPOS Manager\nAccounts Manager",
+   "fieldname": "incentive_rebuild_roles",
+   "fieldtype": "Small Text",
+   "label": "Incentive Rebuild Roles"
+  },
+  {
+   "default": "200",
+   "description": "Maximum invoices processed by one incentive rebuild request.",
+   "fieldname": "incentive_rebuild_batch_limit",
+   "fieldtype": "Int",
+   "label": "Incentive Rebuild Batch Limit",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "default": "366",
+   "description": "Maximum inclusive date range accepted by incentive rebuild requests.",
+   "fieldname": "incentive_rebuild_max_days",
+   "fieldtype": "Int",
+   "label": "Incentive Rebuild Maximum Days",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "default": "Accounts Manager\nAccounts User",
+   "fieldname": "finance_notification_roles",
+   "fieldtype": "Small Text",
+   "label": "Finance Notification Roles"
+  },
+  {
+   "default": "RSM\nASM\nStock Manager\nPurchase Manager",
+   "fieldname": "fifo_alert_roles",
+   "fieldtype": "Small Text",
+   "label": "FIFO Alert Roles"
   },
   {
    "fieldname": "cash_variance_account",
@@ -198,11 +1073,113 @@
    "description": "Debited when a free sale is created to reclassify COGS as promotional expense."
   },
   {
+   "fieldname": "buyback_exchange_mode_of_payment",
+   "fieldtype": "Link",
+   "label": "Buyback Exchange Mode of Payment",
+   "options": "Mode of Payment",
+   "description": "Configured payment mode that clears approved buyback exchange credit against the company liability account."
+  },
+  {
+   "fieldname": "buyback_cash_mode_of_payment",
+   "fieldtype": "Link",
+   "label": "Buyback Cash Mode of Payment",
+   "options": "Mode of Payment"
+  },
+  {
+   "fieldname": "buyback_upi_mode_of_payment",
+   "fieldtype": "Link",
+   "label": "Buyback UPI Mode of Payment",
+   "options": "Mode of Payment"
+  },
+  {
+   "fieldname": "buyback_bank_mode_of_payment",
+   "fieldtype": "Link",
+   "label": "Buyback Bank Mode of Payment",
+   "options": "Mode of Payment"
+  },
+  {
    "fieldname": "approval_token_ttl_hours",
    "fieldtype": "Int",
    "label": "Approval Token TTL (Hours)",
    "default": "24",
    "description": "Free sale approval token expires after this many hours."
+  },
+  {
+   "default": "100",
+   "description": "Maximum cart rows accepted by one free-sale approval request.",
+   "fieldname": "free_sale_max_cart_items",
+   "fieldtype": "Int",
+   "label": "Free Sale Maximum Cart Items"
+  },
+  {
+   "default": "500",
+   "description": "Maximum documents processed by one POS scheduler invocation.",
+   "fieldname": "scheduler_batch_limit",
+   "fieldtype": "Int",
+   "label": "Scheduler Batch Limit"
+  },
+  {
+   "default": "45",
+   "description": "Minutes of inactivity before an in-progress POS token is recovered by the scheduler.",
+   "fieldname": "stale_billing_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Stale Billing Timeout (Minutes)"
+  },
+  {
+   "default": "50",
+   "description": "Maximum enabled system users included in one scheduled POS notification.",
+   "fieldname": "scheduler_notification_recipient_limit",
+   "fieldtype": "Int",
+   "label": "Scheduler Notification Recipient Limit"
+  },
+  {
+   "default": "2000",
+   "description": "Maximum active attach-rate incentive slabs loaded by the monthly scheduler.",
+   "fieldname": "attach_bonus_slab_limit",
+   "fieldtype": "Int",
+   "label": "Attach Bonus Slab Limit"
+  },
+  {
+   "default": "200",
+   "description": "Maximum active warranty and VAS plans returned by one POS catalog request.",
+   "fieldname": "warranty_plan_result_limit",
+   "fieldtype": "Int",
+   "label": "Warranty Plan Result Limit"
+  },
+  {
+   "default": "5000",
+   "description": "Maximum warranty plan category rows loaded by one VAS catalog request.",
+   "fieldname": "warranty_plan_category_row_limit",
+   "fieldtype": "Int",
+   "label": "Warranty Plan Category Row Limit"
+  },
+  {
+   "default": "100",
+   "description": "Maximum cart rows evaluated by one VAS eligibility request.",
+   "fieldname": "vas_cart_item_limit",
+   "fieldtype": "Int",
+   "label": "VAS Cart Item Limit"
+  },
+  {
+   "default": "50",
+   "description": "Maximum open repairs returned by one store repair request.",
+   "fieldname": "store_repair_result_limit",
+   "fieldtype": "Int",
+   "label": "Store Repair Result Limit"
+  },
+  {
+   "default": "100",
+   "description": "Maximum proformas returned by one POS request.",
+   "fieldname": "proforma_result_limit",
+   "fieldtype": "Int",
+   "label": "Proforma Result Limit"
+  },
+  {
+   "default": "65536",
+   "description": "Maximum raw request size accepted by a public POS callback.",
+   "fieldname": "guest_payload_max_bytes",
+   "fieldtype": "Int",
+   "label": "Guest Payload Maximum Bytes"
   }
  ],
  "index_web_pages_for_search": 0,

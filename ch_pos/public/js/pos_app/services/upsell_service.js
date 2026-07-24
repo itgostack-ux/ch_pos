@@ -57,6 +57,7 @@ export class UpsellService {
 			const r = await frappe.xcall("ch_pos.api.ai.get_upsell_suggestions", {
 				item_code: cart_item.item_code,
 				cart_items: cart_codes,
+				pos_profile: PosState.pos_profile || undefined,
 			});
 
 			if (!r || !r.length) return;
@@ -159,8 +160,8 @@ export class UpsellService {
 					offers: [],
 					applied_offer: null,
 					warranty_plan: s.warranty_plan || s.item_code,
-					is_warranty: true,
-					is_vas: false,
+					is_warranty: s.type === "Warranty",
+					is_vas: s.type === "Protection Plan",
 					has_serial_no: 0,
 					serial_no: "",
 					for_item_code: cart_item.item_code,

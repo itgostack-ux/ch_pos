@@ -266,7 +266,7 @@ export class ReturnsWorkspace {
 						fieldtype: "Check",
 						label: __("Credit Only (No Stock Reversal)"),
 						default: 0,
-						description: __("Customer keeps the goods (damaged write-off / lost / fraud credit). Posts the Credit Note GL only — no Stock Ledger Entry. Requires POS/Accounts Manager role or a valid manager PIN."),
+						description: __("Customer keeps the goods (damaged write-off / lost / fraud credit). Posts the Credit Note GL only — no Stock Ledger Entry. Requires a configured return-approval role or a valid manager PIN."),
 					});
 					fields.push({ fieldtype: "Column Break" });
 					fields.push({

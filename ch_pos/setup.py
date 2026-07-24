@@ -850,10 +850,7 @@ def after_install():
     _scrub_broken_link_custom_fields(CUSTOM_FIELDS.keys())
     create_custom_fields(_filter_ready_fields(CUSTOM_FIELDS), update=False)
     sync_margin_receipt_format()
-
-
-def before_migrate():
-    pass
+    _ensure_default_docperms()
 
 
 def after_migrate():
@@ -861,6 +858,24 @@ def after_migrate():
     create_custom_fields(_filter_ready_fields(CUSTOM_FIELDS), update=False)
     sync_margin_receipt_format()
     _ensure_sale_types()
+    _ensure_default_docperms()
+
+
+def _ensure_default_docperms():
+    from ch_erp15.ch_erp15.default_permissions import seed_default_docperms
+
+    roles = (
+        "POS User",
+        "POS Manager",
+        "Store Manager",
+        "Sales User",
+        "Sales Manager",
+        "Stock User",
+    )
+    seed_default_docperms({
+        "Item": {role: {"read"} for role in roles},
+        "POS Profile": {role: {"read"} for role in roles},
+    })
 
 
 # ── Sale Type seed data ─────────────────────────────────────────────

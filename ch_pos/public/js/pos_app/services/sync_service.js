@@ -238,7 +238,7 @@ export class SyncService {
 		const customers = await new Promise((resolve) => {
 			frappe.call({
 				method: "ch_pos.api.offline_sync.get_customer_catalog",
-				args: { limit: 500 },
+				args: { limit: 500, pos_profile: PosState.pos_profile },
 				callback: (r) => resolve((r.message || {}).customers || []),
 				error:    () => resolve([]),
 			});

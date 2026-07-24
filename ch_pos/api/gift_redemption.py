@@ -37,12 +37,17 @@ concurrent spins/redemptions cannot double-issue.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import secrets
 
 import frappe
 from frappe import _
 from frappe.rate_limiter import rate_limit
 from frappe.utils import add_to_date, cint, flt, get_datetime, now_datetime
+
+from ch_pos.api.scope_guard import assert_pos_profile_scope
+from ch_pos.config import get_control_setting, require_configured_roles
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +58,6 @@ from frappe.utils import add_to_date, cint, flt, get_datetime, now_datetime
 _CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 _CODE_PREFIX = "GIFT-"
 _CODE_LENGTH = 4  # -> 30^4 = 810k codes; expand if collisions arise
-_DEFAULT_TTL_HOURS = 168  # 7 days — user default
 
 _ORIGINAL_INVOICE_REASON = "Late Free Gift"  # matches existing Select option
 _FREE_SALE_REASON = "Spin Wheel Gift Redemption"
@@ -126,7 +130,10 @@ def issue_gift_for_invoice(sales_invoice) -> str | None:
 	if not offer:
 		return None
 
-	ttl_hours = cint(offer.get("redemption_ttl_hours")) or _DEFAULT_TTL_HOURS
+	default_ttl = max(
+		1, min(cint(get_control_setting("gift_redemption_default_ttl_hours", 168)), 8760)
+	)
+	ttl_hours = max(1, min(cint(offer.get("redemption_ttl_hours")) or default_ttl, 8760))
 
 	# History captures the concrete line sold — when the offer targets a
 	# template, this is the actual variant (and its IMEI), not the template.
@@ -153,8 +160,8 @@ def issue_gift_for_invoice(sales_invoice) -> str | None:
 		"issued_at": now_datetime(),
 		"expires_at": add_to_date(now_datetime(), hours=ttl_hours),
 		"redemption_code": _generate_short_code(),
-		"spin_token": secrets.token_urlsafe(32),
 	})
+	gift.flags.gift_redemption_engine_write = True
 	gift.flags.ignore_permissions = True
 	gift.insert()
 
@@ -416,23 +423,24 @@ def _get_wheel_candidate_items(gift, limit: int = 8) -> list[str]:
 @rate_limit(limit=60, seconds=60, ip_based=True)
 def get_gift_details(token: str) -> dict:
 	"""Return safe metadata for the /spin page. Does NOT reveal the code."""
-	if not token or len(token) < 20:
+	token = str(token or "").strip()
+	if len(token) < 20 or len(token) > 256:
 		frappe.throw(_("Invalid link."))
 
-	name = frappe.db.get_value("CH Gift Redemption", {"spin_token": token}, "name")
+	name = _resolve_spin_token(token)
 	if not name:
 		frappe.throw(_("This spin link is invalid or has been revoked."))
 
 	gift = frappe.get_doc("CH Gift Redemption", name)
-	_mark_expired_if_due(gift)
+	status = _effective_status(gift)
 
 	return {
 		"reward_item_name": gift.reward_item_name or gift.reward_item,
 		"wheel_style": gift.wheel_style or "Prize Wheel",
 		"customer_name": gift.customer_name,
-		"status": gift.status,
+		"status": status,
 		"expires_at": str(gift.expires_at) if gift.expires_at else None,
-		"already_revealed": gift.status in ("Revealed", "Redeemed", "Expired"),
+		"already_revealed": status in ("Revealed", "Redeemed", "Expired"),
 		"parent_sales_invoice": gift.parent_sales_invoice,
 		# Wheel-slice labels — index 0 is the guaranteed winner. Client
 		# aligns this slice under the pointer at the end of the spin.
@@ -446,10 +454,11 @@ def spin_wheel(token: str) -> dict:
 	"""Reveal the redemption code. Idempotent: repeated calls return the
 	same code as long as the gift has not been redeemed / expired.
 	"""
-	if not token or len(token) < 20:
+	token = str(token or "").strip()
+	if len(token) < 20 or len(token) > 256:
 		frappe.throw(_("Invalid link."))
 
-	name = frappe.db.get_value("CH Gift Redemption", {"spin_token": token}, "name")
+	name = _resolve_spin_token(token)
 	if not name:
 		frappe.throw(_("This spin link is invalid or has been revoked."))
 
@@ -457,6 +466,8 @@ def spin_wheel(token: str) -> dict:
 	# the same code + single Revealed transition.
 	frappe.db.get_value("CH Gift Redemption", name, "name", for_update=True)
 	gift = frappe.get_doc("CH Gift Redemption", name)
+	if gift.spin_token_consumed_at:
+		frappe.throw(_("This spin link has already been used."))
 
 	_mark_expired_if_due(gift)
 	if gift.status == "Expired":
@@ -469,6 +480,7 @@ def spin_wheel(token: str) -> dict:
 	if gift.status == "Issued":
 		gift.db_set("status", "Revealed", update_modified=False)
 		gift.db_set("revealed_at", now_datetime(), update_modified=False)
+	gift.db_set("spin_token_consumed_at", now_datetime(), update_modified=False)
 
 	return {
 		"redemption_code": gift.redemption_code,
@@ -476,6 +488,26 @@ def spin_wheel(token: str) -> dict:
 		"reward_qty": cint(gift.reward_qty) or 1,
 		"expires_at": str(gift.expires_at),
 	}
+
+
+def _resolve_spin_token(token: str) -> str:
+	token = str(token or "").strip()
+	if len(token) < 20 or len(token) > 256:
+		frappe.throw(_("Invalid link."))
+	digest = hashlib.sha256(token.encode()).hexdigest()
+	row = frappe.db.get_value(
+		"CH Gift Redemption",
+		{"spin_token_digest": digest},
+		["name", "spin_token_digest", "spin_token_consumed_at"],
+		as_dict=True,
+	)
+	if (
+		not row
+		or not hmac.compare_digest(str(row.spin_token_digest or ""), digest)
+		or row.spin_token_consumed_at
+	):
+		frappe.throw(_("This spin link is invalid or has been revoked."))
+	return row.name
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +528,15 @@ def redeem_gift_code(code: str, pos_profile: str) -> dict:
 		frappe.throw(_("POS Profile is required."))
 
 	code = str(code).strip().upper()
+	require_configured_roles(
+		"gift_redemption_roles",
+		defaults=("POS User", "POS Manager", "Store Manager"),
+		action=_("redeem a POS gift"),
+	)
+	frappe.has_permission("CH Gift Redemption", "write", throw=True)
 	frappe.has_permission("Sales Invoice", "create", throw=True)
+	frappe.has_permission("Sales Invoice", "submit", throw=True)
+	profile_anchors = assert_pos_profile_scope(pos_profile)
 
 	# Row-level lock on the redemption to prevent two cashiers grabbing
 	# the same code at the same time.
@@ -508,6 +548,8 @@ def redeem_gift_code(code: str, pos_profile: str) -> dict:
 
 	gift = frappe.get_doc("CH Gift Redemption", name)
 	_mark_expired_if_due(gift)
+	if gift.company != profile_anchors.get("company"):
+		frappe.throw(_("Gift and POS Profile companies do not match."), frappe.PermissionError)
 
 	if gift.status == "Issued":
 		frappe.throw(_("The customer has not yet spun the wheel for this gift."))
@@ -555,6 +597,7 @@ def redeem_gift_code(code: str, pos_profile: str) -> dict:
 def _create_gift_invoice(gift, pos_profile: str) -> str:
 	"""Create + submit the ₹0 free-gift Sales Invoice, linked to the parent."""
 	profile = frappe.get_doc("POS Profile", pos_profile)
+	profile.check_permission("read")
 	if profile.company != gift.company:
 		frappe.throw(
 			_("POS Profile company ({0}) does not match gift company ({1}).").format(
@@ -602,7 +645,6 @@ def _create_gift_invoice(gift, pos_profile: str) -> str:
 	if inv.meta.has_field("custom_free_sale_approved_by"):
 		inv.custom_free_sale_approved_by = f"Gamified Offer: {gift.offer}"
 
-	inv.flags.ignore_permissions = True
 	inv.flags.ignore_pricing_rule = True
 	inv.insert()
 	inv.submit()
@@ -630,23 +672,31 @@ def _default_mode_of_payment(profile) -> str | None:
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
-def lookup_gift_code(code: str) -> dict:
+def lookup_gift_code(code: str, pos_profile: str) -> dict:
 	"""Cashier-side pre-check. Returns display metadata; does NOT redeem."""
 	if not code:
 		frappe.throw(_("Redemption code is required."))
 	code = str(code).strip().upper()
+	require_configured_roles(
+		"gift_redemption_roles",
+		defaults=("POS User", "POS Manager", "Store Manager"),
+		action=_("look up a POS gift"),
+	)
 	frappe.has_permission("CH Gift Redemption", "read", throw=True)
+	profile_anchors = assert_pos_profile_scope(pos_profile)
 
 	name = frappe.db.get_value("CH Gift Redemption", {"redemption_code": code}, "name")
 	if not name:
 		frappe.throw(_("No gift found for this code."))
 
 	gift = frappe.get_doc("CH Gift Redemption", name)
-	_mark_expired_if_due(gift)
+	if gift.company != profile_anchors.get("company"):
+		frappe.throw(_("Gift and POS Profile companies do not match."), frappe.PermissionError)
+	status = _effective_status(gift)
 	return {
 		"name": gift.name,
 		"redemption_code": gift.redemption_code,
-		"status": gift.status,
+		"status": status,
 		"parent_sales_invoice": gift.parent_sales_invoice,
 		"customer": gift.customer,
 		"customer_name": gift.customer_name,
@@ -677,15 +727,31 @@ def _mark_expired_if_due(gift) -> None:
 		gift.reload()
 
 
+def _effective_status(gift) -> str:
+	if gift.status not in ("Redeemed", "Expired", "Cancelled") and gift.expires_at:
+		if get_datetime(gift.expires_at) < now_datetime():
+			return "Expired"
+	return gift.status
+
+
 def expire_stale_gift_redemptions():
-	"""Scheduler hook — bulk-mark expired gifts. Wired hourly in hooks.py."""
-	frappe.db.sql(
-		"""
-		UPDATE `tabCH Gift Redemption`
-		   SET status = 'Expired', modified = NOW()
-		 WHERE status IN ('Issued', 'Revealed')
-		   AND expires_at IS NOT NULL
-		   AND expires_at < NOW()
-		"""
+	"""Scheduler hook — mark one bounded batch of expired gifts."""
+	batch_limit = max(1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000))
+	names = frappe.get_all(
+		"CH Gift Redemption",
+		filters={
+			"status": ("in", ("Issued", "Revealed")),
+			"expires_at": ("<", now_datetime()),
+		},
+		pluck="name",
+		order_by="expires_at asc, name asc",
+		limit_page_length=batch_limit,
 	)
-	frappe.db.commit()
+	if names:
+		frappe.db.set_value(
+			"CH Gift Redemption",
+			{"name": ("in", names)},
+			"status",
+			"Expired",
+			update_modified=False,
+		)

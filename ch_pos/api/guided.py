@@ -2,6 +2,9 @@ import frappe
 from frappe import _
 from frappe.utils import flt, cint
 
+from ch_pos.api.scope_guard import assert_pos_profile_scope
+from ch_pos.config import get_control_setting
+
 
 # Universal questions shown for every category. Anything category-specific
 # (Capacity, Material, Use Case, Storage, Colour, ...) MUST come from the
@@ -33,7 +36,21 @@ _SPEC_TYPE_TO_QUESTION_TYPE = {
 # data is unnormalised free text (e.g. Colour with 1000+ values) and a dropdown
 # of it is pure noise.
 MIN_SPEC_OPTIONS = 2
-MAX_SPEC_OPTIONS = 40
+
+
+def _positive_setting(fieldname, default, maximum):
+    value = cint(get_control_setting(fieldname, default)) or default
+    return max(1, min(value, maximum))
+
+
+def _ensure_within_limit(rows, limit, label):
+    if len(rows) > limit:
+        frappe.throw(
+            _("{0} exceeds the configured limit of {1} rows. Narrow the selection or raise the limit.").format(
+                label, limit
+            )
+        )
+    return rows
 
 
 @frappe.whitelist()
@@ -54,13 +71,16 @@ def get_guided_questions(sub_category) -> list:
     questions = [dict(q) for q in UNIVERSAL_QUESTIONS]
 
     # ── Brand options from items in this sub-category ────────────────────
+    catalog_limit = _positive_setting("guided_catalog_result_limit", 1000, 10000)
     brands = frappe.db.get_all(
         "Item",
         filters={"ch_sub_category": sub_category, "disabled": 0},
         fields=["brand"],
         distinct=True,
         pluck="brand",
+        limit_page_length=catalog_limit + 1,
     )
+    _ensure_within_limit(brands, catalog_limit, _("Guided brand options"))
     brand_opts = sorted({b for b in brands if b})
     for q in questions:
         if q["key"] == "brand":
@@ -89,7 +109,8 @@ def get_guided_questions(sub_category) -> list:
         # Skip specs that are unusable as a guided question: fewer than 2
         # distinct values (nothing to choose) or an unbounded set of free-text
         # values (e.g. Colour with 1000+ entries) that renders a junk dropdown.
-        if not options or not (MIN_SPEC_OPTIONS <= len(options) <= MAX_SPEC_OPTIONS):
+        max_spec_options = _positive_setting("guided_spec_option_limit", 40, 500)
+        if not options or not (MIN_SPEC_OPTIONS <= len(options) <= max_spec_options):
             continue
         questions.append({
             "question": f"Preferred {spec_name}?",
@@ -115,23 +136,34 @@ def _has_refurbished_items(sub_category):
 
 def _get_spec_options(sub_category, spec_name):
     """Get distinct values of a spec across models in a sub-category."""
+    limit = _positive_setting("guided_spec_option_limit", 40, 500)
     return frappe.db.sql(
         """SELECT DISTINCT sv.spec_value
            FROM `tabCH Model Spec Value` sv
            JOIN `tabCH Model` m ON m.name = sv.parent
            WHERE m.sub_category = %s AND sv.spec = %s AND IFNULL(sv.spec_value, '') != ''
-           ORDER BY sv.spec_value""",
-        (sub_category, spec_name),
+           ORDER BY sv.spec_value
+           LIMIT %s""",
+        (sub_category, spec_name, limit + 1),
         pluck="spec_value",
     )
 
 
 @frappe.whitelist()
-def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8) -> list:
+def get_guided_recommendations(
+    sub_category, responses, warehouse=None, pos_profile=None, limit=8
+) -> list:
     """Given guided session responses, return ranked item recommendations."""
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+    if warehouse and warehouse != anchors.get("warehouse"):
+        frappe.throw(_("Warehouse does not match the active POS Profile."), frappe.PermissionError)
+    warehouse = anchors.get("warehouse")
     if isinstance(responses, str):
         responses = frappe.parse_json(responses)
     limit = min(cint(limit) or 8, 20)
+    candidate_limit = _positive_setting("guided_candidate_limit", 1000, 5000)
+    related_limit = _positive_setting("guided_related_row_limit", 10000, 50000)
 
     # Base query — items in this specific sub-category (e.g. Backpacks only,
     # not the entire Accessories item_group which includes earbuds, cables...)
@@ -144,10 +176,31 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
            WHERE i.ch_sub_category = %(sub_cat)s
              AND i.disabled = 0 AND i.is_sales_item = 1 AND i.has_variants = 0
              AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
-           ORDER BY i.item_name""",
-        {"sub_cat": sub_category, "wh": warehouse},
+           ORDER BY i.item_name
+           LIMIT %(candidate_limit)s""",
+        {"sub_cat": sub_category, "wh": warehouse, "candidate_limit": candidate_limit + 1},
         as_dict=True,
     )
+    _ensure_within_limit(items, candidate_limit, _("Guided item candidates"))
+
+    item_codes = [item.item_code for item in items]
+    price_map = {}
+    if item_codes:
+        price_rows = frappe.get_all(
+            "CH Item Price",
+            filters={
+                "item_code": ("in", item_codes),
+                "channel": "POS",
+                "status": "Active",
+            },
+            fields=["item_code", "selling_price"],
+            limit_page_length=related_limit + 1,
+        )
+        _ensure_within_limit(price_rows, related_limit, _("Guided price rows"))
+        for row in price_rows:
+            price_map[row.item_code] = max(
+                flt(row.selling_price), flt(price_map.get(row.item_code))
+            )
 
     uom_names = list({item.stock_uom for item in items if item.stock_uom})
     uom_map = {}
@@ -156,7 +209,9 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
             "UOM",
             filters={"name": ("in", uom_names)},
             fields=["name", "must_be_whole_number"],
+            limit_page_length=related_limit + 1,
         )
+        _ensure_within_limit(all_uoms, related_limit, _("Guided UOM rows"))
         uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms}
 
     prefs = {r.get("key"): r.get("answer") for r in responses}
@@ -166,26 +221,22 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
     all_model_names = list({item.ch_model for item in items if item.ch_model})
     model_specs = {}
     if all_model_names:
-        for s in frappe.db.get_all(
+        spec_rows = frappe.db.get_all(
             "CH Model Spec Value",
             filters={"parent": ["in", all_model_names]},
             fields=["parent", "spec", "spec_value"],
-        ):
+            limit_page_length=related_limit + 1,
+        )
+        _ensure_within_limit(spec_rows, related_limit, _("Guided model specification rows"))
+        for s in spec_rows:
             model_specs.setdefault(s.parent, {})[s.spec] = s.spec_value
 
     scored = []
     for item in items:
         item_specs = model_specs.get(item.ch_model, {}) if item.ch_model else {}
-        score = _score_item(item, prefs, item_specs)
+        price = flt(price_map.get(item.item_code))
+        score = _score_item(item, prefs, item_specs, price)
         if score > 0:
-            # get selling price
-            price = flt(
-                frappe.db.get_value(
-                    "CH Item Price",
-                    {"item_code": item.item_code, "channel": "POS", "status": "Active"},
-                    "selling_price",
-                )
-            )
             scored.append(
                 {
                     "item_code": item.item_code,
@@ -218,25 +269,30 @@ def get_guided_recommendations(sub_category, responses, warehouse=None, limit=8)
 @frappe.whitelist()
 def get_guided_catalog() -> dict:
     """Return active categories and sub-categories for guided POS flow."""
+    result_limit = _positive_setting("guided_catalog_result_limit", 1000, 10000)
     categories = frappe.get_all(
         "CH Category",
         filters={"disabled": 0},
         fields=["name", "category_name"],
         order_by="category_name asc",
+        limit_page_length=result_limit + 1,
     )
     sub_categories = frappe.get_all(
         "CH Sub Category",
         filters={"disabled": 0},
         fields=["name", "sub_category_name", "category"],
         order_by="sub_category_name asc",
+        limit_page_length=result_limit + 1,
     )
+    _ensure_within_limit(categories, result_limit, _("Guided categories"))
+    _ensure_within_limit(sub_categories, result_limit, _("Guided sub-categories"))
     return {
         "categories": categories,
         "sub_categories": sub_categories,
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_guided_session(
     session_name=None,
     pos_profile=None,
@@ -248,6 +304,8 @@ def save_guided_session(
     status="Completed",
 ) -> dict:
     """Create or update POS Guided Session from POS UI."""
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
     if isinstance(responses, str):
         responses = frappe.parse_json(responses)
     if isinstance(recommendations, str):
@@ -261,10 +319,17 @@ def save_guided_session(
 
     if session_name and frappe.db.exists("POS Guided Session", session_name):
         doc = frappe.get_doc("POS Guided Session", session_name)
+        if doc.pos_profile != pos_profile:
+            frappe.throw(_("Guided session belongs to another POS Profile."), frappe.PermissionError)
     else:
         doc = frappe.new_doc("POS Guided Session")
 
-    warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse") if pos_profile else None
+    if kiosk_token:
+        token_profile = frappe.db.get_value("POS Kiosk Token", kiosk_token, "pos_profile")
+        if token_profile != pos_profile:
+            frappe.throw(_("Queue token belongs to another POS Profile."), frappe.PermissionError)
+
+    warehouse = anchors.get("warehouse")
 
     doc.store = warehouse
     doc.pos_profile = pos_profile
@@ -294,8 +359,7 @@ def save_guided_session(
             "reason": (rec.get("reason") or "")[:1000],
         })
 
-    doc.flags.ignore_permissions = True
-    doc.save(ignore_permissions=True)
+    doc.save()
 
     return {
         "name": doc.name,
@@ -303,7 +367,7 @@ def save_guided_session(
     }
 
 
-def _score_item(item, prefs, item_specs=None):
+def _score_item(item, prefs, item_specs=None, price=0):
     """Score an item (0-100) based on customer preferences.
 
     item_specs: optional dict {spec_name: spec_value} for the item's model,
@@ -322,13 +386,7 @@ def _score_item(item, prefs, item_specs=None):
     # Budget match (needs price lookup)
     budget = prefs.get("budget")
     if budget:
-        price = flt(
-            frappe.db.get_value(
-                "CH Item Price",
-                {"item_code": item.item_code, "channel": "POS", "status": "Active"},
-                "selling_price",
-            )
-        )
+        price = flt(price)
         if price:
             budget_val = flt(budget)
             if price <= budget_val:

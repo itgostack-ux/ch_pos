@@ -72,13 +72,7 @@ export class SessionControls {
 	}
 
 	_can_manage_session() {
-		const exec = PosState.executive_access?.own_executive || {};
-		const role = String(exec.role || "").toLowerCase();
-		return Boolean(
-			PosState.executive_access?.is_manager
-			|| /manager|head|admin|owner/.test(role)
-			|| (frappe.user_roles || []).includes("System Manager")
-		);
+		return Boolean(PosState.executive_access?.can_manage_session);
 	}
 
 	render(container) {
@@ -248,8 +242,8 @@ export class SessionControls {
 			companies = access.companies.map(c => c.company);
 		}
 
-		// System Manager with no executive records — fetch all companies
-		if (!companies.length && (frappe.user_roles || []).includes("System Manager")) {
+		// Administrative access is decided server-side and returned as a capability.
+		if (!companies.length && access?.can_select_all_companies) {
 			frappe.xcall("frappe.client.get_list", {
 				doctype: "Company",
 				fields: ["name"],

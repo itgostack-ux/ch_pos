@@ -1,6 +1,21 @@
 import frappe
 from frappe.utils import cint, flt
 
+from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_store_scope
+from ch_pos.config import get_control_setting
+
+
+def _search_limit(fieldname, default, maximum):
+    value = cint(get_control_setting(fieldname, default)) or default
+    return max(1, min(value, maximum))
+
+
+def _ensure_search_limit(rows, limit, label):
+    if len(rows) > limit:
+        frappe.throw(
+            frappe._("{0} exceeds the configured limit of {1} rows.").format(label, limit)
+        )
+    return rows
 
 def _resolve_sellable_warehouse(warehouse):
     """Given any store-related warehouse, return the Sellable warehouse for that store.
@@ -64,11 +79,11 @@ def _optional_item_select(fieldname, alias=None, fallback="''", cast="text"):
     return f"{expr} as {alias}"
 
 
-def _get_item_offers(item_code):
+def _get_item_offers(item_code, company=None):
     """Return active POS offers for an item (used by item detail endpoint)."""
     from ch_pos.api.offers import get_applicable_offers
     try:
-        return get_applicable_offers(item_code=item_code)
+        return get_applicable_offers(item_code=item_code, company=company)
     except Exception:
         return []
 
@@ -84,6 +99,11 @@ def pos_item_search(
     usage_context="sale",
 ) -> None:
     """Unified POS item search across item_code, item_name, barcode, model, brand."""
+    frappe.has_permission("Item", "read", throw=True)
+    if pos_profile:
+        assert_pos_profile_scope(pos_profile)
+    elif company:
+        assert_store_scope(company=company)
     if isinstance(filters, str):
         filters = frappe.parse_json(filters)
     filters = filters or {}
@@ -95,23 +115,45 @@ def pos_item_search(
     warehouse = _resolve_sellable_warehouse(parent_warehouse) or parent_warehouse
     company = company or (profile_doc.company if profile_doc else None)
 
+    company_type = None
     if company and warehouse:
         try:
             from ch_pos.api.pos_api import _get_executive_access
 
             access = _get_executive_access(frappe.session.user, warehouse)
-            allowed_companies = {row.get("company") for row in (access or {}).get("companies", []) if row.get("company")}
+            company_rows = (access or {}).get("companies", [])
+            allowed_companies = {row.get("company") for row in company_rows if row.get("company")}
             if allowed_companies and company not in allowed_companies:
                 frappe.throw(
                     frappe._("You are not permitted to access {0} items.").format(frappe.bold(company)),
                     frappe.PermissionError,
                 )
+            company_row = next(
+                (row for row in company_rows if row.get("company") == company), None
+            )
+            if company_row and company_row.get("company_type") != "unconfigured":
+                company_type = company_row.get("company_type")
         except frappe.PermissionError:
             raise
         except Exception:
-            pass
+            frappe.log_error(frappe.get_traceback(), "POS item company scope lookup failed")
+            frappe.throw(
+                frappe._("Unable to verify item access for this company."),
+                frappe.PermissionError,
+            )
+    elif company:
+        from ch_pos.api.pos_api import _get_company_type
 
-    is_service_company = bool(company and any(tag in company.lower() for tag in ("gofix", "service")))
+        company_type = _get_company_type(company)
+
+    if company and not company_type:
+        frappe.throw(
+            frappe._("No retail or service capability is configured for company {0}.").format(
+                frappe.bold(company)
+            ),
+            frappe.ValidationError,
+        )
+    is_service_company = company_type == "service"
     has_lifecycle_status = frappe.db.has_column("Item", "ch_lifecycle_status")
     has_pos_usage = frappe.db.has_column("Item", "custom_pos_usage")
     brand_expr = "IFNULL(NULLIF(i.brand, ''), IFNULL(tmpl.brand, ''))"
@@ -271,6 +313,7 @@ def pos_item_search(
 
     items = []
     nearby_warehouses = _get_nearby_warehouses(pos_profile) if pos_profile else []
+    related_limit = _search_limit("pos_search_related_row_limit", 2000, 10000)
 
     if items_raw:
         item_codes = [r.item_code for r in items_raw]
@@ -281,7 +324,9 @@ def pos_item_search(
             filters={"parent": ("in", item_codes)},
             fields=["parent", "attribute", "attribute_value", "idx"],
             order_by="parent, idx",
+            limit_page_length=related_limit + 1,
         )
+        _ensure_search_limit(all_attrs, related_limit, frappe._("Item attributes"))
         attrs_map = {}
         for a in all_attrs:
             attrs_map.setdefault(a.parent, []).append(
@@ -293,7 +338,9 @@ def pos_item_search(
             "CH Item Price",
             filters={"item_code": ("in", item_codes), "channel": "POS", "status": "Active"},
             fields=["item_code", "selling_price", "mrp", "mop"],
+            limit_page_length=related_limit + 1,
         )
+        _ensure_search_limit(all_prices, related_limit, frappe._("Item prices"))
         price_map = {p.item_code: p for p in all_prices}
 
         uom_names = list({r.stock_uom for r in items_raw if r.stock_uom})
@@ -303,7 +350,9 @@ def pos_item_search(
                 "UOM",
                 filters={"name": ("in", uom_names)},
                 fields=["name", "must_be_whole_number"],
+                limit_page_length=related_limit + 1,
             )
+            _ensure_search_limit(all_uoms, related_limit, frappe._("Item units"))
             uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms}
 
         # Batch-fetch stock from Bin
@@ -313,7 +362,9 @@ def pos_item_search(
                 "Bin",
                 filters={"item_code": ("in", item_codes), "warehouse": warehouse},
                 fields=["item_code", "actual_qty"],
+                limit_page_length=related_limit + 1,
             )
+            _ensure_search_limit(all_bins, related_limit, frappe._("Item stock rows"))
         stock_map = {b.item_code: flt(b.actual_qty) for b in all_bins}
 
         # For serial-tracked items, use count of Active serials (stays in sync with IMEI picker)
@@ -337,18 +388,24 @@ def pos_item_search(
 
         # Batch-fetch active offers
         today = frappe.utils.today()
+        offer_filters = {
+            "item_code": ("in", item_codes),
+            "channel": "POS",
+            "status": "Active",
+            "approval_status": "Approved",
+            "start_date": ("<=", today),
+            "end_date": (">=", today),
+        }
+        if company:
+            offer_filters["company"] = company
         all_offers = frappe.get_all(
             "CH Item Offer",
-            filters={
-                "item_code": ("in", item_codes),
-                "channel": "POS",
-                "status": "Active",
-                "start_date": ("<=", today),
-                "end_date": (">=", today),
-            },
+            filters=offer_filters,
             fields=["item_code", "name", "offer_name", "offer_type", "value_type", "value", "priority"],
             order_by="priority asc",
+            limit_page_length=related_limit + 1,
         )
+        _ensure_search_limit(all_offers, related_limit, frappe._("Item offers"))
         offers_map = {}
         for o in all_offers:
             offers_map.setdefault(o.item_code, []).append({
@@ -370,7 +427,9 @@ def pos_item_search(
                         "actual_qty": (">", 0),
                     },
                     fields=["item_code", "warehouse", "actual_qty"],
+                    limit_page_length=related_limit + 1,
                 )
+                _ensure_search_limit(nearby_bins, related_limit, frappe._("Nearby stock rows"))
                 for nb in nearby_bins:
                     nearby_stock_map.setdefault(nb.item_code, []).append(
                         {"warehouse": nb.warehouse, "qty": flt(nb.actual_qty)}
@@ -468,6 +527,7 @@ def _get_nearby_warehouses(pos_profile):
         return []
 
     where = " AND ".join(conditions)
+    result_limit = _search_limit("nearby_store_result_limit", 10, 100)
     stores = frappe.db.sql(
         """SELECT s.store_code, s.store_name, s.city, s.zone, s.pincode, s.warehouse
             FROM `tabCH Store` s
@@ -477,8 +537,13 @@ def _get_nearby_warehouses(pos_profile):
                      WHEN s.pincode LIKE %(pin3)s THEN 1
                      ELSE 2 END,
                 s.store_name
-            LIMIT 10""".format(where=where),  # noqa: UP032
-        {**values, "cur_pin": current.pincode or "", "pin3": (current.pincode or "")[:3] + "%"},
+            LIMIT %(result_limit)s""".format(where=where),  # noqa: UP032
+        {
+            **values,
+            "cur_pin": current.pincode or "",
+            "pin3": (current.pincode or "")[:3] + "%",
+            "result_limit": result_limit,
+        },
         as_dict=True,
     )
     return stores
@@ -490,26 +555,35 @@ def get_nearby_stock(item_code, pos_profile) -> dict:
 
     Returns Sellable-bin qty only — damaged/reserved/transfer stock excluded.
     """
+    assert_pos_profile_scope(pos_profile)
     stores = _get_nearby_warehouses(pos_profile)
+    warehouses = [s.warehouse for s in stores if s.warehouse]
+    qty_by_warehouse = {}
+    if warehouses:
+        qty_rows = frappe.db.sql(
+            """
+            SELECT sn.warehouse, COUNT(sn.name) AS qty
+              FROM `tabSerial No` sn
+              LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
+             WHERE sn.item_code = %(item_code)s
+               AND sn.warehouse IN %(warehouses)s
+               AND sn.status = 'Active'
+               AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
+             GROUP BY sn.warehouse
+            """,
+            {"item_code": item_code, "warehouses": warehouses},
+            as_dict=True,
+        )
+        qty_by_warehouse = {row.warehouse: row.qty for row in qty_rows}
+
     result = []
     for s in stores:
-        # Count Active serials in Sellable bin (no bin record = Sellable default)
-        qty = frappe.db.sql("""
-            SELECT COUNT(sn.name)
-            FROM `tabSerial No` sn
-            LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
-            WHERE sn.item_code = %(item_code)s
-              AND sn.warehouse = %(warehouse)s
-              AND sn.status = 'Active'
-              AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
-        """, {"item_code": item_code, "warehouse": s.warehouse})[0][0] or 0
-
         result.append({
             "store_name": s.store_name,
             "store_code": s.store_code,
             "city": s.city,
             "pincode": s.pincode,
-            "qty": flt(qty),
+            "qty": flt(qty_by_warehouse.get(s.warehouse)),
         })
     return result
 
@@ -554,6 +628,11 @@ def get_available_serials(item_code, warehouse) -> list:
     """
     if not item_code or not warehouse:
         return []
+    frappe.has_permission("Serial No", "read", throw=True)
+    assert_store_scope(
+        warehouse=warehouse,
+        company=frappe.db.get_value("Warehouse", warehouse, "company"),
+    )
 
     # Primary query: use the latest SNBB inward into this warehouse for true FIFO order.
     # COALESCE fallback chain on inward_date guarantees NEVER-NULL value:
@@ -564,6 +643,7 @@ def get_available_serials(item_code, warehouse) -> list:
     # from `tabSerial No`. Sold/delivered serials are now identified by:
     #   - sn.status != 'Active'   (status flips to "Delivered" on sale)
     #   - warehouse IS NULL       (cleared when serial leaves inventory)
+    serial_limit = _search_limit("pos_search_related_row_limit", 2000, 10000)
     rows = frappe.db.sql("""
         SELECT
             sn.name AS serial_no,
@@ -600,7 +680,13 @@ def get_available_serials(item_code, warehouse) -> list:
             sn.creation,
             sb.bin_type
         ORDER BY inward_date ASC, sn.name ASC
-    """, {"item_code": item_code, "warehouse": warehouse}, as_dict=True)
+        LIMIT %(serial_limit)s
+    """, {
+        "item_code": item_code,
+        "warehouse": warehouse,
+        "serial_limit": serial_limit + 1,
+    }, as_dict=True)
+    _ensure_search_limit(rows, serial_limit, frappe._("Available serial numbers"))
 
     # Exclude reserved and exchange-committed serials in two set-based queries.
     # The old per-row checks issued two database queries for every displayed
@@ -652,13 +738,19 @@ def get_available_serials(item_code, warehouse) -> list:
 
     
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def load_kiosk_token(token, pos_profile=None) -> dict:
     """Load a POS Kiosk Token and return its items for cart population.
     
     Also increments the kiosk walk-in counter on the active session log.
     """
+    from ch_pos.api.token_api import _assert_token_scope
+
+    _assert_token_scope(token)
     doc = frappe.get_doc("POS Kiosk Token", token)
+    doc.check_permission("read")
+    if pos_profile and doc.pos_profile != pos_profile:
+        frappe.throw(frappe._("Token does not belong to this POS Profile."), frappe.PermissionError)
     if doc.status != "Active":
         frappe.throw(f"Token {token} is {doc.status}.")
     if doc.expires_at and frappe.utils.now_datetime() > doc.expires_at:
@@ -689,6 +781,13 @@ def load_kiosk_token(token, pos_profile=None) -> dict:
 @frappe.whitelist()
 def get_item_detail_for_pos(item_code, warehouse=None, price_list=None) -> dict:
     """Detailed item info for POS item detail panel."""
+    frappe.has_permission("Item", "read", throw=True)
+    company = frappe.db.get_value("Warehouse", warehouse, "company") if warehouse else None
+    if warehouse:
+        assert_store_scope(
+            warehouse=warehouse,
+            company=company,
+        )
     item = frappe.get_cached_doc("Item", item_code)
 
     # Specs from CH Model
@@ -737,7 +836,7 @@ def get_item_detail_for_pos(item_code, warehouse=None, price_list=None) -> dict:
         "selling_price": flt(ch_price.get("selling_price")),
         "mrp": flt(ch_price.get("mrp")),
         "stock_qty": stock_qty,
-        "offers": _get_item_offers(item_code),
+        "offers": _get_item_offers(item_code, company=company),
         "warranty_plans": warranty_plans,
     }
 

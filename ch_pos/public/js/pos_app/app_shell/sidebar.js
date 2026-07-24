@@ -107,7 +107,10 @@ export class Sidebar {
 				? access.companies.find(c => c.company === active)
 				: null;
 
-			if (match && match.allowed_modes) {
+			// NB: an EMPTY allowed_modes array means "unconfigured", not
+			// "deny everything" — treating [] as a restriction blanked the
+			// whole sidebar for every non-privileged cashier.
+			if (match && match.allowed_modes && match.allowed_modes.length) {
 				this._allowed_modes = new Set(match.allowed_modes);
 				return;
 			}
@@ -202,107 +205,6 @@ export class Sidebar {
 		if (this.collapsed) this._apply_collapsed(true);
 	}
 
-	// _show_walkin_dialog() {
-	// 	const d = new frappe.ui.Dialog({
-	// 		title: __("Log Walk-in"),
-	// 		fields: [
-	// 			{
-	// 				label: __("Purpose"),
-	// 				fieldname: "visit_purpose",
-	// 				fieldtype: "Select",
-	// 				options: "Enquiry\nRepair\nSales\nBuyback\nOther",
-	// 				default: "Enquiry",
-	// 				reqd: 1,
-	// 			},
-	// 			{
-	// 				label: __("Customer Name"),
-	// 				fieldname: "customer_name",
-	// 				fieldtype: "Data",
-	// 				placeholder: __("Optional"),
-	// 			},
-	// 			{
-	// 				label: __("Phone"),
-	// 				fieldname: "customer_phone",
-	// 				fieldtype: "Data",
-	// 				placeholder: __("Optional"),
-	// 			},
-	// 			// Walk-in interest capture (TC follow-up): record what the
-	// 			// customer asked for so footfall reports can correlate
-	// 			// enquiries → conversions by brand/model/item.
-	// 			{
-	// 				fieldtype: "Section Break",
-	// 				label: __("What are they looking for?"),
-	// 				collapsible: 0,
-	// 			},
-	// 			{
-	// 				label: __("Brand"),
-	// 				fieldname: "device_brand",
-	// 				fieldtype: "Data",
-	// 				placeholder: __("e.g. Apple, Samsung, OnePlus"),
-	// 			},
-	// 			{
-	// 				fieldtype: "Column Break",
-	// 			},
-	// 			{
-	// 				label: __("Model"),
-	// 				fieldname: "device_model",
-	// 				fieldtype: "Data",
-	// 				placeholder: __("e.g. iPhone 15, Galaxy S24"),
-	// 			},
-	// 			{
-	// 				label: __("Item / Product Interest"),
-	// 				fieldname: "item_code",
-	// 				fieldtype: "Link",
-	// 				options: "Item",
-	// 				placeholder: __("Optional — pick a catalogue item"),
-	// 				get_query: () => ({
-	// 					filters: { disabled: 0 },
-	// 				}),
-	// 			},
-	// 			{
-	// 				label: __("Remarks"),
-	// 				fieldname: "remarks",
-	// 				fieldtype: "Small Text",
-	// 				placeholder: __("Optional — what did the customer need?"),
-	// 			},
-	// 		],
-	// 		primary_action_label: __("Log Walk-in"),
-	// 		primary_action: (values) => {
-	// 			if (values.customer_phone && !validate_india_phone(values.customer_phone)) {
-	// 				frappe.show_alert({ message: __("Enter a valid Indian phone number (10 digits starting with 6-9)"), indicator: "orange" });
-	// 				return;
-	// 			}
-	// 			d.hide();
-	// 			frappe.call({
-	// 				method: "ch_pos.api.token_api.log_counter_walkin",
-	// 				args: {
-	// 					pos_profile: PosState.pos_profile,
-	// 					visit_purpose: values.visit_purpose,
-	// 					customer_name: values.customer_name || "",
-	// 					customer_phone: values.customer_phone || "",
-	// 					remarks: values.remarks || "",
-	// 					device_brand: values.device_brand || "",
-	// 					device_model: values.device_model || "",
-	// 					item_code: values.item_code || "",
-	// 				},
-	// 				callback: (r) => {
-	// 					const res = r.message || {};
-	// 					if (res.status === "ok") {
-	// 						frappe.show_alert({
-	// 							message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
-	// 							indicator: "green",
-	// 						});
-	// 						EventBus.emit("walkin:logged", res);
-	// 					} else {
-	// 						frappe.show_alert({ message: __("Could not log walk-in"), indicator: "orange" });
-	// 					}
-	// 				},
-	// 			});
-	// 		},
-	// 	});
-	// 	d.show();
-	// }
-
 	_show_walkin_dialog() {
 		const d = new frappe.ui.Dialog({
 			title: __("Log Walk-in"),
@@ -346,21 +248,7 @@ export class Sidebar {
 					fieldtype: "Data",
 					placeholder: __("e.g. iPhone 15, Galaxy S24"),
 				},
-				// {
-				// 	label: __("Item / Product Interest"),
-				// 	fieldname: "item_code",
-				// 	fieldtype: "Link",
-				// 	options: "Item",
-				// 	placeholder: __("Optional — pick a catalogue item"),
-				// 	get_query: () => ({
-				// 		filters: { disabled: 0 },
-				// 	}),
-				// },
-
-
-		
-
- {
+			{
                 label: __("Item / Product Interest"),
                 fieldname: "item_code",
                 fieldtype: "Link",

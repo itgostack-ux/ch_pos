@@ -1017,9 +1017,16 @@ _render_dashboard(panel, data) {
 	// ── Claim Detail View ───────────────────────────────────────────
 
 	_show_claim_detail(panel, claim_name) {
-		frappe.xcall("frappe.client.get", {
-			doctype: "CH Warranty Claim", name: claim_name,
-		}).then((claim) => {
+		Promise.all([
+			frappe.xcall("frappe.client.get", {
+				doctype: "CH Warranty Claim", name: claim_name,
+			}),
+			frappe.xcall(
+				"ch_item_master.ch_item_master.warranty_api.get_claim_ui_capabilities",
+				{ claim_name }
+			),
+		]).then(([claim, capabilities]) => {
+			claim._ui_capabilities = capabilities || {};
 			const sc = this._status_color(claim.claim_status);
 			const steps = this._progress_steps(claim);
 
@@ -1192,10 +1199,9 @@ _render_dashboard(panel, data) {
 			actions.push(`<button class="btn btn-xs btn-info ch-claim-log-action" data-claim="${claim.name}" data-action="receive_device"><i class="fa fa-inbox"></i> ${__("Receive Device")}</button>`);
 		}
 
-		// Intake QC (after receiving)
-		// #25 — Hide for GoGizmo* roles; intake QC is store/ops only.
-		const _is_gogizmo_user = (frappe.user_roles || []).some((r) => /^GoGizmo/i.test(r));
-		if (!_is_gogizmo_user && ["Device Received", "QC Pending"].includes(s)) {
+			// Intake QC (after receiving)
+			if (claim._ui_capabilities?.can_perform_intake_qc
+				&& ["Device Received", "QC Pending"].includes(s)) {
 			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="perform_qc"><i class="fa fa-check-square-o"></i> ${__("Perform Intake QC")}</button>`);
 		}
 

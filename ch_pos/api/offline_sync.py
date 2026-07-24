@@ -12,10 +12,12 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, nowdate
 
+from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_sales_invoice_scope
+from ch_pos.config import is_privileged_user
 
 # ── Idempotent Invoice Creation ───────────────────────────────────────────────
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_pos_invoice_offline(**kwargs):
     """Create a POS Sales Invoice with idempotency guard on client_id.
 
@@ -28,10 +30,17 @@ def create_pos_invoice_offline(**kwargs):
     """
     client_id = str(kwargs.get("client_id") or "").strip()
     client_request_id = str(kwargs.get("client_request_id") or client_id or "").strip()
+    pos_profile = str(kwargs.get("pos_profile") or "").strip()
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_pos_profile_scope(pos_profile)
+    if not client_request_id or len(client_request_id) < 16:
+        frappe.throw(_("A durable offline request ID of at least 16 characters is required."))
 
     existing = _find_existing_offline_sales_invoice(client_id, client_request_id)
     if existing:
         doc = frappe.get_doc("Sales Invoice", existing)
+        doc.check_permission("read")
+        assert_sales_invoice_scope(existing)
         return {
             "name": doc.name,
             "grand_total": flt(doc.grand_total),
@@ -104,14 +113,18 @@ def get_full_item_catalog(pos_profile, company=None, page=0, page_size=200):
     Used by SyncService.preload_catalog() to warm the offline IndexedDB store.
     Only returns fields needed for offline item search + cart building.
     """
-    page      = cint(page)
-    page_size = cint(page_size) or 200
+    frappe.has_permission("Item", "read", throw=True)
+    anchors = assert_pos_profile_scope(pos_profile)
+    page      = max(cint(page), 0)
+    page_size = max(1, min(cint(page_size) or 200, 500))
     offset    = page * page_size
 
     if not pos_profile:
         frappe.throw(_("pos_profile is required"))
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    if company and company != profile.company:
+        frappe.throw(_("Company does not match the selected POS Profile."), frappe.PermissionError)
     warehouse = profile.warehouse
 
     # Item groups allowed by the profile (empty = all)
@@ -167,16 +180,28 @@ def get_full_item_catalog(pos_profile, company=None, page=0, page_size=200):
 # ── Customer Catalog ──────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def get_customer_catalog(limit=500):
+def get_customer_catalog(limit=500, pos_profile=None):
     """Return recent customers for offline typeahead cache.
 
     Ordered by last transaction date descending — the most recently-served
     customers are most likely to walk in again.
     """
-    limit = cint(limit) or 500
+    frappe.has_permission("Customer", "read", throw=True)
+    if pos_profile:
+        assert_pos_profile_scope(pos_profile)
+    elif not is_privileged_user():
+        frappe.throw(_("POS Profile is required for the customer catalog."), frappe.PermissionError)
+    limit = max(1, min(cint(limit) or 500, 500))
+
+    profile_filter = ""
+    params = []
+    if pos_profile:
+        profile_filter = "AND si.pos_profile = %s"
+        params.append(pos_profile)
+    params.append(limit)
 
     rows = frappe.db.sql(
-        """
+        f"""
         SELECT
             c.name,
             c.customer_name,
@@ -186,15 +211,16 @@ def get_customer_catalog(limit=500):
             c.customer_type,
             MAX(si.posting_date) AS last_visit
         FROM `tabCustomer` c
-        LEFT JOIN `tabSales Invoice` si
+        JOIN `tabSales Invoice` si
             ON si.customer = c.name
             AND si.docstatus = 1
+            {profile_filter}
         WHERE c.disabled = 0
         GROUP BY c.name
         ORDER BY last_visit DESC, c.customer_name
         LIMIT %s
         """,
-        [limit],
+        params,
         as_dict=True,
     )
 

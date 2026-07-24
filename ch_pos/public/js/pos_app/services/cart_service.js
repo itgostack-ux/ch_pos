@@ -1250,6 +1250,7 @@ export class CartService {
 			args: {
 				cart_items: JSON.stringify(cart_items),
 				company: PosState.company,
+				pos_profile: PosState.pos_profile,
 			},
 			callback: (r) => {
 				const combos = r.message || [];
@@ -1413,7 +1414,7 @@ export class CartService {
 					if (item_det) {
 						this._add_new_cart_item({
 							...item_det, item_code: attach_item_code,
-							is_warranty: false, is_vas: type === "VAS",
+							is_warranty: false, is_vas: false,
 						});
 					}
 					$row.addClass("ch-attach-done");
@@ -1479,6 +1480,7 @@ export class CartService {
 				coupon_code: code,
 				customer: PosState.customer,
 				cart_total: this._get_subtotal(),
+				pos_profile: PosState.pos_profile,
 			},
 			callback: (r) => {
 				if (r.message && r.message.valid) {
@@ -1499,17 +1501,18 @@ export class CartService {
 	_try_voucher(code) {
 		const cart_total = this._get_subtotal();
 		frappe.call({
-			method: "ch_item_master.ch_item_master.voucher_api.validate_voucher",
+			method: "ch_pos.api.pos_api.apply_coupon_or_voucher",
 			args: {
-				voucher_code: code,
+				code: code,
 				cart_total: cart_total,
 				customer: PosState.customer,
-				channel: null,
+				company: PosState.company,
+				pos_profile: PosState.pos_profile,
 			},
 			callback: (r) => {
-				if (r.message && r.message.valid) {
-					PosState.voucher_code = r.message.voucher_code;
-					PosState.voucher_amount = flt(r.message.applicable_amount);
+				if (r.message && r.message.is_voucher) {
+					PosState.voucher_code = code;
+					PosState.voucher_amount = flt(r.message.amount);
 					PosState.voucher_name = r.message.voucher_name;
 					PosState.voucher_balance = flt(r.message.balance);
 					PosState.coupon_code = null;
@@ -1525,6 +1528,9 @@ export class CartService {
 					EventBus.emit("coupon:invalid",
 						r.message?.reason || __("Invalid coupon or voucher code"));
 				}
+			},
+			error: () => {
+				EventBus.emit("coupon:invalid", __("Invalid coupon or voucher code"));
 			},
 		});
 	}
@@ -1592,6 +1598,7 @@ export class CartService {
 
 			// Pass current customer so the server enforces ownership
 			if (PosState.customer) args.customer = PosState.customer;
+			args.pos_profile = PosState.pos_profile;
 
 			frappe.call({
 				method: "ch_pos.api.pos_api.lookup_exchange",
@@ -2464,6 +2471,8 @@ export class CartService {
 		 *   on_approved — callback after successful verification
 		 */
 		let otp_sent = false;
+		let approval_request = "";
+		const cart_item = opts.cart_idx !== undefined ? PosState.cart[opts.cart_idx] : null;
 
 		const dlg = new frappe.ui.Dialog({
 			title: __("Manager Approval Required"),
@@ -2518,15 +2527,14 @@ export class CartService {
 				dlg.disable_primary_action();
 
 				frappe.xcall("ch_pos.api.pos_api.verify_manager_approval", {
-					mobile_no: values.manager_mobile,
-					purpose: opts.purpose || "Manager Override",
 					otp_code: values.otp_code,
+					approval_request,
 				}).then((result) => {
 					if (result && result.valid) {
-						// Stamp approval on the cart item
 						if (opts.cart_idx !== undefined && PosState.cart[opts.cart_idx]) {
 							PosState.cart[opts.cart_idx].manager_approved = true;
-							PosState.cart[opts.cart_idx].manager_user = values.manager_mobile;
+							PosState.cart[opts.cart_idx].manager_user = result.manager_user;
+							PosState.cart[opts.cart_idx].manager_approval_token = result.approval_token;
 							PosState.cart[opts.cart_idx].override_reason = values.override_reason;
 						}
 						frappe.show_alert({ message: __("Manager approval granted"), indicator: "green" });
@@ -2557,9 +2565,14 @@ export class CartService {
 			frappe.xcall("ch_pos.api.pos_api.request_manager_approval", {
 				mobile_no: mobile,
 				purpose: opts.purpose || "Manager Override",
+				pos_profile: PosState.pos_profile,
+				item_code: cart_item ? cart_item.item_code : "",
+				rate: cart_item ? flt(cart_item.rate || cart_item.price) : 0,
+				qty: cart_item ? flt(cart_item.qty || 1) : 1,
 			}).then((r) => {
 				if (r && r.sent) {
 					otp_sent = true;
+					approval_request = r.approval_request || "";
 					frappe.show_alert({
 						message: __("OTP sent to {0}", [r.mobile]),
 						indicator: "green",

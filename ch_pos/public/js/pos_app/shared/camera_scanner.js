@@ -1,7 +1,8 @@
 /**
  * CH POS — Camera Barcode/IMEI Scanner (Phase 2)
  *
- * Uses ZXing-JS (lazy-loaded from CDN, falls back to keyboard wedge).
+ * Uses Frappe's locally installed html5-qrcode asset and falls back to the
+ * keyboard-wedge input when camera scanning is unavailable.
  * `open_camera_scan(onResult)` opens a fullscreen modal with a live
  * camera preview and invokes `onResult(code)` on the first stable decode.
  *
@@ -9,27 +10,25 @@
  * `getUserMedia`. On unsupported environments we surface a clean toast
  * and let the user fall back to the IMEI text input.
  *
- * Reuse-first: we do NOT bundle the library — loaded once via
- * `frappe.require` from jsdelivr, cached by the SW for offline use.
+ * The scanner library is loaded from the same ERP origin.
  */
 import { EventBus } from "../state.js";
 
-const ZXING_CDN = "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";
+const LOCAL_SCANNER_ASSET = "/assets/frappe/node_modules/html5-qrcode/html5-qrcode.min.js";
 
-let _zxing_loading = null;
+let _scanner_loading = null;
 
-function _load_zxing() {
-	if (window.ZXing) return Promise.resolve(window.ZXing);
-	if (_zxing_loading) return _zxing_loading;
-	_zxing_loading = new Promise((resolve, reject) => {
-		const s = document.createElement("script");
-		s.src = ZXING_CDN;
-		s.async = true;
-		s.onload = () => (window.ZXing ? resolve(window.ZXing) : reject(new Error("ZXing not exposed")));
-		s.onerror = () => reject(new Error("Failed to load ZXing from CDN"));
-		document.head.appendChild(s);
+function _load_scanner() {
+	if (window.Html5Qrcode) return Promise.resolve(window.Html5Qrcode);
+	if (_scanner_loading) return _scanner_loading;
+	if (typeof frappe.require !== "function") {
+		return Promise.reject(new Error("Frappe asset loader is unavailable"));
+	}
+	_scanner_loading = Promise.resolve(frappe.require(LOCAL_SCANNER_ASSET)).then(() => {
+		if (!window.Html5Qrcode) throw new Error("Local scanner library was not exposed");
+		return window.Html5Qrcode;
 	});
-	return _zxing_loading;
+	return _scanner_loading;
 }
 
 function _supports_camera() {
@@ -64,8 +63,8 @@ export function open_camera_scan(on_result) {
 				<div style="color:#fff;font-size:15px;margin-bottom:14px;">
 					<i class="fa fa-barcode"></i> ${__("Point the camera at a barcode / IMEI")}
 				</div>
-				<video class="ch-cam-video" autoplay muted playsinline
-					style="max-width:90vw;max-height:60vh;border-radius:12px;background:#000;"></video>
+				<div class="ch-cam-video"
+					style="width:min(90vw,720px);max-height:60vh;border-radius:12px;background:#000;overflow:hidden;"></div>
 				<div class="ch-cam-status text-muted" style="margin-top:14px;color:#cbd5e1;font-size:13px;">
 					${__("Loading scanner…")}
 				</div>
@@ -73,59 +72,54 @@ export function open_camera_scan(on_result) {
 		`);
 		$("body").append(overlay);
 
-		let reader = null;
-		let stream = null;
+		let scanner = null;
+		let scanner_start = null;
 		let resolved = false;
 
 		const cleanup = () => {
-			try { reader && reader.reset(); } catch (e) {}
-			try { stream && stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
-			overlay.remove();
+			overlay.hide();
+			const remove_overlay = () => {
+				try { scanner && scanner.clear(); } catch (error) {}
+				overlay.remove();
+			};
+			return Promise.resolve(scanner_start)
+				.catch(() => null)
+				.then(() => scanner && scanner.stop())
+				.catch(() => null)
+				.then(remove_overlay);
 		};
 
 		const done = (code) => {
 			if (resolved) return;
 			resolved = true;
-			cleanup();
-			if (code && typeof on_result === "function") on_result(code);
-			resolve(code || null);
+			cleanup().finally(() => {
+				if (code && typeof on_result === "function") on_result(code);
+				resolve(code || null);
+			});
 		};
 
 		overlay.on("click", ".ch-cam-close", () => done(null));
 
-		_load_zxing()
-			.then((ZX) => {
-				const hints = new Map();
-				const formats = [
-					ZX.BarcodeFormat.CODE_128,
-					ZX.BarcodeFormat.CODE_39,
-					ZX.BarcodeFormat.EAN_13,
-					ZX.BarcodeFormat.EAN_8,
-					ZX.BarcodeFormat.UPC_A,
-					ZX.BarcodeFormat.UPC_E,
-					ZX.BarcodeFormat.QR_CODE,
-					ZX.BarcodeFormat.DATA_MATRIX,
-				];
-				hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
-				hints.set(ZX.DecodeHintType.TRY_HARDER, true);
-
-				reader = new ZX.BrowserMultiFormatReader(hints);
-				const video = overlay.find("video.ch-cam-video")[0];
+		_load_scanner()
+			.then((Scanner) => {
+				if (resolved) return null;
+				const scan_area = overlay.find(".ch-cam-video")[0];
+				scan_area.id = `ch-cam-video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+				scanner = new Scanner(scan_area.id);
 				overlay.find(".ch-cam-status").text(__("Starting camera…"));
 
-				reader
-					.decodeFromConstraints(
-						{ video: { facingMode: { ideal: "environment" } } },
-						video,
-						(result, err) => {
-							if (result) {
-								const text = (result.getText() || "").trim();
-								if (text) {
-									EventBus.emit("camera:scan", text);
-									done(text);
-								}
+				scanner_start = scanner
+					.start(
+						{ facingMode: "environment" },
+						{ fps: 10, qrbox: { width: 280, height: 180 } },
+						(decoded_text) => {
+							const text = (decoded_text || "").trim();
+							if (text) {
+								EventBus.emit("camera:scan", text);
+								done(text);
 							}
 						},
+						() => null,
 					)
 					.then(() => {
 						overlay.find(".ch-cam-status").text(
@@ -134,16 +128,21 @@ export function open_camera_scan(on_result) {
 					})
 					.catch((err) => {
 						console.error("[ch_pos] camera_scanner start failed", err);
-						overlay.find(".ch-cam-status").text(
-							__("Camera permission denied or unavailable."),
-						);
+						if (!resolved) {
+							overlay.find(".ch-cam-status").text(
+								__("Camera permission denied or unavailable."),
+							);
+						}
 					});
+				return scanner_start;
 			})
 			.catch((err) => {
-				console.error("[ch_pos] zxing load failed", err);
-				overlay.find(".ch-cam-status").text(
-					__("Scanner library unavailable — use the IMEI text box."),
-				);
+				console.error("[ch_pos] local scanner load failed", err);
+				if (!resolved) {
+					overlay.find(".ch-cam-status").text(
+						__("Scanner library unavailable — use the IMEI text box."),
+					);
+				}
 			});
 	});
 }

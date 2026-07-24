@@ -6,6 +6,7 @@
  "engine": "InnoDB",
  "field_order": [
   "user",
+  "store",
   "employee_name",
   "column_break_info",
   "pin_hash",
@@ -17,6 +18,7 @@
   "can_override_business_date",
   "column_break_role",
   "can_approve_discount",
+  "can_approve_return",
   "can_force_close_session"
  ],
  "fields": [
@@ -28,6 +30,14 @@
    "options": "User",
    "reqd": 1,
    "unique": 1
+  },
+  {
+   "fieldname": "store",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Store",
+   "options": "CH Store",
+   "description": "Optional extra restriction. Access is always limited by the manager's active CH User Scope."
   },
   {
    "fieldname": "employee_name",
@@ -95,6 +105,12 @@
   },
   {
    "default": 0,
+   "fieldname": "can_approve_return",
+   "fieldtype": "Check",
+   "label": "Can Approve Return"
+  },
+  {
+   "default": 0,
    "fieldname": "can_force_close_session",
    "fieldtype": "Check",
    "label": "Can Force-Close Session"
@@ -111,11 +127,12 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
-   "read": 1,
-   "role": "System Manager",
-   "write": 1
+   "import": 1
   }
  ],
  "sort_field": "creation",

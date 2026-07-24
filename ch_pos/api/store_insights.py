@@ -25,16 +25,32 @@ from urllib.parse import quote
 import frappe
 from frappe.utils import flt, cint, nowdate, now_datetime, fmt_money, getdate
 
+from ch_pos.api.scope_guard import assert_pos_profile_scope
+from ch_pos.config import get_control_setting
+
 # Severity ordering — lower rank surfaces first.
 _SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 
-# Tunable thresholds (kept conservative so cards stay meaningful).
-_LOW_STOCK_QTY = 5
-_RETURN_RATE_ALERT = 0.15          # > 15% of bills are returns
-_AGING_RATIO_ALERT = 0.20          # > 20% of stock value is aged
-_NO_SALES_HOUR = 11                # flag a dry morning only after 11:00
-_STALE_HOURS = 24                  # drafts / requests older than this are "stuck"
-_MAX_CARDS = 6
+def _bounded_int_setting(fieldname: str, default: int, minimum: int, maximum: int) -> int:
+    value = cint(get_control_setting(fieldname, default))
+    return max(minimum, min(value, maximum))
+
+
+def _bounded_percent_setting(fieldname: str, default: float) -> float:
+    value = flt(get_control_setting(fieldname, default))
+    return max(0.0, min(value, 100.0)) / 100.0
+
+
+def _insight_thresholds() -> frappe._dict:
+    """Load admin-configured business thresholds with defensive bounds."""
+    return frappe._dict(
+        low_stock_qty=_bounded_int_setting("store_insight_low_stock_qty", 5, 1, 100000),
+        return_rate_alert=_bounded_percent_setting("store_insight_return_rate_alert", 15),
+        aging_ratio_alert=_bounded_percent_setting("store_insight_aging_ratio_alert", 20),
+        no_sales_hour=_bounded_int_setting("store_insight_no_sales_hour", 11, 0, 23),
+        stale_hours=_bounded_int_setting("store_insight_stale_hours", 24, 1, 8760),
+        max_cards=_bounded_int_setting("store_insight_max_cards", 6, 1, 50),
+    )
 
 
 def _short_wh(warehouse: str | None) -> str:
@@ -65,12 +81,15 @@ def store_insights(
     salesman: str | None = None,
 ) -> dict:
     """Return prioritised, DB-derived store insights for the dashboard panel."""
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    assert_pos_profile_scope(pos_profile)
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     warehouse = profile.warehouse
     today = nowdate()
     from_date, to_date = _date_range(date=date, from_date=from_date, to_date=to_date)
     salesman = (salesman or "").strip()
     now_dt = now_datetime()
+    thresholds = _insight_thresholds()
     has_salesman_field = frappe.get_meta("Sales Invoice").has_field("custom_sales_executive")
     sales_conditions = [
         "si.pos_profile = %(pp)s",
@@ -109,7 +128,7 @@ def store_insights(
 
     # 1) No sales yet / no sales in selected period
     today_only = from_date == today and to_date == today
-    if bills == 0 and ((today_only and now_dt.hour >= _NO_SALES_HOUR) or not today_only):
+    if bills == 0 and ((today_only and now_dt.hour >= thresholds.no_sales_hour) or not today_only):
         if today_only:
             title = "No sales billed yet today"
             detail = (f"It's {now_dt.strftime('%I:%M %p').lstrip('0')} and no invoice has been "
@@ -126,7 +145,7 @@ def store_insights(
         })
 
     # 2) High return rate
-    if bills >= 5 and returns and (returns / bills) > _RETURN_RATE_ALERT:
+    if bills >= 5 and returns and (returns / bills) > thresholds.return_rate_alert:
         pct = round(returns / bills * 100)
         insights.append({
             "severity": "Medium",
@@ -198,7 +217,7 @@ def store_insights(
                WHERE b.warehouse = %(wh)s AND b.actual_qty > 0
                  AND b.actual_qty <= %(thr)s AND i.disabled = 0
                  AND i.is_stock_item = 1""",
-            {"wh": warehouse, "thr": _LOW_STOCK_QTY},
+            {"wh": warehouse, "thr": thresholds.low_stock_qty},
         )[0][0]
         low_count = cint(low_count)
         if low_count:
@@ -207,7 +226,7 @@ def store_insights(
                 "icon": "fa-battery-quarter",
                 "title": f"{low_count} item{'s' if low_count > 1 else ''} running low",
                 "detail": f"{low_count} line{'s' if low_count > 1 else ''} have "
-                          f"{_LOW_STOCK_QTY} or fewer units left at {_short_wh(warehouse)}. "
+                          f"{thresholds.low_stock_qty} or fewer units left at {_short_wh(warehouse)}. "
                           "Replenish before they sell out.",
                 "metric": str(low_count),
                 "href": "/desk/bin?warehouse=" + quote(warehouse),
@@ -230,7 +249,7 @@ def store_insights(
         )[0]
         stock_total = flt(sv.total)
         aged = flt(sv.aged)
-        if stock_total > 0 and aged > 0 and (aged / stock_total) > _AGING_RATIO_ALERT:
+        if stock_total > 0 and aged > 0 and (aged / stock_total) > thresholds.aging_ratio_alert:
             pct = round(aged / stock_total * 100)
             insights.append({
                 "severity": "Medium",
@@ -261,7 +280,7 @@ def store_insights(
                                  WHERE sed.parent = se.name
                                    AND (sed.s_warehouse = %(wh)s OR sed.t_warehouse = %(wh)s)))
                ORDER BY se.creation ASC LIMIT 5""",
-            {"wh": warehouse, "h": _STALE_HOURS},
+            {"wh": warehouse, "h": thresholds.stale_hours},
             as_dict=True,
         )
         if stale_st:
@@ -287,7 +306,7 @@ def store_insights(
                  AND EXISTS (SELECT 1 FROM `tabMaterial Request Item` mri
                              WHERE mri.parent = mr.name AND mri.warehouse = %(wh)s)
                ORDER BY mr.creation ASC LIMIT 5""",
-            {"wh": warehouse, "h": _STALE_HOURS},
+            {"wh": warehouse, "h": thresholds.stale_hours},
             as_dict=True,
         )
         if pending_mr:
@@ -329,7 +348,7 @@ def store_insights(
     healthy = not any(c["severity"] in ("Critical", "High", "Medium") for c in insights)
 
     return {
-        "insights": insights[:_MAX_CARDS],
+        "insights": insights[:thresholds.max_cards],
         "healthy": healthy,
         "generated_on": now_dt.strftime("%I:%M %p").lstrip("0"),
         "from_date": from_date,

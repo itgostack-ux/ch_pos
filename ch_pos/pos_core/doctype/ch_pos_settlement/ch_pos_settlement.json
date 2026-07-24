@@ -46,6 +46,7 @@
   "column_break_signoff",
   "signoff_by_manager",
   "manager_signoff_time",
+  "server_signature",
   "amended_from",
   "correction_section",
   "corrected_by",
@@ -310,6 +311,15 @@
    "allow_on_submit": 1
   },
   {
+   "fieldname": "server_signature",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Server Signature",
+   "no_copy": 1,
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
    "fieldname": "amended_from",
    "fieldtype": "Link",
    "label": "Amended From",
@@ -375,44 +385,52 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
-   "email": 1,
-   "export": 1,
-   "print": 1,
-   "read": 1,
-   "report": 1,
-   "role": "System Manager",
-   "share": 1,
    "submit": 1,
    "cancel": 1,
-   "write": 1
+   "amend": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "report": 1,
+   "share": 1
   },
   {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
+   "submit": 1,
    "email": 1,
    "export": 1,
    "print": 1,
-   "read": 1,
    "report": 1,
-   "role": "Accounts Manager",
-   "share": 1,
-   "submit": 1,
-   "write": 1
+   "share": 1
   },
   {
-   "create": 1,
-   "read": 1,
-   "report": 1,
    "role": "Sales User",
+   "read": 1,
+   "write": 1,
+   "create": 1,
    "submit": 1,
-   "write": 1
+   "report": 1
   },
   {
-   "create": 1,
-   "read": 1,
    "role": "POS User",
-   "submit": 1,
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
    "write": 1
   }
  ],

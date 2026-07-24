@@ -29,6 +29,7 @@
   "opening_approved_by",
   "opening_approved_at",
   "opening_remarks",
+  "opening_evidence_signature",
   "closing_section",
   "closing_cash_expected",
   "closing_cash_actual",
@@ -38,6 +39,7 @@
   "closing_approved_by",
   "closing_approved_at",
   "auto_closed",
+  "closing_evidence_signature",
   "totals_section",
   "total_invoices",
   "total_sales",
@@ -211,6 +213,15 @@
    "label": "Opening Remarks"
   },
   {
+   "fieldname": "opening_evidence_signature",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Opening Evidence Signature",
+   "no_copy": 1,
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
    "fieldname": "closing_section",
    "fieldtype": "Section Break",
    "label": "Closing & Reconciliation"
@@ -271,6 +282,15 @@
    "read_only": 1,
    "description": "Set if session was force-closed by system/manager",
    "allow_on_submit": 1
+  },
+  {
+   "fieldname": "closing_evidence_signature",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Closing Evidence Signature",
+   "no_copy": 1,
+   "permlevel": 1,
+   "read_only": 1
   },
   {
    "fieldname": "totals_section",
@@ -378,42 +398,50 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
-   "email": 1,
-   "export": 1,
-   "print": 1,
-   "read": 1,
-   "report": 1,
-   "role": "System Manager",
-   "share": 1,
    "submit": 1,
    "cancel": 1,
+   "amend": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "report": 1,
+   "share": 1
+  },
+  {
+   "role": "System Manager",
+   "permlevel": 1,
+   "read": 1,
    "write": 1
   },
   {
-   "create": 1,
-   "email": 1,
-   "export": 1,
-   "print": 1,
-   "read": 1,
-   "report": 1,
    "role": "Sales User",
-   "share": 1,
-   "submit": 1,
-   "write": 1
-  },
-  {
+   "read": 1,
+   "write": 1,
    "create": 1,
+   "submit": 1,
    "email": 1,
    "export": 1,
    "print": 1,
-   "read": 1,
    "report": 1,
+   "share": 1
+  },
+  {
    "role": "POS User",
-   "share": 1,
+   "read": 1,
+   "write": 1,
+   "create": 1,
    "submit": 1,
-   "write": 1
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "report": 1,
+   "share": 1
   }
  ],
  "sort_field": "creation",

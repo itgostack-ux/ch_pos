@@ -112,19 +112,21 @@
  "owner": "Administrator",
  "permissions": [
   {
-   "create": 1,
-   "read": 1,
    "role": "System Manager",
-   "write": 1
-  },
-  {
+   "read": 1,
+   "write": 1,
    "create": 1,
-   "read": 1,
-   "role": "POS User"
+   "delete": 1,
+   "import": 1
   },
   {
+   "role": "POS User",
    "read": 1,
-   "role": "Store Manager"
+   "create": 1
+  },
+  {
+   "role": "Store Manager",
+   "read": 1
   }
  ],
  "sort_field": "creation",

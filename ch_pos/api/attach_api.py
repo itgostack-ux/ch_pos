@@ -4,12 +4,17 @@
 
 import frappe
 from frappe import _
-from frappe.utils import nowdate, now_datetime, flt
+from frappe.utils import cint, flt, now_datetime, nowdate
+
+from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_sales_invoice_scope
+from ch_pos.config import get_control_setting
 
 
 @frappe.whitelist()
 def get_attach_offers(item_code, pos_profile=None) -> dict:
     """Return all applicable attach offers (Warranty, VAS, Accessory) for a sold item."""
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_pos_profile_scope(pos_profile)
     if not item_code:
         return {"warranty_plans": [], "attach_rules": []}
 
@@ -67,21 +72,41 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
         return []
 
     today = nowdate()
-
-    # NOTE on brand filtering: `brand` on CH Warranty Plan is a nullable Link,
-    # and a NULL brand means "applies to every brand" (catch-all). SQL `IN`
-    # does not match NULLs, so we can't push the OR-with-NULL down as a
-    # ``["in", [brand, "", None]]`` filter — that quietly drops every
-    # catch-all plan. Fetch the whole Active set and filter brand in Python.
-    plans = frappe.get_all(
-        "CH Warranty Plan",
-        filters={"status": "Active"},
-        fields=[
-            "name", "plan_name", "plan_type", "duration_months", "price",
-            "pricing_mode", "percentage_value",
-            "service_item", "brand", "valid_from", "valid_to",
-        ],
-        order_by="price asc",
+    plan_limit = max(1, min(cint(get_control_setting("warranty_plan_result_limit", 200)), 1000))
+    conditions = [
+        "wp.status = 'Active'",
+        "(wp.valid_from IS NULL OR wp.valid_from <= %(today)s)",
+        "(wp.valid_to IS NULL OR wp.valid_to >= %(today)s)",
+    ]
+    params = {"today": today, "plan_limit": plan_limit}
+    if brand:
+        conditions.append("(IFNULL(wp.brand, '') = '' OR wp.brand = %(brand)s)")
+        params["brand"] = brand
+    if item_group and frappe.db.table_exists("CH Warranty Plan Item Group"):
+        conditions.append(
+            "(NOT EXISTS ("
+            "SELECT 1 FROM `tabCH Warranty Plan Item Group` all_groups "
+            "WHERE all_groups.parent = wp.name AND all_groups.parenttype = 'CH Warranty Plan'"
+            ") OR EXISTS ("
+            "SELECT 1 FROM `tabCH Warranty Plan Item Group` matching_group "
+            "WHERE matching_group.parent = wp.name "
+            "AND matching_group.parenttype = 'CH Warranty Plan' "
+            "AND matching_group.item_group = %(item_group)s"
+            "))"
+        )
+        params["item_group"] = item_group
+    plans = frappe.db.sql(
+        f"""
+        SELECT wp.name, wp.plan_name, wp.plan_type, wp.duration_months, wp.price,
+               wp.pricing_mode, wp.percentage_value, wp.service_item, wp.brand,
+               wp.valid_from, wp.valid_to
+          FROM `tabCH Warranty Plan` wp
+         WHERE {' AND '.join(conditions)}
+         ORDER BY wp.price ASC, wp.name ASC
+         LIMIT %(plan_limit)s
+        """,
+        params,
+        as_dict=True,
     )
 
     # Only surface plans whose service_item is a Live (Active-lifecycle) Item —
@@ -91,28 +116,13 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
     _live = filter_sellable_items([p.service_item for p in plans])
     plans = [p for p in plans if not p.service_item or p.service_item in _live]
 
-    # Pre-load item-group applicability rows for the fetched plan set in a
-    # single query so we do not re-hit the DB per plan.
-    plan_names = [p.name for p in plans]
-    ig_map: dict[str, set[str]] = {}
-    if plan_names and frappe.db.table_exists("CH Warranty Plan Item Group"):
-        for row in frappe.get_all(
-            "CH Warranty Plan Item Group",
-            filters={"parent": ["in", plan_names], "parenttype": "CH Warranty Plan"},
-            fields=["parent", "item_group"],
-            limit_page_length=0,
-        ):
-            if row.item_group:
-                ig_map.setdefault(row.parent, set()).add(row.item_group)
-
-    # Look up the device selling price once — needed only if we hit a
-    # percentage-priced plan, but a single get_value is cheaper than the
-    # branch overhead per plan.
-    device_price = flt(frappe.db.get_value(
-        "CH Item Price",
-        {"item_code": item_code, "channel": "POS", "status": "Active"},
-        "selling_price",
-    ))
+    device_price = 0
+    if any(p.pricing_mode == "Percentage of Device Price" for p in plans):
+        device_price = flt(frappe.db.get_value(
+            "CH Item Price",
+            {"item_code": item_code, "channel": "POS", "status": "Active"},
+            "selling_price",
+        ))
 
     matched = []
     for p in plans:
@@ -124,10 +134,6 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
             continue
         if p.valid_to and str(p.valid_to) < today:
             continue
-        # Item-group applicability: catch-all when the plan has no rows.
-        applicable_groups = ig_map.get(p.name)
-        if applicable_groups and item_group and item_group not in applicable_groups:
-            continue
         # Resolve percentage pricing to an actual rate. Without this the
         # attach panel adds the plan to the cart at Rs.0 because the plan's
         # ``price`` column stays 0 whenever ``pricing_mode`` is percentage.
@@ -135,10 +141,10 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
             p.price = flt(device_price * flt(p.percentage_value) / 100.0, 2)
         matched.append(p)
 
-    return matched
+    return matched[:plan_limit]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def log_attach_event(pos_invoice=None, pos_profile=None, item_code=None,
                      attach_type=None, action=None, skip_reason=None,
                      plan_code=None, serial_no=None) -> dict:
@@ -164,8 +170,16 @@ def log_attach_event(pos_invoice=None, pos_profile=None, item_code=None,
     ``""`` on a Link would trip Frappe's mandatory check as if the
     field were unset.
     """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    assert_pos_profile_scope(pos_profile)
     if not attach_type or not action:
         frappe.throw(_("attach_type and action are required"), title=_("API Error"))
+    if action not in {"Offered", "Accepted", "Skipped"}:
+        frappe.throw(_("Invalid attach action."), frappe.ValidationError)
+    if pos_invoice:
+        invoice = assert_sales_invoice_scope(pos_invoice)
+        if invoice.pos_profile != pos_profile:
+            frappe.throw(_("Invoice belongs to another POS Profile."), frappe.PermissionError)
 
     def _link(v):
         v = (v or "").strip() if isinstance(v, str) else v
@@ -182,7 +196,6 @@ def log_attach_event(pos_invoice=None, pos_profile=None, item_code=None,
     log.serial_no = (str(serial_no).strip()[:140]) if serial_no else ""
     log.offered_by = frappe.session.user
     log.offered_at = now_datetime()
-    log.flags.ignore_permissions = True
-    log.save()
+    log.insert()
 
     return log.name

@@ -8,6 +8,8 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from ch_pos.config import has_configured_roles
+
 
 def validate_pos_commercial_policy(doc, method=None):
 	"""Validate Sales Invoice items against CH Commercial Policy rules.
@@ -35,6 +37,18 @@ def validate_pos_commercial_policy(doc, method=None):
 
 	policy = get_commercial_policy(company)
 	pos_channel = _resolve_pos_channel(doc)
+	verified_approvals = list(
+		getattr(doc.flags, "ch_pos_verified_manager_approvals", None) or []
+	)
+
+	def _is_server_verified(item, manager_user):
+		return any(
+			approval.get("item_code") == item.item_code
+			and approval.get("manager_user") == manager_user
+			and abs(flt(approval.get("rate")) - flt(item.rate)) <= 0.005
+			and abs(flt(approval.get("qty")) - flt(item.qty)) <= 0.005
+			for approval in verified_approvals
+		)
 
 	# Pre-load the exception request (if any) so the item loop can skip
 	# MOP / discount-limit checks for items the manager already approved.
@@ -46,7 +60,7 @@ def validate_pos_commercial_policy(doc, method=None):
 			if _exc.status in ("Approved", "Auto-Approved") and _exc.docstatus == 1:
 				_exc_doc = _exc
 		except Exception:
-			pass
+			frappe.log_error(frappe.get_traceback(), "POS exception request lookup failed")
 
 	for item in doc.items:
 		rate = flt(item.rate)
@@ -117,26 +131,30 @@ def validate_pos_commercial_policy(doc, method=None):
 						title=_("Discount Limit Exceeded"),
 					)
 				else:
-					# Validate manager: real user with manager role.
-					# PIN is verified upstream via OTP flow (verify_manager_approval API)
-					# and never stored on invoice items.
 					manager_user = item.get("custom_manager_user")
-					if manager_user:
-						if not frappe.db.exists("User", manager_user):
-							frappe.throw(
-								_("Item {0}: Manager user '{1}' does not exist.").format(
-									frappe.bold(item_code), manager_user),
-								title=_("Invalid Manager Override"),
-							)
-						manager_roles = frappe.get_roles(manager_user)
-						if not any(r in manager_roles for r in
-								   ("Store Manager", "Sales Manager", "System Manager", "Administrator")):
-							frappe.throw(
-								_("Item {0}: User '{1}' does not have manager privileges "
-								  "to approve discounts.").format(
-									frappe.bold(item_code), manager_user),
-								title=_("Unauthorized Manager Override"),
-							)
+					if not manager_user or not frappe.db.exists("User", manager_user):
+						frappe.throw(
+							_("Item {0}: A valid manager identity is required.").format(
+								frappe.bold(item_code)),
+							title=_("Invalid Manager Override"),
+						)
+					if not _is_server_verified(item, manager_user):
+						frappe.throw(
+							_("Item {0}: Manager approval was not verified by the server.").format(
+								frappe.bold(item_code)),
+							frappe.PermissionError,
+							title=_("Unauthorized Manager Override"),
+						)
+					if not has_configured_roles(
+						"discount_approval_roles",
+						("Store Manager", "Sales Manager", "POS Manager"),
+						user=manager_user,
+					):
+						frappe.throw(
+							_("Item {0}: User '{1}' cannot approve discounts.").format(
+								frappe.bold(item_code), manager_user),
+							title=_("Unauthorized Manager Override"),
+						)
 
 			# ── Log override if rate differs from CH Item Price ──────
 			if result and flt(result.get("discount_percent")) > 0:
@@ -207,6 +225,14 @@ def validate_pos_commercial_policy(doc, method=None):
 					_("Item {0} added at ₹0 without an active offer. "
 					  "Manager approval required.").format(frappe.bold(item_code)),
 					title=_("Free Accessory — Approval Required"),
+				)
+			manager_user = item.get("custom_manager_user")
+			if not _is_server_verified(item, manager_user):
+				frappe.throw(
+					_("Item {0}: Free accessory approval was not verified by the server.").format(
+						frappe.bold(item_code)),
+					frappe.PermissionError,
+					title=_("Unauthorized Manager Override"),
 				)
 
 		# ── Below-margin check (#5): warn when selling below cost ─────

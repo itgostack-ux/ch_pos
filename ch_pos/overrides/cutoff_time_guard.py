@@ -23,6 +23,8 @@ import frappe
 from frappe import _
 from frappe.utils import get_datetime, getdate, now_datetime
 
+from ch_pos.config import get_configured_roles, has_any_roles, has_configured_roles, is_privileged_user
+
 
 def _coerce_time(value) -> _dt.time | None:
 	if value in (None, ""):
@@ -78,12 +80,16 @@ def validate_pos_cutoff_time(doc, method=None):
 
 	if now.time() <= cutoff:
 		return
-
-	override_role = (profile.get("ch_cutoff_override_role") or "POS Manager").strip()
-	user_roles = set(frappe.get_roles(frappe.session.user))
-	if override_role and override_role in user_roles:
+	if is_privileged_user():
 		return
-	if "System Manager" in user_roles:
+
+	override_role = (profile.get("ch_cutoff_override_role") or "").strip()
+	if override_role and has_any_roles((override_role,)):
+		return
+	override_roles = get_configured_roles(
+		"cutoff_override_roles", ("POS Manager",)
+	)
+	if has_configured_roles("cutoff_override_roles", ("POS Manager",)):
 		return
 
 	frappe.throw(
@@ -95,7 +101,7 @@ def validate_pos_cutoff_time(doc, method=None):
 			cutoff.strftime("%H:%M"),
 			doc.pos_profile,
 			now.strftime("%H:%M"),
-			override_role,
+			override_role or ", ".join(sorted(override_roles)),
 		),
 		title=_("POS Cut-off Reached"),
 	)

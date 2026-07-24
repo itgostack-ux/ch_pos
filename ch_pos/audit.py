@@ -18,8 +18,8 @@ Usage:
         company=profile.company,
     )
 
-All writes are best-effort — a failure to audit must never block a business
-transaction. Errors are captured in frappe.log_error for ops review.
+Writes are best-effort by default. Critical state transitions can require the
+audit insert to succeed in the same request transaction.
 """
 
 import frappe
@@ -36,11 +36,9 @@ def log_business_event(
     store: str = None,
     company: str = None,
     user: str = None,
+    raise_on_error: bool = False,
 ):
-    """Insert a CH Business Audit Log record.
-
-    Best-effort: exceptions are logged but never re-raised.
-    """
+    """Insert a CH Business Audit Log record."""
     try:
         doc = frappe.new_doc("CH Business Audit Log")
         doc.event_type = event_type
@@ -63,6 +61,8 @@ def log_business_event(
         doc.insert(ignore_permissions=True)
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"Audit log failed: {event_type} on {ref_name}")
+        if raise_on_error:
+            raise
 
 
 def _to_str(value) -> str:

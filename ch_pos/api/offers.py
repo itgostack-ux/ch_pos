@@ -2,14 +2,60 @@ import frappe
 from frappe import _
 from frappe.utils import flt, cint
 
+from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_store_scope
+from ch_pos.config import is_privileged_user, require_authenticated_user
+
+
+def _resolve_company_scope(pos_profile=None, company=None):
+    require_authenticated_user()
+    frappe.has_permission("Item", "read", throw=True)
+    if pos_profile:
+        anchors = assert_pos_profile_scope(pos_profile)
+        if company and company != anchors.get("company"):
+            frappe.throw(_("POS Profile belongs to another company."), frappe.PermissionError)
+        return anchors.get("company")
+    if company:
+        assert_store_scope(company=company)
+        return company
+    if not is_privileged_user():
+        frappe.throw(_("POS Profile is required to view offers."), frappe.PermissionError)
+    return None
+
+
+def _filter_company_offers(offers, company):
+    if not company or not offers:
+        return offers
+    primary = {offer.name for offer in offers if offer.company == company}
+    additional = frappe.get_all(
+        "CH Offer Company",
+        filters={
+            "parent": ["in", [offer.name for offer in offers]],
+            "parenttype": "CH Item Offer",
+            "company": company,
+        },
+        pluck="parent",
+        limit_page_length=500,
+    )
+    allowed = primary | set(additional)
+    return [offer for offer in offers if offer.name in allowed]
+
 
 @frappe.whitelist()
-def get_applicable_offers(item_code=None, item_group=None, cart_total=0, payment_mode=None) -> dict:
+def get_applicable_offers(
+    item_code=None,
+    item_group=None,
+    cart_total=0,
+    payment_mode=None,
+    pos_profile=None,
+    company=None,
+) -> list:
     """Return all CH Item Offers applicable to an item or cart via POS channel."""
+    company = _resolve_company_scope(pos_profile, company)
     today = frappe.utils.today()
     filters = {
         "channel": "POS",
         "status": "Active",
+        "approval_status": "Approved",
         "start_date": ["<=", today],
         "end_date": [">=", today],
         "offer_type": ["not in", ["Combo", "Attachment", "Freebie"]],
@@ -21,12 +67,14 @@ def get_applicable_offers(item_code=None, item_group=None, cart_total=0, payment
         "CH Item Offer",
         filters=filters,
         fields=[
-            "name", "offer_name", "offer_type", "value_type", "value",
+            "name", "company", "offer_name", "offer_type", "value_type", "value",
             "priority", "stackable",
             "min_bill_amount", "payment_mode", "bank_name", "card_type",
         ],
         order_by="priority asc",
+        limit_page_length=500,
     )
+    offers = _filter_company_offers(offers, company)
 
     cart_total = flt(cart_total)
     result = []
@@ -35,7 +83,11 @@ def get_applicable_offers(item_code=None, item_group=None, cart_total=0, payment
         if flt(offer.min_bill_amount) and cart_total < flt(offer.min_bill_amount):
             continue
         # Check payment mode condition
-        if offer.payment_mode and payment_mode and offer.payment_mode != payment_mode:
+        if (
+            offer.payment_mode
+            and payment_mode
+            and offer.payment_mode.strip().casefold() != str(payment_mode).strip().casefold()
+        ):
             continue
 
         result.append(
@@ -55,7 +107,7 @@ def get_applicable_offers(item_code=None, item_group=None, cart_total=0, payment
 
 
 @frappe.whitelist()
-def get_best_offer_combination(cart_items) -> dict:
+def get_best_offer_combination(cart_items, pos_profile=None, company=None) -> dict:
     """Find the best combination of non-conflicting offers for the cart."""
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
@@ -63,7 +115,11 @@ def get_best_offer_combination(cart_items) -> dict:
     all_offers = []
     for item in cart_items:
         item_code = item.get("item_code")
-        offers = get_applicable_offers(item_code=item_code)
+        offers = get_applicable_offers(
+            item_code=item_code,
+            pos_profile=pos_profile,
+            company=company,
+        )
         for offer in offers:
             offer["for_item"] = item_code
             offer["for_item_name"] = item.get("item_name", "")
@@ -101,7 +157,7 @@ def get_best_offer_combination(cart_items) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def check_combo_offers(cart_items, company=None) -> list:
+def check_combo_offers(cart_items, company=None, pos_profile=None) -> list:
     """Detect active combo offers satisfied by the current cart items.
 
     Args:
@@ -111,6 +167,7 @@ def check_combo_offers(cart_items, company=None) -> list:
     Returns:
         list of matching combos with savings info
     """
+    company = _resolve_company_scope(pos_profile, company)
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
 
@@ -118,18 +175,20 @@ def check_combo_offers(cart_items, company=None) -> list:
     filters = {
         "offer_type": "Combo",
         "status": "Active",
+        "approval_status": "Approved",
         "start_date": ["<=", today],
         "end_date": [">=", today],
     }
-    if company:
-        filters["company"] = company
-
     combo_offers = frappe.get_all(
         "CH Item Offer",
         filters=filters,
-        fields=["name", "offer_name", "value_type", "value", "combo_price", "priority"],
+        fields=[
+            "name", "company", "offer_name", "value_type", "value", "combo_price", "priority"
+        ],
         order_by="priority asc",
+        limit_page_length=500,
     )
+    combo_offers = _filter_company_offers(combo_offers, company)
 
     if not combo_offers:
         return []
@@ -194,11 +253,12 @@ def check_combo_offers(cart_items, company=None) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def check_attachment_offers(cart_items, company=None) -> dict:
+def check_attachment_offers(cart_items, company=None, pos_profile=None) -> list:
     """Detect attachment/freebie offers triggered by items in the cart.
 
     Returns list of reward items that should be added or discounted.
     """
+    company = _resolve_company_scope(pos_profile, company)
     if isinstance(cart_items, str):
         cart_items = frappe.parse_json(cart_items)
 
@@ -223,24 +283,24 @@ def check_attachment_offers(cart_items, company=None) -> dict:
         # the cart too and the customer would receive it twice.
         "is_gamified": 0,
         "status": "Active",
+        "approval_status": "Approved",
         "start_date": ["<=", today],
         "end_date": [">=", today],
         "trigger_item": ["in", list(trigger_candidates)],
     }
-    if company:
-        filters["company"] = company
-
     all_offers = frappe.get_all(
         "CH Item Offer",
         filters=filters,
         fields=[
-            "name", "offer_name", "offer_type",
+            "name", "company", "offer_name", "offer_type",
             "trigger_item", "trigger_item_name",
             "reward_item", "reward_item_name",
             "reward_price", "reward_qty",
         ],
         order_by="priority desc, modified desc",
+        limit_page_length=500,
     )
+    all_offers = _filter_company_offers(all_offers, company)
 
     offers, seen = [], set()
     for code in cart_item_codes:
@@ -284,11 +344,18 @@ def check_attachment_offers(cart_items, company=None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def validate_coupon_code(coupon_code, customer=None) -> dict:
+def validate_coupon_code(
+    coupon_code,
+    customer=None,
+    pos_profile=None,
+    company=None,
+) -> dict:
     """Validate a coupon code and return its details.
 
     Returns dict with coupon info, or raises an error if invalid.
     """
+    company = _resolve_company_scope(pos_profile, company)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
     if not coupon_code:
         frappe.throw(_("Please enter a coupon code"), title=_("Validation Error"))
 
@@ -310,14 +377,14 @@ def validate_coupon_code(coupon_code, customer=None) -> dict:
         frappe.throw(_("Coupon {0} has expired").format(frappe.bold(coupon_code)), title=_("Validation Error"))
     if coupon.maximum_use and cint(coupon.used) >= cint(coupon.maximum_use):
         frappe.throw(_("Coupon {0} usage limit reached").format(frappe.bold(coupon_code)), title=_("Validation Error"))
-    if coupon.customer and customer and coupon.customer != customer:
+    if coupon.customer and coupon.customer != customer:
         frappe.throw(_("Coupon {0} is not valid for this customer").format(frappe.bold(coupon_code)), title=_("Validation Error"))
 
     # Get linked pricing rule details
     pr = frappe.db.get_value(
         "Pricing Rule",
         coupon.pricing_rule,
-        ["title", "rate_or_discount", "discount_percentage", "discount_amount",
+        ["title", "company", "rate_or_discount", "discount_percentage", "discount_amount",
          "rate", "disable", "valid_from", "valid_upto"],
         as_dict=True,
     )
@@ -325,6 +392,8 @@ def validate_coupon_code(coupon_code, customer=None) -> dict:
     if not pr or pr.disable:
         frappe.throw(_("The pricing rule linked to coupon {0} is disabled").format(
             frappe.bold(coupon_code)))
+    if company and pr.company and pr.company != company:
+        frappe.throw(_("Coupon belongs to another company."), frappe.PermissionError)
 
     return {
         "valid": True,
@@ -341,15 +410,25 @@ def validate_coupon_code(coupon_code, customer=None) -> dict:
     }
 
 
-@frappe.whitelist()
-def apply_coupon_code(coupon_code, customer=None) -> dict:
+@frappe.whitelist(methods=["POST"])
+def apply_coupon_code(
+    coupon_code,
+    customer=None,
+    pos_profile=None,
+    company=None,
+) -> dict:
     """Validate and return coupon details for POS cart application.
 
     The actual application happens when the Sales Invoice is created —
     we just pass coupon_code to create_pos_invoice().
     This API is for pre-validation + UI feedback.
     """
-    return validate_coupon_code(coupon_code, customer)
+    return validate_coupon_code(
+        coupon_code,
+        customer,
+        pos_profile=pos_profile,
+        company=company,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

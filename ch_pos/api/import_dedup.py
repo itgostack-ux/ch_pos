@@ -138,7 +138,7 @@ def release_import_batch_lock(batch_key: str):
     try:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
     except Exception:
-        pass  # best-effort
+        frappe.log_error(frappe.get_traceback(), "CSV import batch lock release failed")
 
 
 class ImportBatchContext:

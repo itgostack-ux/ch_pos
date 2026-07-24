@@ -49,7 +49,8 @@
             frappe.msgprint(__("Select at least 2 items to compare."));
             return;
         }
-        ch_pos_call("ai.compare_items", { item_codes: selected }).then((r) => {
+        const pos_profile = frappe.pages["point-of-sale"]?.pos?.pos_profile_data?.name || "";
+        ch_pos_call("ai.compare_items", { item_codes: selected, pos_profile }).then((r) => {
             if (r && r.message) {
                 let html = "<table class='table table-bordered'>";
                 const items = r.message.comparison_result || [];
@@ -73,7 +74,11 @@
     // ── Offer Display ─────────────────────────────────────
     $(document).on("click", ".ch-pos-show-offers", function () {
         let item_code = $(this).data("item-code");
-        ch_pos_call("offers.get_applicable_offers", { item_code: item_code }).then((r) => {
+        const pos_profile = frappe.pages["point-of-sale"]?.pos?.pos_profile_data?.name || "";
+        ch_pos_call("offers.get_applicable_offers", {
+            item_code: item_code,
+            pos_profile: pos_profile,
+        }).then((r) => {
             if (r && r.message && r.message.length) {
                 let html = "<ul>";
                 r.message.forEach((o) => {

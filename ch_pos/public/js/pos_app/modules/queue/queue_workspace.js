@@ -367,6 +367,7 @@ export class QueueWorkspace {
 		if (token.customer_phone) {
 			return frappe.xcall("ch_pos.api.token_api.find_customer_by_phone", {
 				phone: token.customer_phone,
+				pos_profile: token.pos_profile || PosState.pos_profile,
 			}).then((name) => name || null)
 			  .catch(() => null);
 		}

@@ -19,11 +19,11 @@ add_to_apps_screen = [
 		"logo": "/assets/ch_pos/icon.svg",
 		"title": "CH POS",
 		"route": "/desk/pos",
+		"has_permission": "ch_pos.config.has_app_permission",
 	}
 ]
 
 after_install = "ch_pos.setup.after_install"
-before_migrate = "ch_pos.setup.before_migrate"
 after_migrate = "ch_pos.setup.after_migrate"
 before_uninstall = "ch_pos.setup.before_uninstall"
 

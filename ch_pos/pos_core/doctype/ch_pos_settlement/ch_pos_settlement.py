@@ -7,10 +7,60 @@ User enters actual physical cash count.
 Manager approval required above configured threshold.
 """
 
+import hashlib
+import hmac
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt, now_datetime
+
+from ch_pos.api.scope_guard import assert_session_scope
+from ch_pos.config import assert_session_operator, is_privileged_user
+
+
+def _settlement_signature_payload(doc) -> bytes:
+    denominations = [
+        {
+            "denomination": str(flt(row.get("denomination"), 2)),
+            "count": str(flt(row.get("count") or row.get("quantity"), 2)),
+        }
+        for row in (doc.get("denomination_details") or [])
+    ]
+    payload = {
+        "session": str(doc.get("session") or ""),
+        "company": str(doc.get("company") or ""),
+        "store": str(doc.get("store") or ""),
+        "business_date": str(doc.get("business_date") or ""),
+        "actual_closing_cash": str(flt(doc.get("actual_closing_cash"), 2)),
+        "expected_closing_cash": str(flt(doc.get("expected_closing_cash"), 2)),
+        "variance_amount": str(flt(doc.get("variance_amount"), 2)),
+        "variance_reason": str(doc.get("variance_reason") or ""),
+        "signoff_by_user": str(doc.get("signoff_by_user") or ""),
+        "signoff_time": str(doc.get("signoff_time") or ""),
+        "signoff_by_manager": str(doc.get("signoff_by_manager") or ""),
+        "manager_signoff_time": str(doc.get("manager_signoff_time") or ""),
+        "denominations": denominations,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
+def make_settlement_signature(doc) -> str:
+    from frappe.utils.password import get_encryption_key
+
+    return hmac.new(
+        get_encryption_key().encode(),
+        _settlement_signature_payload(doc),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def has_valid_settlement_signature(doc) -> bool:
+    supplied = str(doc.get("server_signature") or "")
+    return len(supplied) == 64 and hmac.compare_digest(
+        supplied, make_settlement_signature(doc)
+    )
 
 
 def build_settlement_snapshot(session):
@@ -111,6 +161,24 @@ def build_settlement_snapshot(session):
 
 
 class CHPOSSettlement(Document):
+    def before_insert(self):
+        if not self.flags.get("ch_server_issued") and not is_privileged_user():
+            frappe.throw(
+                _("POS settlements must be created through the server settlement flow."),
+                frappe.PermissionError,
+            )
+        session = frappe.get_doc("CH POS Session", self.session)
+        if not is_privileged_user():
+            assert_session_scope(self.session)
+            assert_session_operator(session, _("settle another cashier's POS session"))
+        self.company = session.company
+        self.store = session.store
+        self.device = session.device
+        self.business_date = session.business_date
+        self.signoff_by_user = frappe.session.user
+        self.signoff_time = now_datetime()
+        self.settlement_status = "Draft"
+
     def validate(self):
         self._validate_session()
         self._validate_no_duplicate()
@@ -122,8 +190,33 @@ class CHPOSSettlement(Document):
         if self.is_new() or self.has_value_changed("session"):
             if self.session:
                 self.calculate_from_transactions()
+        if self.signoff_by_manager:
+            if not (
+                self.flags.get("ch_manager_approval_verified")
+                or is_privileged_user()
+            ):
+                frappe.throw(
+                    _("Settlement manager approval was not verified by the server."),
+                    frappe.PermissionError,
+                )
+            self.manager_signoff_time = self.manager_signoff_time or now_datetime()
+        else:
+            self.manager_signoff_time = None
+
+        if self.is_new() or is_privileged_user():
+            self.server_signature = make_settlement_signature(self)
+        elif not has_valid_settlement_signature(self):
+            frappe.throw(
+                _("Settlement evidence was modified outside the approved server flow."),
+                frappe.PermissionError,
+            )
 
     def before_submit(self):
+        if not has_valid_settlement_signature(self):
+            frappe.throw(
+                _("Settlement evidence integrity verification failed."),
+                frappe.PermissionError,
+            )
         self._validate_signoff()
         self._validate_variance_approval()
         self.settlement_status = "Submitted"
@@ -295,6 +388,12 @@ class CHPOSSettlement(Document):
         """Cashier signoff mandatory before submission."""
         if not self.signoff_by_user:
             frappe.throw(_("Cashier sign-off is mandatory before submitting settlement."), title=_("Ch Pos Settlement Error"))
+        session_user = frappe.db.get_value("CH POS Session", self.session, "user")
+        if not is_privileged_user(self.signoff_by_user) and self.signoff_by_user != session_user:
+            frappe.throw(
+                _("Settlement cashier sign-off does not match the session operator."),
+                frappe.PermissionError,
+            )
 
     def _validate_variance_approval(self):
         """Manager approval needed if variance exceeds threshold."""
@@ -311,6 +410,11 @@ class CHPOSSettlement(Document):
                     _("Variance ₹{0} exceeds threshold ₹{1}. Manager sign-off required.").format(
                         abs(flt(self.variance_amount)), threshold
                     )
+                )
+            if not has_valid_settlement_signature(self):
+                frappe.throw(
+                    _("Settlement manager approval evidence is invalid."),
+                    frappe.PermissionError,
                 )
 
     def calculate_from_transactions(self):

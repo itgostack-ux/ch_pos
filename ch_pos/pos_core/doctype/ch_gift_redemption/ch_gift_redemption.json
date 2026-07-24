@@ -11,6 +11,8 @@
   "status",
   "redemption_code",
   "spin_token",
+  "spin_token_digest",
+  "spin_token_consumed_at",
   "column_break_hdr",
   "parent_sales_invoice",
   "offer",
@@ -84,9 +86,29 @@
    "fieldtype": "Data",
    "hidden": 1,
    "label": "Spin Token",
+   "permlevel": 1,
    "read_only": 1,
    "reqd": 1,
    "unique": 1
+  },
+  {
+   "fieldname": "spin_token_digest",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Spin Token Digest",
+   "no_copy": 1,
+   "permlevel": 1,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "spin_token_consumed_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Spin Token Consumed At",
+   "no_copy": 1,
+   "permlevel": 1,
+   "read_only": 1
   },
   {
    "fieldname": "column_break_hdr",
@@ -339,6 +361,12 @@
    "write": 1
   },
   {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
    "read": 1,
    "role": "Sales Manager",
    "write": 1
@@ -346,6 +374,16 @@
   {
    "read": 1,
    "role": "Sales User"
+  },
+  {
+   "read": 1,
+   "role": "POS User",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "POS Manager",
+   "write": 1
   }
  ],
  "search_fields": "redemption_code,customer_name,parent_sales_invoice",

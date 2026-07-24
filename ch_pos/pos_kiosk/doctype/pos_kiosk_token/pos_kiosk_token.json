@@ -9,6 +9,7 @@
  "field_order": [
   "naming_series",
   "token_display",
+  "token_scope_key",
   "pos_profile",
   "company",
   "store",
@@ -78,6 +79,16 @@
    "label": "Token Number",
    "read_only": 1,
    "bold": 1
+  },
+  {
+   "fieldname": "token_scope_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Token Scope Key",
+   "no_copy": 1,
+   "permlevel": 1,
+   "read_only": 1,
+   "unique": 1
   },
   {
    "fieldname": "pos_profile",
@@ -398,18 +409,44 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
-   "read": 1,
-   "role": "System Manager",
    "submit": 1,
    "cancel": 1,
+   "amend": 1,
+   "import": 1
+  },
+  {
+   "role": "System Manager",
+   "permlevel": 1,
+   "read": 1,
    "write": 1
   },
   {
-   "create": 1,
+   "role": "POS User",
    "read": 1,
-   "role": "All"
+   "write": 1,
+   "create": 1,
+   "submit": 1
+  },
+  {
+   "role": "POS Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1
+  },
+  {
+   "role": "Store Manager",
+   "read": 1,
+   "write": 1
+  },
+  {
+   "role": "Technician",
+   "read": 1
   }
  ],
  "sort_field": "creation",

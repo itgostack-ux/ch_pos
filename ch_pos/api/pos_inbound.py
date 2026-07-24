@@ -62,17 +62,8 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt
 
-
-# ── Role gate ───────────────────────────────────────────────────────────
-# Same set as the PR desk form + POS's own store-side role. System Manager
-# always allowed as the escape hatch used elsewhere in ch_pos.
-_INBOUND_ALLOWED_ROLES = frozenset({
-    "System Manager",
-    "Stock Manager",
-    "Stock User",
-    "Store Manager",
-    "POS Manager",
-})
+from ch_pos.api.scope_guard import assert_pos_profile_scope
+from ch_pos.config import require_configured_roles
 
 
 def _require_inbound_role() -> None:
@@ -82,37 +73,29 @@ def _require_inbound_role() -> None:
     intentionally skip this so the store can browse pending GRNs without
     needing GRN-issuing rights.
     """
-    roles = set(frappe.get_roles(frappe.session.user))
-    if not (roles & _INBOUND_ALLOWED_ROLES):
-        frappe.throw(
-            _(
-                "You do not have permission to run Inbound Receive. "
-                "Required roles: {0}."
-            ).format(", ".join(sorted(_INBOUND_ALLOWED_ROLES))),
-            frappe.PermissionError,
-        )
+    require_configured_roles(
+        "inbound_receive_roles",
+        defaults=(
+            "Stock Manager",
+            "Stock User",
+            "Store Manager",
+            "POS Manager",
+        ),
+        action=_("run Inbound Receive"),
+    )
 
 
 def _resolve_store_warehouse(pos_profile: str) -> str:
     """Return the warehouse bound to this POS Profile (mandatory)."""
     if not pos_profile:
         frappe.throw(_("POS Profile is required."))
+    assert_pos_profile_scope(pos_profile)
     warehouse = frappe.db.get_value("POS Profile", pos_profile, "warehouse")
     if not warehouse:
         frappe.throw(
             _("POS Profile <b>{0}</b> is not linked to a warehouse.").format(pos_profile)
         )
     return warehouse
-
-
-def _resolve_store_company(pos_profile: str) -> str:
-    """Return the company bound to this POS Profile."""
-    company = frappe.db.get_value("POS Profile", pos_profile, "company")
-    if not company:
-        frappe.throw(
-            _("POS Profile <b>{0}</b> is not linked to a company.").format(pos_profile)
-        )
-    return company
 
 
 def _row_generate_state(item) -> dict:
@@ -153,6 +136,7 @@ def list_open_purchase_receipts(pos_profile: str, limit: int = 25) -> list[dict]
     row's ``warehouse`` == store warehouse. Only ``docstatus = 0`` is
     returned; submitted PRs are historical and not editable here.
     """
+    frappe.has_permission("Purchase Receipt", "read", throw=True)
     warehouse = _resolve_store_warehouse(pos_profile)
     limit = max(1, min(int(cint(limit)) or 25, 100))
 
@@ -200,6 +184,7 @@ def list_pending_purchase_orders(pos_profile: str, limit: int = 25) -> list[dict
     Purchase Order via ``update_qty()``. Drop-ship POs (``custom_is_drop_ship``
     = 1) with warehouse == this store are the primary use case.
     """
+    frappe.has_permission("Purchase Order", "read", throw=True)
     warehouse = _resolve_store_warehouse(pos_profile)
     limit = max(1, min(int(cint(limit)) or 25, 100))
 
@@ -252,6 +237,7 @@ def get_pr_detail(pr_name: str, pos_profile: str) -> dict:
     warehouse = _resolve_store_warehouse(pos_profile)
 
     pr = frappe.get_doc("Purchase Receipt", pr_name)
+    pr.check_permission("read")
 
     if pr.docstatus != 0:
         frappe.throw(
@@ -305,7 +291,7 @@ def get_pr_detail(pr_name: str, pos_profile: str) -> dict:
 
 # ── Mutate APIs (role-gated) ────────────────────────────────────────────
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_pr_from_po(po_name: str, pos_profile: str) -> dict:
     """Materialise a Draft Purchase Receipt from a Submitted PO.
 
@@ -321,6 +307,7 @@ def create_pr_from_po(po_name: str, pos_profile: str) -> dict:
     warehouse = _resolve_store_warehouse(pos_profile)
 
     po = frappe.get_doc("Purchase Order", po_name)
+    po.check_permission("read")
     if po.docstatus != 1:
         frappe.throw(_("Purchase Order {0} is not Submitted.").format(po_name))
 
@@ -347,13 +334,12 @@ def create_pr_from_po(po_name: str, pos_profile: str) -> dict:
     for row in pr.items or []:
         row.warehouse = warehouse
 
-    pr.flags.ignore_permissions = True
     pr.insert()
 
     return {"pr_name": pr.name}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_pr_set_imei_serials(
     pr_name: str,
     row_name: str,
@@ -408,7 +394,6 @@ def pos_pr_set_imei_serials(
     row.serial_no = "\n".join(cleaned)
     row.custom_serial_generated = 1 if len(cleaned) == int(flt(row.qty)) else 0
 
-    pr.flags.ignore_permissions = True
     pr.save()
 
     return {
@@ -418,7 +403,7 @@ def pos_pr_set_imei_serials(
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_pr_generate_barcode_serials(
     pr_name: str,
     row_name: str,
@@ -467,7 +452,6 @@ def pos_pr_generate_barcode_serials(
     row.serial_no = "\n".join(serials)
     row.custom_serial_generated = 1 if serials else 0
 
-    pr.flags.ignore_permissions = True
     pr.save()
 
     return {
@@ -478,16 +462,14 @@ def pos_pr_generate_barcode_serials(
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pos_pr_submit(pr_name: str, pos_profile: str) -> dict:
     """Submit a Draft PR after Generate is complete for all rows.
 
     ``CustomPurchaseReceipt.validate`` re-runs during submit and enforces
     every guard the desk form does. We do not skip any validator here —
-    ``ignore_permissions`` is used only because the store operator may not
-    hold ``write`` on Purchase Receipt via the standard role matrix, even
-    though the ``_require_inbound_role`` gate above authorises them for
-    this specific POS pipeline.
+    Standard Purchase Receipt create/write/submit permissions remain
+    mandatory in addition to the configured Inbound Receive role gate.
     """
     _require_inbound_role()
     warehouse = _resolve_store_warehouse(pos_profile)
@@ -516,7 +498,6 @@ def pos_pr_submit(pr_name: str, pos_profile: str) -> dict:
             )
         )
 
-    pr.flags.ignore_permissions = True
     pr.submit()
 
     return {"pr_name": pr.name, "docstatus": pr.docstatus}

@@ -63,7 +63,11 @@ export class Customer360Workspace {
 			);
 			frappe.call({
 				method: "ch_pos.api.pos_api.customer_360",
-				args: { identifier: q, company: PosState.company },
+				args: {
+					identifier: q,
+					company: PosState.company,
+					pos_profile: PosState.pos_profile,
+				},
 				callback: (r) => {
 					const d = r.message;
 					if (!d || d.error) {
@@ -332,6 +336,7 @@ export class Customer360Workspace {
 					method: "ch_pos.api.pos_api.update_customer_details",
 					args: {
 						customer: d.customer,
+						pos_profile: PosState.pos_profile,
 						customer_name: values.customer_name,
 						mobile_no: values.mobile_no || "",
 						email_id: values.email_id || "",

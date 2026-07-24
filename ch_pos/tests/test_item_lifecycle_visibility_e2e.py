@@ -179,6 +179,11 @@ def test_full_catalog_hides_inactive():
 def test_guided_recs_hide_inactive():
     from ch_pos.api.guided import get_guided_recommendations
 
+    pos_profile = _first_pos_profile()
+    if not pos_profile:
+        skip("T03_guided_recs", "no POS profile")
+        return
+
     # Find a sub_category that has at least one Active item AND we can prove
     # the SQL is filter-correct by checking the result set is a strict subset
     # of Active/Obsolete items with that sub_category.
@@ -197,7 +202,10 @@ def test_guided_recs_hide_inactive():
     sub_cat = row[0]["ch_sub_category"]
 
     recs = get_guided_recommendations(
-        sub_category=sub_cat, responses=[], warehouse=None, limit=20
+        sub_category=sub_cat,
+        responses=[],
+        pos_profile=pos_profile,
+        limit=20,
     )
     if not isinstance(recs, list):
         fail("T03_guided_recs", f"unexpected return type: {type(recs).__name__}")

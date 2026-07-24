@@ -1,8 +1,10 @@
 import frappe
+from frappe import _
 from frappe.utils import flt, cint, now_datetime
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
 
 from ch_item_master.ch_item_master.serial_utils import get_serial_nos_from_item as _get_serial_nos_from_item
+from ch_pos.config import has_configured_roles, is_privileged_user
 
 
 def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=None):
@@ -65,7 +67,7 @@ def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=
 def _update_serial_status(serial_no, new_status, company=None, warehouse=None, remarks=None, **kwargs):
     """Call the centralized CH Serial Lifecycle API for status transitions."""
     from ch_item_master.ch_item_master.doctype.ch_serial_lifecycle.ch_serial_lifecycle import (
-        update_lifecycle_status,
+        update_lifecycle_status_for_document as update_lifecycle_status,
     )
     return update_lifecycle_status(
         serial_no=serial_no,
@@ -257,7 +259,9 @@ def _enforce_cancel_policy(doc):
     """
     if frappe.flags.get("ignore_cancel_lock"):
         return
-    if frappe.session.user == "Administrator":
+    if is_privileged_user():
+        return
+    if has_configured_roles("cancellation_override_roles", ()):
         return
     if not cint(doc.get("is_pos")):
         return
@@ -291,7 +295,17 @@ def _enforce_cancel_policy(doc):
         except frappe.ValidationError:
             raise
         except Exception:
-            pass  # session check failure must not block cancel silently — let it proceed
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"POS cancellation session lookup failed for {doc.name}",
+            )
+            frappe.throw(
+                frappe._(
+                    "The active POS session could not be verified. Cancellation is blocked "
+                    "until the session check succeeds; create a Sales Return if required."
+                ),
+                title=frappe._("Cancellation Verification Failed"),
+            )
 
 
 # ── doc_event handlers (called via hooks.py) ─────────────────────
@@ -472,7 +486,7 @@ def reverse_serial_lifecycle(doc, method=None):
     For returns: In Stock → Sold (re-mark as sold since the return is voided).
     """
     # Require a cancellation reason from non-system users
-    if frappe.session.user != "Administrator":
+    if not has_configured_roles("cancellation_override_roles", ()):
         if not (doc.get("custom_cancel_reason") or "").strip():
             frappe.throw(
                 frappe._("A cancellation reason is required to cancel Sales Invoice {0}").format(doc.name)

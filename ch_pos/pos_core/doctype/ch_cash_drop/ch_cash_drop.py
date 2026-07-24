@@ -10,16 +10,86 @@ Rules:
 - No post-close cash movement
 """
 
+import hashlib
+import hmac
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt, now_datetime
 
+from ch_pos.api.scope_guard import assert_session_scope
+from ch_pos.config import assert_session_operator, is_privileged_user
+
 # Types that require manager approval
 APPROVAL_REQUIRED_TYPES = {"Petty Expense", "Cash Adjustment", "Buyback Cash Payout"}
 
 
+def _approval_payload(doc) -> bytes:
+    payload = {
+        "session": str(doc.get("session") or ""),
+        "company": str(doc.get("company") or ""),
+        "store": str(doc.get("store") or ""),
+        "created_by": str(doc.get("created_by") or ""),
+        "movement_type": str(doc.get("movement_type") or ""),
+        "amount": str(flt(doc.get("amount"), 2)),
+        "reason": str(doc.get("reason") or ""),
+        "approved_by": str(doc.get("approved_by") or ""),
+        "approved_at": str(doc.get("approved_at") or ""),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
+def make_approval_signature(doc) -> str:
+    from frappe.utils.password import get_encryption_key
+
+    return hmac.new(
+        get_encryption_key().encode(), _approval_payload(doc), hashlib.sha256
+    ).hexdigest()
+
+
+def has_valid_approval_signature(doc) -> bool:
+    supplied = str(doc.get("approval_signature") or "")
+    return len(supplied) == 64 and hmac.compare_digest(
+        supplied, make_approval_signature(doc)
+    )
+
+
 class CHCashDrop(Document):
+    def before_validate(self):
+        if not self.session:
+            return
+        session = frappe.get_doc("CH POS Session", self.session)
+        if not is_privileged_user():
+            assert_session_scope(self.session)
+            assert_session_operator(
+                session, _("record a cash movement on another cashier's session")
+            )
+        self.company = session.company
+        self.store = session.store
+        self.pos_profile = session.pos_profile
+        self.device = session.device
+        self.business_date = session.business_date
+        if self.is_new():
+            self.user = frappe.session.user
+            self.created_by = frappe.session.user
+            self.posting_time = now_datetime()
+            self.status = "Draft"
+
+        if self.approved_by:
+            if self.flags.get("ch_manager_approval_verified") or is_privileged_user():
+                self.approved_at = self.approved_at or now_datetime()
+                self.approval_signature = make_approval_signature(self)
+            elif not has_valid_approval_signature(self):
+                frappe.throw(
+                    _("Cash-movement manager approval was not verified by the server."),
+                    frappe.PermissionError,
+                )
+        else:
+            self.approved_at = None
+            self.approval_signature = None
+
     def validate(self):
         self._validate_session_active()
         self._validate_company_match()
@@ -32,6 +102,20 @@ class CHCashDrop(Document):
         self._log_event()
 
     def on_cancel(self):
+        if self.gl_entry:
+            je = frappe.get_doc("Journal Entry", self.gl_entry)
+            if je.company != self.company:
+                frappe.throw(
+                    _("Linked Journal Entry belongs to another company."),
+                    frappe.PermissionError,
+                )
+            if je.docstatus == 1:
+                je.flags.ignore_permissions = True
+                je.cancel()
+            elif je.docstatus == 0:
+                frappe.delete_doc(
+                    "Journal Entry", je.name, ignore_permissions=True, force=True
+                )
         self.db_set("status", "Cancelled")
 
     def _validate_session_active(self):
@@ -66,6 +150,11 @@ class CHCashDrop(Document):
         if mt in APPROVAL_REQUIRED_TYPES and not self.approved_by:
             frappe.throw(
                 _("{0} requires manager approval before submission.").format(mt)
+            )
+        if self.approved_by and not has_valid_approval_signature(self):
+            frappe.throw(
+                _("Cash-movement manager approval was not verified by the server."),
+                frappe.PermissionError,
             )
 
     def _post_gl_entry(self) -> None:
@@ -159,6 +248,7 @@ class CHCashDrop(Document):
         except Exception:
             frappe.log_error(frappe.get_traceback(),
                              f"Cash Drop GL failed for {self.name}")
+            raise
 
     def _log_event(self):
         try:

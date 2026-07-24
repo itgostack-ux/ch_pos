@@ -1784,7 +1784,7 @@ export class BuybackWorkspace {
 			this._show_instore_approval_dialog(data);
 		});
 
-		// Store-initiated price negotiation → routes to Buyback Manager, who
+		// Store-initiated price negotiation routes to the configured approver, who
 		// approves it; on approval the order's payout is updated (close-the-loop).
 		el.on("click.bbstage", ".ch-bb-raise-price-exc", (e) => {
 			const order_name = $(e.currentTarget).data("order") || (data.order && data.order.name);
@@ -1801,7 +1801,7 @@ export class BuybackWorkspace {
 					{ fieldname: "requested_price", fieldtype: "Currency", label: __("Requested Price"),
 					  reqd: 1, default: current },
 					{ fieldname: "reason", fieldtype: "Small Text", label: __("Reason"), reqd: 1,
-					  description: __("Sent to the Buyback Manager for approval.") },
+					  description: __("Sent to the configured approver.") },
 				],
 				primary_action_label: __("Submit to Manager"),
 				primary_action: (v) => {
@@ -1816,7 +1816,7 @@ export class BuybackWorkspace {
 						reason: v.reason,
 					}).then((res) => {
 						frappe.show_alert({
-							message: __("Price exception {0} sent to Buyback Manager.", [res.name]),
+							message: __("Price exception {0} sent for approval.", [res.name]),
 							indicator: "orange",
 						});
 						this._reload();

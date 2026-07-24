@@ -56,7 +56,7 @@ import { open_camera_scan } from "./pos_app/shared/camera_scanner.js";
 // ── Make globally available for Frappe page lifecycle ────
 frappe.provide("ch_pos");
 // Phase 2 — expose camera scanner globally so toolbars / workspaces can use it
-// without re-importing (lazy ZXing load happens on first invocation).
+// without re-importing (the local scanner asset loads on first invocation).
 ch_pos.open_camera_scan = open_camera_scan;
 
 ch_pos.PosApp = class PosApp {

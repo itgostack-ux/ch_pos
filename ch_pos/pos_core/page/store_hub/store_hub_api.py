@@ -1,7 +1,62 @@
 """Store Hub – Backend API for store operations dashboard."""
 
 import frappe
+from frappe import _
 from frappe.utils import flt, nowdate, get_first_day, cint, getdate
+
+from ch_pos.api.scope_guard import assert_store_scope
+from ch_pos.config import get_control_setting, is_privileged_user, require_configured_roles
+
+
+def _authorize_hub_scope(company=None, store=None):
+    """Return an exact ``(company, warehouse, store_keys)`` authorized scope."""
+    require_configured_roles(
+        "session_report_roles",
+        defaults=("Store Manager", "POS Manager", "Accounts Manager"),
+        action=_("view the store operations hub"),
+    )
+
+    if not store and not is_privileged_user():
+        try:
+            from ch_erp15.ch_erp15.scope import get_user_scope
+        except ImportError:
+            frappe.throw(_("Store scope service is unavailable."), frappe.PermissionError)
+        scope = get_user_scope()
+        warehouses = set(scope.get("warehouses") or [])
+        if not warehouses:
+            for store_name in set(scope.get("stores") or []):
+                warehouse = frappe.db.get_value("CH Store", store_name, "warehouse")
+                if warehouse:
+                    warehouses.add(warehouse)
+        if len(warehouses) != 1:
+            frappe.throw(_("Select one of your assigned stores to view the hub."), frappe.PermissionError)
+        store = next(iter(warehouses))
+
+    if not store:
+        # Global/company-wide dashboards are an explicit privileged-user view.
+        return company, None, ()
+
+    warehouse = store if frappe.db.exists("Warehouse", store) else frappe.db.get_value(
+        "CH Store", store, "warehouse"
+    )
+    warehouse_row = frappe.db.get_value(
+        "Warehouse", warehouse, ["name", "company", "is_group", "disabled"], as_dict=True
+    ) if warehouse else None
+    if not warehouse_row or warehouse_row.is_group or warehouse_row.disabled:
+        frappe.throw(_("Select an active leaf Warehouse."))
+    if company and company != warehouse_row.company:
+        frappe.throw(_("The selected store belongs to another company."), frappe.PermissionError)
+
+    store_name = frappe.db.get_value(
+        "CH Store", {"warehouse": warehouse_row.name, "disabled": 0}, "name"
+    )
+    assert_store_scope(
+        store=store_name,
+        warehouse=warehouse_row.name,
+        company=warehouse_row.company,
+    )
+    keys = tuple(dict.fromkeys(key for key in (warehouse_row.name, store_name) if key))
+    return warehouse_row.company, warehouse_row.name, keys
 
 
 def _build_filters(company=None, store=None, from_date=None, to_date=None):
@@ -36,8 +91,19 @@ def _build_filters(company=None, store=None, from_date=None, to_date=None):
 @frappe.whitelist()
 def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
     """Store operations dashboard: POS Sessions → Daily Sales → Settlements → Cash → Inventory."""
+    company, store, store_keys = _authorize_hub_scope(company, store)
+    if from_date and to_date:
+        start_date = getdate(from_date)
+        end_date = getdate(to_date)
+        if start_date > end_date:
+            frappe.throw(_("From Date cannot be after To Date."))
+        max_days = max(cint(get_control_setting("store_hub_max_days", 366)), 1)
+        if (end_date - start_date).days > max_days:
+            frappe.throw(_("The Store Hub date range cannot exceed {0} days.").format(max_days))
     f = _build_filters(company, store, from_date, to_date)
     prm = f["prm"]
+    if store_keys:
+        prm["store_keys"] = store_keys
     co = f["co"]
     wh = f["wh"]
     dc = f["date_col"]
@@ -50,7 +116,7 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
     # Store filter for session/settlement
     store_flt = ""
     if store:
-        store_flt = " AND store = %(store)s"
+        store_flt = " AND store IN %(store_keys)s"
 
     # Alias-qualified company filters for queries that JOIN `tabCH Store`
     # (which also has a `company` column — bare {co} is ambiguous).
@@ -60,10 +126,10 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
     al_co = " AND al.company = %(company)s" if company else ""
     pi_co = " AND pi.company = %(company)s" if company else ""
     posi_co = " AND pos_invoice.company = %(company)s" if company else ""
-    s_store_flt = " AND s.store = %(store)s" if store else ""
-    st_store_flt = " AND st.store = %(store)s" if store else ""
-    cd_store_flt = " AND cd.store = %(store)s" if store else ""
-    al_store_flt = " AND al.store = %(store)s" if store else ""
+    s_store_flt = " AND s.store IN %(store_keys)s" if store else ""
+    st_store_flt = " AND st.store IN %(store_keys)s" if store else ""
+    cd_store_flt = " AND cd.store IN %(store_keys)s" if store else ""
+    al_store_flt = " AND al.store IN %(store_keys)s" if store else ""
 
     # ── Pipeline ──
     # Sessions today

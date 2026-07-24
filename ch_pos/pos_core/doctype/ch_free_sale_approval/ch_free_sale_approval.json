@@ -22,6 +22,7 @@
   "cart_snapshot",
   "cart_hash",
   "approval_token",
+  "server_signature",
   "section_approvals",
   "approvals",
   "used",
@@ -44,6 +45,7 @@
    "label": "Status",
    "options": "Pending\nApproved\nRejected\nExpired",
    "reqd": 1,
+   "read_only": 1,
    "bold": 1
   },
   {
@@ -120,7 +122,8 @@
    "fieldtype": "Long Text",
    "label": "Cart Snapshot (JSON)",
    "read_only": 1,
-   "hidden": 1
+   "hidden": 1,
+   "permlevel": 1
   },
   {
    "fieldname": "cart_hash",
@@ -128,6 +131,7 @@
    "label": "Cart Hash",
    "read_only": 1,
    "hidden": 1,
+   "permlevel": 1,
    "description": "SHA-256 of the normalized cart (customer + item lines + total). Validated at consumption so an approval cannot be replayed on a different cart."
   },
   {
@@ -136,7 +140,17 @@
    "label": "Approval Token",
    "unique": 1,
    "read_only": 1,
-   "hidden": 1
+   "hidden": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "server_signature",
+   "fieldtype": "Data",
+   "label": "Server Signature",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "permlevel": 1
   },
   {
    "fieldname": "section_approvals",
@@ -148,7 +162,8 @@
    "fieldtype": "Table",
    "label": "Approvals",
    "options": "CH Free Sale Approval Detail",
-   "reqd": 1
+   "reqd": 1,
+   "read_only": 1
   },
   {
    "fieldname": "used",
@@ -177,21 +192,33 @@
  "owner": "Administrator",
  "permissions": [
   {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
    "create": 1,
    "delete": 1,
+   "import": 1
+  },
+  {
+   "role": "Sales User",
+   "read": 1
+  },
+  {
+   "role": "Sales Manager",
+   "read": 1
+  },
+  {
+   "read": 1,
+   "role": "POS User"
+  },
+  {
+   "read": 1,
+   "role": "POS Manager"
+  },
+  {
+   "permlevel": 1,
    "read": 1,
    "role": "System Manager",
-   "write": 1
-  },
-  {
-   "create": 1,
-   "read": 1,
-   "role": "Sales User",
-   "write": 1
-  },
-  {
-   "read": 1,
-   "role": "Sales Manager",
    "write": 1
   }
  ],

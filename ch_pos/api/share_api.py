@@ -15,8 +15,41 @@ import frappe
 from frappe import _
 from frappe.utils import cint, get_url
 
+from ch_pos.api.scope_guard import assert_sales_invoice_scope
+from ch_pos.config import is_privileged_user, require_configured_roles
 
 _VALID_CHANNELS = {"print", "email", "whatsapp", "einvoice"}
+
+
+def _normalize_phone(value: str | None) -> str:
+	return "".join(char for char in str(value or "") if char.isdigit())[-10:]
+
+
+def _validate_recipient_overrides(doc, email=None, mobile_no=None) -> None:
+	requested_email = str(email or "").strip().lower()
+	requested_mobile = _normalize_phone(mobile_no)
+	allowed_emails = {
+		str(doc.get("contact_email") or "").strip().lower(),
+		str(frappe.db.get_value("Customer", doc.customer, "email_id") or "").strip().lower(),
+	}
+	allowed_mobiles = {
+		_normalize_phone(doc.get("contact_mobile")),
+		_normalize_phone(frappe.db.get_value("Customer", doc.customer, "mobile_no")),
+	}
+	allowed_emails.discard("")
+	allowed_mobiles.discard("")
+
+	if (not requested_email or requested_email in allowed_emails) and (
+		not requested_mobile or requested_mobile in allowed_mobiles
+	):
+		return
+	if is_privileged_user():
+		return
+	require_configured_roles(
+		"invoice_recipient_override_roles",
+		defaults=("POS Manager", "Accounts Manager"),
+		action=_("share an invoice with a recipient not stored on the customer"),
+	)
 
 
 def _resolve_print_format(invoice_name: str) -> str:
@@ -149,7 +182,7 @@ def _share_einvoice(invoice_name: str) -> dict:
 		return {"success": False, "message": str(exc)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def share_invoice(
 	invoice_name: str,
 	channels: list | str,
@@ -162,6 +195,16 @@ def share_invoice(
 	"""
 	if not invoice_name or not frappe.db.exists("Sales Invoice", invoice_name):
 		frappe.throw(_("Invoice not found."), title=_("Share Invoice"))
+	doc = frappe.get_doc("Sales Invoice", invoice_name)
+	doc.check_permission("read")
+	# READ path (receipt reprint/share): tolerate a since-disabled POS Profile.
+	assert_sales_invoice_scope(invoice_name, allow_disabled=True)
+	require_configured_roles(
+		"invoice_share_roles",
+		defaults=("POS User", "POS Manager", "Accounts User", "Accounts Manager"),
+		action=_("share a POS invoice"),
+	)
+	_validate_recipient_overrides(doc, email=email, mobile_no=mobile_no)
 
 	if isinstance(channels, str):
 		import json
@@ -173,6 +216,12 @@ def share_invoice(
 	channels = [c for c in (channels or []) if c in _VALID_CHANNELS]
 	if not channels:
 		frappe.throw(_("At least one valid channel is required."), title=_("Share Invoice"))
+	if "einvoice" in channels:
+		require_configured_roles(
+			"einvoice_generation_roles",
+			defaults=("Accounts Manager",),
+			action=_("generate an e-invoice"),
+		)
 
 	settings = _resolve_print_settings(invoice_name)
 	fmt = settings.get("print_format") or _resolve_print_format(invoice_name)

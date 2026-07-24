@@ -420,6 +420,7 @@ export class CartPanel {
 		frappe.xcall("ch_pos.api.pos_api.get_customer_pos_info", {
 			customer: val,
 			company: PosState.company,
+			pos_profile: PosState.pos_profile,
 		}).then((info) => {
 			PosState.customer_info = info;
 			if (info.price_list) {
@@ -439,6 +440,7 @@ export class CartPanel {
 			frappe.xcall("ch_erp15.loyalty.api.get_customer_loyalty_status", {
 				customer: val,
 				company: PosState.company,
+				pos_profile: PosState.pos_profile,
 			}).then((status) => {
 				PosState.customer_loyalty_status = status;
 				if (status && status.enrolled) {
@@ -507,6 +509,7 @@ export class CartPanel {
 		return frappe.xcall("ch_pos.api.pos_api.update_customer_complete", {
 			customer: customer,
 			payload: payload,
+			pos_profile: PosState.pos_profile,
 		}).catch((err) => {
 			console.error("Failed to sync new customer address:", err);
 		});
@@ -525,6 +528,7 @@ export class CartPanel {
 		// ⚡ Force fresh fetch — bypass any cache
 		frappe.xcall("ch_pos.api.pos_api.get_customer_full_details", { 
 			customer,
+			pos_profile: PosState.pos_profile,
 			_ts: Date.now()   // cache buster
 		})
 			.then((doc) => {
@@ -532,7 +536,6 @@ export class CartPanel {
 					frappe.msgprint(__("Customer not found"));
 					return;
 				}
-				console.log("📥 Loaded customer data:", doc);  // debug
 				this._open_edit_dialog(customer, doc);
 			})
 			.catch((err) => {
@@ -549,18 +552,21 @@ export class CartPanel {
 			const stateField = prefix ? `${prefix}_state` : "state";
 			const cityField  = prefix ? `${prefix}_city`  : "city";
 
-			fetch(`https://api.postalpincode.in/pincode/${pin}`)
-				.then(r => r.json())
-				.then(data => {
-					if (!data?.[0]?.PostOffice?.length) {
+			frappe.xcall("ch_pos.api.pos_api.lookup_pincode", {
+				pincode: pin,
+				pos_profile: PosState.pos_profile,
+			})
+				.then((data) => {
+					if (!data?.found) {
 						frappe.show_alert({ message: __("Invalid pincode {0}", [pin]), indicator: "red" });
 						return;
 					}
-					const po = data[0].PostOffice[0];
-					dialog.set_value(stateField, po.State);
-					dialog.set_value(cityField, po.District);
+					dialog.set_value(stateField, data.state);
+					dialog.set_value(cityField, data.city);
 				})
-				.catch(() => {});
+				.catch(() => {
+					frappe.show_alert({ message: __("Pincode lookup is unavailable."), indicator: "orange" });
+				});
 		};
 
 		const d = new frappe.ui.Dialog({
@@ -766,6 +772,7 @@ export class CartPanel {
 				frappe.xcall("ch_pos.api.pos_api.update_customer_complete", {
 					customer: customer,
 					payload: values,
+					pos_profile: PosState.pos_profile,
 				})
 				.then(() => {
 					frappe.show_alert({ message: __("Customer updated successfully"), indicator: "green" });

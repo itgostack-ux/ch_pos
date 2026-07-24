@@ -8,19 +8,21 @@ ALL category managers must approve before the free sale can proceed.
 import hashlib
 import hmac
 import json
-import secrets
+from urllib.parse import urlencode
 
 import frappe
 from frappe import _
 from frappe.rate_limiter import rate_limit
-from frappe.utils import now_datetime, get_url
+from frappe.utils import cint, flt, get_url, getdate, now_datetime, nowdate
+
+from ch_pos.rate_limits import clear_fixed_window, increment_fixed_window
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _manager_link_sig(token: str, manager: str) -> str:
+def _manager_link_sig(token: str, manager: str, action: str) -> str:
     """Per-manager signature binding one approval link to one manager row.
 
     Keyed on the site's server-only encryption key so that a party who holds
@@ -32,7 +34,55 @@ def _manager_link_sig(token: str, manager: str) -> str:
     key = get_encryption_key()
     if isinstance(key, str):
         key = key.encode()
-    return hmac.new(key, f"{token}:{manager}".encode(), hashlib.sha256).hexdigest()
+    return hmac.new(
+        key,
+        f"{token}:{manager}:{action}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _validate_signed_link(token: str, manager: str, action: str, sig: str | None) -> bool:
+    token = str(token or "").strip()
+    manager = str(manager or "").strip()
+    action = str(action or "").strip()
+    sig = str(sig or "").strip()
+    if len(token) > 256 or len(manager) > 254 or len(action) > 16 or len(sig) > 128:
+        frappe.respond_as_web_page(
+            _("Invalid Request"),
+            _("Approval link parameters exceed the allowed size."),
+            indicator_color="red",
+        )
+        return False
+    if action not in ("approve", "reject"):
+        frappe.respond_as_web_page(
+            _("Invalid Request"),
+            _("Action must be 'approve' or 'reject'."),
+            indicator_color="red",
+        )
+        return False
+    if not token or len(token) < 20:
+        frappe.respond_as_web_page(
+            _("Invalid Request"),
+            _("Missing or invalid approval token."),
+            indicator_color="red",
+        )
+        return False
+    if not manager:
+        frappe.respond_as_web_page(
+            _("Invalid Link"),
+            _("This approval link is missing its intended manager."),
+            indicator_color="red",
+        )
+        return False
+    expected = _manager_link_sig(token, manager, action)
+    if not sig or not hmac.compare_digest(expected, sig):
+        frappe.respond_as_web_page(
+            _("Invalid Link"),
+            _("This approval link is not valid for the specified action and manager."),
+            indicator_color="red",
+        )
+        return False
+    return True
 
 def _rate_limit_token_attempt(token: str) -> None:
     """Raise PermissionError if this token has been attempted too many times.
@@ -41,9 +91,8 @@ def _rate_limit_token_attempt(token: str) -> None:
     attempts the endpoint returns a locked response.  Successful
     responses clear the counter (see respond_to_approval).
     """
-    cache_key = f"free_sale_token_attempts:{token}"
-    attempts = frappe.cache().get_value(cache_key) or 0
-    if int(attempts) >= 10:
+    attempts = increment_fixed_window("free-sale-approval", token, 900)
+    if attempts > 10:
         frappe.respond_as_web_page(
             _("Too Many Attempts"),
             _("This approval link has been accessed too many times. "
@@ -51,43 +100,226 @@ def _rate_limit_token_attempt(token: str) -> None:
             indicator_color="red",
         )
         raise frappe.PermissionError
-    frappe.cache().set_value(cache_key, int(attempts) + 1, expires_in_sec=900)
 
 
-def compute_cart_hash(customer, items) -> str:
-    """Return a stable SHA-256 over the cart's identity.
+_VAS_PLAN_TYPES = frozenset({"Value Added Service", "Protection Plan"})
+_WARRANTY_PLAN_TYPES = frozenset(
+    {"Own Warranty", "Extended Warranty", "Post-Repair Warranty"}
+)
 
-    Covers the customer and each non-VAS / non-warranty line's
-    ``(item_code, qty, rate)`` — which together determine the cart total.
-    Bound into the approval at request time and re-checked at invoice creation
-    so an approval issued for one cart cannot be replayed on a different
-    cart/invoice.
 
-    grand_total is deliberately NOT part of the hash: at request time it may be
-    tax-inclusive and is not reliably reproducible from the invoice pipeline,
-    whereas the per-line ``rate`` already pins the economic value.
+def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
+    """Return cart rows with classification and billable values normalized.
+
+    ``is_vas`` and ``is_warranty`` are presentation hints from the browser,
+    never authorization inputs. A special row must name an active CH Warranty
+    Plan whose configured service item matches the billed Item. Any supplied
+    hint that disagrees with that master data is rejected.
     """
-    from frappe.utils import flt
+    if isinstance(items, str):
+        items = frappe.parse_json(items)
+    if not isinstance(items, list):
+        frappe.throw(_("Items must be a list."))
 
-    norm_items = sorted(
-        (
-            {
-                "item_code": str(i.get("item_code") or ""),
-                "qty": round(flt(i.get("qty") or 1), 3),
-                "rate": round(
-                    flt(i.get("rate") if i.get("rate") is not None else i.get("price")),
-                    2,
-                ),
-            }
-            for i in items
-            if not i.get("is_warranty") and not i.get("is_vas")
-        ),
-        key=lambda x: (x["item_code"], x["qty"], x["rate"]),
+    from ch_pos.config import get_control_setting
+
+    max_items = max(
+        1,
+        min(int(get_control_setting("free_sale_max_cart_items", 100) or 100), 500),
     )
+    if len(items) > max_items:
+        frappe.throw(_("A free-sale request may contain at most {0} items.").format(max_items))
+
+    plan_names = set()
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            frappe.throw(_("Cart row {0} must be an object.").format(index))
+        plan_name = str(item.get("warranty_plan") or "").strip()
+        if len(plan_name) > 140:
+            frappe.throw(_("Cart row {0} has an invalid warranty plan.").format(index))
+        if plan_name:
+            plan_names.add(plan_name)
+
+    plans = {}
+    if plan_names:
+        plans = {
+            row.name: row
+            for row in frappe.get_all(
+                "CH Warranty Plan",
+                filters={"name": ("in", sorted(plan_names))},
+                fields=[
+                    "name", "company", "status", "plan_type", "service_item",
+                    "is_sellable", "pricing_mode", "price", "percentage_value",
+                    "valid_from", "valid_to", "min_device_price", "max_device_price",
+                ],
+                limit_page_length=len(plan_names),
+            )
+        }
+
+    normalized = []
+    for index, source in enumerate(items, start=1):
+        item = dict(source)
+        item_code = str(item.get("item_code") or "").strip()
+        if not item_code or len(item_code) > 140:
+            frappe.throw(_("Cart row {0} has an invalid item code.").format(index))
+
+        qty = flt(item.get("qty") if item.get("qty") is not None else 1)
+        if qty <= 0:
+            frappe.throw(_("Cart row {0} must have a positive quantity.").format(index))
+
+        supplied_rate = item.get("rate")
+        if supplied_rate is None:
+            supplied_rate = item.get("price")
+        rate = flt(supplied_rate)
+        amount_supplied = item.get("amount") not in (None, "")
+        amount = flt(item.get("amount")) if amount_supplied else None
+        if supplied_rate in (None, "") and amount_supplied:
+            rate = flt(amount / qty)
+        elif amount_supplied and abs(amount - (rate * qty)) > 0.01:
+            frappe.throw(
+                _("Cart row {0} has conflicting rate and amount values.").format(index)
+            )
+        if rate < 0:
+            frappe.throw(_("Cart row {0} cannot have a negative rate.").format(index))
+
+        plan_name = str(item.get("warranty_plan") or "").strip()
+        plan = plans.get(plan_name) if plan_name else None
+        if plan_name and not plan:
+            frappe.throw(_("Warranty plan {0} does not exist.").format(plan_name))
+
+        authoritative_vas = 0
+        authoritative_warranty = 0
+        if plan:
+            if plan.status != "Active" or not cint(plan.is_sellable):
+                frappe.throw(_("Warranty plan {0} is not active.").format(plan_name))
+            today = getdate(nowdate())
+            if (plan.valid_from and getdate(plan.valid_from) > today) or (
+                plan.valid_to and getdate(plan.valid_to) < today
+            ):
+                frappe.throw(_("Warranty plan {0} is outside its validity period.").format(plan_name))
+            if company and plan.company and plan.company != company:
+                frappe.throw(
+                    _("Warranty plan {0} belongs to another company.").format(plan_name),
+                    frappe.PermissionError,
+                )
+            if not plan.service_item or plan.service_item != item_code:
+                frappe.throw(
+                    _("Warranty plan {0} does not authorize item {1}.").format(
+                        plan_name, item_code
+                    ),
+                    frappe.PermissionError,
+                )
+            if plan.plan_type in _VAS_PLAN_TYPES:
+                authoritative_vas = 1
+            elif plan.plan_type in _WARRANTY_PLAN_TYPES:
+                authoritative_warranty = 1
+            else:
+                frappe.throw(_("Warranty plan {0} has an unsupported plan type.").format(plan_name))
+
+        for fieldname, authoritative in (
+            ("is_vas", authoritative_vas),
+            ("is_warranty", authoritative_warranty),
+        ):
+            if fieldname in item and cint(item.get(fieldname)) != authoritative:
+                frappe.throw(
+                    _("Cart row {0} has a forged or stale {1} classification.").format(
+                        index, fieldname
+                    ),
+                    frappe.PermissionError,
+                )
+
+        item.update(
+            {
+                "item_code": item_code,
+                "qty": qty,
+                "rate": rate,
+                "warranty_plan": plan_name or None,
+                "is_vas": authoritative_vas,
+                "is_warranty": authoritative_warranty,
+            }
+        )
+        if item.get("customer_imei") and not item.get("for_serial_no"):
+            item["for_serial_no"] = str(item["customer_imei"])
+        normalized.append(item)
+
+    max_device_price = max(
+        (
+            flt(item.get("rate"))
+            for item in normalized
+            if not item.get("warranty_plan")
+        ),
+        default=0,
+    )
+    for index, item in enumerate(normalized, start=1):
+        plan_name = item.get("warranty_plan")
+        if not plan_name:
+            continue
+        plan = plans[plan_name]
+        if plan.pricing_mode == "Percentage of Device Price":
+            expected_rate = round(
+                max_device_price * flt(plan.percentage_value) / 100,
+                2,
+            )
+        else:
+            expected_rate = flt(plan.price)
+        if expected_rate <= 0:
+            frappe.throw(
+                _("Warranty plan {0} has no computable server price.").format(plan_name)
+            )
+        if abs(flt(item.get("rate")) - expected_rate) > 0.01:
+            frappe.throw(
+                _("Cart row {0} does not match the configured price for plan {1}.").format(
+                    index, plan_name
+                ),
+                frappe.PermissionError,
+            )
+        if plan.min_device_price and max_device_price < flt(plan.min_device_price):
+            frappe.throw(_("Warranty plan {0} is not valid for this device value.").format(plan_name))
+        if plan.max_device_price and max_device_price > flt(plan.max_device_price):
+            frappe.throw(_("Warranty plan {0} is not valid for this device value.").format(plan_name))
+    return normalized
+
+
+def _cart_hash_rows(items) -> list[dict]:
+    rows = [
+        {
+            "item_code": str(item.get("item_code") or ""),
+            "qty": round(flt(item.get("qty")), 3),
+            "rate": round(flt(item.get("rate")), 2),
+            "warranty_plan": str(item.get("warranty_plan") or ""),
+            "for_item_code": str(item.get("for_item_code") or ""),
+            "serial_no": str(item.get("serial_no") or ""),
+            "for_serial_no": str(item.get("for_serial_no") or ""),
+            "is_warranty": cint(item.get("is_warranty")),
+            "is_vas": cint(item.get("is_vas")),
+        }
+        for item in items
+    ]
+    return sorted(
+        rows,
+        key=lambda row: tuple(str(row[field]) for field in sorted(row)),
+    )
+
+
+def compute_cart_total(items) -> float:
+    """Recompute the billable cart subtotal from canonical server rows."""
+    return round(sum(flt(item.get("qty")) * flt(item.get("rate")) for item in items), 2)
+
+
+def compute_cart_hash(
+    customer,
+    items,
+    *,
+    company: str | None = None,
+    canonical: bool = False,
+) -> str:
+    """Return a stable SHA-256 over every canonical billed row."""
+    normalized = list(items) if canonical else canonicalize_cart_items(items, company=company)
     payload = json.dumps(
         {
             "customer": str(customer or ""),
-            "items": norm_items,
+            "items": _cart_hash_rows(normalized),
+            "billable_total": compute_cart_total(normalized),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -95,8 +327,55 @@ def compute_cart_hash(customer, items) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _get_category_managers_for_canonical_cart(items) -> list:
+    item_codes = sorted(
+        {
+            item["item_code"]
+            for item in items
+            if not item.get("is_warranty") and not item.get("is_vas")
+        }
+    )
+    if not item_codes:
+        return []
+
+    item_categories = frappe.get_all(
+        "Item",
+        filters={"name": ("in", item_codes), "ch_category": ("is", "set")},
+        fields=["name as item_code", "ch_category"],
+    )
+    categories = sorted({row["ch_category"] for row in item_categories})
+    if not categories:
+        return []
+
+    cat_managers = frappe.get_all(
+        "CH Category",
+        filters={"name": ("in", categories), "category_manager": ("is", "set")},
+        fields=["name as category", "category_name", "category_manager as manager"],
+    )
+    manager_ids = sorted({row["manager"] for row in cat_managers if row.get("manager")})
+    manager_names = {
+        row.name: row.full_name or row.name
+        for row in frappe.get_all(
+            "User",
+            filters={"name": ("in", manager_ids)},
+            fields=["name", "full_name"],
+            limit_page_length=len(manager_ids),
+        )
+    } if manager_ids else {}
+    for manager in cat_managers:
+        manager["manager_name"] = manager_names.get(manager["manager"], manager["manager"])
+
+    seen_managers = set()
+    unique_managers = []
+    for manager in cat_managers:
+        if manager["manager"] not in seen_managers:
+            seen_managers.add(manager["manager"])
+            unique_managers.append(manager)
+    return unique_managers
+
+
 @frappe.whitelist()
-def get_category_managers_for_cart(items) -> list:
+def get_category_managers_for_cart(items, company=None) -> list:
     """Given cart items, return the unique category managers required.
 
     Args:
@@ -105,54 +384,14 @@ def get_category_managers_for_cart(items) -> list:
     Returns:
         list of {category, category_name, manager, manager_name}
     """
-    if isinstance(items, str):
-        items = json.loads(items)
-
-    # Collect unique item codes (exclude warranty/VAS service items)
-    item_codes = list({
-        i["item_code"]
-        for i in items
-        if not i.get("is_warranty") and not i.get("is_vas")
-    })
-
-    if not item_codes:
-        return []
-
-    # Get ch_category for each item
-    item_categories = frappe.get_all(
-        "Item",
-        filters={"name": ("in", item_codes), "ch_category": ("is", "set")},
-        fields=["name as item_code", "ch_category"],
-    )
-
-    # Unique categories
-    categories = list({ic["ch_category"] for ic in item_categories})
-    if not categories:
-        return []
-
-    # Get category managers
-    cat_managers = frappe.get_all(
-        "CH Category",
-        filters={"name": ("in", categories), "category_manager": ("is", "set")},
-        fields=["name as category", "category_name", "category_manager as manager"],
-    )
-
-    # Resolve manager names
-    for cm in cat_managers:
-        cm["manager_name"] = frappe.db.get_value("User", cm["manager"], "full_name") or cm["manager"]
-
-    # Deduplicate by manager — same person managing multiple categories needs only one approval
-    seen_managers = set()
-    unique_managers = []
-    for cm in cat_managers:
-        if cm["manager"] not in seen_managers:
-            seen_managers.add(cm["manager"])
-            unique_managers.append(cm)
-
-    return unique_managers
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    frappe.has_permission("Item", "read", throw=True)
+    frappe.has_permission("CH Category", "read", throw=True)
+    canonical_items = canonicalize_cart_items(items, company=company)
+    return _get_category_managers_for_canonical_cart(canonical_items)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def request_free_sale_approval(reason, customer, items, grand_total,
                                 store=None, company=None) -> dict:
     """Create a CH Free Sale Approval request and email category managers.
@@ -168,18 +407,30 @@ def request_free_sale_approval(reason, customer, items, grand_total,
     Returns:
         {approval_name, managers: [{category, manager, manager_name, status}]}
     """
-    if isinstance(items, str):
-        items = json.loads(items)
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+    from ch_pos.api.scope_guard import assert_store_scope
+    from ch_pos.config import require_configured_roles
 
-    managers = get_category_managers_for_cart(items)
+    require_configured_roles(
+        "free_sale_request_roles",
+        defaults=("POS User", "POS Manager", "Sales User"),
+        action=_("request free-sale approval"),
+    )
+
+    if not store:
+        frappe.throw(_("Store is required for a free-sale approval request."))
+    store_company = frappe.db.get_value("CH Store", store, "company")
+    if not store_company or store_company != company:
+        frappe.throw(_("Store and company do not match."), frappe.PermissionError)
+    assert_store_scope(store=store, company=company)
+
+    canonical_items = canonicalize_cart_items(items, company=company)
+    managers = _get_category_managers_for_canonical_cart(canonical_items)
     if not managers:
         frappe.throw(_(
             "No category managers found for the items in this cart. "
             "Please assign category managers in CH Category."
         ))
-
-    # Generate a unique token for email approval links
-    token = secrets.token_urlsafe(32)
 
     doc = frappe.get_doc({
         "doctype": "CH Free Sale Approval",
@@ -189,10 +440,9 @@ def request_free_sale_approval(reason, customer, items, grand_total,
         "company": company or None,
         "customer": customer or None,
         "reason": reason,
-        "grand_total": frappe.utils.flt(grand_total),
-        "cart_snapshot": json.dumps(items, default=str),
-        "cart_hash": compute_cart_hash(customer, items),
-        "approval_token": token,
+        "grand_total": compute_cart_total(canonical_items),
+        "cart_snapshot": json.dumps(canonical_items, default=str),
+        "cart_hash": compute_cart_hash(customer, canonical_items, canonical=True),
         "approvals": [
             {
                 "category": m["category"],
@@ -203,7 +453,9 @@ def request_free_sale_approval(reason, customer, items, grand_total,
             for m in managers
         ],
     })
+    doc.flags.ch_server_issued = True
     doc.insert(ignore_permissions=True)
+    token = doc.approval_token
 
     # Send email to each manager
     for m in managers:
@@ -225,15 +477,21 @@ def request_free_sale_approval(reason, customer, items, grand_total,
 
 def _send_approval_email(approval_doc, manager_info, token):
     """Send approval request email to a category manager."""
-    sig = _manager_link_sig(token, manager_info["manager"])
-    approve_url = get_url(
-        f"/api/method/ch_pos.api.free_sale_api.respond_to_approval"
-        f"?token={token}&manager={manager_info['manager']}&action=approve&sig={sig}"
-    )
-    reject_url = get_url(
-        f"/api/method/ch_pos.api.free_sale_api.respond_to_approval"
-        f"?token={token}&manager={manager_info['manager']}&action=reject&sig={sig}"
-    )
+    base_url = "/api/method/ch_pos.api.free_sale_api.preview_approval"
+    approve_params = {
+        "token": token,
+        "manager": manager_info["manager"],
+        "action": "approve",
+        "sig": _manager_link_sig(token, manager_info["manager"], "approve"),
+    }
+    reject_params = {
+        "token": token,
+        "manager": manager_info["manager"],
+        "action": "reject",
+        "sig": _manager_link_sig(token, manager_info["manager"], "reject"),
+    }
+    approve_url = get_url(f"{base_url}?{urlencode(approve_params)}")
+    reject_url = get_url(f"{base_url}?{urlencode(reject_params)}")
 
     # Build items summary for email
     items = json.loads(approval_doc.cart_snapshot or "[]")
@@ -245,13 +503,18 @@ def _send_approval_email(approval_doc, manager_info, token):
         if not i.get("is_warranty") and not i.get("is_vas")
     )
 
-    subject = _("Congruence Holdings | Free Sale Approval | {0}").format(
-        approval_doc.name,
+    company_label = (
+        frappe.get_cached_value("Company", approval_doc.company, "company_name")
+        or approval_doc.company
+        or _("Our Store")
     )
+    company_subject = str(company_label).replace("\r", " ").replace("\n", " ")
+    company_html = frappe.utils.escape_html(company_label)
+    subject = _("{0} | Free Sale Approval | {1}").format(company_subject, approval_doc.name)
 
     message = f"""
     <div style="font-family:Segoe UI,Arial,sans-serif;max-width:680px;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
-        <div style="background:#0f172a;color:#ffffff;padding:12px 16px;font-weight:600">Congruence Holdings - CH POS Approval Desk</div>
+        <div style="background:#0f172a;color:#ffffff;padding:12px 16px;font-weight:600">{company_html} - POS Approval Desk</div>
         <div style="padding:16px">
         <h3 style="color:#111827;margin-top:0">Free Sale Approval Required</h3>
         <p>A free sale has been requested and needs your approval as
@@ -309,8 +572,43 @@ def _send_approval_email(approval_doc, manager_info, token):
     )
 
 
-@frappe.whitelist(allow_guest=True)
-@rate_limit(limit=20, seconds=300, ip_based=True)
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+@rate_limit(limit=30, seconds=300, methods=["GET"], ip_based=True)
+def preview_approval(token: str, manager: str, action: str, sig: str | None = None) -> None:
+    token = str(token or "").strip()
+    manager = str(manager or "").strip()
+    action = str(action or "").strip()
+    sig = str(sig or "").strip()
+    if not _validate_signed_link(token, manager, action, sig):
+        return
+
+    from frappe.sessions import get_csrf_token
+
+    escape = frappe.utils.escape_html
+    verb = _("Approve") if action == "approve" else _("Reject")
+    color = "#16a34a" if action == "approve" else "#dc2626"
+    form = f"""
+        <p>{_("Please confirm that you want to {0} this free-sale request.").format(verb.lower())}</p>
+        <form method="post" action="/api/method/ch_pos.api.free_sale_api.respond_to_approval">
+            <input type="hidden" name="csrf_token" value="{escape(get_csrf_token())}">
+            <input type="hidden" name="token" value="{escape(token)}">
+            <input type="hidden" name="manager" value="{escape(manager)}">
+            <input type="hidden" name="action" value="{escape(action)}">
+            <input type="hidden" name="sig" value="{escape(sig)}">
+            <button type="submit" style="border:0;border-radius:6px;padding:10px 20px;color:#fff;background:{color};font-weight:600">
+                {verb}
+            </button>
+        </form>
+    """
+    frappe.respond_as_web_page(
+        _("Confirm Free Sale Response"),
+        form,
+        indicator_color="orange",
+    )
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@rate_limit(limit=20, seconds=300, methods=["POST"], ip_based=True)
 def respond_to_approval(token: str, manager: str, action: str, sig: str | None = None) -> None:
     """Handle manager's response from email link.
 
@@ -327,30 +625,22 @@ def respond_to_approval(token: str, manager: str, action: str, sig: str | None =
         manager: Manager's Frappe user/email
         action: 'approve' or 'reject'
     """
-    if action not in ("approve", "reject"):
-        frappe.respond_as_web_page(
-            _("Invalid Request"),
-            _("Action must be 'approve' or 'reject'."),
-            indicator_color="red",
-        )
-        return
-
-    if not token or len(token) < 20:
-        frappe.respond_as_web_page(
-            _("Invalid Request"),
-            _("Missing or invalid approval token."),
-            indicator_color="red",
-        )
+    token = str(token or "").strip()
+    manager = str(manager or "").strip()
+    action = str(action or "").strip()
+    sig = str(sig or "").strip()
+    if not _validate_signed_link(token, manager, action, sig):
         return
 
     # Rate-limit: max 10 attempts per token in a 15-minute window
     _rate_limit_token_attempt(token)
 
-    approval = frappe.get_all(
+    approval = frappe.db.get_value(
         "CH Free Sale Approval",
-        filters={"approval_token": token, "status": "Pending"},
-        fields=["name", "creation"],
-        limit=1,
+        {"approval_token": token, "status": "Pending"},
+        ["name", "creation"],
+        as_dict=True,
+        for_update=True,
     )
     if not approval:
         frappe.respond_as_web_page(
@@ -363,7 +653,7 @@ def respond_to_approval(token: str, manager: str, action: str, sig: str | None =
     # Token TTL — reject links older than configured hours (default 24)
     from frappe.utils import time_diff_in_hours
     ttl_hours = frappe.db.get_single_value("CH POS Control Settings", "approval_token_ttl_hours") or 24
-    age_hours = time_diff_in_hours(now_datetime(), approval[0].creation)
+    age_hours = time_diff_in_hours(now_datetime(), approval.creation)
     if age_hours > ttl_hours:
         frappe.respond_as_web_page(
             _("Expired"),
@@ -373,33 +663,16 @@ def respond_to_approval(token: str, manager: str, action: str, sig: str | None =
         )
         return
 
-    # Per-manager link binding: links issued after this hardening carry a
-    # `sig` that must match. This stops a holder of the shared approval token
-    # from approving as a *different* manager by editing the `manager` param.
-    # Links issued before the upgrade carry no sig and fall back to the
-    # token + pending-row check below; those tokens expire within
-    # `approval_token_ttl_hours` (default 24h), so the fallback is transient.
-    if sig:
-        if not hmac.compare_digest(_manager_link_sig(token, manager), sig):
-            frappe.respond_as_web_page(
-                _("Invalid Link"),
-                _("This approval link is not valid for the specified manager."),
-                indicator_color="red",
-            )
-            return
-
-    doc = frappe.get_doc("CH Free Sale Approval", approval[0].name)
+    doc = frappe.get_doc("CH Free Sale Approval", approval.name)
 
     # Verify the manager matches a pending row — prevents token reuse by a different person
-    found = False
+    target_row = None
     for row in doc.approvals:
         if row.manager == manager and row.status == "Pending":
-            row.status = "Approved" if action == "approve" else "Rejected"
-            row.responded_at = now_datetime()
-            found = True
+            target_row = row
             break
 
-    if not found:
+    if not target_row:
         frappe.respond_as_web_page(
             _("Already Responded"),
             _("You have already responded to this approval request."),
@@ -407,10 +680,30 @@ def respond_to_approval(token: str, manager: str, action: str, sig: str | None =
         )
         return
 
-    # Clear rate-limit counter on successful response
-    frappe.cache().delete_value(f"free_sale_token_attempts:{token}")
+    new_status = "Approved" if action == "approve" else "Rejected"
+    frappe.db.set_value(
+        "CH Free Sale Approval Detail",
+        target_row.name,
+        {"status": new_status, "responded_at": now_datetime()},
+        update_modified=False,
+    )
+    statuses = [new_status if row.name == target_row.name else row.status for row in doc.approvals]
+    parent_status = (
+        "Rejected"
+        if "Rejected" in statuses
+        else "Approved"
+        if statuses and all(status == "Approved" for status in statuses)
+        else "Pending"
+    )
+    frappe.db.set_value(
+        "CH Free Sale Approval",
+        doc.name,
+        "status",
+        parent_status,
+        update_modified=True,
+    )
 
-    doc.update_status()
+    clear_fixed_window("free-sale-approval", token)
 
     # Show confirmation page
     if action == "approve":
@@ -439,6 +732,18 @@ def check_approval_status(approval_name) -> dict:
         {status, approvals: [{category, manager, manager_name, status}]}
     """
     doc = frappe.get_doc("CH Free Sale Approval", approval_name)
+    from ch_pos.api.scope_guard import assert_store_scope
+    from ch_pos.config import is_privileged_user, require_configured_roles
+
+    assert_store_scope(store=doc.store, company=doc.company)
+    managers = {row.manager for row in (doc.approvals or []) if row.manager}
+    if frappe.session.user != doc.requested_by and frappe.session.user not in managers:
+        if not is_privileged_user():
+            require_configured_roles(
+                "free_sale_review_roles",
+                defaults=("POS Manager", "Store Manager", "Sales Manager"),
+                action=_("review another user's free-sale approval"),
+            )
     return {
         "status": doc.status,
         "approvals": [
