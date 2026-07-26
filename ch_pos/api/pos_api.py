@@ -15922,7 +15922,7 @@ def get_customer_full_details(customer, pos_profile=None, **kwargs):
         "name", "customer_name", "customer_group", "customer_type",
         "email_id", "mobile_no",
         "ch_whatsapp_number", "ch_alternate_phone",
-        "pan", "ch_pan_number", "gstin", "tax_id",
+        "pan",  "gstin", "tax_id",
         "customer_primary_address"
     ], as_dict=True)
 
