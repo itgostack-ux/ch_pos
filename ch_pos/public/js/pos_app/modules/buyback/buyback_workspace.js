@@ -1235,6 +1235,48 @@ export class BuybackWorkspace {
 		const order_name = order ? order.name : "";
 		const summary = this._html_order_summary(order);
 
+		// The payout mode the customer chose in the approval wizard drives this
+		// screen. Defaulting the dropdown to Cash regardless is how a customer
+		// who asked for a bank transfer got paid cash at the counter.
+		const chosen_mode = (order && order.customer_payout_mode) || "";
+		const modes = ["Cash", "UPI", "Bank Transfer"];
+		const default_mode = modes.includes(chosen_mode) ? chosen_mode : "Cash";
+
+		// A bank payout runs on the banking rail, not the till: the order sits in
+		// Ready to Pay until the Bank Payment Request is approved and the bank
+		// confirms. Show that as a state, not as another settle button.
+		const awaiting_bank = order
+			&& order.status === "Ready to Pay"
+			&& chosen_mode === "Bank Transfer";
+		if (awaiting_bank) {
+			return `
+				<div class="ch-bb-valuation-banner" style="background:#eff6ff;border-color:#3b82f6">
+					<div class="ch-bb-val-label" style="color:#1d4ed8">
+						<i class="fa fa-university"></i> ${__("Bank Payout Raised — Awaiting Bank Confirmation")}
+					</div>
+					<div class="ch-bb-val-amount" style="color:#1d4ed8">₹${format_number(price)}</div>
+					<div class="ch-bb-val-sub" style="color:#1d4ed8">
+						${__("Finance approves and pushes the payout; the order is marked Paid when the bank confirms it.")}
+					</div>
+				</div>
+				${summary}
+				<div class="ch-bb-info-note" style="margin-top:12px">
+					<i class="fa fa-info-circle"></i>
+					${__("Nothing further is due at the counter. Hand the customer the acknowledgement and check the Bank Payment Request for payout status.")}
+				</div>
+				<div class="ch-bb-actions" style="margin-top:14px;flex-direction:column;gap:8px">
+					<button class="btn btn-default btn-lg ch-bb-act ch-bb-refresh-stage"
+						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:44px">
+						<i class="fa fa-refresh"></i> ${__("Refresh Payout Status")}
+					</button>
+					<button class="btn btn-default ch-bb-print-receipt"
+						data-order="${frappe.utils.escape_html(order_name)}"
+						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:44px">
+						<i class="fa fa-print"></i> ${__("Print Acknowledgement")}
+					</button>
+				</div>`;
+		}
+
 		const indemnity_banner = !indemnity_ok ? `
 			<div class="ch-bb-info-note" style="background:#fffbeb;border-color:#fbbf24;color:#92400e;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px">
 				<div>
@@ -1280,17 +1322,38 @@ export class BuybackWorkspace {
 						<label class="ch-bb-field-label">${__("Payment Method")}</label>
 						<select class="form-control ch-bb-cashback-mode"
 							style="border-radius:var(--pos-radius,8px)"
+							data-customer-choice="${this._esc(chosen_mode)}"
 							${!indemnity_ok ? "disabled" : ""}>
-							<option value="Cash">${__("Cash")}</option>
-							<option value="UPI">${__("UPI")}</option>
-							<option value="Bank Transfer">${__("Bank Transfer")}</option>
+							${modes.map(m => `<option value="${m}" ${m === default_mode ? "selected" : ""}>${__(m)}</option>`).join("")}
 						</select>
+						${chosen_mode
+							? `<div class="ch-bb-desc" style="font-size:11px;margin-top:6px;color:#64748b">
+									<i class="fa fa-user"></i> ${__("Customer chose")} <b>${this._esc(chosen_mode)}</b> —
+									${__("changing it needs a reason and is logged.")}
+								</div>`
+							: ""}
+					</div>
+					<div class="ch-bb-cashback-ref-wrap" style="margin:10px 0;display:${default_mode === "UPI" ? "block" : "none"}">
+						<label class="ch-bb-field-label">${__("UPI Reference / UTR")}</label>
+						<input type="text" class="form-control ch-bb-cashback-ref"
+							style="border-radius:var(--pos-radius,8px)"
+							placeholder="${__("e.g. 431203456789")}"
+							${!indemnity_ok ? "disabled" : ""}>
+						<div class="ch-bb-desc" style="font-size:11px;margin-top:6px;color:#64748b">
+							${__("Required — proof the payout actually left the store.")}
+						</div>
+					</div>
+					<div class="ch-bb-cashback-bank-note ch-bb-info-note"
+						style="margin:10px 0;font-size:11px;display:${default_mode === "Bank Transfer" ? "block" : "none"}">
+						<i class="fa fa-university"></i>
+						${__("Raises a Bank Payment Request for finance to approve and push to the bank. Nothing is paid at the counter.")}
 					</div>
 					<button class="btn btn-warning ch-bb-act ch-bb-cashback"
 						style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:44px"
 						data-price="${price}"
 						${!indemnity_ok ? "disabled title='" + __("Record Indemnity first") + "'" : ""}>
-						<i class="fa fa-money"></i> ${__("Settle as Cashback")}
+						<i class="fa ${default_mode === "Bank Transfer" ? "fa-university" : "fa-money"}"></i>
+						<span class="ch-bb-cashback-label">${default_mode === "Bank Transfer" ? __("Initiate Bank Payout") : __("Settle as Cashback")}</span>
 					</button>
 				</div>
 				<div class="ch-bb-settle-card">
@@ -1776,12 +1839,42 @@ export class BuybackWorkspace {
 			});
 		});
 
-		el.on("click.bbstage", ".ch-bb-approve-instor", () => {
+		el.on("click.bbstage", ".ch-bb-approve-instor", (e) => {
 			if (!data.order || !data.order.name) {
 				frappe.show_alert({ message: __("No Buyback Order found — complete inspection first"), indicator: "orange" });
 				return;
 			}
-			this._show_instore_approval_dialog(data);
+			// Re-read the order before building the wizard. Its steps (and whether
+			// OTP is still owed) are derived from the order status, and the panel
+			// data can be minutes old — resuming on a stale copy is what made the
+			// wizard re-run verification against an order that had already moved on.
+			const btn = $(e.currentTarget);
+			const label = btn.html();
+			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}`);
+			frappe.xcall("ch_pos.api.pos_api.get_pos_buyback_detail", { assessment_name: data.name })
+				.then((fresh) => {
+					btn.prop("disabled", false).html(label);
+					const current = fresh || data;
+					if (!current.order || !current.order.name) {
+						frappe.show_alert({ message: __("No Buyback Order found — complete inspection first"), indicator: "orange" });
+						return;
+					}
+					this._current_data = current;
+					const status = current.order.status;
+					if (["Paid", "Closed", "Cancelled", "Rejected"].includes(status)) {
+						frappe.msgprint({
+							title: __("Order Already {0}", [status]),
+							message: __("Buyback Order {0} is already {1} — customer approval details can no longer be changed.", [current.order.name, status]),
+							indicator: "orange",
+						});
+						this._reload();
+						return;
+					}
+					this._show_instore_approval_dialog(current);
+				})
+				.catch(() => {
+					btn.prop("disabled", false).html(label);
+				});
 		});
 
 		// Store-initiated price negotiation routes to the configured approver, who
@@ -1826,22 +1919,91 @@ export class BuybackWorkspace {
 			d.show();
 		});
 
+		// Keep the settle card honest about the selected rail: UPI needs a UTR,
+		// Bank Transfer is a payout request rather than a counter payment.
+		el.on("change.bbstage", ".ch-bb-cashback-mode", (e) => {
+			const mode = $(e.currentTarget).val();
+			el.find(".ch-bb-cashback-ref-wrap").toggle(mode === "UPI");
+			el.find(".ch-bb-cashback-bank-note").toggle(mode === "Bank Transfer");
+			el.find(".ch-bb-cashback-label").text(
+				mode === "Bank Transfer" ? __("Initiate Bank Payout") : __("Settle as Cashback")
+			);
+			el.find(".ch-bb-cashback i").attr(
+				"class", mode === "Bank Transfer" ? "fa fa-university" : "fa fa-money"
+			);
+		});
+
 		el.on("click.bbstage", ".ch-bb-cashback", (e) => {
 			const price = flt($(e.currentTarget).data("price"));
-			const payment_method = el.find(".ch-bb-cashback-mode").val();
+			const $mode = el.find(".ch-bb-cashback-mode");
+			const payment_method = $mode.val();
+			const customer_choice = ($mode.data("customer-choice") || "").toString();
+			const transaction_reference = (el.find(".ch-bb-cashback-ref").val() || "").trim();
 			const btn = el.find(".ch-bb-cashback");
-			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i>`);
-			frappe.xcall("ch_pos.api.pos_api.pos_settle_buyback_cashback", {
-				order_name: data.order.name, payment_method,
-			}).then(() => {
+			const restore = btn.html();
+
+			if (payment_method === "UPI" && !transaction_reference) {
 				frappe.show_alert({
-					message: __("Cashback ₹{0} recorded via {1}", [format_number(price), payment_method]),
-					indicator: "green",
+					message: __("Enter the UPI reference / UTR before settling"),
+					indicator: "orange",
 				});
-				this._reload();
-			}).catch(() => {
-				btn.prop("disabled", false).html(`<i class="fa fa-money"></i> ${__("Settle as Cashback")}`);
-			});
+				el.find(".ch-bb-cashback-ref").focus();
+				return;
+			}
+
+			const settle = (override_reason) => {
+				btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i>`);
+				frappe.xcall("ch_pos.api.pos_api.pos_settle_buyback_cashback", {
+					order_name: data.order.name,
+					payment_method,
+					transaction_reference: transaction_reference || null,
+					override_reason: override_reason || null,
+				}).then((res) => {
+					if (res && res.awaiting_bank) {
+						if (res.payout_initiated) {
+							frappe.msgprint({
+								title: __("Bank Payout Raised"),
+								message: __("Bank Payment Request {0} created for ₹{1}. Finance must approve and push it to the bank — the order is marked Paid only when the bank confirms.", [res.bpr, format_number(price)]),
+								indicator: "blue",
+							});
+						} else {
+							frappe.msgprint({
+								title: __("Payout Not Raised"),
+								message: __("The order is Ready to Pay, but the Bank Payment Request could not be created: {0}", [res.payout_error || __("unknown error")]),
+								indicator: "orange",
+							});
+						}
+					} else {
+						frappe.show_alert({
+							message: __("Payout ₹{0} recorded via {1}", [format_number(price), payment_method]),
+							indicator: "green",
+						});
+						if (res && res.close_deferred) {
+							frappe.show_alert({
+								message: __("Order stays Paid pending closure: {0}", [res.close_deferred]),
+								indicator: "orange",
+							});
+						}
+					}
+					this._reload();
+				}).catch(() => {
+					btn.prop("disabled", false).html(restore);
+				});
+			};
+
+			// Paying by a rail the customer did not choose is an override, not a
+			// silent default — capture why, the server logs it to the audit trail.
+			if (customer_choice && customer_choice !== payment_method) {
+				frappe.prompt([{
+					fieldname: "override_reason",
+					fieldtype: "Small Text",
+					label: __("Reason for changing payout mode"),
+					reqd: 1,
+					description: __("Customer chose {0}. Explain why the payout is being made by {1}.", [customer_choice, payment_method]),
+				}], (v) => settle(v.override_reason), __("Payout Mode Override"), __("Confirm & Settle"));
+				return;
+			}
+			settle(null);
 		});
 
 		el.on("click.bbstage", ".ch-bb-exchange", (e) => {

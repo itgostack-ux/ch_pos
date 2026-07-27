@@ -13514,6 +13514,21 @@ def pos_approve_customer_buyback(order_name, method="In-Store Signature", otp_co
         action=_("record customer Buyback approval"),
     )
 
+    # Terminal-state guard. Approval evidence — KYC identity, photos and the
+    # payout bank account — is what the payment was authorised against, so it
+    # must not be rewritten once the order has settled or been closed out.
+    # (The settlement endpoint has always been idempotent for these states;
+    # this one silently accepted the write.) Amending settled payout details
+    # is an exception-request/credit-note decision, not a POS re-submit.
+    if doc.status in ("Paid", "Closed", "Cancelled", "Rejected"):
+        frappe.throw(
+            _("Buyback Order {0} is already {1}. Customer approval details can no "
+              "longer be changed — raise an exception request to amend a settled order.").format(
+                frappe.bold(doc.name), frappe.bold(doc.status)
+            ),
+            title=_("Order Already {0}").format(doc.status),
+        )
+
     def _normalize_kyc_type(id_type):
         raw = (id_type or "").strip()
         if not raw:
@@ -13819,11 +13834,27 @@ def pos_send_approval_link(order_name) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
-    """Mark a buyback order as settled via direct cashback to customer.
+def pos_settle_buyback_cashback(order_name, payment_method="Cash",
+                                transaction_reference=None, override_reason=None) -> dict:
+    """Settle a buyback payout from POS.
 
-    Records a payment entry on the order, marks it Paid, then auto-closes.
-    Idempotent — if already Paid/Closed, returns current state.
+    Payout rails are deliberately split, the way an ERP separates a till
+    disbursement from a treasury payment run:
+
+    * ``Cash``          — paid from the till. Recorded, marked Paid and closed
+                          inline; the cash leg is its own evidence.
+    * ``UPI``           — paid from the store handle. Recorded inline too, but
+                          a real UTR / UPI reference is mandatory (no
+                          system-generated placeholder stands in for proof
+                          that money left the store).
+    * ``Bank Transfer`` — never settled at the counter. The order advances to
+                          "Ready to Pay", which raises a Bank Payment Request
+                          (maker). Finance approves and pushes it to the bank
+                          (checker), and the order only becomes Paid when the
+                          bank confirms and the BPR reconciles back onto it.
+
+    Idempotent — if the order is already Paid/Closed the current state is
+    returned untouched.
     """
     frappe.has_permission("Buyback Order", "write", throw=True)
     require_configured_roles(
@@ -13836,17 +13867,17 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     payout_mode = (payment_method or "Cash").strip()
     if payout_mode not in ("Cash", "UPI", "Bank Transfer"):
         frappe.throw(frappe._("Invalid buyback payout method: {0}").format(payout_mode))
-    payment_method = _resolve_buyback_payment_mode(payout_mode)
 
     # Idempotency: already settled
     if doc.status in ("Paid", "Closed"):
-        return {
-            "order_name": doc.name,
-            "status": doc.status,
-            "final_price": flt(doc.final_price),
-            "payment_method": payment_method,
-            "payout_mode": payout_mode,
-        }
+        return _buyback_settlement_state(doc, payout_mode)
+
+    if doc.status in ("Cancelled", "Rejected"):
+        frappe.throw(
+            frappe._("Buyback Order {0} is {1} and cannot be settled.").format(
+                frappe.bold(doc.name), frappe.bold(doc.status)
+            )
+        )
 
     if not doc.customer_approved:
         # OTP verification by the customer on their registered mobile is itself a
@@ -13860,11 +13891,55 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
         else:
             frappe.throw(frappe._("Customer must approve the final price before cashback settlement."))
 
+    # The payout mode the customer chose and confirmed in the approval wizard is
+    # a commitment, not a default the counter may quietly change. Paying them by
+    # another rail needs a stated reason, and it lands in the audit trail.
+    from buyback.utils import log_audit
+
+    customer_choice = (doc.customer_payout_mode or "").strip()
+    override_reason = (override_reason or "").strip()
+    if customer_choice and customer_choice != payout_mode:
+        if not override_reason:
+            frappe.throw(
+                frappe._("The customer asked to be paid by {0}. Enter a reason to settle by {1} instead.").format(
+                    frappe.bold(customer_choice), frappe.bold(payout_mode)
+                ),
+                title=frappe._("Payout Mode Override"),
+            )
+        log_audit(
+            f"Payout Mode Override — {customer_choice} → {payout_mode}: {override_reason}",
+            "Buyback Order", doc.name,
+            old_value={"customer_payout_mode": customer_choice},
+            new_value={"customer_payout_mode": payout_mode, "reason": override_reason},
+        )
+
     from frappe.utils import now_datetime
     doc.settlement_type = "Buyback"
     doc.customer_payout_mode = payout_mode
     doc.customer_payout_updated_at = now_datetime()
     doc.customer_payout_updated_by = frappe.session.user
+    doc.save()
+
+    # Advance the state machine before any money moves. mark_paid() only accepts
+    # an order in "Ready to Pay"; without this the settle button threw
+    # "Only an order in Ready to Pay can be marked Paid" from every state the
+    # settle screen is reachable from.
+    doc.mark_ready_to_pay()
+    doc.reload()
+
+    if payout_mode == "Bank Transfer":
+        return _initiate_buyback_bank_payout(doc, payout_mode)
+
+    txn_ref = (transaction_reference or "").strip()
+    if payout_mode != "Cash" and not txn_ref:
+        frappe.throw(
+            frappe._("A transaction reference (UTR / UPI reference) is required for {0} payouts.").format(
+                frappe.bold(payout_mode)
+            ),
+            title=frappe._("Reference Required"),
+        )
+    payment_method = _resolve_buyback_payment_mode(payout_mode)
+    txn_ref = txn_ref or f"POS-Cashback-{doc.name}"
 
     # Avoid duplicate payments. The order may already have payment rows from
     # another flow (customer-portal payout capture, manual entry, prior call
@@ -13874,7 +13949,6 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     already_paid = sum(flt(p.amount) for p in (doc.payments or []))
     remaining = flt(final_price - already_paid)
 
-    txn_ref = f"POS-Cashback-{doc.name}"
     already_exists = any(p.transaction_reference == txn_ref for p in (doc.payments or []))
     if not already_exists and remaining > 0.01:
         doc.append("payments", {
@@ -13890,10 +13964,17 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     if doc.payment_status == "Paid":
         doc.mark_paid()
 
-    # Auto-close after successful cashback — triggers lifecycle update
+    # Auto-close through the controller so the finance gates (JE + SE posted,
+    # payout evidence present) actually run. Closure is best-effort: a paid
+    # order that cannot close yet stays Paid for finance to close after
+    # reconciliation rather than being force-flipped past its own controls.
+    close_error = None
     if doc.status == "Paid":
-        doc.status = "Closed"
-        doc.save()
+        try:
+            doc.close()
+        except Exception as exc:
+            close_error = _clean_error_message(exc)
+            frappe.log_error(frappe.get_traceback(), f"Buyback auto-close deferred for {doc.name}")
 
     try:
         from ch_pos.audit import log_business_event
@@ -13907,13 +13988,68 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash") -> dict:
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Buyback cashback audit failed")
 
+    out = _buyback_settlement_state(doc, payout_mode)
+    out["payment_method"] = payment_method
+    out["transaction_reference"] = txn_ref
+    if close_error:
+        out["close_deferred"] = close_error
+    return out
+
+
+def _clean_error_message(exc) -> str:
+    """Flatten a frappe throw into a single plain-text line for API payloads."""
+    message = getattr(exc, "message", None) or str(exc)
+    try:
+        return frappe.utils.strip_html(str(message)).strip()
+    except Exception:
+        return str(message)
+
+
+def _buyback_settlement_state(doc, payout_mode: str) -> dict:
+    """Common settlement response payload."""
     return {
         "order_name": doc.name,
         "status": doc.status,
         "final_price": flt(doc.final_price),
-        "payment_method": payment_method,
+        "payment_status": doc.payment_status,
         "payout_mode": payout_mode,
     }
+
+
+def _initiate_buyback_bank_payout(doc, payout_mode: str) -> dict:
+    """Raise the banking-rail payout for a Ready to Pay Buyback Order.
+
+    Reaching "Ready to Pay" already fires ch_payments' auto-create hook (the
+    SAP F110-style payment-run trigger), so in the normal case the Bank Payment
+    Request exists by the time we look. If it does not, ask for it explicitly
+    so the real reason surfaces to the cashier instead of being swallowed.
+
+    A missing BPR is not fatal: the order legitimately waits in "Ready to Pay"
+    for finance to raise and approve the payout. Nothing is marked Paid here —
+    only the bank's confirmation does that, via BPR reconciliation.
+    """
+    from buyback.payment_api import _find_existing_bpr
+
+    payout_error = None
+    bpr = _find_existing_bpr(doc.name)
+    if not bpr:
+        try:
+            from buyback.payment_api import initiate_payout
+
+            bpr = (initiate_payout(buyback_order=doc.name) or {}).get("bpr")
+        except Exception as exc:
+            payout_error = _clean_error_message(exc)
+            frappe.log_error(frappe.get_traceback(), f"Buyback bank payout not raised for {doc.name}")
+
+    out = _buyback_settlement_state(doc, payout_mode)
+    out.update({
+        "payout_rail": "Bank Payment Request",
+        "bpr": bpr,
+        "payout_initiated": bool(bpr),
+        "payout_error": payout_error,
+        "awaiting_bank": True,
+    })
+    return out
 
 
 def _resolve_buyback_payment_mode(payout_mode: str) -> str:

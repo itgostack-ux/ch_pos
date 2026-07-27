@@ -137,7 +137,20 @@ def run():
         update_modified=False,
     )
 
-    settled = pos_settle_buyback_cashback(order_name=order_name, payment_method="UPI")
+    # Non-cash payouts must carry real settlement evidence — a UTR / UPI
+    # reference, never a system-generated placeholder.
+    upi_reference = "UTR-POS-REFLECTION-001"
+    try:
+        pos_settle_buyback_cashback(order_name=order_name, payment_method="UPI")
+        raise AssertionError("UPI settlement was accepted without a transaction reference")
+    except frappe.ValidationError:
+        pass
+
+    settled = pos_settle_buyback_cashback(
+        order_name=order_name,
+        payment_method="UPI",
+        transaction_reference=upi_reference,
+    )
     assert settled.get("status") in ("Paid", "Closed"), f"Unexpected settlement status: {settled}"
 
     order.reload()
@@ -146,7 +159,7 @@ def run():
     assert any(
         frappe.db.exists("Mode of Payment", p.payment_method)
         and flt(p.amount) > 0
-        and (p.transaction_reference or "").startswith("POS-Cashback-")
+        and (p.transaction_reference or "") == upi_reference
         for p in (order.payments or [])
     ), (
         "POS settlement did not create a valid payment row"
