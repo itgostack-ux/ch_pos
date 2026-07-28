@@ -762,6 +762,20 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
     ],
+    # Address — "Area / Locality" captured by the POS customer dialogs.
+    # ERPNext's Address has no locality field, so without this the value typed
+    # into the New/Edit Customer form was silently discarded on save and always
+    # came back blank.
+    "Address": [
+        {
+            "fieldname": "custom_area",
+            "fieldtype": "Data",
+            "label": "Area / Locality",
+            "insert_after": "address_line2",
+            "description": "Neighbourhood / locality, as captured at the POS counter.",
+            "module": "POS Core",
+        },
+    ],
     # Company — gift card liability account for GL posting
     "Company": [
         {

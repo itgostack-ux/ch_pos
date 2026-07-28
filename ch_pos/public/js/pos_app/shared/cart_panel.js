@@ -13,6 +13,19 @@
 import { PosState, EventBus } from "../state.js";
 import { format_number, assert_india_phone } from "./helpers.js";
 
+/**
+ * Frappe's Link control appends synthetic action rows to the Awesomplete list
+ * ("Create a new Customer", "Advanced Search", the filter hint). Their `value`
+ * is a sentinel — `create_new__link_option`, `advanced_search__link_option`,
+ * `filter_description__link_option` — never a real docname. The
+ * `awesomplete-selectcomplete` event still carries that sentinel, so anything
+ * reading `e.originalEvent.text.value` must drop it or we end up calling POS
+ * APIs with a customer named "create_new__link_option" (→ 404 "Not found").
+ */
+function is_link_option_sentinel(val) {
+	return typeof val === "string" && val.indexOf("__link_option") !== -1;
+}
+
 export class CartPanel {
 	constructor(wrapper) {
 		this.wrapper = wrapper;
@@ -358,7 +371,11 @@ export class CartPanel {
 		// Belt-and-suspenders: awesomplete fires reliably on dropdown pick
 		if (this.customer_field.$input) {
 			this.customer_field.$input.on("awesomplete-selectcomplete", (e) => {
-				const val = e.originalEvent?.text?.value || this.customer_field.get_value();
+				const picked = e.originalEvent?.text?.value;
+				// "+ Create a new Customer" / "Advanced Search" rows — let the
+				// Link control run its own action, never treat them as a docname.
+				if (is_link_option_sentinel(picked)) return;
+				const val = picked || this.customer_field.get_value();
 				if (val) this._commit_customer(val);
 			});
 		}
@@ -387,6 +404,15 @@ export class CartPanel {
 
 	/** Actually persist a customer selection to state & UI */
 	_commit_customer(val) {
+		// Belt-and-suspenders: a stale change handler can still hand us the
+		// Awesomplete action sentinel. Committing it would poison PosState and
+		// fire customer APIs with a docname that does not exist.
+		if (is_link_option_sentinel(val)) {
+			if (this.customer_field && is_link_option_sentinel(this.customer_field.get_value())) {
+				this.customer_field.set_value("");
+			}
+			return;
+		}
 		if (val === PosState.customer) return;
 		PosState.customer = val;
 		PosState.customer_info = null;

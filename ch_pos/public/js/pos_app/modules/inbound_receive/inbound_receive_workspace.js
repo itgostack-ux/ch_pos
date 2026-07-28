@@ -17,6 +17,7 @@
  * never re-implement barcode / IMEI generation logic on the client.
  */
 import { PosState, EventBus } from "../../state.js";
+import { wh_label } from "../../shared/helpers.js";
 
 const API = "ch_pos.api.pos_inbound";
 
@@ -165,7 +166,7 @@ export class InboundReceiveWorkspace {
 	_pr_card(pr) {
 		const name = frappe.utils.escape_html(pr.name);
 		const supplier = frappe.utils.escape_html(pr.supplier_name || pr.supplier || "");
-		const wh = frappe.utils.escape_html(pr.set_warehouse || "");
+		const wh = wh_label(pr.set_warehouse);
 		const pending = parseInt(pr.pending_generate_rows || 0, 10) || 0;
 		const pending_badge = pending > 0
 			? `<span class="ch-pos-badge ch-pos-badge-warning">${__("{0} rows need Generate", [pending])}</span>`
@@ -208,7 +209,7 @@ export class InboundReceiveWorkspace {
 	_po_card(po) {
 		const name = frappe.utils.escape_html(po.name);
 		const supplier = frappe.utils.escape_html(po.supplier_name || po.supplier || "");
-		const wh = frappe.utils.escape_html(po.set_warehouse || "");
+		const wh = wh_label(po.set_warehouse);
 		const per = parseFloat(po.per_received || 0);
 		const per_badge = per > 0
 			? `<span class="ch-pos-badge ch-pos-badge-info">${__("Received {0}%", [per.toFixed(0)])}</span>`
@@ -305,7 +306,7 @@ export class InboundReceiveWorkspace {
 	_row_html(row) {
 		const idx = row.idx;
 		const item = frappe.utils.escape_html(row.item_name || row.item_code || "");
-		const wh = frappe.utils.escape_html(row.warehouse || "");
+		const wh = wh_label(row.warehouse);
 		const type_badge = row.custom_type
 			? `<span class="ch-pos-badge ch-pos-badge-info">${frappe.utils.escape_html(row.custom_type)}</span>`
 			: `<span class="ch-pos-badge ch-pos-badge-muted">${__("Non-Serial")}</span>`;

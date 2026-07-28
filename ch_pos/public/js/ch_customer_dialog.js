@@ -386,11 +386,12 @@
 				  default: "auto",
 				  description: __("Customer preference. Auto tries WhatsApp + SMS together.") },
 				{ fieldname: "otp_code", fieldtype: "Data", label: __("OTP Code"),
-				  description: __("Enter the 6-digit code received on the selected channel. Verified automatically.") },
+				  description: __("Enter the 6-digit code, then click Verify OTP.") },
 				{ fieldtype: "Column Break" },
 				{ fieldname: "otp_actions", fieldtype: "HTML", options: `
 					<div class="ch-customer-otp-actions" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding-top:2px">
 						<button type="button" class="btn btn-default btn-xs ch-send-customer-otp" style="display:none">${__("Send OTP")}</button>
+						<button type="button" class="btn btn-primary btn-xs ch-verify-customer-otp"><i class="fa fa-check"></i> ${__("Verify OTP")}</button>
 					</div>` },
 				{ fieldname: "otp_status", fieldtype: "HTML", options: "" },
 
@@ -504,7 +505,11 @@
 							if (res && res.valid) {
 								otp_verified_number = whatsapp;
 								otp_verification_token = res.verification_token || "";
-								d.fields_dict.otp_status.$wrapper.html(status_html(__("WhatsApp verified"), "#15803d"));
+								d.fields_dict.otp_status.$wrapper.html(status_html(
+									res.shadow_live
+										? (res.message || __("Verified via shadow-live master OTP"))
+										: __("WhatsApp verified"),
+									"#15803d"));
 							} else {
 								const msg = (res && res.message) || __("Invalid OTP");
 								d.fields_dict.otp_status.$wrapper.html(status_html(msg, "#b91c1c"));
@@ -714,6 +719,17 @@
 				});
 				otp_verified_number = "";
 				otp_verification_token = "";
+				// Shadow-live pilot: nothing is sent to the customer, the
+				// counter clears the gate with the master OTP instead. Saying
+				// "OTP sent" here would have staff waiting for a message that
+				// is never coming.
+				if (res && res.shadow_live) {
+					const shadow_msg = res.message
+						|| __("Shadow live — customer messaging is suppressed. Enter the master OTP.");
+					d.fields_dict.otp_status.$wrapper.html(status_html(shadow_msg, "#b45309"));
+					frappe.show_alert({ message: shadow_msg, indicator: "orange" });
+					return;
+				}
 				const channels = [];
 				if (res && res.sent_whatsapp) channels.push(__("WhatsApp"));
 				if (res && res.sent_sms) channels.push(__("SMS"));
@@ -732,7 +748,7 @@
 			}
 		};
 
-		const verify_otp_handler = () => {
+		const verify_otp_handler = async () => {
 			const whatsapp = input_value("whatsapp_number");
 			const otp_code = input_value("otp_code");
 			if (!whatsapp || !assert_india_phone(input_el("whatsapp_number"), whatsapp)) return;
@@ -740,25 +756,34 @@
 				frappe.show_alert({ message: __("Enter OTP code"), indicator: "orange" });
 				return;
 			}
-			frappe.xcall("ch_pos.api.pos_api.verify_customer_whatsapp_otp", {
-				mobile_no: whatsapp,
-				otp_code,
-			}).then((res) => {
+			const button = d.$wrapper.find(".ch-verify-customer-otp").get(0);
+			if (button) button.disabled = true;
+			d.fields_dict.otp_status.$wrapper.html(status_html(__("Verifying OTP..."), "#2563eb"));
+			try {
+				const res = await frappe.xcall("ch_pos.api.pos_api.verify_customer_whatsapp_otp", {
+					mobile_no: whatsapp,
+					otp_code,
+				});
 				if (res && res.valid) {
 					otp_verified_number = whatsapp;
 					otp_verification_token = res.verification_token || "";
-					d.fields_dict.otp_status.$wrapper.html(status_html(__("WhatsApp verified"), "#15803d"));
-					frappe.show_alert({ message: __("WhatsApp verified"), indicator: "green" });
+					const ok_msg = res.shadow_live
+						? (res.message || __("Verified via shadow-live master OTP"))
+						: __("WhatsApp verified");
+					d.fields_dict.otp_status.$wrapper.html(status_html(ok_msg, "#15803d"));
+					frappe.show_alert({ message: ok_msg, indicator: "green" });
 				} else {
 					otp_verified_number = "";
 					otp_verification_token = "";
 					d.fields_dict.otp_status.$wrapper.html(status_html((res && res.message) || __("Invalid OTP"), "#b91c1c"));
 				}
-			}).catch((err) => {
+			} catch (err) {
 				otp_verified_number = "";
 				otp_verification_token = "";
 				d.fields_dict.otp_status.$wrapper.html(status_html(otp_error_message(err, __("OTP verification failed")), "#b91c1c"));
-			});
+			} finally {
+				if (button) button.disabled = false;
+			}
 		};
 
 		const bind_send_otp_button = () => {
@@ -870,6 +895,13 @@
 				event.stopImmediatePropagation();
 				d.fields_dict.otp_status.$wrapper.html(status_html(__("Checking customer..."), "#2563eb"));
 				send_otp_handler();
+				return false;
+			})
+			.on("click.ch_customer_dialog_otp", ".ch-verify-customer-otp", (event) => {
+				if (!$.contains(d.$wrapper.get(0), event.currentTarget)) return;
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				verify_otp_handler();
 				return false;
 			});
 		d.$wrapper.one("hidden.bs.modal", () => {

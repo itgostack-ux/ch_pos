@@ -16,7 +16,7 @@
  * already exist in ch_pos/api/pos_api.py; this workspace only renders UI.
  */
 import { PosState, EventBus } from "../../state.js";
-import { format_number } from "../../shared/helpers.js";
+import { format_number, wh_label } from "../../shared/helpers.js";
 
 export class PrebookWorkspace {
 	constructor() {
@@ -1092,7 +1092,7 @@ export class PrebookWorkspace {
 					${qty_pending_rows.map((r) => {
 						const label = frappe.utils.escape_html(r.item_name || r.item_code || "");
 						const code = frappe.utils.escape_html(r.item_code || "");
-						const wh = frappe.utils.escape_html(r.warehouse || "");
+						const wh = wh_label(r.warehouse);
 						return `<div style="margin:2px 0;">• <b>${label}</b> <span class="text-muted">(${code})</span> — ${__("Warehouse")}: ${wh} · ${__("Need")}: ${cint(r.qty)} · ${__("On-hand")}: ${cint(r.available)} · <span style="color:#b91c1c;">${__("Backorder")}: ${cint(r.pending)}</span></div>`;
 					}).join("")}
 				</div>

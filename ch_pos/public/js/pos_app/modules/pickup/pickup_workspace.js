@@ -21,7 +21,7 @@
  * and item mapping behave identically to billing from Desk.
  */
 import { PosState, EventBus } from "../../state.js";
-import { format_number } from "../../shared/helpers.js";
+import { format_number, wh_label } from "../../shared/helpers.js";
 import { print_invoice_pdf } from "../../shared/print_helper.js";
 
 export class PickupWorkspace {
@@ -529,7 +529,7 @@ export class PickupWorkspace {
 								<td>${frappe.utils.escape_html(r.customer_name)}<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div></td>
 								<td>${frappe.utils.escape_html(r.sales_order)}</td>
 								<td>${r.delivery_date || "—"}${overdue}</td>
-								<td>${frappe.utils.escape_html(r.warehouse || "—")}</td>
+								<td>${wh_label(r.warehouse, "—")}</td>
 								<td>${action_btn}</td>
 							</tr>
 						`;

@@ -5,7 +5,7 @@
  * sales, returns, services, buybacks, warranty status.
  */
 import { PosState, EventBus } from "../../state.js";
-import { format_number } from "../../shared/helpers.js";
+import { format_number, wh_label } from "../../shared/helpers.js";
 
 export class ImeiWorkspace {
 	constructor() {
@@ -124,7 +124,7 @@ export class ImeiWorkspace {
 					</div>
 					<div style="display:flex;gap:var(--pos-space-lg);flex-wrap:wrap;margin-top:12px;font-size:var(--pos-fs-sm)">
 						${d.brand ? `<span><b>${__("Brand")}:</b> ${frappe.utils.escape_html(d.brand)}</span>` : ""}
-						${d.warehouse ? `<span><b>${__("Location")}:</b> ${frappe.utils.escape_html(d.warehouse)}</span>` : ""}
+						${d.warehouse ? `<span><b>${__("Location")}:</b> ${wh_label(d.warehouse)}</span>` : ""}
 						${d.customer ? `<span><b>${__("Owner")}:</b> ${frappe.utils.escape_html(d.customer_name || d.customer)}</span>` : ""}
 						${d.amc_expiry_date ? `<span><b>${__("AMC Expiry")}:</b> ${frappe.datetime.str_to_user(d.amc_expiry_date)}</span>` : ""}
 					</div>
