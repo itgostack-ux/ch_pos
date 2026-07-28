@@ -166,6 +166,12 @@ export class ContextualToolbar {
 
 	/** Barcode scanner — physical scanners send rapid keystrokes + Enter */
 	_bind_scanner() {
+		// IDEMPOTENT BIND — a fresh ContextualToolbar is constructed on every
+		// entry into sell mode (SellWorkspace.render). jQuery ``.on`` with a
+		// namespace APPENDS, so without this ``.off`` each re-entry stacked
+		// another document-level scanner handler: one physical scan then fired
+		// _handle_scan N times and pushed the SAME IMEI into the cart N times.
+		$(document).off("keydown.ch_pos_scanner");
 		$(document).on("keydown.ch_pos_scanner", (e) => {
 			const tag = (e.target.tagName || "").toLowerCase();
 			if (tag === "input" || tag === "textarea" || tag === "select") return;
@@ -185,9 +191,16 @@ export class ContextualToolbar {
 	}
 
 	_handle_scan(barcode) {
+		const code = String(barcode || "").trim();
+		if (!code) return;
+
+		// NOTE: repeat scans are deliberately NOT suppressed here. Scanning the
+		// same PRODUCT barcode twice is how a cashier bills two units of a
+		// non-serialized accessory. Repeat scans of the same SERIAL are refused
+		// downstream by CartService._claim_serial, which can tell the two apart.
 		frappe.call({
 			method: "ch_pos.api.pos_api.scan_barcode",
-			args: { barcode, pos_profile: PosState.pos_profile },
+			args: { barcode: code, pos_profile: PosState.pos_profile },
 			callback: (r) => {
 				if (r.message && r.message.item_code) {
 					const data = r.message;

@@ -9,7 +9,7 @@
  * The sidebar simply renders what the server says — no client-side heuristics.
  */
 import { PosState, EventBus } from "../state.js";
-import { validate_india_phone } from "../shared/helpers.js";
+import { validate_india_phone, wh_label } from "../shared/helpers.js";
 
 const MODE_SECTIONS = [
 	{
@@ -170,7 +170,11 @@ export class Sidebar {
 			|| access_data?.own_executive;
 		const exec_name = exec ? exec.executive_name : (frappe.session.user_fullname || frappe.session.user);
 		const initials = (exec_name || "U").split(" ").map(w => w[0]).join("").substring(0, 2).toUpperCase();
-		const store = PosState.warehouse || PosState.pos_profile || "";
+		// Store identity, not bin identity — the cashier only ever sells from
+		// the Sellable bin, so "GG-KELLYS-Sellable - BM" reads as "Gogizmo - Kellys".
+		// wh_label() returns escaped markup, hence no second escape below.
+		const store = wh_label(PosState.warehouse)
+			|| frappe.utils.escape_html(PosState.pos_profile || "");
 		const role_badge = exec ? `<span class="sidebar-role-badge sidebar-role-${(exec.role || "").toLowerCase().replace(/\s+/g, "-")}">${frappe.utils.escape_html(exec.role)}</span>` : "";
 		const company_badge = PosState.active_company
 			? `<span class="sidebar-company-badge">${frappe.utils.escape_html(PosState.active_company)}</span>`
@@ -181,7 +185,7 @@ export class Sidebar {
 				<div class="store-info">
 					<div class="store-avatar">${frappe.utils.escape_html(initials)}</div>
 					<div class="store-detail">
-						<span class="store-name">${frappe.utils.escape_html(store)}</span>
+						<span class="store-name">${store}</span>
 						<span class="store-operator">${frappe.utils.escape_html(exec_name)} ${role_badge}</span>
 						${company_badge}
 					</div>

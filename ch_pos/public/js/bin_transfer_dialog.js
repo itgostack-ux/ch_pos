@@ -198,7 +198,7 @@ async function refresh_summary(dlg) {
 				(b) => `
 				<tr>
 					<td>${frappe.utils.escape_html(b.bin_type)}</td>
-					<td>${frappe.utils.escape_html(b.warehouse)}</td>
+					<td>${window.ch_wh_label_html ? ch_wh_label_html(b.warehouse) : frappe.utils.escape_html(b.warehouse)}</td>
 					<td class="text-right">${b.qty}</td>
 					<td class="text-right">${b.items}</td>
 				</tr>`,

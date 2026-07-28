@@ -69,18 +69,13 @@ class StoreHub {
 		const store = this.store_field?.get_value() || "";
 		const from_date = this.from_date_field?.get_value() || "";
 		const to_date = this.to_date_field?.get_value() || "";
-		this.$root.html(`<div class="hub-loading"><i class="fa fa-spinner fa-spin"></i> ${__("Loading Store Hub...")}</div>`);
-		frappe.xcall("ch_pos.pos_core.page.store_hub.store_hub_api.get_store_hub_data",
-			{ company, store, from_date, to_date })
-			.then((data) => this._render(data))
-			.catch(() => {
-				this.$root.html(`<div class="hub-loading text-danger">${__("Failed to load data. Please try again.")}</div>`);
-			});
+		return ch_erp15.hub_refresh.run(this,
+			() => frappe.xcall("ch_pos.pos_core.page.store_hub.store_hub_api.get_store_hub_data", { company, store, from_date, to_date }),
+			(data) => this._render(data), { label: "Store Hub" });
 	}
 
 	_start_auto_refresh() {
-		this._timer = setInterval(() => this.refresh(), 60000);
-		$(this.page.parent).on("remove", () => clearInterval(this._timer));
+		ch_erp15.hub_refresh.start(this, 60000);
 	}
 
 	_render(data) {
@@ -317,7 +312,10 @@ class StoreHub {
 			<th>${__("Date")}</th><th>${__("Store")}</th><th class="text-right">${__("Transactions")}</th>
 			<th class="text-right">${__("Revenue")}</th><th class="text-right">${__("Avg Ticket")}</th>
 		</tr></thead><tbody>${rows.map((r) => {
-			const warehouse_name = r.warehouse_name || r.warehouse || "";
+			// Store-facing label: the Sellable bin reads as the store itself.
+			const warehouse_name = window.ch_wh_label_html
+				? ch_wh_label_html(r.warehouse || r.warehouse_name)
+				: frappe.utils.escape_html(r.warehouse_name || r.warehouse || "");
 			return `<tr>
 			<td>${frappe.datetime.str_to_user(r.posting_date)}</td>
 			<td>${warehouse_name}</td>
@@ -347,7 +345,10 @@ class StoreHub {
 			<th>${__("Item")}</th><th>${__("Item Name")}</th><th>${__("Warehouse")}</th>
 			<th class="text-right">${__("In Stock")}</th><th class="text-right">${__("Reorder Level")}</th>
 		</tr></thead><tbody>${rows.map((r) => {
-			const warehouse_name = r.warehouse_name || r.warehouse || "";
+			// Store-facing label: the Sellable bin reads as the store itself.
+			const warehouse_name = window.ch_wh_label_html
+				? ch_wh_label_html(r.warehouse || r.warehouse_name)
+				: frappe.utils.escape_html(r.warehouse_name || r.warehouse || "");
 			return `<tr>
 			<td><a href="/app/item/${r.item_code}">${r.item_code}</a></td>
 			<td>${r.item_name || ""}</td>

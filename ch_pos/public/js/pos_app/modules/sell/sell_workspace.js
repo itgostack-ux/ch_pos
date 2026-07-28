@@ -25,6 +25,11 @@ export class SellWorkspace {
 	render(panel) {
 		// Clean up previous sub-component EventBus listeners
 		if (this.grid) this.grid.destroy();
+		// The toolbar owns a DOCUMENT-level barcode listener. Without this
+		// teardown every re-entry into sell mode left the previous listener
+		// alive, so one physical scan was handled twice (or N times) and the
+		// same IMEI landed in the cart on multiple rows.
+		if (this.toolbar) this.toolbar.destroy();
 
 		// Toolbar
 		this.toolbar = new ContextualToolbar(panel);

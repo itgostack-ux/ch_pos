@@ -11,6 +11,7 @@ import { print_invoice_pdf } from "../shared/print_helper.js";
 
 export class CartService {
 	constructor() {
+		this._serial_claims = new Set();
 		this._exception_status_inflight = new Set();
 		this._exception_status_seen = {};
 		this._exception_status_poll_ms = 8000;
@@ -90,7 +91,27 @@ export class CartService {
 			if (!has_cart && !has_exchange) return;
 
 			if (has_cart) {
-				PosState.cart = data.cart;
+				// Self-heal: a cart saved by an affected build may hold the
+				// same IMEI on two rows. Drop the repeats on restore rather
+				// than resurrecting a cart that can never be billed.
+				const seen_serials = new Set();
+				let dropped = 0;
+				PosState.cart = (data.cart || []).filter((row) => {
+					const sn = String((row && row.serial_no) || "").trim();
+					if (!sn) return true;
+					if (seen_serials.has(sn)) {
+						dropped += 1;
+						return false;
+					}
+					seen_serials.add(sn);
+					return true;
+				});
+				if (dropped) {
+					frappe.show_alert({
+						message: __("{0} duplicate IMEI line(s) removed from the restored cart", [dropped]),
+						indicator: "orange",
+					}, 7);
+				}
 			}
 			if (data.customer) PosState.customer = data.customer;
 			if (data.additional_discount_pct) PosState.additional_discount_pct = data.additional_discount_pct;
@@ -263,6 +284,7 @@ export class CartService {
 
 		EventBus.on("state:transaction_reset", () => {
 			this._exception_status_seen = {};
+			this._serial_claims.clear();
 		});
 
 		// POS-10 fix: Auto-persist cart to localStorage on every update
@@ -371,6 +393,41 @@ export class CartService {
 		}
 	}
 
+	// ── Serial add-lock ─────────────────────────────────
+	//
+	// A serialized unit is UNIQUE — it may appear on exactly one cart row.
+	// The trouble is that the duplicate check and the cart push are separated
+	// by one or two async server round-trips (scan_barcode →
+	// validate_serial_for_sale). Two scans of the same IMEI fired inside that
+	// window BOTH saw an empty cart, BOTH passed the duplicate check and BOTH
+	// pushed a row — the exact "same IMEI on two lines" defect.
+	//
+	// Claiming the serial SYNCHRONOUSLY closes that window: the claim is taken
+	// before the first round-trip and only released once the row is in the
+	// cart (where the cart scan below then catches it) or the add has failed.
+
+	/** @returns {boolean} true when the caller now owns this serial. */
+	_claim_serial(serial_no) {
+		const key = String(serial_no || "").trim();
+		if (!key) return true;
+		if (this._serial_claims.has(key)) return false;
+		if ((PosState.cart || []).some((c) => String(c.serial_no || "").trim() === key)) return false;
+		this._serial_claims.add(key);
+		return true;
+	}
+
+	_release_serial(serial_no) {
+		const key = String(serial_no || "").trim();
+		if (key) this._serial_claims.delete(key);
+	}
+
+	_warn_duplicate_serial(serial_no) {
+		frappe.show_alert({
+			message: __("IMEI / Serial {0} is already in the cart — a unit can only be billed once", [serial_no]),
+			indicator: "orange",
+		});
+	}
+
 	// ── Add to Cart ─────────────────────────────────────
 
 	/**
@@ -407,15 +464,17 @@ export class CartService {
 				return;
 			}
 		}
-		const dup = PosState.cart.find((c) => c.serial_no === serial_no);
-		if (dup) {
-			frappe.show_alert({ message: __("Serial {0} is already in the cart", [serial_no]), indicator: "orange" });
+		// Claim before the round-trip — a concurrent scan of the same IMEI
+		// must lose here, not after both have validated.
+		if (!this._claim_serial(serial_no)) {
+			this._warn_duplicate_serial(serial_no);
 			return;
 		}
 
 		frappe.call({
 			method: "ch_pos.api.pos_api.validate_serial_for_sale",
 			args: { serial_no, item_code: item_data.item_code, warehouse: PosState.warehouse },
+			always: () => this._release_serial(serial_no),
 			callback: (r) => {
 				const res = r.message || {};
 				if (res.valid) {
@@ -643,6 +702,16 @@ export class CartService {
 	}
 
 	_add_new_cart_item(item_data, serial_no) {
+		// LAST LINE OF DEFENCE — every serialized add funnels through here, so
+		// this is the one place that can make a duplicate IMEI impossible no
+		// matter which caller (scan, picker, bundle, restore) raced ahead.
+		const incoming_serial = String(serial_no || "").trim();
+		if (incoming_serial
+			&& (PosState.cart || []).some((c) => String(c.serial_no || "").trim() === incoming_serial)) {
+			this._warn_duplicate_serial(incoming_serial);
+			return null;
+		}
+
 		const price_list_rate = flt(item_data.price_list_rate || item_data.mrp || item_data.selling_price || 0);
 		const selling_rate = flt(item_data.selling_price || price_list_rate || 0);
 		const commercial_discount_amount = Math.max(0, price_list_rate - selling_rate);
@@ -686,6 +755,7 @@ export class CartService {
 		EventBus.emit("cart:item_added", { item_data, cart_item });
 		this._prompt_warranty(item_data, cart_item);
 		this._prompt_bundle_items(item_data);
+		return cart_item;
 	}
 
 	/** Show a popup to add free bundle items (accessories) when a main device is added */
@@ -734,14 +804,15 @@ export class CartService {
 								ch_allow_zero_rate: 1,
 								is_free_bundle_item: 1,
 							};
-							this._add_new_cart_item(free_item);
-							// Set rate to 0 for the just-added free item
-							const last = PosState.cart[PosState.cart.length - 1];
-							if (last && last.item_code === bi.item_code) {
-								last.qty = 1;
-								last.rate = 0;
-								last.is_free_bundle_item = true;
-								last.bundle_parent = item_data.item_code;
+							// Use the returned row, not cart[length-1] — a refused
+							// add (duplicate serial) would otherwise zero-rate
+							// whatever row happened to be last.
+							const added = this._add_new_cart_item(free_item);
+							if (added) {
+								added.qty = 1;
+								added.rate = 0;
+								added.is_free_bundle_item = true;
+								added.bundle_parent = item_data.item_code;
 							}
 						}
 					});
@@ -817,9 +888,8 @@ export class CartService {
 					return;
 				}
 
-				const dup = PosState.cart.find((c) => c.serial_no === final_serial);
-				if (dup) {
-					frappe.show_alert({ message: __("Serial {0} is already in the cart", [final_serial]), indicator: "orange" });
+				if (!this._claim_serial(final_serial)) {
+					this._warn_duplicate_serial(final_serial);
 					return;
 				}
 
@@ -831,6 +901,7 @@ export class CartService {
 						item_code: item_data.item_code,
 						warehouse: PosState.warehouse,
 					},
+					always: () => this._release_serial(final_serial),
 					callback: (r) => {
 						const res = r.message || {};
 						if (res.valid) {

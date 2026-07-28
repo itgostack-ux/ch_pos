@@ -53,6 +53,33 @@ def _assert_company_scope(company, action=None) -> None:
         assert_store_scope(company=company)
 
 
+def is_link_option_sentinel(value) -> bool:
+    """True for Frappe's synthetic Awesomplete rows.
+
+    The Link control appends action rows ("+ Create a new Customer",
+    "Advanced Search", the active-filter hint) whose ``value`` is a sentinel
+    ending in ``__link_option`` — never a real docname. A stale POS change
+    handler can forward one into an API; without this guard the request dies
+    with a DoesNotExistError that the browser renders as a "Not found" modal.
+    """
+    return isinstance(value, str) and "__link_option" in value
+
+
+def _existing_fields(doctype, fieldnames) -> list[str]:
+    """Filter ``fieldnames`` down to columns that exist on ``doctype``.
+
+    Guards against custom fields a site never got (or later lost). Selecting a
+    missing column makes MariaDB reject the whole query with "Unknown column",
+    turning one stale fieldname into a hard 500 for the caller.
+    """
+    meta = frappe.get_meta(doctype)
+    return [f for f in fieldnames if f in ("name", "owner", "creation", "modified") or meta.get_field(f)]
+
+
+def _existing_customer_fields(fieldnames) -> list[str]:
+    return _existing_fields("Customer", fieldnames)
+
+
 def _assert_customer_pos_access(customer, pos_profile=None, action="access") -> None:
     if not pos_profile:
         if is_privileged_user():
@@ -3233,6 +3260,13 @@ def create_pos_invoice(
         inv.custom_warranty_claim = warranty_claim
 
     warranty_items: list = []
+    # A serialized unit can be sold exactly once, so it may appear on exactly
+    # one billed row. The browser guards this too, but the client is not the
+    # integrity boundary: a stacked scan handler, an offline replay or a
+    # crafted payload can all deliver the same IMEI on two rows, and every
+    # per-serial gate below (bin type, lifecycle "Sold") passes for BOTH rows
+    # because the unit is still unsold when the invoice is being built.
+    seen_sale_serials: set[str] = set()
     canonical_billed_items: list[dict] = []
     verified_manager_approvals: list[dict] = []
     consumed_free_sale_approval = None
@@ -3457,6 +3491,26 @@ def create_pos_invoice(
 
         if item.get("serial_no") and not item_is_plan:
             row["serial_no"] = item.get("serial_no")
+
+        # Duplicate-IMEI guard — across rows AND within a single row's blob.
+        if row.get("serial_no"):
+            row_serials = _split_serials(row["serial_no"])
+            for _sn in row_serials:
+                if _sn in seen_sale_serials:
+                    frappe.throw(
+                        _("IMEI / Serial {0} appears more than once on this bill. "
+                          "A serialized unit can only be sold once — remove the "
+                          "duplicate line and scan the second unit's own IMEI.").format(_sn),
+                        title=_("Duplicate IMEI / Serial"))
+                seen_sale_serials.add(_sn)
+            # One serial per unit: the row cannot bill more units than the
+            # IMEIs it carries, or a second unit rides out untracked.
+            if len(row_serials) != int(flt(row["qty"])) or flt(row["qty"]) != int(flt(row["qty"])):
+                frappe.throw(
+                    _("Item {0} is billed for quantity {1} but carries {2} IMEI / Serial number(s). "
+                      "Each serialized unit needs its own IMEI.").format(
+                        row["item_code"], flt(row["qty"]), len(row_serials)),
+                    title=_("IMEI / Serial Count Mismatch"))
 
         canonical_billed_items.append({
             "item_code": row["item_code"],
@@ -8184,6 +8238,7 @@ def request_customer_whatsapp_otp(
 ) -> dict:
     """Generate and send OTP for customer WhatsApp verification before quick create."""
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+    from ch_item_master.ch_core.shadow_live import suppress_customer_comms
 
     frappe.has_permission("Customer", "create", throw=True)
     _assert_company_scope(company, _("request customer verification"))
@@ -8207,6 +8262,24 @@ def request_customer_whatsapp_otp(
                 title=_("OTP Setup Error"),
             )
         raise
+
+    # Shadow-live pilot: customers must not be contacted at all. Sending is
+    # skipped and staff clear the gate with the master OTP from CH Shadow Live
+    # Settings. Returning early (instead of falling through to the "no delivery
+    # channel" throw below) is what keeps the Pending CH OTP Log row alive — a
+    # frappe.throw here rolls the whole request back, which is why verifying the
+    # master OTP kept answering "No pending OTP found for this mobile number."
+    if suppress_customer_comms():
+        return {
+            "sent": True,
+            "mobile": mobile_no[:3] + "****" + mobile_no[-3:],
+            "otp_generated": bool(otp_code),
+            "sent_whatsapp": False,
+            "sent_sms": False,
+            "sent_email": False,
+            "shadow_live": True,
+            "message": _("Shadow live — customer messaging is suppressed. Enter the master OTP."),
+        }
 
     sent_whatsapp = False
     sent_email = False
@@ -8392,9 +8465,28 @@ def verify_discount_auth(
 def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Verification") -> dict:
     """Verify customer OTP used during POS quick customer creation."""
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+    from ch_item_master.ch_core.shadow_live import master_otp_matches
+    from ch_pos.api.manager_approval import issue_action_grant
 
     mobile_no = validate_indian_phone(mobile_no)
     purpose = "POS Customer Verification"
+
+    # The Shadow Live master OTP is itself the controlled verification event;
+    # it must not depend on a customer OTP row having been generated first.
+    # Requiring a Pending CH OTP Log made the configured master code fail when
+    # Send OTP had not been clicked or when that row had already expired.  The
+    # resulting grant is still short-lived, single-use and bound to this user
+    # and mobile number by consume_action_grant() during customer creation.
+    if master_otp_matches(otp_code):
+        return {
+            "valid": True,
+            "message": _("Verified via shadow-live master OTP."),
+            "shadow_live": True,
+            "verification_token": issue_action_grant(
+                "customer_otp",
+                {"mobile_no": mobile_no},
+            ),
+        }
 
     result = CHOTPLog.verify_otp(
         mobile_no=mobile_no,
@@ -8405,16 +8497,17 @@ def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Veri
     )
     if not result.get("valid"):
         return result
-    if result.get("shadow_live"):
-        frappe.throw(
-            _("A live customer OTP is required."),
-            frappe.PermissionError,
-        )
-    from ch_pos.api.manager_approval import issue_action_grant
 
+    # Shadow-live master OTP is accepted here. It only ever matches while
+    # CH Shadow Live Settings is enabled and unexpired (see
+    # shadow_live.master_otp_matches), and during that window customer
+    # messaging is suppressed — demanding a live OTP would make the customer
+    # form impossible to complete. The CH OTP Log row records which path was
+    # used, and the flag is echoed so the counter UI can say so.
     return {
         "valid": True,
         "message": result.get("message") or _("OTP verified."),
+        "shadow_live": bool(result.get("shadow_live")),
         "verification_token": issue_action_grant(
             "customer_otp",
             {"mobile_no": mobile_no},
@@ -8684,7 +8777,7 @@ def customer_360(identifier, company=None, pos_profile=None) -> dict:
         "alternate_phone": cust_doc.get("ch_alternate_phone") or "",
         "whatsapp_number": cust_doc.get("ch_whatsapp_number") or "",
         "previous_phones": cust_doc.get("ch_previous_phones") or "",
-        "pan": cust_doc.get("ch_pan_number") or cust_doc.get("pan") or "",
+        "pan": cust_doc.get("custom_pan") or cust_doc.get("pan") or "",
     }
 
     # Bill-To and Ship-To addresses via Dynamic Link
@@ -10680,15 +10773,15 @@ def get_customer_pos_info(customer, company=None, pos_profile=None) -> dict:
 
     Used when a named customer is selected to auto-apply correct pricing.
     """
-    # Frappe's Awesomplete link picker injects a synthetic option whose value
-    # is the literal sentinel "create_new__link_option" — selecting it normally
-    # triggers the "+ Create a new Customer" dialog. POS code occasionally
-    # reads the field value before that action fires (e.g. a stale `change`
-    # handler), and we end up calling this API with that sentinel, which then
-    # blows up with "Customer create_new__link_option not found". Treat it as
-    # a no-op so the picker can recover gracefully and the user can complete
-    # the create-customer flow.
-    if customer in (None, "", "create_new__link_option", "__create_new__"):
+    # Frappe's Awesomplete link picker injects synthetic options whose value is
+    # a sentinel — "create_new__link_option", "advanced_search__link_option",
+    # "filter_description__link_option". Selecting one triggers the matching
+    # action (e.g. the "+ Create a new Customer" dialog), but a stale POS
+    # `change` handler can still read the raw value and call this API with it,
+    # which then blows up with "Customer create_new__link_option not found".
+    # Treat it as a no-op so the picker recovers and the user can finish the
+    # create-customer flow.
+    if not customer or customer == "__create_new__" or is_link_option_sentinel(customer):
         return {}
 
     frappe.has_permission("Customer", "read", throw=True)
@@ -12199,9 +12292,12 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
             changed = True
 
     if pan_number is not None:
+        # `custom_pan` is the CH master-data field (tracked in CH Master Data
+        # Log); `pan` is india_compliance's. The old `ch_pan_number` target does
+        # not exist on Customer, so PAN edits from Customer 360 were discarded.
         pan_clean = pan_number.strip().upper()
-        if pan_clean != (cust.get("ch_pan_number") or ""):
-            cust.ch_pan_number = pan_clean
+        if pan_clean != (cust.get("custom_pan") or ""):
+            cust.custom_pan = pan_clean
             cust.pan = pan_clean
             changed = True
 
@@ -12221,7 +12317,7 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
         "alternate_phone": cust.get("ch_alternate_phone") or "",
         "whatsapp_number": cust.get("ch_whatsapp_number") or "",
         "previous_phones": cust.get("ch_previous_phones") or "",
-        "pan": cust.get("ch_pan_number") or cust.get("pan") or "",
+        "pan": cust.get("custom_pan") or cust.get("pan") or "",
     }
 
 @frappe.whitelist(methods=["POST"])
@@ -12241,54 +12337,22 @@ def update_customer_complete(customer, payload, pos_profile=None):
     _assert_customer_pos_access(customer, pos_profile)
 
     # ──────────────────────────────────────────────
-    # 1. UPDATE CUSTOMER DOC
+    # 1. BILLING ADDRESS (primary) — first, so that Customer validation
+    #    (which can require a primary address) passes on the save below.
     # ──────────────────────────────────────────────
-    cust = frappe.get_doc("Customer", customer)
-    cust_changed = False
-
-    # Editable customer-level fields (name/mobile/email/whatsapp are locked on frontend)
-    standard_map = {
-        "customer_group": "customer_group",
-        "gstin": "gstin",
-    }
-    for src, dest in standard_map.items():
-        val = payload.get(src)
-        if val is not None:
-            val = val.strip() if isinstance(val, str) else val
-            if src == "gstin":
-                val = val.upper() if val else ""
-            if val != (cust.get(dest) or ""):
-                cust.set(dest, val)
-                cust_changed = True
-
-    # Custom (ch_*) editable fields
-    custom_map = {
-        "alternate_no": "ch_alternate_phone",
-    }
-    for src, dest in custom_map.items():
-        val = payload.get(src)
-        if val is not None:
-            val = val.strip() if isinstance(val, str) else val
-            if val != (cust.get(dest) or ""):
-                cust.set(dest, val)
-                cust_changed = True
-
-    # PAN — mirror to both fields
-    if payload.get("pan") is not None:
-        pan_clean = (payload["pan"] or "").strip().upper()
-        if pan_clean != (cust.get("ch_pan_number") or ""):
-            cust.ch_pan_number = pan_clean
-            cust.pan = pan_clean
-            cust_changed = True
-
-    # 2. BILLING ADDRESS (primary)
+    customer_name_now = frappe.db.get_value("Customer", customer, "customer_name")
+    # `area` deliberately not a trigger — it rides along with a real address
+    # block. On its own it would reach _upsert_address with a blank
+    # address_line1 and fail the update on a required field the caller never
+    # meant to touch. Both dialogs mark Address Line 1 mandatory, so a genuine
+    # area edit always arrives with the rest of the address.
     billing_fields = ["address_line1", "address_line2", "city", "state", "pincode"]
     has_billing_data = any(payload.get(f) for f in billing_fields)
 
     if has_billing_data:
         _upsert_address(
             customer=customer,
-            customer_name=cust.customer_name,
+            customer_name=customer_name_now,
             address_type="Billing",
             is_primary=1,
             is_shipping=0,
@@ -12298,29 +12362,62 @@ def update_customer_complete(customer, payload, pos_profile=None):
                 "city": payload.get("city"),
                 "state": payload.get("state"),
                 "pincode": payload.get("pincode"),
+                "area": payload.get("area"),
             },
             link_field="customer_primary_address",
         )
-        cust = frappe.get_doc("Customer", customer)
-        for src, dest in standard_map.items():
-            val = payload.get(src)
-            if val is not None:
-                val = val.strip() if isinstance(val, str) else val
-                if src == "gstin":
-                    val = val.upper() if val else ""
-                if val != (cust.get(dest) or ""):
-                    cust.set(dest, val)
-        for src, dest in custom_map.items():
-            val = payload.get(src)
-            if val is not None:
-                val = val.strip() if isinstance(val, str) else val
-                if val != (cust.get(dest) or ""):
-                    cust.set(dest, val)
-        if payload.get("pan") is not None:
-            pan_clean = (payload["pan"] or "").strip().upper()
-            if pan_clean != (cust.get("ch_pan_number") or ""):
-                cust.ch_pan_number = pan_clean
-                cust.pan = pan_clean
+
+    # ──────────────────────────────────────────────
+    # 2. UPDATE CUSTOMER DOC — fetched *after* the address upsert, which
+    #    saves the Customer itself when it re-links customer_primary_address.
+    #    Reading earlier would leave us holding a stale doc.
+    # ──────────────────────────────────────────────
+    cust = frappe.get_doc("Customer", customer)
+    cust_changed = False
+
+    def _apply(fieldname, value):
+        """Set a Customer field if it exists on this site and actually changed."""
+        nonlocal cust_changed
+        if not cust.meta.get_field(fieldname):
+            return
+        if value != (cust.get(fieldname) or ""):
+            cust.set(fieldname, value)
+            cust_changed = True
+
+    # Editable customer-level fields. Name / mobile / WhatsApp are read-only on
+    # the dialog; `email_id` is editable and used to be dropped silently here —
+    # the update reported success while the value never reached the database.
+    if payload.get("customer_group") is not None:
+        _apply("customer_group", (payload.get("customer_group") or "").strip())
+
+    if payload.get("email_id") is not None:
+        email = (payload.get("email_id") or "").strip()
+        if email:
+            email = validate_email_address(email, throw=True)
+        if email != (cust.email_id or ""):
+            # Write the Contact first — Customer.email_id is fetched from it.
+            _set_customer_primary_email(cust, email)
+            _apply("email_id", email)
+
+    if payload.get("alternate_no") is not None:
+        _apply("ch_alternate_phone", (payload.get("alternate_no") or "").strip())
+
+    # GSTIN → `custom_gstin`, the CH master-data field. This is what
+    # get_customer_pos_info reads for B2B/B2C detection and what
+    # quick_create_customer writes, so writing india_compliance's `gstin`
+    # instead (as this used to) left the POS showing the old value forever.
+    # `gstin` is deliberately left to india_compliance — assigning it also
+    # rewrites `pan` and forces a gst_category.
+    if payload.get("gstin") is not None:
+        _apply("custom_gstin", (payload.get("gstin") or "").strip().upper())
+
+    # PAN → `custom_pan` (CH master data) + `pan` (india_compliance). The old
+    # code wrote `ch_pan_number`, which no longer exists on Customer, so the
+    # value went nowhere.
+    if payload.get("pan") is not None:
+        pan_clean = (payload.get("pan") or "").strip().upper()
+        _apply("custom_pan", pan_clean)
+        _apply("pan", pan_clean)
 
     # 3. NOW save Customer (address exists >>>>validation passes)
     if cust_changed:
@@ -12448,6 +12545,10 @@ def _upsert_address(customer, customer_name, address_type, is_primary, is_shippi
     addr.city = city
     addr.state = state
     addr.pincode = pincode
+    # "Area / Locality" — POS-only custom field (ch_pos.setup CUSTOM_FIELDS).
+    # Skipped on sites that predate the field rather than failing the save.
+    if data.get("area") is not None and addr.meta.get_field("custom_area"):
+        addr.custom_area = (data.get("area") or "").strip()
     if not addr.country:
         addr.country = frappe.db.get_single_value("System Settings", "country")
     if not addr.country:
@@ -12470,6 +12571,46 @@ def _upsert_address(customer, customer_name, address_type, is_primary, is_shippi
         frappe.clear_document_cache("Address", addr_name)
 
     return addr_name
+
+def _set_customer_primary_email(cust, email) -> None:
+    """Change a customer's e-mail through its primary Contact.
+
+    ``Customer.email_id`` is a Read Only field with
+    ``fetch_from = customer_primary_contact.email_id``. Assigning it directly
+    looks like it works — the API returns the new value — but the very next
+    save re-fetches from the Contact and silently restores the old address.
+    That is why POS e-mail edits reported "Customer updated successfully" and
+    then showed the old e-mail again.
+
+    Writing the Contact first makes the fetch agree with us. When the customer
+    has no primary Contact there is nothing to fetch from, so the value on the
+    Customer stands on its own.
+    """
+    contact_name = cust.get("customer_primary_contact")
+    if not contact_name:
+        return
+
+    contact = frappe.get_doc("Contact", contact_name)
+    contact.check_permission("write")
+
+    if not email:
+        contact.set("email_ids", [])
+    else:
+        primary = None
+        for row in contact.get("email_ids") or []:
+            if cint(row.is_primary):
+                primary = row
+                break
+        if primary is None:
+            primary = next(iter(contact.get("email_ids") or []), None)
+        if primary is None:
+            contact.append("email_ids", {"email_id": email, "is_primary": 1})
+        else:
+            primary.email_id = email
+            primary.is_primary = 1
+
+    contact.save()
+
 
 def _phone_suffix_10(phone_no):
     """Return normalized 10-digit Indian phone suffix, or empty string."""
@@ -12644,7 +12785,7 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
     if pan_number:
         pan_clean = pan_number.strip().upper()
         cust.pan = pan_clean
-        cust.ch_pan_number = pan_clean
+        cust.custom_pan = pan_clean
     cust.insert()
 
     # Add contact details if provided
@@ -12660,7 +12801,7 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         contact.insert()
 
     # Create billing address if provided
-    if address_line1 or city or pincode:
+    if address_line1 or city or pincode or area:
         _upsert_address(
             customer=cust.name,
             customer_name=customer_name,
@@ -12673,6 +12814,9 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
                 "city": city,
                 "state": state,
                 "pincode": pincode,
+                # Previously accepted as an argument and then dropped on the
+                # floor — the locality typed at the counter never persisted.
+                "area": area,
             },
         )
 
@@ -16053,14 +16197,21 @@ def get_customer_full_details(customer, pos_profile=None, **kwargs):
     # ⚡ Clear cache first to guarantee fresh data
     frappe.clear_document_cache("Customer", customer)
 
-    # Use db.get_value to read directly from DB (no cache)
-    cust_data = frappe.db.get_value("Customer", customer, [
-        "name", "customer_name", "customer_group", "customer_type",
-        "email_id", "mobile_no",
-        "ch_whatsapp_number", "ch_alternate_phone",
-        "pan", "ch_pan_number", "gstin", "tax_id",
-        "customer_primary_address"
-    ], as_dict=True)
+    # Use db.get_value to read directly from DB (no cache).
+    # Only select columns the installed Customer schema actually has — this list
+    # used to include `ch_pan_number`, a field a stale patch was supposed to
+    # create but which does not exist on this site. MariaDB answered every call
+    # with "Unknown column 'ch_pan_number'", so the POS Edit Customer dialog
+    # could never open at all.
+    cust_data = frappe.db.get_value(
+        "Customer", customer, _existing_customer_fields([
+            "name", "customer_name", "customer_group", "customer_type",
+            "email_id", "mobile_no",
+            "ch_whatsapp_number", "ch_alternate_phone",
+            "pan", "custom_pan", "custom_gstin", "gstin", "tax_id",
+            "customer_primary_address",
+        ]), as_dict=True
+    )
 
     if not cust_data:
         return {}
@@ -16072,10 +16223,18 @@ def get_customer_full_details(customer, pos_profile=None, **kwargs):
         "customer_type": cust_data.customer_type,
         "email_id": cust_data.email_id,
         "mobile_no": cust_data.mobile_no,
-        "whatsapp_no": cust_data.ch_whatsapp_number,
-        "alternate_no": cust_data.ch_alternate_phone,
-        "pan": cust_data.pan or cust_data.ch_pan_number,
-        "gstin": cust_data.gstin or cust_data.tax_id,
+        "whatsapp_no": cust_data.get("ch_whatsapp_number"),
+        "alternate_no": cust_data.get("ch_alternate_phone"),
+        # `custom_pan` / `custom_gstin` are the CH master-data fields (tracked in
+        # CH Master Data Log and read by get_customer_pos_info); `pan` / `gstin`
+        # are india_compliance's tax-tab fields. Prefer CH, fall back to standard.
+        "pan": cust_data.get("custom_pan") or cust_data.get("pan") or "",
+        "gstin": (
+            cust_data.get("custom_gstin")
+            or cust_data.get("gstin")
+            or cust_data.get("tax_id")
+            or ""
+        ),
     }
 
     # ── BILLING ADDRESS: Try customer_primary_address first ──
@@ -16099,9 +16258,9 @@ def get_customer_full_details(customer, pos_profile=None, **kwargs):
 
     if billing_addr_name and frappe.db.exists("Address", billing_addr_name):
         # Read directly from DB to bypass cache
-        billing = frappe.db.get_value("Address", billing_addr_name, [
-            "address_line1", "address_line2", "city", "state", "pincode", "country"
-        ], as_dict=True)
+        billing = frappe.db.get_value("Address", billing_addr_name, _existing_fields("Address", [
+            "address_line1", "address_line2", "city", "state", "pincode", "country", "custom_area"
+        ]), as_dict=True)
         if billing:
             result.update({
                 "address_line1": billing.address_line1,
@@ -16110,6 +16269,8 @@ def get_customer_full_details(customer, pos_profile=None, **kwargs):
                 "state": billing.state,
                 "pincode": billing.pincode,
                 "country": billing.country,
+                # "Area / Locality" — collected by both POS customer dialogs.
+                "area": billing.get("custom_area") or "",
                 "billing_address_name": billing_addr_name,
             })
 

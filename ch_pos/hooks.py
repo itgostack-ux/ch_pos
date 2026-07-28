@@ -50,7 +50,7 @@ doctype_js = {
 # App-level JS (extends POS UI)
 app_include_js = [
     "/assets/ch_pos/js/pos_extensions.js",
-    "/assets/ch_pos/js/ch_customer_dialog.js",
+    "/assets/ch_pos/js/ch_customer_dialog.js?v=2",
     "/assets/ch_pos/js/bin_transfer_dialog.js",
     "/assets/ch_pos/js/ch_pin_ux.js",  # TC_018 — Manager PIN field UX
     "/assets/ch_pos/js/session_logout_guard.js",  # Prevent logout with pending tokens

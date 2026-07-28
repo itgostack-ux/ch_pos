@@ -5,7 +5,7 @@
  * top sellers, staff performance, inventory alerts.
  */
 import { PosState, EventBus } from "../../state.js";
-import { format_number } from "../../shared/helpers.js";
+import { format_number, wh_label } from "../../shared/helpers.js";
 
 export class ReportsWorkspace {
 	constructor() {
@@ -558,8 +558,8 @@ export class ReportsWorkspace {
 					// TC_042 / TC_043 — show From → To warehouse pair and the
 					// primary item name (or "+N more" when a transfer has
 					// multiple lines) instead of the bare item count.
-					const from_wh = frappe.utils.escape_html(se.from_warehouse || "—");
-					const to_wh = frappe.utils.escape_html(se.to_warehouse || "—");
+					const from_wh = wh_label(se.from_warehouse, "—");
+					const to_wh = wh_label(se.to_warehouse, "—");
 					const item_count = se.item_count || 0;
 					const primary = se.primary_item_name || se.primary_item_code || "";
 					const item_label = primary
@@ -768,7 +768,7 @@ export class ReportsWorkspace {
 
 		d.fields_dict.sheet.$wrapper.html(`
 			<div class="text-muted" style="margin-bottom:8px">
-				${__("Warehouse")}: <b>${frappe.utils.escape_html(res.warehouse)}</b> · ${res.items} ${__("item(s)")}
+				${__("Warehouse")}: <b>${wh_label(res.warehouse)}</b> · ${res.items} ${__("item(s)")}
 				${blind ? `· <span style="color:#d97706">${__("Blind count")}</span>` : ""}
 			</div>
 			<div style="max-height:420px;overflow:auto">

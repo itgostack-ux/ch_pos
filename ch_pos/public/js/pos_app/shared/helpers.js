@@ -18,6 +18,30 @@ export function format_number(val) {
 }
 
 /**
+ * Store-facing label for a warehouse.
+ *
+ * A store is four sibling bins (Sellable / Damaged / Demo / Buyback) and the
+ * POS only ever trades against Sellable, so "GG-KELLYS-Sellable - BM" is spelt
+ * "Gogizmo - Kellys" on screen. The other three keep their bin type
+ * ("Gogizmo - Kellys · Damaged") so bin-level screens stay unambiguous.
+ *
+ * Backed by ch_erp15's global helper (loaded via app_include_js, map shipped in
+ * bootinfo). Falls back to the raw name if that asset has not loaded.
+ *
+ * DISPLAY ONLY — never send a label back to the server as a warehouse.
+ *
+ * @param {string} warehouse
+ * @param {string} [fallback=""] - shown when warehouse is blank
+ * @returns {string} escaped, ready to drop into a template literal
+ */
+export function wh_label(warehouse, fallback = "") {
+	const raw = (warehouse === null || warehouse === undefined) ? "" : String(warehouse).trim();
+	if (!raw) return fallback;
+	const label = (typeof window.ch_wh_label === "function") ? window.ch_wh_label(raw) : raw;
+	return frappe.utils.escape_html(label || raw);
+}
+
+/**
  * Generate a deterministic pastel color for item placeholders.
  * @param {string} code - Item code to hash
  * @returns {{ bg: string, text: string }}

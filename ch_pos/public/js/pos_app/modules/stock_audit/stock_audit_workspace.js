@@ -16,6 +16,7 @@
  *   • Variance Requests — Stock Count Variance approval audit log
  */
 import { PosState, EventBus } from "../../state.js";
+import { wh_label } from "../../shared/helpers.js";
 
 const TABS = [
 	{ key: "stock",    icon: "fa-cubes",          label: __("Stock Report") },
@@ -226,7 +227,7 @@ export class StockAuditWorkspace {
 			// Pagination info for the header
 			const summary = d.summary || {};
 			const pagination = d.pagination || {};
-			let warehouse_label = frappe.utils.escape_html(d.warehouse || "");
+			let warehouse_label = wh_label(d.warehouse);
 			if (pagination.has_more) {
 				warehouse_label += `<span style="margin-left:8px;font-size:12px;color:#666;">(Showing ${summary.items_on_page || 0} of ${summary.items || 0} items)</span>`;
 			}
@@ -457,7 +458,7 @@ export class StockAuditWorkspace {
 			<body>
 				<h2>${__("Stock Audit Snapshot")}</h2>
 				<div class="meta">
-					<div><b>${__("Warehouse")}:</b> ${frappe.utils.escape_html(warehouse)}</div>
+					<div><b>${__("Warehouse")}:</b> ${wh_label(warehouse)}</div>
 					<div><b>${__("Printed On")}:</b> ${frappe.utils.escape_html(printed_on)}</div>
 					<div><b>${__("Items")}:</b> ${flt(summary.items || rows.length)} · <b>${__("Stock Value")}:</b> ${frappe.format(summary.total_stock_value || 0, { fieldtype: "Currency" })}</div>
 				</div>
@@ -584,7 +585,7 @@ export class StockAuditWorkspace {
 
 		d.fields_dict.sheet.$wrapper.html(`
 			<div class="text-muted" style="margin-bottom:8px">
-				${__("Warehouse")}: <b>${frappe.utils.escape_html(res.warehouse)}</b> · ${res.items} ${__("item(s)")}
+				${__("Warehouse")}: <b>${wh_label(res.warehouse)}</b> · ${res.items} ${__("item(s)")}
 				${blind ? `· <span style="color:#d97706">${__("Blind count")}</span>` : ""}
 			</div>
 			<div style="max-height:420px;overflow:auto">

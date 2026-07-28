@@ -5,7 +5,7 @@
  * ad-hoc transfers between warehouses from POS.
  */
 import { PosState, EventBus } from "../../state.js";
-import { format_number } from "../../shared/helpers.js";
+import { format_number, wh_label } from "../../shared/helpers.js";
 
 export class StockTransferWorkspace {
 	constructor() {
@@ -745,9 +745,9 @@ export class StockTransferWorkspace {
 					fieldname: "header_html",
 					options: `
 						<div style="margin-bottom:12px;color:var(--pos-text-secondary);font-size:13px">
-							<strong>${frappe.utils.escape_html(data.from_warehouse || "")}</strong>
+							<strong>${wh_label(data.from_warehouse)}</strong>
 							<i class="fa fa-arrow-right" style="margin:0 8px"></i>
-							<strong>${frappe.utils.escape_html(data.to_warehouse || "")}</strong>
+							<strong>${wh_label(data.to_warehouse)}</strong>
 						</div>`,
 				},
 				{
