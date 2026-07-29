@@ -879,11 +879,20 @@ def get_external_imei_plan_for_item(item_code) -> dict:
             "duration_months", "price", "pricing_mode",
             "percentage_value", "fulfillment_type",
             "allow_external_device", "external_device_item",
+            "coverage_availability", "external_device_price", "allow_zero_external_price",
         ],
         as_dict=True,
     )
-    if not plan or not plan.get("external_device_item"):
-        # No plan, or the plan doesn't have an external-device Item
-        # configured — cannot auto-open the IMEI prompt safely.
+    if not plan:
         return {}
+    if not plan.get("external_device_item"):
+        company = frappe.db.get_value("CH Warranty Plan", plan.name, "company")
+        if company:
+            plan.external_device_item = frappe.db.get_value(
+                "Company", company, "ch_default_external_device_item"
+            )
+    if not plan.get("external_device_item"):
+        return {}
+    if plan.get("coverage_availability") in ("External Only", "Both"):
+        plan.price = plan.get("external_device_price") or 0
     return plan

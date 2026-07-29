@@ -1923,7 +1923,7 @@ export class CartService {
 			const blocked_html = blocked
 				? `<div class="text-danger" style="font-size:11px;margin-top:4px"><i class="fa fa-ban"></i> ${frappe.utils.escape_html(p.blocked_reason)}</div>`
 				: "";
-			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}" data-allows-external="${p.allows_external_device ? 1 : 0}" data-requires-device="${p.requires_device ? 1 : 0}">
+			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}" data-allows-external="${p.allows_external_device ? 1 : 0}" data-allows-in-store="${p.allows_in_store_device ? 1 : 0}" data-requires-device="${p.requires_device ? 1 : 0}">
 				<div class="ch-vas-card-body">
 					<div class="ch-vas-card-check"><i class="fa fa-check"></i></div>
 					<div style="flex:1;min-width:0">
@@ -1966,6 +1966,11 @@ export class CartService {
 				{
 					fieldname: "selected_plan",
 					fieldtype: "Data",
+					hidden: 1,
+				},
+				{
+					fieldname: "external_model_required",
+					fieldtype: "Check",
 					hidden: 1,
 				},
 				{
@@ -2015,6 +2020,22 @@ export class CartService {
 					mandatory_depends_on: "eval:doc.coverage_mode === 'customer'",
 					description: __("15-digit IMEI of the customer's own phone (e.g. shown under Settings → About). Stored only on the Active VAS Plan as external coverage — NOT on this invoice."),
 				},
+				{
+					fieldname: "external_device_model_item",
+					fieldtype: "Link",
+					options: "Item",
+					label: __("Customer Device Model"),
+					depends_on: "eval:doc.coverage_mode === 'customer'",
+					mandatory_depends_on: "eval:doc.coverage_mode === 'customer' && doc.external_model_required",
+					description: __("Required for plans restricted to specific sub-categories; optional for plans that accept every external phone."),
+					get_query: () => {
+						const selected = plans.find((p) => p.name === dialog.get_value("selected_plan"));
+						const subcats = (selected && selected.applicable_sub_categories) || [];
+						const filters = { disabled: 0 };
+						if (subcats.length) filters.ch_sub_category = ["in", subcats];
+						return { filters };
+					},
+				},
 			],
 			size: "large",
 			primary_action_label: __("Add to Cart"),
@@ -2045,6 +2066,7 @@ export class CartService {
 
 				if (mode === "customer") {
 					const imei = (values.customer_imei || "").trim();
+					const external_model = (values.external_device_model_item || "").trim();
 					if (!/^\d{14,17}$/.test(imei) && !/^[A-Za-z0-9\-\/]{6,30}$/.test(imei)) {
 						frappe.show_alert({ message: __("Enter a 14–17 digit IMEI or the device serial number (6–30 characters)"), indicator: "red" });
 						return;
@@ -2056,7 +2078,7 @@ export class CartService {
 					// external_device_item when this IMEI is not in our inventory.
 					frappe.xcall(
 						"ch_item_master.ch_item_master.warranty_api.validate_vas_category",
-						{ serial_no: imei, warranty_plan: plan.name }
+						{ serial_no: imei, warranty_plan: plan.name, external_item_code: external_model }
 					).then((res) => {
 						if (!res.valid) {
 							frappe.msgprint({
@@ -2067,7 +2089,7 @@ export class CartService {
 							return;
 						}
 						if (res.item_code) for_item_code = res.item_code;
-						this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
+						this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no, external_model, true);
 					});
 					return; // async — don't fall through
 				}
@@ -2097,13 +2119,18 @@ export class CartService {
 			$(this).addClass("ch-vas-selected");
 			const plan_name = $(this).data("plan");
 			dialog.set_value("selected_plan", plan_name);
+			const selected_plan = plans.find((p) => p.name === plan_name);
+			dialog.set_value("external_model_required", selected_plan && selected_plan.external_model_required ? 1 : 0);
 
 			const allows_external = String($(this).data("allows-external")) === "1";
+			const allows_in_store = String($(this).data("allows-in-store")) === "1";
 			const requires_device = String($(this).data("requires-device")) === "1";
 			const current_mode = dialog.get_value("coverage_mode");
 
 			// Auto-flip mode when the plan can only be one or the other.
-			if (!allows_external && current_mode !== "in_store") {
+			if (!allows_in_store && allows_external && current_mode !== "customer") {
+				dialog.set_value("coverage_mode", "customer");
+			} else if (!allows_external && current_mode !== "in_store") {
 				dialog.set_value("coverage_mode", "in_store");
 			} else if (allows_external && !has_in_store_options && requires_device && current_mode !== "customer") {
 				dialog.set_value("coverage_mode", "customer");
@@ -2112,7 +2139,10 @@ export class CartService {
 			// Update hint copy + lock the radio when only one mode is valid.
 			const hint = dialog.$wrapper.find("#ch-vas-mode-hint");
 			const mode_field = dialog.fields_dict.coverage_mode;
-			if (!allows_external) {
+			if (!allows_in_store && allows_external) {
+				hint.text(__("This plan is available only for customer-provided devices."));
+				mode_field && mode_field.df && (mode_field.df.read_only = 1);
+			} else if (!allows_external) {
 				hint.text(__("This plan only covers devices sold by us — customer-provided IMEI is disabled."));
 				mode_field && mode_field.df && (mode_field.df.read_only = 1);
 			} else if (!has_in_store_options) {
@@ -2156,7 +2186,7 @@ export class CartService {
 		setTimeout(apply_selected_device, 100);
 	}
 
-	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no) {
+	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no, external_device_model_item = null, external_intent = false) {
 		// Prevent duplicate: same plan on same device/IMEI
 		const dup = PosState.cart.find(
 			(c) => c.is_vas && c.warranty_plan === plan.name
@@ -2168,14 +2198,15 @@ export class CartService {
 			return;
 		}
 
+		const authoritative_rate = external_intent ? flt(plan.external_price) : flt(plan.internal_price);
 		dialog.hide();
 		PosState.cart.push({
 			item_code: plan.service_item || plan.name,
 			item_name: `✦ ${plan.plan_name}`,
 			qty: 1,
-			rate: flt(plan.price),
-			price_list_rate: flt(plan.price),
-			mrp: flt(plan.price),
+			rate: authoritative_rate,
+			price_list_rate: authoritative_rate,
+			mrp: authoritative_rate,
 			uom: "Nos",
 			discount_percentage: 0,
 			discount_amount: 0,
@@ -2184,6 +2215,8 @@ export class CartService {
 			warranty_plan: plan.name,
 			for_item_code,
 			for_serial_no,
+			customer_imei: external_intent ? for_serial_no : null,
+			external_device_model_item,
 			is_warranty: false,
 			is_vas: true,
 		});

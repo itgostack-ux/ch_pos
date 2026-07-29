@@ -151,6 +151,8 @@ def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
                     "name", "company", "status", "plan_type", "service_item",
                     "is_sellable", "pricing_mode", "price", "percentage_value",
                     "valid_from", "valid_to", "min_device_price", "max_device_price",
+                    "coverage_availability", "allow_external_device",
+                    "external_device_price", "allow_zero_external_price",
                 ],
                 limit_page_length=len(plan_names),
             )
@@ -255,14 +257,29 @@ def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
         if not plan_name:
             continue
         plan = plans[plan_name]
-        if plan.pricing_mode == "Percentage of Device Price":
+        external_intent = bool(str(item.get("customer_imei") or "").strip())
+        availability = plan.coverage_availability or (
+            "Both" if plan.allow_external_device else "In-Store Only"
+        )
+        if external_intent and availability not in ("External Only", "Both"):
+            frappe.throw(_("Warranty plan {0} is not available for external devices.").format(plan_name))
+        if not external_intent and availability == "External Only":
+            frappe.throw(_("Warranty plan {0} is available only for customer-provided devices.").format(plan_name))
+
+        if external_intent:
+            expected_rate = flt(plan.external_device_price)
+            if expected_rate == 0 and not cint(plan.allow_zero_external_price):
+                frappe.throw(
+                    _("Warranty plan {0} has no authorized external-device price.").format(plan_name)
+                )
+        elif plan.pricing_mode == "Percentage of Device Price":
             expected_rate = round(
                 max_device_price * flt(plan.percentage_value) / 100,
                 2,
             )
         else:
             expected_rate = flt(plan.price)
-        if expected_rate <= 0:
+        if expected_rate < 0 or (expected_rate == 0 and not external_intent):
             frappe.throw(
                 _("Warranty plan {0} has no computable server price.").format(plan_name)
             )
@@ -273,9 +290,9 @@ def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
                 ),
                 frappe.PermissionError,
             )
-        if plan.min_device_price and max_device_price < flt(plan.min_device_price):
+        if not external_intent and plan.min_device_price and max_device_price < flt(plan.min_device_price):
             frappe.throw(_("Warranty plan {0} is not valid for this device value.").format(plan_name))
-        if plan.max_device_price and max_device_price > flt(plan.max_device_price):
+        if not external_intent and plan.max_device_price and max_device_price > flt(plan.max_device_price):
             frappe.throw(_("Warranty plan {0} is not valid for this device value.").format(plan_name))
     return normalized
 

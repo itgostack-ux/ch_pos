@@ -126,6 +126,15 @@ def _ensure_item_tax(item_code, company):
 
 
 def _ensure_non_stock_item(item_code, company=None, with_tax=False):
+    classification = frappe.db.get_value(
+        "CH Sub Category",
+        {"disabled": 0},
+        ["category", "name"],
+        as_dict=True,
+    ) or frappe.db.get_value(
+        "CH Sub Category", {}, ["category", "name"], as_dict=True
+    )
+    _assert(classification, "No CH Sub Category available for VAS test items")
     if frappe.db.exists("Item", item_code):
         is_stock_item = frappe.db.get_value("Item", item_code, "is_stock_item")
         _assert(not is_stock_item, f"Test item {item_code} exists but is a stock item")
@@ -135,8 +144,8 @@ def _ensure_non_stock_item(item_code, company=None, with_tax=False):
             {
                 "disabled": 0,
                 "is_sales_item": 1,
-                "ch_category": "_Test Universal Cat",
-                "ch_sub_category": "_Test Universal Cat-Cables",
+                "ch_category": classification.category,
+                "ch_sub_category": classification.name,
                 "ch_lifecycle_status": "Active",
                 "ch_approval_status": "Approved",
                 "ch_plm_status": "Approved",
@@ -162,8 +171,8 @@ def _ensure_non_stock_item(item_code, company=None, with_tax=False):
         "is_sales_item": 1,
         "is_purchase_item": 0,
         "include_item_in_manufacturing": 0,
-        "ch_category": "_Test Universal Cat",
-        "ch_sub_category": "_Test Universal Cat-Cables",
+        "ch_category": classification.category,
+        "ch_sub_category": classification.name,
         "ch_approval_status": "Approved",
         "ch_plm_status": "Approved",
         "gst_hsn_code": "998599",
@@ -190,7 +199,8 @@ def _pick_service_items(company):
     return service_item, external_item
 
 
-def _make_plan(company, service_item, external_item, *, allow_external, purchase_window=0):
+def _make_plan(company, service_item, external_item=None, *, allow_external, purchase_window=0,
+               sub_category=None, external_price=99, allow_zero_external=False):
     plan = frappe.new_doc("CH Warranty Plan")
     plan.company = company
     plan.plan_name = "POS External IMEI VAS " + frappe.generate_hash(length=8)
@@ -198,6 +208,7 @@ def _make_plan(company, service_item, external_item, *, allow_external, purchase
     plan.coverage_scope = "Screen Only"
     plan.service_item = service_item
     plan.status = "Active"
+    plan.is_sellable = 1
     plan.duration_months = 12
     plan.max_claims = 1
     plan.claims_per_year = 0
@@ -206,14 +217,20 @@ def _make_plan(company, service_item, external_item, *, allow_external, purchase
     plan.pricing_mode = "Fixed"
     plan.purchase_window_hours = purchase_window
     plan.fulfillment_type = "Digital Activation"
+    plan.coverage_availability = "Both" if allow_external else "In-Store Only"
     plan.allow_external_device = 1 if allow_external else 0
     if allow_external:
+        plan.external_device_price = external_price
+        plan.allow_zero_external_price = 1 if allow_zero_external else 0
+    if allow_external and external_item:
         plan.external_device_item = external_item
+    if sub_category:
+        plan.append("applicable_sub_categories", {"sub_category": sub_category})
     plan.insert(ignore_permissions=True)
     return plan
 
 
-def _invoice_external_vas(profile, customer, mop, plan, serial_no):
+def _invoice_external_vas(profile, customer, mop, plan, serial_no, model_item=None):
     from ch_pos.api.pos_api import create_pos_invoice
 
     with _skip_eod_lock():
@@ -223,14 +240,16 @@ def _invoice_external_vas(profile, customer, mop, plan, serial_no):
             items=[{
                 "item_code": plan.service_item,
                 "qty": 1,
-                "rate": flt(plan.price),
-                "price_list_rate": flt(plan.price),
+                "rate": flt(plan.external_device_price),
+                "price_list_rate": flt(plan.external_device_price),
                 "warranty_plan": plan.name,
                 "for_serial_no": serial_no,
+                "customer_imei": serial_no,
+                "external_device_model_item": model_item,
                 "is_vas": 1,
             }],
             mode_of_payment=mop,
-            amount_paid=flt(plan.price),
+            amount_paid=flt(plan.external_device_price),
             client_request_id=frappe.generate_hash(length=20),
         )
 
@@ -258,7 +277,10 @@ def run() -> dict:
     sp = "vas_external_imei_allowed"
     frappe.db.savepoint(sp)
     try:
-        plan = _make_plan(profile.company, service_item, external_item, allow_external=True)
+        frappe.db.set_value(
+            "Company", profile.company, "ch_default_external_device_item", external_item
+        )
+        plan = _make_plan(profile.company, service_item, allow_external=True)
         serial_no = "EXT-VAS-" + frappe.generate_hash(length=10).upper()
         result = _invoice_external_vas(profile, customer, mop, plan, serial_no)
         active_plan_name = (result.get("active_plans") or result.get("sold_plans") or [None])[0]
@@ -269,7 +291,75 @@ def run() -> dict:
         _assert(active.item_code == external_item, "External IMEI did not use the configured external item")
         _assert(active.serial_no == serial_no, "External IMEI was not stored on Active VAS Plan")
         _assert(active.is_external_device == 1, "Active VAS Plan was not marked external")
+        _assert(not plan.external_device_item, "Test plan unexpectedly used a plan-level placeholder")
+        from ch_item_master.ch_item_master.doctype.active_vas_plans.active_vas_plans import (
+            check_warranty_status,
+        )
+        coverage = check_warranty_status(serial_no, profile.company)
+        _assert(coverage.get("warranty_covered"), "Claim lookup could not find external IMEI coverage")
+        _assert(
+            coverage.get("covering_plan", {}).get("name") == active_plan_name,
+            "Claim lookup resolved the wrong Active VAS Plan",
+        )
         results.append(("PASS", "allowed_external_imei_creates_active_plan", active_plan_name))
+    finally:
+        frappe.db.rollback(save_point=sp)
+
+    sp = "vas_external_imei_zero_price"
+    frappe.db.savepoint(sp)
+    try:
+        frappe.db.set_value(
+            "Company", profile.company, "ch_default_external_device_item", external_item
+        )
+        plan = _make_plan(
+            profile.company,
+            service_item,
+            allow_external=True,
+            external_price=0,
+            allow_zero_external=True,
+        )
+        serial_no = "EXT-FREE-" + frappe.generate_hash(length=10).upper()
+        result = _invoice_external_vas(profile, customer, mop, plan, serial_no)
+        active_plan_name = (result.get("active_plans") or result.get("sold_plans") or [None])[0]
+        active = frappe.get_doc("Active VAS Plans", active_plan_name)
+        _assert(flt(active.plan_price) == 0, "Authorized zero external price was not preserved")
+        results.append(("PASS", "authorized_zero_external_price", active_plan_name))
+    finally:
+        frappe.db.rollback(save_point=sp)
+
+    sp = "vas_external_imei_subcategory"
+    frappe.db.savepoint(sp)
+    try:
+        frappe.db.set_value(
+            "Company", profile.company, "ch_default_external_device_item", external_item
+        )
+        model = frappe.db.get_value(
+            "Item", service_item, ["name", "ch_sub_category"], as_dict=True
+        )
+        _assert(model and model.ch_sub_category, "Test model has no sub-category")
+        plan = _make_plan(
+            profile.company,
+            service_item,
+            allow_external=True,
+            sub_category=model.ch_sub_category,
+        )
+        missing_serial = "EXT-NOMODEL-" + frappe.generate_hash(length=8).upper()
+        _expect_error(
+            lambda: _invoice_external_vas(profile, customer, mop, plan, missing_serial),
+            "select the customer's device model",
+        )
+        serial_no = "EXT-MODEL-" + frappe.generate_hash(length=10).upper()
+        result = _invoice_external_vas(
+            profile, customer, mop, plan, serial_no, model_item=model.name
+        )
+        active_plan_name = (result.get("active_plans") or result.get("sold_plans") or [None])[0]
+        active = frappe.get_doc("Active VAS Plans", active_plan_name)
+        _assert(active.external_device_model_item == model.name, "External model was not stored")
+        _assert(
+            active.external_device_sub_category == model.ch_sub_category,
+            "External sub-category snapshot was not stored",
+        )
+        results.append(("PASS", "subcategory_restricted_external_imei", active_plan_name))
     finally:
         frappe.db.rollback(save_point=sp)
 
@@ -280,7 +370,7 @@ def run() -> dict:
         serial_no = "EXT-BLOCK-" + frappe.generate_hash(length=10).upper()
         message = _expect_error(
             lambda: _invoice_external_vas(profile, customer, mop, plan, serial_no),
-            "cannot be sold for customer-provided IMEI",
+            "not available for external devices",
         )
         results.append(("PASS", "disallowed_external_imei_hard_stops", message[:120]))
     finally:

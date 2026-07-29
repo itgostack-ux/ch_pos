@@ -3591,6 +3591,7 @@ def create_pos_invoice(
                 "price": flt(item.get("rate")),
                 "is_vas": item_is_vas,
                 "external_intent": 1 if item.get("customer_imei") else 0,
+                "external_device_model_item": item.get("external_device_model_item"),
             })
 
     profile_payment_modes = {
@@ -4081,6 +4082,19 @@ def create_pos_invoice(
 
         # ---------- 5. SUBMIT ----------
         inv.reload()
+        # A genuine zero-value invoice produces no tax rows. GST calculation
+        # may still leave transient item-wise detail rows with blank tax_row;
+        # those cannot satisfy the child DocType's mandatory link and must not
+        # be submitted as if they represented tax. Paid invoices retain their
+        # fully linked rows unchanged.
+        if hasattr(inv, "item_wise_tax_details"):
+            inv.set(
+                "item_wise_tax_details",
+                [
+                    row for row in (inv.item_wise_tax_details or [])
+                    if row.get("item_row") and row.get("tax_row")
+                ],
+            )
         inv.flags.ch_pos_verified_manager_approvals = verified_manager_approvals
         inv.workflow_state = "Approved"
         if hasattr(inv, "custom_si_approval_state"):
@@ -4111,7 +4125,11 @@ def create_pos_invoice(
         _write_tax_rows_and_header(inv.name, totals)
 
         # ---------- 7. Rewrite GL to final balanced state ----------
-        _rewrite_gl_entries(inv.name, totals)
+        # A deliberately authorized ₹0 plan invoice has no receivable,
+        # revenue, tax, or payment movement, so ERPNext correctly produces no
+        # GL rows. Paid invoices must still pass the normal balanced repost.
+        if abs(flt((totals or {}).get("total_net"))) > 0.005:
+            _rewrite_gl_entries(inv.name, totals)
 
         frappe.clear_document_cache("Sales Invoice", inv.name)
 
@@ -4439,6 +4457,33 @@ def create_pos_invoice(
                 title=frappe._("External IMEI Not Allowed"),
             )
 
+        model_item = (wi.get("external_device_model_item") or "").strip()
+        allowed_sub_categories = {
+            row.sub_category for row in (plan_doc.get("applicable_sub_categories") or [])
+            if row.sub_category
+        }
+        if allowed_sub_categories and not model_item:
+            frappe.throw(
+                frappe._("Plan {0} is restricted by sub-category. Select the customer's device model.").format(
+                    frappe.bold(wi.get("warranty_plan"))
+                ),
+                title=frappe._("External Device Model Required"),
+            )
+        if model_item:
+            model = frappe.db.get_value(
+                "Item", model_item, ["disabled", "ch_sub_category"], as_dict=True
+            )
+            if not model or model.disabled:
+                frappe.throw(frappe._("The selected external device model is not active."))
+            if allowed_sub_categories and model.ch_sub_category not in allowed_sub_categories:
+                frappe.throw(
+                    frappe._("The selected model belongs to {0}; this plan covers {1}.").format(
+                        model.ch_sub_category or frappe._("no sub-category"),
+                        ", ".join(sorted(allowed_sub_categories)),
+                    ),
+                    title=frappe._("External Device Not Eligible"),
+                )
+
         # Resolve generic device item from plan or company-level default
         generic_device_item = _resolve_generic_device_item_for_plan(plan_doc)
         if not generic_device_item:
@@ -4536,6 +4581,7 @@ def create_pos_invoice(
                 device_purchase_price=device_price,
                 is_external_device=wi.get("is_external_device"),
                 external_device_source=wi.get("external_device_source"),
+                external_device_model_item=wi.get("external_device_model_item"),
                 original_invoice=original_invoice,
             )
             if sp:
@@ -4758,7 +4804,8 @@ def _send_voucher_email(customer, email, phone, vouchers, invoice_name):
 
 def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoice, plan_price,
                         serial_no=None, device_purchase_price=0, is_external_device=0,
-                        external_device_source=None, original_invoice=None):
+                        external_device_source=None, external_device_model_item=None,
+                        original_invoice=None):
     """Create an Active VAS Plans record (shown as Active VAS Plans in UI) when a warranty is sold via POS.
 
     Uses the standard Frappe document lifecycle (insert → submit) so that
@@ -4840,6 +4887,7 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
     sp.max_coverage_value = flt(device_purchase_price) if flt(device_purchase_price) > 0 else 0
     sp.is_external_device = cint(is_external_device)
     sp.external_device_source = external_device_source or ""
+    sp.external_device_model_item = external_device_model_item or ""
     if cint(is_external_device):
         sp.remarks = _("Customer-provided IMEI sold via POS. Not attached to seller device inventory.")
     sp.sold_by = frappe.session.user
@@ -4856,12 +4904,13 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
         cd_name = frappe.db.get_value("CH Customer Device", {"serial_no": serial_no})
         if not cd_name:
             frappe.has_permission("CH Customer Device", "create", throw=True)
-            item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
-            item_brand = frappe.db.get_value("Item", item_code, "brand")
+            customer_device_item = external_device_model_item or item_code
+            item_name = frappe.db.get_value("Item", customer_device_item, "item_name") or customer_device_item
+            item_brand = frappe.db.get_value("Item", customer_device_item, "brand")
             cd = frappe.new_doc("CH Customer Device")
             cd.customer = customer
             cd.serial_no = serial_no
-            cd.item_code = item_code
+            cd.item_code = customer_device_item
             cd.item_name = item_name
             if item_brand:
                 cd.brand = item_brand
@@ -11215,13 +11264,24 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             device_item_codes.add(cart_item["item_code"])
 
     item_categories = {}
+    item_sub_categories = {}
     if device_item_codes:
         item_categories = {
             row.name: row.ch_category
             for row in frappe.get_all(
                 "Item",
                 filters={"name": ("in", sorted(device_item_codes))},
-                fields=["name", "ch_category"],
+                fields=["name", "ch_category", "ch_sub_category"],
+                order_by="name ASC",
+                limit_page_length=cart_item_limit,
+            )
+        }
+        item_sub_categories = {
+            row.name: row.ch_sub_category
+            for row in frappe.get_all(
+                "Item",
+                filters={"name": ("in", sorted(device_item_codes))},
+                fields=["name", "ch_sub_category"],
                 order_by="name ASC",
                 limit_page_length=cart_item_limit,
             )
@@ -11263,6 +11323,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
     # and fall back to the item's active POS selling price.
     has_device = False
     device_categories = set()
+    device_sub_categories = set()
     max_device_price = 0.0
     for ci in device_rows:
         has_device = True
@@ -11270,6 +11331,9 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         ch_category = item_categories.get(ic)
         if ch_category:
             device_categories.add(ch_category)
+        ch_sub_category = item_sub_categories.get(ic)
+        if ch_sub_category:
+            device_sub_categories.add(ch_sub_category)
         rate = flt(ci.get("rate") or ci.get("price") or ci.get("selling_price") or ci.get("amount"))
         if not rate and ic:
             rate = fallback_prices.get(ic, 0)
@@ -11283,10 +11347,11 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         "CH Warranty Plan",
         filters={"status": "Active", "is_sellable": 1},
         fields=[
-            "name", "plan_name", "plan_type", "service_item",
+            "name", "plan_name", "plan_type", "service_item", "company",
             "duration_months", "price", "pricing_mode", "percentage_value",
             "coverage_description", "brand", "fulfillment_type",
             "allow_external_device", "external_device_item",
+            "coverage_availability", "external_device_price", "allow_zero_external_price",
             "valid_from", "valid_to",
             "min_device_price", "max_device_price",
             "partner", "auto_attach",
@@ -11305,6 +11370,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
     plan_rows = [r for r in plan_rows if not r.get("service_item") or r.get("service_item") in _live]
 
     plan_categories = {}
+    plan_sub_categories = {}
     plan_names = [row.name for row in plan_rows]
     if plan_names:
         category_row_limit = max(
@@ -11323,6 +11389,20 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         for category_row in category_rows:
             if category_row.category:
                 plan_categories.setdefault(category_row.parent, []).append(category_row.category)
+        sub_category_rows = frappe.get_all(
+            "CH Warranty Plan Sub Category",
+            filters={"parent": ("in", plan_names)},
+            fields=["parent", "sub_category"],
+            order_by="parent ASC, idx ASC",
+            limit_page_length=category_row_limit + 1,
+        )
+        if len(sub_category_rows) > category_row_limit:
+            frappe.throw(_("Warranty plan sub-category configuration exceeds the safe row limit."))
+        for sub_category_row in sub_category_rows:
+            if sub_category_row.sub_category:
+                plan_sub_categories.setdefault(sub_category_row.parent, []).append(
+                    sub_category_row.sub_category
+                )
 
     def _resolve_price(fixed_price, pricing_mode, pct):
         """Effective sellable rate for a plan.
@@ -11353,13 +11433,26 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
                 row.get("pricing_mode"),
                 row.get("percentage_value"),
             ),
+            "internal_price": _resolve_price(
+                row.get("price"), row.get("pricing_mode"), row.get("percentage_value")
+            ),
+            "external_price": flt(row.get("external_device_price")),
+            "allow_zero_external_price": cint(row.get("allow_zero_external_price")),
+            "coverage_availability": row.get("coverage_availability") or (
+                "Both" if cint(row.get("allow_external_device")) else "In-Store Only"
+            ),
             "pricing_mode": row.get("pricing_mode"),
             "percentage_value": flt(row.get("percentage_value")),
             "coverage_description": row.get("coverage_description"),
             "brand": row.get("brand"),
             "fulfillment_type": row.get("fulfillment_type"),
             "allow_external_device": cint(row.get("allow_external_device")),
-            "external_device_item": row.get("external_device_item"),
+            "external_device_item": (
+                row.get("external_device_item")
+                or frappe.db.get_value(
+                    "Company", row.get("company"), "ch_default_external_device_item"
+                )
+            ),
             "valid_from": row.get("valid_from"),
             "valid_to": row.get("valid_to"),
             "min_device_price": flt(row.get("min_device_price")),
@@ -11380,10 +11473,16 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
 
         # Device dependency: Protection Plans always require a device
         requires_device = plan.plan_type == "Protection Plan"
+        allows_in_store_device = plan.coverage_availability in ("In-Store Only", "Both")
         allows_external_device = cint(plan.get("allow_external_device")) and bool(
             plan.get("external_device_item")
         )
+        if plan.coverage_availability == "External Only" or (
+            not has_device and allows_external_device
+        ):
+            plan["price"] = plan.external_price
         plan["requires_device"] = requires_device
+        plan["allows_in_store_device"] = bool(allows_in_store_device)
         plan["allows_external_device"] = bool(allows_external_device)
 
         if requires_device and not has_device and not allows_external_device:
@@ -11396,6 +11495,10 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         else:
             plan["blocked"] = False
             plan["blocked_reason"] = ""
+
+        if not allows_in_store_device and not allows_external_device:
+            plan["blocked"] = True
+            plan["blocked_reason"] = frappe._("External device pricing is not configured")
 
         # Price band.
         min_dp = flt(plan.get("min_device_price"))
@@ -11427,6 +11530,16 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
                     plan["blocked"] = True
                     plan["blocked_reason"] = frappe._("Requires an eligible device in cart")
                 # External-allowed plans stay unblocked; manual IMEI is validated before billing.
+
+        applicable_sub_categories = plan_sub_categories.get(plan.name, [])
+        plan["applicable_sub_categories"] = applicable_sub_categories
+        plan["external_model_required"] = bool(applicable_sub_categories)
+        if not plan.get("blocked") and applicable_sub_categories and device_sub_categories:
+            if not device_sub_categories.intersection(applicable_sub_categories):
+                plan["blocked"] = True
+                plan["blocked_reason"] = frappe._("Not applicable for {0}").format(
+                    ", ".join(sorted(device_sub_categories))
+                )
 
         applicable.append(plan)
 
