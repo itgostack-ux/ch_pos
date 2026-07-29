@@ -3468,7 +3468,7 @@ def create_pos_invoice(
         _fifo_reason = str(item.get("fifo_override_reason") or "").strip()
         if _fifo_reason and item.get("serial_no") and not item_is_plan:
             _fifo_remarks = str(item.get("fifo_override_remarks") or "").strip()
-            _assert_fifo_override_allowed(_fifo_reason, _fifo_remarks, company)
+            _assert_fifo_override_allowed(_fifo_reason, _fifo_remarks, profile.company)
             row["custom_fifo_override_reason"] = _fifo_reason
             row["custom_fifo_override_remarks"] = _fifo_remarks
             row["custom_fifo_skipped_serial"] = str(
