@@ -1,0 +1,164 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "autoname": "format:{exception_type}-{reason_name}",
+ "creation": "2026-07-28 10:00:00.000000",
+ "description": "Picklist of approved reasons per CH Exception Type. Ops adds rows here and they appear at the counter immediately — no code change. The free-text 'Requested Reason' on CH Exception Request stays available for detail.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "exception_type",
+  "reason_name",
+  "reason_code",
+  "enabled",
+  "column_break_main",
+  "company",
+  "sort_order",
+  "section_controls",
+  "requires_remarks",
+  "requires_approval",
+  "column_break_controls",
+  "description"
+ ],
+ "fields": [
+  {
+   "fieldname": "exception_type",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Exception Type",
+   "options": "CH Exception Type",
+   "reqd": 1,
+   "search_index": 1,
+   "description": "Which exception this reason belongs to (FIFO Override, Discount Override, …)."
+  },
+  {
+   "fieldname": "reason_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Reason",
+   "reqd": 1,
+   "description": "Shown in the counter dropdown."
+  },
+  {
+   "fieldname": "reason_code",
+   "fieldtype": "Data",
+   "label": "Reason Code",
+   "in_list_view": 1,
+   "description": "Short code for reporting (e.g. OLDER_NOT_TRACEABLE). Unique per exception type. Optional."
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled",
+   "description": "Uncheck to retire a reason without losing past usage."
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "in_standard_filter": 1,
+   "description": "Leave blank to offer this reason in every company."
+  },
+  {
+   "default": "0",
+   "fieldname": "sort_order",
+   "fieldtype": "Int",
+   "label": "Display Order",
+   "description": "Lower numbers appear first."
+  },
+  {
+   "fieldname": "section_controls",
+   "fieldtype": "Section Break",
+   "label": "Controls"
+  },
+  {
+   "default": "0",
+   "fieldname": "requires_remarks",
+   "fieldtype": "Check",
+   "label": "Require Remarks",
+   "description": "Force the cashier to type a note. Use for catch-all reasons like \"Other\"."
+  },
+  {
+   "default": "0",
+   "fieldname": "requires_approval",
+   "fieldtype": "Check",
+   "label": "Manager Only",
+   "description": "Only users holding an approval role for this exception may pick it."
+  },
+  {
+   "fieldname": "column_break_controls",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description",
+   "description": "Guidance shown to the cashier under the dropdown."
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-07-28 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Core",
+ "name": "CH Exception Reason",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "import": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "POS Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Store Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "POS User"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "reason_name",
+ "show_title_field_in_link": 1,
+ "track_changes": 1
+}

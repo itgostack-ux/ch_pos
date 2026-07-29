@@ -34,6 +34,30 @@ def assert_store_scope(store=None, company=None, warehouse=None, user=None, msg=
     )
 
 
+def has_store_scope(store=None, company=None, warehouse=None, user=None) -> bool:
+    """Non-raising scope test for filtering candidate users.
+
+    Prefer this over ``try: assert_store_scope(...) except PermissionError``.
+    The throw-and-catch form leaves the denial message in
+    ``frappe.local.message_log``, so every skipped candidate still surfaces a
+    "You are not entitled to access this store / location." popup to whoever is
+    standing at the till.
+    """
+    user = user or frappe.session.user
+    if user == "Guest":
+        return False
+    if is_privileged_user(user):
+        return True
+    try:
+        from ch_erp15.ch_erp15.scope import user_has_store_scope
+    except ImportError:
+        # Fail closed, consistent with assert_store_scope.
+        return False
+    return user_has_store_scope(
+        store=store, company=company, warehouse=warehouse, user=user
+    )
+
+
 def get_pos_profile_anchors(pos_profile: str, allow_disabled: bool = False) -> dict:
     """Resolve a POS Profile to its authoritative company/store/warehouse.
 
@@ -150,11 +174,11 @@ def assert_any_warehouse_scope(warehouses, company=None, user=None) -> None:
 
     candidates = [str(warehouse).strip() for warehouse in (warehouses or []) if warehouse]
     for warehouse in dict.fromkeys(candidates):
-        try:
-            assert_store_scope(warehouse=warehouse, company=company, user=user)
+        # Predicate, not throw-and-catch — a swallowed frappe.throw still
+        # leaves its message in frappe.local.message_log, so probing N
+        # warehouses used to emit N-1 stray denials before the real answer.
+        if has_store_scope(warehouse=warehouse, company=company, user=user):
             return
-        except frappe.PermissionError:
-            continue
     frappe.throw(
         _("This document is outside your assigned store scope."),
         frappe.PermissionError,

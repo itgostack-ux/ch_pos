@@ -183,6 +183,18 @@
 			return $i[0] || null;
 		};
 
+		const valid_otp_code = (show_message = true) => {
+			const code = input_value("otp_code");
+			if (/^\d{6}$/.test(code)) return code;
+			if (show_message) {
+				frappe.show_alert({
+					message: __("OTP Code must contain exactly 6 numeric digits."),
+					indicator: "orange",
+				});
+			}
+			return "";
+		};
+
 		const sync_city_state_from_pincode = () => {
 			const raw = input_value("pincode");
 			const pincode = raw.replace(/\D/g, "").slice(0, 6);
@@ -495,7 +507,8 @@
 				// auto-verify on Create instead of forcing an extra click. Mirrors the
 				// inline OTP verification pattern used by Razorpay / Shopify checkout.
 				if (otp_verified_number !== whatsapp) {
-					const otp_code = input_value("otp_code");
+					const entered_otp = input_value("otp_code");
+					const otp_code = valid_otp_code(false);
 					if (otp_code) {
 						try {
 							const res = await frappe.xcall("ch_pos.api.pos_api.verify_customer_whatsapp_otp", {
@@ -523,7 +536,12 @@
 							return;
 						}
 					} else {
-						frappe.show_alert({ message: __("Send & verify WhatsApp OTP before creating customer"), indicator: "red" });
+						frappe.show_alert({
+							message: entered_otp
+								? __("OTP Code must contain exactly 6 numeric digits.")
+								: __("Send & verify WhatsApp OTP before creating customer"),
+							indicator: "red",
+						});
 						return;
 					}
 				}
@@ -750,10 +768,10 @@
 
 		const verify_otp_handler = async () => {
 			const whatsapp = input_value("whatsapp_number");
-			const otp_code = input_value("otp_code");
+			const otp_code = valid_otp_code(false);
 			if (!whatsapp || !assert_india_phone(input_el("whatsapp_number"), whatsapp)) return;
 			if (!otp_code) {
-				frappe.show_alert({ message: __("Enter OTP code"), indicator: "orange" });
+				valid_otp_code(true);
 				return;
 			}
 			const button = d.$wrapper.find(".ch-verify-customer-otp").get(0);
@@ -801,6 +819,21 @@
 			button.onpointerdown = run;
 		};
 
+		const bind_otp_input_constraints = () => {
+			const el = d.$wrapper.find('[data-fieldname="otp_code"] input').get(0);
+			if (!el || el._ch_otp_constraints_bound) return;
+			el._ch_otp_constraints_bound = true;
+			el.setAttribute("inputmode", "numeric");
+			el.setAttribute("pattern", "[0-9]*");
+			el.setAttribute("maxlength", "6");
+			el.setAttribute("autocomplete", "one-time-code");
+			el.addEventListener("input", () => {
+				const code = (el.value || "").replace(/\D/g, "").slice(0, 6);
+				if (el.value !== code) el.value = code;
+				(d.doc || (d.doc = {})).otp_code = code;
+			});
+		};
+
 		// Auto-verify OTP when the user finishes typing a 6-digit code (Razorpay /
 		// Stripe Checkout pattern). Removes the need for an explicit Verify button.
 		const bind_otp_auto_verify = () => {
@@ -809,7 +842,9 @@
 			el._ch_otp_auto_bound = true;
 			let last_attempted = "";
 			const maybe_verify = () => {
-				const code = (el.value || "").replace(/\D/g, "").trim();
+				const code = (el.value || "").replace(/\D/g, "").slice(0, 6);
+				if (el.value !== code) el.value = code;
+				(d.doc || (d.doc = {})).otp_code = code;
 				if (code.length !== 6 || code === last_attempted) return;
 				const whatsapp = input_value("whatsapp_number");
 				if (!whatsapp || otp_verified_number === whatsapp) return;
@@ -862,9 +897,11 @@
 
 		d.$wrapper.one("shown.bs.modal", bind_native_inputs);
 		setTimeout(bind_send_otp_button, 50);
+		setTimeout(bind_otp_input_constraints, 50);
 		setTimeout(bind_otp_auto_verify, 50);
 		d.$wrapper.one("shown.bs.modal", () => {
 			bind_send_otp_button();
+			bind_otp_input_constraints();
 			bind_otp_auto_verify();
 		});
 

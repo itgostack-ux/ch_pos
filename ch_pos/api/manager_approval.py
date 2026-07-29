@@ -71,14 +71,18 @@ def _resolve_manager_user(mobile_no: str, anchors: dict) -> dict:
             user=user.name,
         ):
             continue
-        try:
-            assert_store_scope(
-                store=anchors.get("store"),
-                warehouse=anchors.get("warehouse"),
-                company=anchors.get("company"),
-                user=user.name,
-            )
-        except frappe.PermissionError:
+        # Predicate, not throw-and-catch: a swallowed frappe.throw still leaves
+        # its denial in frappe.local.message_log, so filtering N candidate
+        # managers used to pop N "not entitled to access this store" messages
+        # at the till — about other people's scope, not the operator's.
+        from ch_pos.api.scope_guard import has_store_scope
+
+        if not has_store_scope(
+            store=anchors.get("store"),
+            warehouse=anchors.get("warehouse"),
+            company=anchors.get("company"),
+            user=user.name,
+        ):
             continue
         matches.append(user)
 

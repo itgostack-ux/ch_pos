@@ -8,6 +8,7 @@ from frappe.utils import (
     add_days,
     add_months,
     cint,
+    date_diff,
     flt,
     fmt_money,
     get_datetime,
@@ -3455,6 +3456,25 @@ def create_pos_invoice(
             row["custom_exception_original_rate"] = item_exception_original
             row["custom_exception_final_rate"] = item_exception_final
 
+        # ── FIFO exception carried from the cart ──────────────────────────
+        # Re-authorised here rather than trusted: the client could otherwise
+        # post any reason string, or none, and still land a non-FIFO serial on
+        # the bill. _assert_fifo_override_allowed re-checks the switch, the
+        # role, the reason row and the remarks requirement.
+        # Gate on the CLIENT payload, not on row["serial_no"] — that key is not
+        # assigned until further down this same loop body, so guarding on it
+        # here silently discarded every override. Mirrors the condition used
+        # where the serial is actually copied onto the row.
+        _fifo_reason = str(item.get("fifo_override_reason") or "").strip()
+        if _fifo_reason and item.get("serial_no") and not item_is_plan:
+            _fifo_remarks = str(item.get("fifo_override_remarks") or "").strip()
+            _assert_fifo_override_allowed(_fifo_reason, _fifo_remarks, company)
+            row["custom_fifo_override_reason"] = _fifo_reason
+            row["custom_fifo_override_remarks"] = _fifo_remarks
+            row["custom_fifo_skipped_serial"] = str(
+                item.get("fifo_skipped_serial") or ""
+            ).strip()
+
         # ── Minimum Selling Price floor (server-side, TC_002) ──────────────
         # A sale below the item's approved channel selling price requires an
         # authorized override. The client cannot enforce this — a crafted
@@ -4069,6 +4089,11 @@ def create_pos_invoice(
         inv.flags.ignore_validate_update_after_submit = True
         inv.flags.ignore_gl_balance_check             = True   # persist bypass
         inv.submit()
+
+        # Governance record for any line sold out of FIFO order. Raised here
+        # (not at cart-add) because CH Exception Request is customer-scoped and
+        # the customer is only certain once the bill exists.
+        _raise_fifo_exception_requests(inv)
 
         if voucher_application:
             from ch_item_master.ch_item_master.voucher_api import redeem_voucher
@@ -6899,20 +6924,32 @@ def process_return_with_replacement(
 
 
 @frappe.whitelist()
-def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_override=0) -> dict:
+def validate_serial_for_sale(
+    serial_no,
+    item_code,
+    warehouse,
+    allow_fifo_override=0,
+    override_reason=None,
+    override_remarks=None,
+) -> dict:
     """Validate a serial number can be sold from this warehouse, enforcing FIFO.
 
     If a FIFO violation is detected and allow_fifo_override is falsy, returns
-    {valid: False, fifo_violation: True, oldest_serial, oldest_date, selected_date}
-    so the JS can show a soft-warning confirm dialog.
+    ``{valid: False, fifo_violation: True, oldest_serial, oldest_date,
+    selected_date, override_allowed, override_reasons}`` so the JS can offer the
+    exception dialog without a second round trip.
 
-    When allow_fifo_override=1 the FIFO check is skipped (user has already
-    confirmed the override in the UI); the exception is logged via log_fifo_override.
+    ``allow_fifo_override=1`` skips the FIFO check, but only against a named
+    ``override_reason`` from the CH Exception Reason master — the flag alone
+    is not enough, or any client could POST it and walk past the control. Record
+    the exception with :func:`authorize_fifo_override`.
     """
-    assert_store_scope(
-        warehouse=warehouse,
-        company=frappe.db.get_value("Warehouse", warehouse, "company"),
-    )
+    company = frappe.db.get_value("Warehouse", warehouse, "company")
+    assert_store_scope(warehouse=warehouse, company=company)
+
+    fifo_override = cint(allow_fifo_override)
+    if fifo_override:
+        _assert_fifo_override_allowed(override_reason, override_remarks, company)
     # IMEIs / barcodes are stored as strings; coerce in case the client sent
     # a JSON number for an all-digit IMEI (e.g. 35600220100003).
     serial_no = str(serial_no or "").strip()
@@ -6971,7 +7008,7 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
         }
 
     # ── FIFO enforcement ────────────────────────────────────────────────────
-    if not cint(allow_fifo_override):
+    if not fifo_override:
         oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse)
         if oldest_serial and oldest_serial != serial_no:
             # Determine the receipt date of the selected serial (for display in the dialog).
@@ -6992,66 +7029,228 @@ def validate_serial_for_sale(serial_no, item_code, warehouse, allow_fifo_overrid
             if oldest_date and selected_date and selected_date > oldest_date:
                 # Soft FIFO violation — return warning so JS can confirm with user.
                 # Manager alert fires only when the cashier confirms the override
-                # (see log_fifo_override below).
+                # (see authorize_fifo_override below).
+                override_allowed = _fifo_override_enabled() and has_configured_roles(
+                    "fifo_override_roles",
+                    ("POS User", "POS Manager", "Store Manager"),
+                )
                 return {
                     "valid": False,
                     "fifo_violation": True,
                     "oldest_serial": oldest_serial,
                     "oldest_date": str(oldest_date),
                     "selected_date": str(selected_date),
+                    # Everything the exception dialog needs, so the counter does
+                    # not pay a second round trip to draw the reason dropdown.
+                    "override_allowed": override_allowed,
+                    "override_reasons": (
+                        get_fifo_override_reasons(company) if override_allowed else []
+                    ),
                     "reason": frappe._(
                         "Older stock exists: {0} (received {1}) should be sold before {2} (received {3})."
                     ).format(oldest_serial, oldest_date, serial_no, selected_date),
                 }
 
-    return {"valid": True, "serial_no": serial_no, "item_code": item_code}
+    result = {"valid": True, "serial_no": serial_no, "item_code": item_code}
+    if fifo_override:
+        result["fifo_override"] = True
+    return result
+
+
+@frappe.whitelist()
+def get_fifo_override_reasons_for_pos(pos_profile=None) -> dict:
+    """Reason dropdown feed for the POS FIFO exception dialog."""
+    company = None
+    if pos_profile:
+        company = assert_pos_profile_scope(pos_profile).get("company")
+    elif not is_privileged_user():
+        frappe.throw(
+            _("POS Profile is required to list FIFO override reasons."),
+            frappe.PermissionError,
+        )
+    return {
+        "enabled": _fifo_override_enabled(),
+        "allowed": _fifo_override_enabled() and has_configured_roles(
+            "fifo_override_roles", ("POS User", "POS Manager", "Store Manager")
+        ),
+        "reasons": get_fifo_override_reasons(company),
+    }
 
 @frappe.whitelist(methods=["POST"])
-def log_fifo_override(serial_no, item_code, warehouse, oldest_serial, oldest_date, pos_profile=None) -> dict:
-    """Record a cashier-confirmed FIFO override exception.
+def authorize_fifo_override(
+    serial_no,
+    item_code,
+    warehouse,
+    oldest_serial,
+    oldest_date,
+    reason=None,
+    remarks=None,
+    selected_date=None,
+    pos_profile=None,
+) -> dict:
+    """Authorise a cashier-raised FIFO exception so the line can enter the cart.
 
-    Called from the JS confirm dialog when the user chooses to proceed despite
-    the FIFO warning.  Logs to CH Business Audit Log and notifies RSM/ASM.
+    Validates the reason against CH Exception Reason, re-runs the serial gates,
+    and alerts the configured FIFO Alert Roles. It does NOT write the governance
+    record: that is a CH Exception Request raised at invoice time by
+    :func:`_raise_fifo_exception_requests`, once a real customer is known — the
+    same shape Discount Override uses. The values returned here ride on the cart
+    line and are re-validated server-side when the invoice is built, so nothing
+    depends on the client preserving them honestly.
     """
-    assert_store_scope(
-        warehouse=warehouse,
-        company=frappe.db.get_value("Warehouse", warehouse, "company"),
-    )
+    company = frappe.db.get_value("Warehouse", warehouse, "company")
+    assert_store_scope(warehouse=warehouse, company=company)
     if pos_profile:
-        assert_pos_profile_scope(pos_profile)
+        anchors = assert_pos_profile_scope(pos_profile)
+        company = anchors.get("company") or company
     serial_no = str(serial_no or "").strip()
     oldest_serial = str(oldest_serial or "").strip()
+    remarks = (remarks or "").strip()
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
-    store = frappe.get_cached_value("POS Profile", pos_profile, "warehouse") if pos_profile else warehouse
-    company = frappe.get_cached_value("POS Profile", pos_profile, "company") if pos_profile else None
+    reason_row = _assert_fifo_override_allowed(reason, remarks, company)
 
-    # Write audit entry
+    # Re-run every non-FIFO gate. The exception dialog was open for a while; in
+    # the meantime the unit could have been sold, transferred, or reserved on a
+    # pre-booking.
+    check = validate_serial_for_sale(
+        serial_no,
+        item_code,
+        warehouse,
+        allow_fifo_override=1,
+        override_reason=reason_row.name,
+        override_remarks=remarks,
+    )
+    if not check.get("valid"):
+        return {"authorized": False, **check}
+
+    days_skipped = 0
     try:
-        from ch_pos.audit import log_business_event
-        log_business_event(
-            event_type="Other",
-            ref_doctype="Serial No",
-            ref_name=serial_no,
-            before=f"Oldest: {oldest_serial} (received {oldest_date})",
-            after=f"Sold out of order: {serial_no}",
-            remarks=f"Cashier confirmed FIFO override — item {item_code} at {warehouse}",
-            store=store,
-            company=company,
-        )
+        if oldest_date and selected_date:
+            days_skipped = max(0, date_diff(getdate(selected_date), getdate(oldest_date)))
     except Exception:
-        frappe.log_error(frappe.get_traceback(), f"FIFO override audit log failed for {serial_no}")
+        days_skipped = 0
 
-    # Notify managers (same as previous hard-reject alert)
+    detail = reason_row.reason_name + (f" — {remarks}" if remarks else "")
+
+    # Managers hear about it now, not at billing — an exception the cashier
+    # abandons is still worth a look on the shop floor.
     _send_fifo_violation_alert(
         item_code=item_code,
         warehouse=warehouse,
         selected_serial=serial_no,
         oldest_serial=oldest_serial,
         cashier=frappe.session.user,
+        reason_detail=detail,
     )
 
-    return {"logged": True}
+    return {
+        "authorized": True,
+        "valid": True,
+        "serial_no": serial_no,
+        "reason": reason_row.name,
+        "reason_name": reason_row.reason_name,
+        "remarks": remarks,
+        "skipped_serial": oldest_serial,
+        "days_skipped": days_skipped,
+    }
+
+
+def _raise_fifo_exception_requests(invoice_doc):
+    """Raise one CH Exception Request per FIFO-overridden invoice line.
+
+    Runs at invoice validate, mirroring how Discount Override is recorded in
+    ``ch_pos.overrides.discount_control``. Waiting until now is what makes the
+    customer-scoped guard on CH Exception Request satisfiable — at cart-add time
+    the counter often has not identified the customer yet.
+    """
+    if not frappe.db.exists("CH Exception Type", FIFO_EXCEPTION_TYPE):
+        return
+
+    for item in invoice_doc.get("items") or []:
+        reason = (item.get("custom_fifo_override_reason") or "").strip()
+        if not reason:
+            continue
+        # Never re-raise on amend / re-validate.
+        if frappe.db.exists("CH Exception Request", {
+            "exception_type": FIFO_EXCEPTION_TYPE,
+            "serial_no": item.get("serial_no") or "",
+            "reference_doctype": "Sales Invoice",
+            "reference_name": invoice_doc.name,
+            "docstatus": ("!=", 2),
+        }):
+            continue
+
+        reason_name = frappe.db.get_value("CH Exception Reason", reason, "reason_name") or reason
+        remarks = (item.get("custom_fifo_override_remarks") or "").strip()
+        skipped = (item.get("custom_fifo_skipped_serial") or "").strip()
+        detail = _("FIFO exception: {0}").format(reason_name)
+        if skipped:
+            detail += _(" — sold {0} ahead of older unit {1}").format(
+                item.get("serial_no") or "", skipped
+            )
+        if remarks:
+            detail += f" — {remarks}"
+
+        # Deliberately NOT via exception_api.raise_exception. That entry point is
+        # for a cashier *asking* for something (a discount, a policy waiver): it
+        # runs doc-level `has_permission("Item", "read", item_code)`, which a
+        # store cashier with a Warehouse User Permission fails, and it refuses a
+        # walk-in customer because a discount grant must be customer-scoped so it
+        # cannot be reused on another bill.
+        #
+        # Neither applies here. This row is a system-written record of a
+        # stock-picking deviation that has already happened and is already tied
+        # to one serial on one invoice — it is never consumed as a grant, so it
+        # cannot leak across bills. Going through raise_exception would mean
+        # silently losing the audit row for exactly the sales most worth
+        # recording.
+        customer = invoice_doc.customer
+        walk_in = frappe.db.get_value(
+            "POS Profile", invoice_doc.get("pos_profile"), "customer"
+        ) if invoice_doc.get("pos_profile") else None
+        anonymous = not customer or (walk_in and customer == walk_in)
+        if anonymous:
+            detail += _(" (walk-in sale — no registered customer)")
+
+        try:
+            exc = frappe.new_doc("CH Exception Request")
+            exc.exception_type = FIFO_EXCEPTION_TYPE
+            exc.company = invoice_doc.company
+            exc.requested_by = frappe.session.user
+            exc.requested_reason = detail
+            exc.item_code = item.get("item_code")
+            exc.serial_no = item.get("serial_no") or ""
+            exc.store_warehouse = item.get("warehouse") or invoice_doc.get("set_warehouse")
+            # NB: the doctype's `pos_invoice` field links to **POS Invoice**, but
+            # this app bills on Sales Invoice (see the
+            # migrate_pos_invoice_to_sales_invoice patch), so setting it fails
+            # link validation. The generic reference pair is the correct pointer.
+            exc.reference_doctype = "Sales Invoice"
+            exc.reference_name = invoice_doc.name
+            exc.customer = None if anonymous else customer
+            # `pos_profile` drives the customer-scoped grant guard on the
+            # doctype. Leave it unset on anonymous sales so the record survives;
+            # the store is still identified by store_warehouse and the reason
+            # text says plainly that it was a walk-in.
+            exc.pos_profile = None if anonymous else invoice_doc.get("pos_profile")
+            # No approver queue: the deviation is recorded, not requested. The
+            # manager alert already went out when the cashier raised it.
+            exc.status = "Auto-Approved"
+            exc.approval_channel = "Auto-Policy"
+            exc.approved_at = now_datetime()
+            exc.resolved_at = now_datetime()
+            exc.resolved_by = frappe.session.user
+            exc._authorize_approval_transition()
+            exc.insert(ignore_permissions=True)
+            exc.submit()
+        except Exception:
+            # Governance must not cost the customer their bill; the manager
+            # alert already fired at cart-add time.
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"FIFO exception request failed for {item.get('serial_no')}",
+            )
 
 
 @frappe.whitelist()
@@ -8470,6 +8669,12 @@ def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Veri
 
     mobile_no = validate_indian_phone(mobile_no)
     purpose = "POS Customer Verification"
+    otp_code = str(otp_code or "").strip()
+    if not re.fullmatch(r"\d{6}", otp_code):
+        return {
+            "valid": False,
+            "message": _("OTP Code must contain exactly 6 numeric digits."),
+        }
 
     # The Shadow Live master OTP is itself the controlled verification event;
     # it must not depend on a customer OTP row having been generated first.
@@ -8491,7 +8696,7 @@ def verify_customer_whatsapp_otp(mobile_no, otp_code, purpose="POS Customer Veri
     result = CHOTPLog.verify_otp(
         mobile_no=mobile_no,
         purpose=purpose,
-        otp_code=str(otp_code or "").strip(),
+        otp_code=otp_code,
         reference_doctype="Customer",
         reference_name="",
     )
@@ -14943,19 +15148,139 @@ def _get_oldest_fifo_serial(item_code, warehouse):
     return None, None
 
 
-def _send_fifo_violation_alert(item_code, warehouse, selected_serial, oldest_serial, cashier):
+def _fifo_override_enabled() -> bool:
+    """Master switch — CH POS Control Settings → Allow FIFO Override at POS.
+
+    ``ch_pos.setup._ensure_pos_control_defaults`` writes the ``1`` default into
+    tabSingles on install/migrate. Do not treat a missing value as "on" here: an
+    unsaved Check reads back as 0 either way, so inferring at read time would
+    quietly re-enable the exception on a site that deliberately turned it off.
+    """
+    return bool(cint(get_control_setting("allow_fifo_override")))
+
+
+FIFO_EXCEPTION_TYPE = "FIFO Override"
+
+
+def get_fifo_override_reasons(company=None) -> list:
+    """Enabled CH Exception Reason rows for FIFO Override, in display order.
+
+    Company-specific rows win over the blank-company (all-companies) rows.
+    `allowed` is False for Manager Only reasons the caller cannot use — they are
+    still returned so the counter can see the reason exists and fetch a manager,
+    rather than wondering why the list looks short.
+    """
+    if not frappe.db.exists("DocType", "CH Exception Reason"):
+        return []
+
+    filters = {"enabled": 1, "exception_type": FIFO_EXCEPTION_TYPE}
+    if company:
+        filters["company"] = ("in", [company, ""])
+
+    rows = frappe.get_all(
+        "CH Exception Reason",
+        filters=filters,
+        fields=[
+            "name", "reason_name", "reason_code", "company",
+            "requires_remarks", "requires_approval", "description",
+            "sort_order",
+        ],
+        order_by="sort_order asc, reason_name asc",
+    )
+
+    can_approve = has_configured_roles(
+        "fifo_override_approval_roles", ("POS Manager", "Store Manager")
+    )
+    for row in rows:
+        row["allowed"] = True if not cint(row.requires_approval) else can_approve
+    return rows
+
+
+def _assert_fifo_override_allowed(reason, remarks, company=None):
+    """Authorise one FIFO exception. Returns the resolved reason row.
+
+    Every bypass of the FIFO gate funnels through here, so the checks live in
+    one place: the feature is switched on, the caller holds an override role,
+    the reason is a real enabled row (not free text the client made up), the
+    caller is senior enough for a Manager Only reason, and remarks are present
+    where the reason demands them.
+    """
+    if not _fifo_override_enabled():
+        frappe.throw(
+            _("Selling out of FIFO order is disabled. Sell the oldest IMEI first."),
+            title=_("FIFO Override Disabled"),
+        )
+
+    require_configured_roles(
+        "fifo_override_roles",
+        defaults=("POS User", "POS Manager", "Store Manager"),
+        action=_("sell an IMEI out of FIFO order"),
+    )
+
+    reason = (reason or "").strip()
+    if not reason:
+        frappe.throw(
+            _("Select a reason before selling out of FIFO order."),
+            title=_("Reason Required"),
+        )
+
+    row = frappe.db.get_value(
+        "CH Exception Reason",
+        {"name": reason, "exception_type": FIFO_EXCEPTION_TYPE},
+        ["name", "reason_name", "reason_code", "company", "enabled",
+         "requires_remarks", "requires_approval"],
+        as_dict=True,
+    )
+    if not row or not cint(row.enabled):
+        frappe.throw(
+            _("{0} is not an active FIFO override reason.").format(reason),
+            title=_("Invalid Reason"),
+        )
+    if row.company and company and row.company != company:
+        frappe.throw(
+            _("Reason {0} is not available for {1}.").format(row.reason_name, company),
+            title=_("Invalid Reason"),
+        )
+
+    if cint(row.requires_approval) and not has_configured_roles(
+        "fifo_override_approval_roles", ("POS Manager", "Store Manager")
+    ):
+        frappe.throw(
+            _("\"{0}\" may only be used by a manager. Ask a supervisor to complete this sale.").format(
+                row.reason_name
+            ),
+            frappe.PermissionError,
+            title=_("Manager Approval Required"),
+        )
+
+    if cint(row.requires_remarks) and not (remarks or "").strip():
+        frappe.throw(
+            _("Reason \"{0}\" needs a short explanation in Remarks.").format(row.reason_name),
+            title=_("Remarks Required"),
+        )
+
+    return row
+
+
+def _send_fifo_violation_alert(
+    item_code, warehouse, selected_serial, oldest_serial, cashier, reason_detail=None
+):
     """Notify configured, store-scoped recipients about a FIFO violation."""
     subject = frappe._("FIFO Violation: Serial {0} selected out of order").format(selected_serial)
     message = frappe._(
         "FIFO violation at <b>{warehouse}</b>: cashier <b>{cashier}</b> is attempting to sell "
         "serial <b>{selected}</b> for item <b>{item}</b>, but the oldest available serial is "
-        "<b>{oldest}</b>. Please investigate."
+        "<b>{oldest}</b>.{reason} Please investigate."
     ).format(
         warehouse=warehouse,
         cashier=cashier,
         selected=selected_serial,
         item=item_code,
         oldest=oldest_serial,
+        reason=(
+            frappe._(" Reason given: <b>{0}</b>.").format(frappe.utils.escape_html(reason_detail))
+            if reason_detail else ""
+        ),
     )
 
     alert_roles = sorted(

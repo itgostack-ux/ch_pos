@@ -49,6 +49,33 @@ def _clear_pin_failures(key: str) -> None:
     clear_fixed_window("manager-pin", key)
 
 
+def _read_pin_quietly(password_name):
+    """Return ``(pin, readable)`` without leaking decryption noise to the till.
+
+    ``frappe.decrypt`` **msgprints before it throws** — it emits "Failed to
+    decrypt key …", "Encryption key is invalid! Please check site_config.json"
+    and a link about restoring sites. Catching the exception does not remove
+    those from ``frappe.local.message_log``, so a cashier entering a manager PIN
+    was shown the site's encryption internals once per unreadable row.
+
+    Snapshotting the log and truncating it back is the only way to undo a
+    msgprint that has already happened. The failure is not swallowed: the caller
+    collects the names and writes a single Error Log for administrators.
+    """
+    log = getattr(frappe.local, "message_log", None)
+    mark = len(log) if isinstance(log, list) else None
+    try:
+        value = get_decrypted_password(
+            "CH POS Password", password_name, "pin_hash", raise_exception=True
+        )
+        return value, True
+    except Exception:
+        return None, False
+    finally:
+        if mark is not None and isinstance(frappe.local.message_log, list):
+            del frappe.local.message_log[mark:]
+
+
 def verify_manager_pin(pin, store=None, permission=None):
     """Verify a manager PIN and return the manager's user if valid.
 
@@ -132,24 +159,33 @@ def verify_manager_pin(pin, store=None, permission=None):
         )
 
     matches = []
+    undecryptable = []
     for mgr in managers:
         manager_is_privileged = is_privileged_user(mgr.user)
         manager_store = mgr.get("store") if has_store_field else None
         if not manager_is_privileged:
             if not store or (manager_store and manager_store != store):
                 continue
-            try:
-                from ch_pos.api.scope_guard import assert_store_scope
+            # Predicate, not throw-and-catch: `frappe.throw` also appends to
+            # frappe.local.message_log, and catching the exception does not
+            # remove it. The old form showed the cashier one "You are not
+            # entitled to access this store / location." popup per skipped
+            # manager — noise about other people's permissions.
+            from ch_pos.api.scope_guard import has_store_scope
 
-                assert_store_scope(store=store, user=mgr.user)
-            except frappe.PermissionError:
+            if not has_store_scope(store=store, user=mgr.user):
                 continue
         if permission and not cint(mgr.requested_permission):
             continue
 
-        stored_pin = get_decrypted_password(
-            "CH POS Password", mgr.name, "pin_hash"
-        )
+        # One unreadable PIN must not deny the till to every other manager.
+        # Decryption fails for every row encrypted under a different
+        # site_config `encryption_key` — the usual cause is a database restored
+        # from another site without its key.
+        stored_pin, readable = _read_pin_quietly(mgr.name)
+        if not readable:
+            undecryptable.append(mgr.name)
+            continue
         if not hmac.compare_digest(str(stored_pin or ""), str(pin)):
             continue
 
@@ -179,4 +215,23 @@ def verify_manager_pin(pin, store=None, permission=None):
             "This PIN belongs to more than one authorized manager here. "
             "Assign each manager a distinct PIN (or bind their PIN to a store)."
         )}
+
+    if undecryptable:
+        # Loud in the server log (an admin must fix the key or reset the PINs),
+        # and honest at the till: without this the operator sees a bare
+        # "Invalid PIN" for a PIN that is very likely correct.
+        frappe.log_error(
+            "Manager PINs stored under a different encryption key and cannot be "
+            "read on this site. Restore the original site_config.json "
+            "encryption_key, or have these managers set a new PIN:\n"
+            + "\n".join(undecryptable),
+            "CH POS Password decryption failed",
+        )
+        if not managers or len(undecryptable) == len(managers):
+            return {"valid": False, "message": _(
+                "Manager PINs cannot be read on this site — none are stored "
+                "under the current encryption key. Ask an administrator to "
+                "restore the original encryption key or reset the PINs."
+            )}
+
     return {"valid": False, "message": _("Invalid PIN")}

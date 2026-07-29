@@ -2864,6 +2864,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			manager_user:     c.manager_user || null,
 			override_reason:  c.override_reason || null,
 			serial_no:        c.serial_no || null,
+			// FIFO exception raised at cart-add. Re-authorised server-side in
+			// create_pos_invoice, then written as a CH Exception Request once
+			// the invoice (and therefore the customer) exists.
+			fifo_override_reason:  c.fifo_override_reason || null,
+			fifo_override_remarks: c.fifo_override_remarks || null,
+			fifo_skipped_serial:   c.fifo_skipped_serial || null,
 			// Sales Order pickup linkage — per-row so the SI Items carry the
 			// reference back to the SO Item, which is what drives per_billed and
 			// Stock Reservation Entry matching on the backend.

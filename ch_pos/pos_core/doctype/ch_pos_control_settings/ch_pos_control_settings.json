@@ -123,6 +123,9 @@
   "incentive_rebuild_max_days",
   "finance_notification_roles",
   "fifo_alert_roles",
+  "allow_fifo_override",
+  "fifo_override_roles",
+  "fifo_override_approval_roles",
   "cash_variance_account",
   "isolation_section",
   "enforce_device_company_isolation",
@@ -980,6 +983,29 @@
    "fieldname": "fifo_alert_roles",
    "fieldtype": "Small Text",
    "label": "FIFO Alert Roles"
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_fifo_override",
+   "fieldtype": "Check",
+   "label": "Allow FIFO Override at POS",
+   "description": "When on, a cashier who cannot sell the oldest IMEI may sell a newer one by picking a reason from CH Exception Reason (type: FIFO Override). Managers are alerted at once and a CH Exception Request is raised on the invoice. Turn off to hard-block non-FIFO sales."
+  },
+  {
+   "default": "POS User\nPOS Manager\nStore Manager",
+   "fieldname": "fifo_override_roles",
+   "fieldtype": "Small Text",
+   "label": "FIFO Override Roles",
+   "depends_on": "allow_fifo_override",
+   "description": "Roles allowed to raise a FIFO exception at the counter. One role per line."
+  },
+  {
+   "default": "POS Manager\nStore Manager",
+   "fieldname": "fifo_override_approval_roles",
+   "fieldtype": "Small Text",
+   "label": "FIFO Override Approval Roles",
+   "depends_on": "allow_fifo_override",
+   "description": "Roles allowed to use reasons marked \"Manager Only\" in CH Exception Reason. One role per line."
   },
   {
    "fieldname": "cash_variance_account",

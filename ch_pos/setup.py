@@ -622,6 +622,38 @@ CUSTOM_FIELDS = {
             "read_only": 1,
             "module": "POS Core",
         },
+        # ── FIFO exception carriers ──────────────────────────────────────
+        # Set at cart-add when the cashier sells a newer IMEI than the FIFO
+        # leader, and consumed at invoice validate to raise the CH Exception
+        # Request (same shape as Discount Override above).
+        {
+            "fieldname": "custom_fifo_override_reason",
+            "fieldtype": "Link",
+            "label": "FIFO Override Reason",
+            "options": "CH Exception Reason",
+            "insert_after": "custom_item_category",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_fifo_skipped_serial",
+            "fieldtype": "Data",
+            "label": "FIFO Skipped IMEI",
+            "insert_after": "custom_fifo_override_reason",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_fifo_override_reason",
+            "description": "The older unit that should have been sold first.",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_fifo_override_remarks",
+            "fieldtype": "Small Text",
+            "label": "FIFO Override Remarks",
+            "insert_after": "custom_fifo_skipped_serial",
+            "read_only": 1,
+            "depends_on": "eval:doc.custom_fifo_override_reason",
+            "module": "POS Core",
+        },
     ],
     "Item": [
         {
@@ -865,6 +897,8 @@ def after_install():
     create_custom_fields(_filter_ready_fields(CUSTOM_FIELDS), update=False)
     sync_margin_receipt_format()
     _ensure_default_docperms()
+    _ensure_pos_control_defaults()
+    _ensure_fifo_override_reasons()
 
 
 def after_migrate():
@@ -873,6 +907,43 @@ def after_migrate():
     sync_margin_receipt_format()
     _ensure_sale_types()
     _ensure_default_docperms()
+    _ensure_pos_control_defaults()
+    _ensure_fifo_override_reasons()
+
+
+def _ensure_pos_control_defaults():
+    """Materialise go-live defaults that Single DocTypes do not persist automatically."""
+    if not frappe.db.exists("DocType", "CH POS Control Settings"):
+        return
+    if not frappe.db.get_single_value("CH POS Control Settings", "pincode_lookup_provider"):
+        frappe.db.set_single_value(
+            "CH POS Control Settings", "pincode_lookup_provider", "Local Master"
+        )
+        frappe.clear_document_cache("CH POS Control Settings")
+
+    # FIFO override defaults. A Check field that was never saved reads back as 0,
+    # which is indistinguishable from an admin deliberately switching it off — so
+    # the "on" default has to be written down once, not inferred at read time.
+    # Keyed on the tabSingles row existing, so an admin who turns it off stays off.
+    # Raw SQL: `Singles` is a bare table, not a DocType, so the ORM cannot read it.
+    stored = {
+        row[0]
+        for row in frappe.db.sql(
+            """SELECT field FROM tabSingles
+               WHERE doctype = 'CH POS Control Settings'
+                 AND field IN ('allow_fifo_override', 'fifo_override_roles',
+                               'fifo_override_approval_roles')"""
+        )
+    }
+    for field, value in (
+        ("allow_fifo_override", 1),
+        ("fifo_override_roles", "POS User\nPOS Manager\nStore Manager"),
+        ("fifo_override_approval_roles", "POS Manager\nStore Manager"),
+    ):
+        if field not in stored:
+            frappe.db.set_single_value("CH POS Control Settings", field, value)
+    if stored != {"allow_fifo_override", "fifo_override_roles", "fifo_override_approval_roles"}:
+        frappe.clear_document_cache("CH POS Control Settings")
 
 
 def _ensure_default_docperms():
@@ -950,6 +1021,115 @@ def _ensure_sale_types():
             })
         doc.insert(ignore_permissions=True)
     frappe.db.commit()
+
+
+# FIFO override rides on the existing governance framework rather than a
+# bespoke one: CH Exception Type carries the routing/limit config, CH Exception
+# Request is the audit row, and CH Exception Reason is the counter picklist.
+# That keeps every POS exception (Discount Override, Return Override, Buyback
+# Price Override, Stock Count Variance…) in one place.
+FIFO_EXCEPTION_TYPE = "FIFO Override"
+
+# Starting picklist only — the point of the master is that Ops adds rows in Desk
+# without a code change, so the seeder never updates or deletes an existing row.
+FIFO_OVERRIDE_REASON_SEED = [
+    {
+        "reason_name": "Older IMEI Not Traceable in Store",
+        "reason_code": "OLDER_NOT_TRACEABLE",
+        "sort_order": 10,
+        "description": "The oldest unit is not on the shelf or in the back room and could not be located during the sale.",
+    },
+    {
+        "reason_name": "Older Unit Physically Damaged",
+        "reason_code": "UNIT_DAMAGED",
+        "sort_order": 20,
+        "description": "Dents, scratches or screen damage on the oldest unit make it unsellable at full price.",
+    },
+    {
+        "reason_name": "Older Unit Box / Seal Damaged",
+        "reason_code": "BOX_DAMAGED",
+        "sort_order": 30,
+        "description": "Device is fine but the carton or factory seal is torn, so the customer refused it.",
+    },
+    {
+        "reason_name": "Older Unit Fails Power-On / Demo",
+        "reason_code": "DEMO_FAILED",
+        "sort_order": 40,
+        "description": "The oldest unit did not power on or failed the in-store demo.",
+    },
+    {
+        "reason_name": "Older Unit Sent for Service / RMA",
+        "reason_code": "IN_SERVICE",
+        "sort_order": 50,
+        "description": "The oldest unit is away at service or has been raised for RMA to the brand.",
+    },
+    {
+        "reason_name": "Older Unit Informally Held for Another Customer",
+        "reason_code": "INFORMAL_HOLD",
+        "sort_order": 60,
+        "description": "Verbally promised to a walk-in who is returning today. Use a Pre-Book instead where possible.",
+    },
+    {
+        "reason_name": "Customer Insists on a Specific IMEI",
+        "reason_code": "CUSTOMER_CHOICE",
+        "sort_order": 70,
+        "requires_remarks": 1,
+        "description": "Customer chose a particular unit (colour variant, IMEI digits, sealed date). Record what they asked for.",
+    },
+    {
+        "reason_name": "Other (Explain in Remarks)",
+        "reason_code": "OTHER",
+        "sort_order": 999,
+        "requires_remarks": 1,
+        "requires_approval": 1,
+        "description": "Catch-all. Requires a written explanation and a manager-level role.",
+    },
+]
+
+
+def _ensure_fifo_exception_type():
+    """Register FIFO Override alongside the other POS exception types."""
+    if not frappe.db.exists("DocType", "CH Exception Type"):
+        return False
+    if frappe.db.exists("CH Exception Type", FIFO_EXCEPTION_TYPE):
+        return True
+    doc = frappe.new_doc("CH Exception Type")
+    doc.exception_type = FIFO_EXCEPTION_TYPE
+    doc.enabled = 1
+    # No OTP / HO call: the cashier is not asking for money off, they are
+    # recording why the oldest unit could not go out. Routing still runs so
+    # managers are notified, and Ops can add an occurrence cap here later.
+    doc.requires_otp = 0
+    doc.requires_ho_approval = 0
+    doc.routing_mode = "Approval Matrix"
+    doc.applicable_to_ggr = 1
+    doc.applicable_to_gfs = 1
+    doc.insert(ignore_permissions=True)
+    return True
+
+
+def _ensure_fifo_override_reasons():
+    """Create the FIFO Override exception type and its default reasons once."""
+    if not frappe.db.exists("DocType", "CH Exception Reason"):
+        return
+    if not _ensure_fifo_exception_type():
+        return
+
+    created = False
+    for seed in FIFO_OVERRIDE_REASON_SEED:
+        if frappe.db.exists("CH Exception Reason", {
+            "exception_type": FIFO_EXCEPTION_TYPE,
+            "reason_name": seed["reason_name"],
+        }):
+            continue
+        doc = frappe.new_doc("CH Exception Reason")
+        doc.update(seed)
+        doc.exception_type = FIFO_EXCEPTION_TYPE
+        doc.enabled = 1
+        doc.insert(ignore_permissions=True)
+        created = True
+    if created:
+        frappe.db.commit()
 
 
 def sync_margin_receipt_format():

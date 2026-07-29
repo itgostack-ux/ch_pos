@@ -481,15 +481,138 @@ export class CartService {
 					this._add_new_cart_item(item_data, serial_no);
 					frappe.show_alert({ message: __("{0} added with IMEI {1}", [item_data.item_name, serial_no]), indicator: "green" });
 				} else if (res.fifo_violation) {
-					frappe.show_alert({
-						message: __("FIFO restricted. Sell oldest serial first: {0}", [res.oldest_serial || "-"]),
-						indicator: "red",
+					this._prompt_fifo_override(res, { serial_no, item_data }, (grant) => {
+						this._add_new_cart_item(item_data, serial_no, grant);
+						frappe.show_alert({
+							message: __("{0} added with IMEI {1} — FIFO exception recorded", [item_data.item_name, serial_no]),
+							indicator: "orange",
+						});
 					});
 				} else {
 					frappe.show_alert({ message: res.reason || __("Invalid serial number"), indicator: "red" });
 				}
 			},
 		});
+	}
+
+	/**
+	 * FIFO exception dialog.
+	 *
+	 * Shown when the cashier picks an IMEI that is not the FIFO-oldest. Selling
+	 * out of order is a real counter need (the older unit is damaged, missing,
+	 * away at service…) so instead of a dead-end "FIFO restricted" toast we ask
+	 * for a reason from the CH Exception Reason master (exception type "FIFO Override").
+	 *
+	 * `res` is the fifo_violation payload from validate_serial_for_sale — it
+	 * already carries the reason list, so the dialog opens with no extra call.
+	 * on_success() runs only after the server has re-validated the serial AND
+	 * written the audit row.
+	 */
+	_prompt_fifo_override(res, { serial_no, item_data }, on_success) {
+		const oldest = res.oldest_serial || "-";
+		const reasons = (res.override_reasons || []).filter((r) => r.allowed);
+		const blocked = (res.override_reasons || []).filter((r) => !r.allowed);
+
+		if (!res.override_allowed || !reasons.length) {
+			// Either the store has the override switched off, this user has no
+			// override role, or every reason left is manager-only.
+			let msg = __("FIFO restricted. Sell the oldest IMEI first: {0}", [oldest]);
+			if (res.override_allowed && blocked.length) {
+				msg = __("Only a manager can sell out of FIFO order here. Oldest IMEI: {0}", [oldest]);
+			}
+			frappe.show_alert({ message: msg, indicator: "red" }, 7);
+			return;
+		}
+
+		const by_name = {};
+		reasons.forEach((r) => { by_name[r.reason_name] = r; });
+
+		const d = new frappe.ui.Dialog({
+			title: __("Older Stock Exists"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "summary",
+					options: `
+						<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:10px 12px;font-size:12px;line-height:1.7">
+							<div style="color:#9a3412;font-weight:600;margin-bottom:6px">
+								<i class="fa fa-exclamation-triangle"></i> ${__("This is not the oldest unit in stock")}
+							</div>
+							<div>${__("Oldest (sell first)")}: <b>${frappe.utils.escape_html(oldest)}</b>
+								<span style="color:#78716c">${res.oldest_date ? "· " + frappe.datetime.str_to_user(res.oldest_date) : ""}</span></div>
+							<div>${__("You selected")}: <b>${frappe.utils.escape_html(serial_no)}</b>
+								<span style="color:#78716c">${res.selected_date ? "· " + frappe.datetime.str_to_user(res.selected_date) : ""}</span></div>
+						</div>`,
+				},
+				{
+					fieldname: "reason",
+					fieldtype: "Select",
+					label: __("Reason for selling out of order"),
+					reqd: 1,
+					options: [""].concat(reasons.map((r) => r.reason_name)),
+					onchange: () => {
+						const picked = by_name[d.get_value("reason")];
+						d.set_df_property("remarks", "reqd", picked ? !!cint(picked.requires_remarks) : 0);
+						d.set_df_property("remarks", "description", (picked && picked.description) || "");
+					},
+				},
+				{
+					fieldname: "remarks",
+					fieldtype: "Small Text",
+					label: __("Remarks"),
+					description: __("Required for some reasons — e.g. \"Other\"."),
+				},
+			],
+			primary_action_label: __("Sell This Unit"),
+			primary_action: () => {
+				const picked = by_name[d.get_value("reason")];
+				if (!picked) {
+					frappe.show_alert({ message: __("Select a reason"), indicator: "orange" });
+					return;
+				}
+				const remarks = (d.get_value("remarks") || "").trim();
+				if (cint(picked.requires_remarks) && !remarks) {
+					frappe.show_alert({
+						message: __("Reason \"{0}\" needs a short explanation.", [picked.reason_name]),
+						indicator: "orange",
+					});
+					return;
+				}
+				d.disable_primary_action();
+				frappe.call({
+					method: "ch_pos.api.pos_api.authorize_fifo_override",
+					args: {
+						serial_no,
+						item_code: item_data.item_code,
+						warehouse: PosState.warehouse,
+						oldest_serial: res.oldest_serial || "",
+						oldest_date: res.oldest_date || "",
+						selected_date: res.selected_date || "",
+						reason: picked.name,
+						remarks,
+						pos_profile: PosState.pos_profile,
+					},
+					callback: (r) => {
+						const out = r.message || {};
+						if (!out.authorized) {
+							// The unit was sold / moved / reserved while the
+							// dialog was open.
+							d.enable_primary_action();
+							frappe.show_alert({
+								message: out.reason || __("This IMEI can no longer be sold."),
+								indicator: "red",
+							}, 7);
+							return;
+						}
+						d.hide();
+						on_success(out);
+					},
+					error: () => d.enable_primary_action(),
+				});
+			},
+		});
+		d.show();
+		setTimeout(() => d.set_df_property("remarks", "reqd", 0), 0);
 	}
 
 	add_to_cart(item_data) {
@@ -701,7 +824,7 @@ export class CartService {
 		return true;
 	}
 
-	_add_new_cart_item(item_data, serial_no) {
+	_add_new_cart_item(item_data, serial_no, fifo_override) {
 		// LAST LINE OF DEFENCE — every serialized add funnels through here, so
 		// this is the one place that can make a duplicate IMEI impossible no
 		// matter which caller (scan, picker, bundle, restore) raced ahead.
@@ -742,6 +865,13 @@ export class CartService {
 			stock_qty: flt(item_data.stock_qty || 0),
 			must_be_whole_number: cint(item_data.must_be_whole_number),
 		};
+		// FIFO exception rides on the line to billing, where it becomes a
+		// CH Exception Request (the customer is only known at that point).
+		if (fifo_override && fifo_override.reason) {
+			cart_item.fifo_override_reason = fifo_override.reason;
+			cart_item.fifo_override_remarks = fifo_override.remarks || "";
+			cart_item.fifo_skipped_serial = fifo_override.skipped_serial || "";
+		}
 		if (!cart_item.discount_percentage && flt(item_data.discount_percentage) > 0) {
 			cart_item.discount_percentage = flt(item_data.discount_percentage);
 		}
@@ -913,10 +1043,18 @@ export class CartService {
 							});
 						} else if (res.fifo_violation) {
 							dlg.enable_primary_action();
-							frappe.show_alert({
-								message: __("FIFO restricted. Please select oldest serial: {0}", [res.oldest_serial || "-"]),
-								indicator: "red",
-							});
+							this._prompt_fifo_override(
+								res,
+								{ serial_no: final_serial, item_data },
+								(grant) => {
+									dlg.hide();
+									this._add_new_cart_item(item_data, final_serial, grant);
+									frappe.show_alert({
+										message: __("{0} added with IMEI {1} — FIFO exception recorded", [item_data.item_name, final_serial]),
+										indicator: "orange",
+									});
+								}
+							);
 						} else {
 							dlg.enable_primary_action();
 							frappe.show_alert({
