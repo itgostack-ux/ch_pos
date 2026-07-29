@@ -2853,6 +2853,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			warranty_plan:    c.warranty_plan || null,
 			for_item_code:    c.for_item_code || null,
 			for_serial_no:    c.for_serial_no || null,
+			customer_imei:    c.customer_imei || null,
+			external_device_model_item: c.external_device_model_item || null,
 			is_warranty:      c.is_warranty || false,
 			is_vas:           c.is_vas || false,
 			// GoFix service rows — consolidated repair billing (bifurcated
@@ -3542,6 +3544,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			warranty_plan: c.warranty_plan || null,
 			for_item_code: c.for_item_code || null,
 			for_serial_no: c.for_serial_no || null,
+			customer_imei: c.customer_imei || null,
+			external_device_model_item: c.external_device_model_item || null,
 			serial_no: c.serial_no || "",
 		}));
 		const $mgr = this._overlay.find("#ch-pay-free-managers");
@@ -3590,6 +3594,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			warranty_plan: c.warranty_plan || null,
 			for_item_code: c.for_item_code || null,
 			for_serial_no: c.for_serial_no || null,
+			customer_imei: c.customer_imei || null,
+			external_device_model_item: c.external_device_model_item || null,
 			serial_no: c.serial_no || "",
 		}));
 

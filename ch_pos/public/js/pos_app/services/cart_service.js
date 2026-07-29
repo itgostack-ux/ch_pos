@@ -769,7 +769,7 @@ export class CartService {
 						return;
 					}
 					const for_item_code = res.item_code || plan.external_device_item || null;
-					this._add_vas_to_cart(dialog, plan, for_item_code, imei);
+					this._add_vas_to_cart(dialog, plan, for_item_code, imei, null, true);
 				});
 			},
 		});
@@ -2198,7 +2198,12 @@ export class CartService {
 			return;
 		}
 
-		const authoritative_rate = external_intent ? flt(plan.external_price) : flt(plan.internal_price);
+		// Catalog plans expose external_price/internal_price, while the direct
+		// service-item lookup exposes external_device_price/price. Preserve a
+		// configured numeric zero in either shape.
+		const authoritative_rate = external_intent
+			? flt(plan.external_price ?? plan.external_device_price ?? plan.price)
+			: flt(plan.internal_price ?? plan.price);
 		dialog.hide();
 		PosState.cart.push({
 			item_code: plan.service_item || plan.name,
