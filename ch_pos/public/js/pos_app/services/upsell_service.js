@@ -147,6 +147,10 @@ export class UpsellService {
 			if ($btn.hasClass("disabled")) return;
 
 			if (s.type === "Protection Plan" || s.type === "Warranty") {
+				const is_vas_plan = ["Value Added Service", "Protection Plan"].includes(s.plan_type)
+					|| (!s.plan_type && s.type === "Protection Plan");
+				const is_warranty_plan = ["Own Warranty", "Extended Warranty", "Post-Repair Warranty"].includes(s.plan_type)
+					|| (!s.plan_type && s.type === "Warranty");
 				// Add as warranty/plan item
 				PosState.cart.push({
 					item_code: s.item_code,
@@ -160,8 +164,8 @@ export class UpsellService {
 					offers: [],
 					applied_offer: null,
 					warranty_plan: s.warranty_plan || s.item_code,
-					is_warranty: s.type === "Warranty",
-					is_vas: s.type === "Protection Plan",
+					is_warranty: is_warranty_plan,
+					is_vas: is_vas_plan,
 					has_serial_no: 0,
 					serial_no: "",
 					for_item_code: cart_item.item_code,

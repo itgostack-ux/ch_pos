@@ -596,7 +596,15 @@ def _match_warranty_plans(item, device_price, cart_codes):
 				"item_code": plan.service_item or plan.name,
 				"warranty_plan": plan.name,
 				"item_name": plan.plan_name,
-				"type": "Protection Plan",
+				# Preserve the master classification. Treating every plan as a
+				# Protection Plan makes Extended/Own Warranty cart rows claim
+				# is_vas=1, which the invoice integrity gate correctly rejects.
+				"plan_type": plan.plan_type,
+				"type": (
+					"Protection Plan"
+					if plan.plan_type in ("Value Added Service", "Protection Plan")
+					else "Warranty"
+				),
 				"reason": reason,
 				"price": flt(plan.price),
 				"priority": priority,
