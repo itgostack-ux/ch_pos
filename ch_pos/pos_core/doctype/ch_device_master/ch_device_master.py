@@ -78,12 +78,11 @@ def get_device_for_user(user, company=None, store=None):
     if store:
         filters["store"] = store
 
-    # Look up from CH POS User Allocation
-    alloc = frappe.db.get_value(
-        "CH POS User Allocation",
-        {"user": user, "is_active": 1, **({"company": company} if company else {})},
-        "default_device",
-    )
+    # Default device now rides on the user's CH User Scope Store row
+    # (CH POS User Allocation retired — ch_erp15 patch v34).
+    from ch_erp15.ch_erp15.scope import get_store_till_settings
+
+    alloc = (get_store_till_settings(user, store=store, company=company) or {}).get("default_device")
     if alloc:
         device = frappe.db.get_value("CH Device Master", alloc, ["name", "company", "store", "pos_profile", "warehouse", "is_active"], as_dict=True)
         if device and device.is_active:

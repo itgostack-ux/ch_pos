@@ -33,14 +33,22 @@ def _get_session_permissions(user, company=None, store=None):
             "can_do_cash_drop": 1,
         }
 
-    allocation = frappe.db.get_value(
-        "CH POS User Allocation",
-        {"user": user, "company": company, "store": store, "is_active": 1},
-        ["can_open_session", "can_close_session", "can_approve_variance", "can_do_cash_drop"],
-        as_dict=True,
-    )
-    if allocation:
-        return {key: cint(allocation.get(key)) for key in allocation}
+    # Till duties live on the user's CH User Scope Store row. CH POS User
+    # Allocation was retired into it (ch_erp15 patch v34) so there is one place
+    # a store grant is authored, rather than a scope row and an allocation row
+    # that could disagree about the same user and store.
+    from ch_erp15.ch_erp15.scope import get_store_till_settings
+
+    _TILL_KEYS = ("can_open_session", "can_close_session",
+                  "can_approve_variance", "can_do_cash_drop")
+    grant = get_store_till_settings(user, store=store, company=company)
+    # Only an EXPLICIT grant overrides the role-derived defaults below. A store
+    # row with every duty unticked means "not configured here", not "denied
+    # everything" — the entitlement rows migrated in ch_erp15 patch v34 carried
+    # only till access, never duties, so treating them as a deny would have
+    # silently stripped POS capability from every migrated user.
+    if grant and any(cint(grant.get(key)) for key in _TILL_KEYS):
+        return {key: cint(grant.get(key)) for key in _TILL_KEYS}
 
     return {
         "can_open_session": cint(

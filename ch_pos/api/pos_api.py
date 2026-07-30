@@ -7777,12 +7777,14 @@ def get_repair_closure_data(service_request, pos_profile=None) -> dict:
         if _pos_profile_name:
             _store_name = frappe.db.get_value("CH Store", {"pos_profile": _pos_profile_name, "disabled": 0}, "name")
     if _store_name:
-        _rows = frappe.db.get_all(
-            "CH Store User",
-            filters={"parent": _store_name, "parenttype": "CH Store"},
-            fields=["user as name", "full_name"],
-            order_by="full_name",
-        )
+        # Roster now derives from CH User Scope (CH Store User retired —
+        # ch_erp15 patch v34): stores are authored per user, read back per store.
+        from ch_erp15.ch_erp15.scope import get_store_users
+
+        _rows = [
+            {"name": _r.get("user"), "full_name": _r.get("full_name")}
+            for _r in get_store_users(_store_name)
+        ]
         for r in _rows:
             if not r.full_name:
                 r.full_name = frappe.db.get_value("User", r.name, "full_name") or r.name
@@ -8048,13 +8050,11 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     if technician and sr.service_order:
         source_warehouse = sr.get("source_warehouse") or profile.warehouse
         source_store = frappe.db.get_value("CH Store", {"warehouse": source_warehouse}, "name")
-        if not source_store or not frappe.db.exists(
-            "CH Store User",
-            {
-                "parent": source_store,
-                "parenttype": "CH Store",
-                "user": technician,
-            },
+        from ch_erp15.ch_erp15.scope import get_store_users
+
+        # CH Store User retired into CH User Scope (ch_erp15 patch v34).
+        if not source_store or not any(
+            _r.get("user") == technician for _r in get_store_users(source_store)
         ):
             frappe.throw(_("Technician is not assigned to the Service Request store."))
         ja = frappe.db.get_value("Job Assignment", {"service_order": sr.service_order}, "name")

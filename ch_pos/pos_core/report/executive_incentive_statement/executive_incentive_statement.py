@@ -243,8 +243,8 @@ def _get_target_achievement_cards(filters, conditions, values):
         company=filters.get("company"),
     )
 
-    asm_stores = _get_scope_store_union("Area Sales Manager (ASM)")
-    zsm_stores = _get_scope_store_union("Zonal Sales Manager (ZSM)")
+    asm_stores = _get_scope_store_union("CH Area Sales Manager (ASM)")
+    zsm_stores = _get_scope_store_union("CH Zonal Sales Manager (ZSM)")
 
     achieved_asm = sum(v for s, v in achieved_by_store.items() if s in asm_stores)
     achieved_zsm = sum(v for s, v in achieved_by_store.items() if s in zsm_stores)
@@ -293,12 +293,12 @@ def _get_target_achievement_cards(filters, conditions, values):
     ]
 
 
-def _get_scope_store_union(scope_role):
+def _get_scope_store_union(role_profile):
     stores = set()
     try:
         users = frappe.get_all(
             "CH User Scope",
-            filters={"enabled": 1, "scope_role": scope_role},
+            filters={"enabled": 1, "role_profile": role_profile},
             pluck="user",
         )
     except Exception:
