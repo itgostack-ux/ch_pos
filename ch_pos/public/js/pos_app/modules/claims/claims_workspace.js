@@ -857,81 +857,102 @@ _render_dashboard(panel, data) {
 		}
 		btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Submitting...")}`);
 
-		frappe.xcall(
-			"ch_item_master.ch_item_master.warranty_api.initiate_warranty_claim",
-			{
-				serial_no: dev.serial_no,
-				customer: data.customer,
-				item_code: dev.item_code,
-				company: PosState.company,
-				issue_description: issue_desc,
-				issue_categories: JSON.stringify(selected_cats),
-				reported_at_company: PosState.company,
-				reported_at_store: PosState.store || "",
-				estimated_repair_cost: parseFloat(panel.find(".ch-claim-est-cost").val()) || 0,
-				mode_of_service,
-				pickup_address: pickup_address || undefined,
-				pickup_slot: pickup_slot || undefined,
-				sold_plan: selected_sold_plan || undefined,
-			}
-		).then(async (result) => {
-			// Upload images to the created claim
-			if (result.claim_name && filled.length) {
-				try {
-					await this._upload_claim_images(result.claim_name, img_files);
-				} catch (e) {
-					frappe.show_alert({ message: __("Claim created but some images failed to upload"), indicator: "orange" });
+		let staged_evidence = [];
+		this._stage_claim_images(img_files)
+			.then((evidence) => {
+				staged_evidence = evidence;
+				return frappe.xcall(
+					"ch_item_master.ch_item_master.warranty_api.initiate_warranty_claim",
+					{
+						serial_no: dev.serial_no,
+						customer: data.customer,
+						item_code: dev.item_code,
+						company: PosState.company,
+						issue_description: issue_desc,
+						issue_categories: JSON.stringify(selected_cats),
+						reported_at_company: PosState.company,
+						reported_at_store: PosState.store || "",
+						estimated_repair_cost: parseFloat(panel.find(".ch-claim-est-cost").val()) || 0,
+						mode_of_service,
+						pickup_address: pickup_address || undefined,
+						pickup_slot: pickup_slot || undefined,
+						sold_plan: selected_sold_plan || undefined,
+						evidence_files: JSON.stringify(evidence),
+					}
+				);
+			})
+			.then((result) => {
+				this._show_claim_result(panel, result);
+				this._load_claims_pipeline(panel);
+				// Re-search to refresh dashboard
+				const q = panel.find(".ch-claim-search").val().trim();
+				if (q) setTimeout(() => this._search(panel, q), 1500);
+			})
+			.catch(async (err) => {
+				if (staged_evidence.length) {
+					try {
+						await frappe.xcall(
+							"ch_item_master.ch_item_master.warranty_api.discard_unattached_claim_evidence",
+							{ file_names: JSON.stringify(staged_evidence.map((entry) => entry.file_name)) }
+						);
+					} catch (cleanup_error) {
+						console.warn("Unable to clean staged claim evidence", cleanup_error);
+					}
 				}
-			}
-			this._show_claim_result(panel, result);
-			this._load_claims_pipeline(panel);
-			// Re-search to refresh dashboard
-			const q = panel.find(".ch-claim-search").val().trim();
-			if (q) setTimeout(() => this._search(panel, q), 1500);
-		}).catch((err) => {
-			frappe.show_alert({ message: err.message || __("Failed to create claim"), indicator: "red" });
-		}).finally(() => {
-			btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Submit Claim")}`);
-		});
+				frappe.show_alert({ message: err.message || __("Failed to create claim"), indicator: "red" });
+			})
+			.finally(() => {
+				btn.prop("disabled", false).html(`<i class="fa fa-paper-plane"></i> ${__("Submit Claim")}`);
+			});
 	}
 
 	/**
-	 * Upload device images to an existing warranty claim document.
-	 * Uploads each file, collects URLs, then sets all field values at once.
+	 * Upload device images as private staging files. The claim API validates
+	 * ownership and binds them to the submitted claim in its transaction.
 	 */
-	async _upload_claim_images(claim_name, img_files) {
-		const field_urls = {};
+	async _stage_claim_images(img_files) {
+		const evidence = [];
 
-		for (const { field, file } of img_files) {
-			if (!file) continue;
-			const form_data = new FormData();
-			form_data.append("file", file, file.name);
-			form_data.append("doctype", "CH Warranty Claim");
-			form_data.append("docname", claim_name);
-			form_data.append("fieldname", field);
-			form_data.append("is_private", "1");
+		try {
+			for (const { field, file } of img_files) {
+				if (!file) continue;
+				const form_data = new FormData();
+				form_data.append("file", file, file.name);
+				form_data.append("is_private", "1");
 
-			const resp = await fetch("/api/method/upload_file", {
-				method: "POST",
-				body: form_data,
-				headers: {
-					"X-Frappe-CSRF-Token": frappe.csrf_token,
-				},
-			});
-			if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
-			const result = await resp.json();
-			const file_url = result.message && result.message.file_url;
-			if (file_url) field_urls[field] = file_url;
+				const resp = await fetch("/api/method/upload_file", {
+					method: "POST",
+					body: form_data,
+					headers: {
+						"X-Frappe-CSRF-Token": frappe.csrf_token,
+					},
+				});
+				if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
+				const result = await resp.json();
+				const uploaded = result.message || {};
+				if (!uploaded.name || !uploaded.file_url) {
+					throw new Error(__("Upload completed without a valid private file record"));
+				}
+				evidence.push({
+					fieldname: field,
+					file_name: uploaded.name,
+					file_url: uploaded.file_url,
+				});
+			}
+		} catch (error) {
+			if (evidence.length) {
+				try {
+					await frappe.xcall(
+						"ch_item_master.ch_item_master.warranty_api.discard_unattached_claim_evidence",
+						{ file_names: JSON.stringify(evidence.map((entry) => entry.file_name)) }
+					);
+				} catch (cleanup_error) {
+					console.warn("Unable to clean partially staged claim evidence", cleanup_error);
+				}
+			}
+			throw error;
 		}
-
-		// Set all image field values on the submitted claim
-		if (Object.keys(field_urls).length) {
-			await frappe.xcall("frappe.client.set_value", {
-				doctype: "CH Warranty Claim",
-				name: claim_name,
-				fieldname: field_urls,
-			});
-		}
+		return evidence;
 	}
 
 	_show_claim_result(panel, result) {
@@ -1142,17 +1163,26 @@ _render_dashboard(panel, data) {
 
 		const AFTER_APPROVAL = ["Approved","Pickup Requested","Pickup Scheduled","Picked Up",
 			"Device Received","QC Pending","QC Passed","QC Failed","Fee Pending","Fee Paid","Fee Waived",
-			"Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed"];
+			"Ticket Created","In Repair","Repair Complete","Final QC Pending","Final QC Passed",
+			"Invoice Pending","Invoice Raised","Payment Pending","Payment Received","Ready for Delivery",
+			"Out for Delivery","Delivered","Closed"];
 		const AFTER_RECEIVED = ["Device Received","QC Pending","QC Passed","QC Failed",
 			"Fee Pending","Fee Paid","Fee Waived","Ticket Created","In Repair","Repair Complete",
-			"Out for Delivery","Delivered","Closed"];
+			"Final QC Pending","Final QC Passed","Invoice Pending","Invoice Raised","Payment Pending",
+			"Payment Received","Ready for Delivery","Out for Delivery","Delivered","Closed"];
 		const AFTER_QC = ["QC Passed","Fee Pending","Fee Paid","Fee Waived",
-			"Ticket Created","In Repair","Repair Complete","Out for Delivery","Delivered","Closed"];
-		const AFTER_FEE = ["Fee Paid","Fee Waived","Ticket Created","In Repair",
-			"Repair Complete","Out for Delivery","Delivered","Closed"];
-		const AFTER_TICKET = ["Ticket Created","In Repair","Repair Complete",
+			"Ticket Created","In Repair","Repair Complete","Final QC Pending","Final QC Passed",
+			"Invoice Pending","Invoice Raised","Payment Pending","Payment Received","Ready for Delivery",
 			"Out for Delivery","Delivered","Closed"];
-		const AFTER_REPAIR = ["Repair Complete","Out for Delivery","Delivered","Closed"];
+		const AFTER_FEE = ["Fee Paid","Fee Waived","Ticket Created","In Repair",
+			"Repair Complete","Final QC Pending","Final QC Passed","Invoice Pending","Invoice Raised",
+			"Payment Pending","Payment Received","Ready for Delivery","Out for Delivery","Delivered","Closed"];
+		const AFTER_TICKET = ["Ticket Created","In Repair","Repair Complete",
+			"Final QC Pending","Final QC Passed","Invoice Pending","Invoice Raised","Payment Pending",
+			"Payment Received","Ready for Delivery","Out for Delivery","Delivered","Closed"];
+		const AFTER_REPAIR = ["Repair Complete","Final QC Pending","Final QC Passed","Invoice Pending",
+			"Invoice Raised","Payment Pending","Payment Received","Ready for Delivery","Out for Delivery",
+			"Delivered","Closed"];
 
 		return [
 			{ label: __("Filed"), icon: "fa-file-text", done: true, color: "#3b82f6" },
@@ -1182,68 +1212,86 @@ _render_dashboard(panel, data) {
 		const mode = claim.mode_of_service || "Walk-in";
 		const lstat = claim.logistics_status || "Not Required";
 		const s = claim.claim_status;
+		const capabilities = claim._ui_capabilities || {};
 
 		// ── Action buttons based on current status ──
 		const actions = [];
 
 		// Pickup flow
-		if (["Approved", "Pickup Requested"].includes(s) && claim.pickup_required) {
+		if (capabilities.can_manage_logistics
+			&& ["Approved", "Pickup Requested"].includes(s) && claim.pickup_required) {
 			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="schedule_pickup"><i class="fa fa-calendar"></i> ${__("Schedule Pickup")}</button>`);
 		}
-		if (s === "Pickup Scheduled") {
+		if (capabilities.can_manage_logistics && s === "Pickup Scheduled") {
 			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="mark_picked_up"><i class="fa fa-truck"></i> ${__("Mark Picked Up")}</button>`);
 		}
 
 		// Device Receiving (walk-in: from Approved; pickup: from Picked Up)
-		if ((s === "Approved" && !claim.pickup_required) || s === "Picked Up") {
+		if (capabilities.can_manage_logistics
+			&& ((s === "Approved" && !claim.pickup_required) || s === "Picked Up")) {
 			actions.push(`<button class="btn btn-xs btn-info ch-claim-log-action" data-claim="${claim.name}" data-action="receive_device"><i class="fa fa-inbox"></i> ${__("Receive Device")}</button>`);
 		}
 
-			// Intake QC (after receiving)
-			if (claim._ui_capabilities?.can_perform_intake_qc
-				&& ["Device Received", "QC Pending"].includes(s)) {
+		// Intake QC (after receiving)
+		if (capabilities.can_perform_intake_qc
+			&& ["Device Received", "QC Pending"].includes(s)) {
 			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="perform_qc"><i class="fa fa-check-square-o"></i> ${__("Perform Intake QC")}</button>`);
 		}
 
 		// Processing Fee (after QC passed)
-		if (s === "QC Passed" && !claim.processing_fee_amount) {
+		if (capabilities.can_manage_finance && s === "QC Passed" && !claim.processing_fee_amount) {
 			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="generate_fee"><i class="fa fa-calculator"></i> ${__("Generate Fee")}</button>`);
 		}
-		if (["Fee Pending", "QC Passed"].includes(s) && flt(claim.processing_fee_amount) > 0
-		    && !["Paid","Waived","Not Required"].includes(claim.processing_fee_status)) {
+		if (capabilities.can_manage_finance
+			&& ["Fee Pending", "QC Passed"].includes(s) && flt(claim.processing_fee_amount) > 0
+			&& !["Paid", "Waived", "Not Required"].includes(claim.processing_fee_status)) {
 			actions.push(`<button class="btn btn-xs btn-success ch-claim-log-action" data-claim="${claim.name}" data-action="collect_fee"><i class="fa fa-credit-card"></i> ${__("Collect Fee ₹") + format_number(claim.processing_fee_amount)}</button>`);
 			actions.push(`<button class="btn btn-xs btn-default ch-claim-log-action" data-claim="${claim.name}" data-action="send_fee_link"><i class="fa fa-paper-plane"></i> ${__("Send Link")}</button>`);
 			actions.push(`<button class="btn btn-xs btn-default ch-claim-log-action" data-claim="${claim.name}" data-action="waive_fee"><i class="fa fa-ban"></i> ${__("Waive Fee")}</button>`);
 		}
 
 		// Create Repair Ticket (after all gates pass)
-		if (["Fee Paid", "Fee Waived"].includes(s)
-		    || (s === "QC Passed" && claim.processing_fee_status === "Not Required")) {
+		if (capabilities.can_manage_service && (["Fee Paid", "Fee Waived"].includes(s)
+			|| (s === "QC Passed" && claim.processing_fee_status === "Not Required"))) {
 			if (!claim.service_request) {
 				actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="create_ticket"><i class="fa fa-wrench"></i> ${__("Create GoFix Ticket")}</button>`);
 			}
 		}
 
 		// Additional damage/cost approval (during repair)
-		if (["In Repair", "Ticket Created"].includes(s)) {
+		if (capabilities.can_manage_service && ["In Repair", "Ticket Created"].includes(s)) {
 			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="request_additional_approval"><i class="fa fa-exclamation-triangle"></i> ${__("Additional Cost")}</button>`);
 		}
-		if (s === "Additional Approval Pending") {
+		if (capabilities.can_manage_service && s === "Additional Approval Pending") {
 			actions.push(`<button class="btn btn-xs btn-success ch-claim-log-action" data-claim="${claim.name}" data-action="resolve_additional_approved"><i class="fa fa-check"></i> ${__("Customer Approved")}</button>`);
 			actions.push(`<button class="btn btn-xs btn-danger ch-claim-log-action" data-claim="${claim.name}" data-action="resolve_additional_rejected"><i class="fa fa-times"></i> ${__("Customer Rejected")}</button>`);
 		}
 
 		// Final QC (after repair)
-		if (s === "Repair Complete" || s === "Final QC Pending") {
+		if (capabilities.can_perform_final_qc
+			&& (s === "Repair Complete" || s === "Final QC Pending")) {
 			actions.push(`<button class="btn btn-xs btn-primary ch-claim-log-action" data-claim="${claim.name}" data-action="perform_final_qc"><i class="fa fa-check-double"></i> ${__("Final QC")}</button>`);
 		}
 
+		// Document-backed financial settlement after final QC.
+		if (capabilities.can_manage_finance
+			&& ["Final QC Passed", "Invoice Pending", "Invoice Raised", "Payment Pending"].includes(s)
+			&& claim.settlement_status !== "Settled") {
+			actions.push(`<button class="btn btn-xs btn-warning ch-claim-log-action" data-claim="${claim.name}" data-action="record_settlement"><i class="fa fa-file-text-o"></i> ${__("Record Settlement")}</button>`);
+		}
+
 		// Post-repair delivery
-		if (["Repair Complete", "Final QC Passed", "Payment Received", "Invoice Raised"].includes(s)) {
+		if (capabilities.can_manage_logistics
+			&& ["Payment Received", "Ready for Delivery"].includes(s)) {
 			actions.push(`<button class="btn btn-xs btn-info ch-claim-log-action" data-claim="${claim.name}" data-action="mark_out_for_delivery"><i class="fa fa-motorcycle"></i> ${__("Out for Delivery")}</button>`);
 		}
-		if (s === "Out for Delivery") {
+		if (capabilities.can_manage_logistics && s === "Out for Delivery") {
 			actions.push(`<button class="btn btn-xs btn-success ch-claim-log-action" data-claim="${claim.name}" data-action="mark_delivered_back"><i class="fa fa-check"></i> ${__("Mark Delivered")}</button>`);
+		}
+
+		if (capabilities.can_manage_claim
+			&& ["Rejected", "Delivered", "QC Failed", "Not Repairable"].includes(s)) {
+			actions.push(`<button class="btn btn-xs btn-default ch-claim-log-action" data-claim="${claim.name}" data-action="close_claim"><i class="fa fa-lock"></i> ${__("Close Claim")}</button>`);
 		}
 
 		// ── Summary card ──
@@ -1338,7 +1386,7 @@ _render_dashboard(panel, data) {
 	_render_fee_block(claim) {
 		if (!claim.processing_fee_amount && claim.processing_fee_status === "Not Required") return "";
 		const s = claim.processing_fee_status || "Pending";
-		const paid = ["Paid","Waived","Not Required"].includes(s);
+		const paid = ["Paid", "Waived", "Not Required"].includes(s);
 		const bg = paid ? "#dcfce7" : "#fef3c7";
 		const border = paid ? "#bbf7d0" : "#fde68a";
 		return `
@@ -1346,12 +1394,12 @@ _render_dashboard(panel, data) {
 			<b><i class="fa fa-credit-card"></i> ${__("Processing Fee")} — ${s}</b>
 			<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px">
 				<div><span class="text-muted">${__("Amount")}:</span> <b>₹${format_number(claim.processing_fee_amount || 0)}</b></div>
-				${s === "Paid" ? `<div><span class="text-muted">${__("Paid")}:</span> ₹${format_number(claim.processing_fee_paid_amount || 0)} via ${claim.payment_mode || "—"}</div>` : ""}
+				${s === "Paid" ? `<div><span class="text-muted">${__("Paid")}:</span> ₹${format_number(claim.processing_fee_paid_amount || 0)} via ${claim.processing_fee_payment_mode || "—"}</div>` : ""}
 				${s === "Paid" && claim.processing_fee_paid_at ? `<div><span class="text-muted">${__("Paid At")}:</span> ${claim.processing_fee_paid_at}</div>` : ""}
 				${claim.processing_fee_payment_ref ? `<div><span class="text-muted">${__("Ref")}:</span> ${claim.processing_fee_payment_ref}</div>` : ""}
 				${s === "Link Sent" ? `<div><span class="text-muted">${__("Link Sent")}:</span> ${claim.processing_fee_link_sent_at || "—"} via ${claim.processing_fee_link_sent_via || "—"}</div>` : ""}
-				${s === "Waived" ? `<div><span class="text-muted">${__("Waived")}:</span> ₹${format_number(claim.waived_amount || 0)}</div>` : ""}
-				${claim.waiver_reason ? `<div style="grid-column:span 2"><span class="text-muted">${__("Reason")}:</span> ${frappe.utils.escape_html(claim.waiver_reason)}</div>` : ""}
+				${s === "Waived" ? `<div><span class="text-muted">${__("Waived")}:</span> ₹${format_number(claim.processing_fee_waived_amount || 0)}</div>` : ""}
+				${claim.processing_fee_waiver_reason ? `<div style="grid-column:span 2"><span class="text-muted">${__("Reason")}:</span> ${frappe.utils.escape_html(claim.processing_fee_waiver_reason)}</div>` : ""}
 			</div>
 		</div>`;
 	}
@@ -1381,7 +1429,6 @@ _render_dashboard(panel, data) {
 		}
 		if (action === "mark_picked_up") {
 			frappe.prompt([
-				{ fieldname: "delivery_otp", fieldtype: "Data", label: __("Pickup OTP"), description: __("Optional") },
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
 			], (v) => call_logistics(v), __("Mark Picked Up"), __("Confirm"));
 			return;
@@ -1397,7 +1444,7 @@ _render_dashboard(panel, data) {
 		}
 		if (action === "mark_delivered_back") {
 			frappe.prompt([
-				{ fieldname: "delivery_otp", fieldtype: "Data", label: __("Delivery OTP"), description: __("Optional") },
+				{ fieldname: "delivery_otp", fieldtype: "Data", label: __("Delivery OTP"), reqd: 1 },
 				{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
 			], (v) => call_logistics(v), __("Mark Delivered"), __("Confirm"));
 			return;
@@ -1576,6 +1623,109 @@ _render_dashboard(panel, data) {
 			}, __("Final QC After Repair"), __("Submit QC"));
 			return;
 		}
+
+		// ── Document-backed Settlement ──
+		if (action === "record_settlement") {
+			frappe.xcall("frappe.client.get", {
+				doctype: "CH Warranty Claim",
+				name: claim_name,
+			}).then((claim) => {
+				const gogizmo_due = flt(claim.gogizmo_share);
+				const customer_due = flt(claim.customer_share);
+				const dialog = new frappe.ui.Dialog({
+					title: __("Record Claim Settlement"),
+					fields: [
+						{
+							fieldtype: "Section Break",
+							label: __("GoGizmo → GoFix Payment"),
+							hidden: gogizmo_due <= 0,
+						},
+						{
+							fieldname: "gogizmo_invoice",
+							fieldtype: "Link",
+							options: "Sales Invoice",
+							label: __("GoGizmo Invoice"),
+							default: claim.gogizmo_invoice || "",
+							hidden: gogizmo_due <= 0,
+							reqd: gogizmo_due > 0,
+						},
+						{
+							fieldname: "gogizmo_payment_ref",
+							fieldtype: "Data",
+							label: __("Payment Entry / Journal Entry"),
+							description: __("Submitted accounting reference allocated against ₹{0}", [
+								format_number(gogizmo_due),
+							]),
+							default: claim.gogizmo_payment_ref || "",
+							hidden: gogizmo_due <= 0,
+						},
+						{
+							fieldtype: "Section Break",
+							label: __("Customer Payment"),
+							hidden: customer_due <= 0,
+						},
+						{
+							fieldname: "customer_invoice",
+							fieldtype: "Link",
+							options: "Sales Invoice",
+							label: __("Customer Invoice"),
+							default: claim.customer_invoice || "",
+							hidden: customer_due <= 0,
+							reqd: customer_due > 0,
+						},
+						{
+							fieldname: "customer_payment_ref",
+							fieldtype: "Data",
+							label: __("Payment Entry / Journal Entry"),
+							description: __("Submitted accounting reference allocated against ₹{0}", [
+								format_number(customer_due),
+							]),
+							default: claim.customer_payment_ref || "",
+							hidden: customer_due <= 0,
+						},
+					],
+					primary_action_label: __("Save Settlement"),
+					primary_action: (v) => {
+						frappe.xcall(
+							"ch_item_master.ch_item_master.warranty_api.settle_claim_finance",
+							{
+								claim_name,
+								gogizmo_invoice: v.gogizmo_invoice || null,
+								gogizmo_payment_ref: v.gogizmo_payment_ref || null,
+								customer_invoice: v.customer_invoice || null,
+								customer_payment_ref: v.customer_payment_ref || null,
+							}
+						).then((result) => {
+							dialog.hide();
+							refresh(
+								__("Settlement recorded: {0}", [
+									result?.settlement_status || __("Updated"),
+								])
+							);
+						});
+					},
+				});
+				dialog.show();
+			});
+			return;
+		}
+
+		// ── Terminal Closure ──
+		if (action === "close_claim") {
+			frappe.prompt([
+				{
+					fieldname: "remarks",
+					fieldtype: "Small Text",
+					label: __("Closing Remarks"),
+				},
+			], (v) => {
+				frappe.xcall(
+					"ch_item_master.ch_item_master.warranty_api.close_warranty_claim",
+					{ claim_name, remarks: v.remarks }
+				).then(() => refresh("Claim closed"));
+			}, __("Close Warranty Claim"), __("Close Claim"));
+			return;
+		}
 	}
 
 	// ── Claims Pipeline ─────────────────────────────────────────────
@@ -1598,7 +1748,7 @@ _render_dashboard(panel, data) {
 					"Pickup Scheduled", "Picked Up", "Device Received", "QC Passed",
 					"Fee Paid", "Fee Waived", "Ticket Created", "Sent to Manufacturer",
 					"In Repair", "Repair Complete", "Final QC Passed", "Invoice Raised",
-					"Payment Received", "Out for Delivery"],
+					"Payment Received", "Ready for Delivery", "Out for Delivery"],
 			},
 			completed: {
 				label: __("Completed"), icon: "fa-check-circle", color: "#166534",
@@ -1843,6 +1993,7 @@ _render_dashboard(panel, data) {
 			"Invoice Raised":   { bg: "#dbeafe", fg: "#1e40af" },
 			"Payment Pending":  { bg: "#fef3c7", fg: "#92400e" },
 			"Payment Received": { bg: "#dcfce7", fg: "#166534" },
+			"Ready for Delivery": { bg: "#ccfbf1", fg: "#115e59" },
 			"Out for Delivery": { bg: "#e0f2fe", fg: "#075985" },
 			"Delivered":        { bg: "#bbf7d0", fg: "#166534" },
 			"Closed":           { bg: "#f3f4f6", fg: "#374151" },

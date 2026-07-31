@@ -1557,13 +1557,13 @@ export class CartPanel {
 					options: "CH Warranty Claim",
 					label: __("Warranty Claim"),
 					reqd: 1,
-					get_query: () => ({
-						filters: {
-							docstatus: 1,
-							claim_status: "Approved",
-							processing_fee_invoice: ["in", ["", null]],
-						},
-					}),
+						get_query: () => ({
+							filters: {
+								docstatus: 1,
+								claim_status: "Fee Pending",
+								processing_fee_invoice: ["in", ["", null]],
+							},
+						}),
 				},
 			],
 			size: "small",
@@ -1572,13 +1572,17 @@ export class CartPanel {
 				frappe.xcall("frappe.client.get_value", {
 					doctype: "CH Warranty Claim",
 					filters: { name: values.warranty_claim },
-					fieldname: ["processing_fee_status", "processing_fee_amount", "processing_fee_invoice",
-					            "customer", "customer_name", "serial_no", "item_code"],
+						fieldname: ["claim_status", "processing_fee_status", "processing_fee_amount",
+							"processing_fee_invoice", "customer", "customer_name", "serial_no", "item_code"],
 				}).then((wc) => {
-					if (!wc) {
-						frappe.msgprint(__("Warranty Claim {0} not found", [values.warranty_claim]));
-						return;
-					}
+						if (!wc) {
+							frappe.msgprint(__("Warranty Claim {0} not found", [values.warranty_claim]));
+							return;
+						}
+						if (wc.claim_status !== "Fee Pending") {
+							frappe.msgprint(__("Claim is {0}, not awaiting a processing fee", [wc.claim_status]));
+							return;
+						}
 					if (wc.processing_fee_status !== "Pending") {
 						frappe.msgprint(__("Processing fee is {0}, not Pending", [wc.processing_fee_status]));
 						return;

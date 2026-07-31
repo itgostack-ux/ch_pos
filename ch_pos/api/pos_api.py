@@ -3249,15 +3249,33 @@ def create_pos_invoice(
         return contract
 
     if warranty_claim:
+        frappe.db.sql(
+            "SELECT name FROM `tabCH Warranty Claim` WHERE name = %s FOR UPDATE",
+            (warranty_claim,),
+        )
         wc = frappe.get_doc("CH Warranty Claim", warranty_claim)
         if wc.docstatus != 1:
             frappe.throw(_("Warranty Claim {0} is not submitted").format(warranty_claim))
-        if wc.processing_fee_status != "Pending":
+        if wc.claim_status != "Fee Pending":
+            frappe.throw(_("Warranty Claim {0} is not awaiting a processing fee").format(
+                warranty_claim))
+        if wc.processing_fee_status not in ("Pending", "Link Sent"):
             frappe.throw(_("Warranty Claim {0} processing fee is {1}, not Pending").format(
                 warranty_claim, wc.processing_fee_status))
         if wc.processing_fee_invoice:
             frappe.throw(_("Warranty Claim {0} already has a processing fee invoice {1}").format(
                 warranty_claim, wc.processing_fee_invoice))
+        if wc.company != profile.company:
+            frappe.throw(_("Warranty Claim {0} belongs to another company").format(
+                warranty_claim), frappe.PermissionError)
+        if wc.customer != inv.customer:
+            frappe.throw(_("Warranty Claim {0} belongs to another customer").format(
+                warranty_claim), frappe.PermissionError)
+        if flt(wc.processing_fee_amount, 2) <= 0:
+            frappe.throw(_("Warranty Claim {0} has no billable processing fee").format(
+                warranty_claim))
+        if cint(is_credit_sale):
+            frappe.throw(_("Warranty processing fees must be paid in full at billing."))
         inv.custom_warranty_claim = warranty_claim
 
     warranty_items: list = []
@@ -4153,10 +4171,8 @@ def create_pos_invoice(
                             "pos_invoice", inv.name, update_modified=False)
 
     if warranty_claim:
-        frappe.db.set_value("CH Warranty Claim", warranty_claim,
-                            {"processing_fee_invoice": inv.name,
-                             "processing_fee_status": "Paid"},
-                            update_modified=False)
+        wc.reload()
+        wc.record_processing_fee_invoice(inv.name)
 
     if exchange_context and exchange_context.get("order"):
         frappe.db.set_value(
