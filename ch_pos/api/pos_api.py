@@ -10248,6 +10248,7 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
 
     se = frappe.new_doc("Stock Entry")
     se.stock_entry_type = "Material Transfer"
+    se.custom_transfer_type = "Store Transfer"
     se.company = company
     se.from_warehouse = from_warehouse
     se.to_warehouse = to_warehouse
@@ -10277,7 +10278,12 @@ def create_stock_transfer(from_warehouse, to_warehouse, items,
         line_serials = []
         for s in serial_list:
             if s in seen_serials:
-                continue
+                frappe.throw(
+                    _("Serial / IMEI {0} was supplied more than once.").format(
+                        frappe.bold(s)
+                    ),
+                    title=_("Duplicate Serial / IMEI"),
+                )
             seen_serials.add(s)
             line_serials.append(s)
 

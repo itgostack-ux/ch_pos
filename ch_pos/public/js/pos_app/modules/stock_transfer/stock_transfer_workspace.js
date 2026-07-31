@@ -56,7 +56,11 @@ export class StockTransferWorkspace {
 	}
 
 	_bind(panel) {
-		panel.on("click", ".ch-st-tabs .ch-pos-category-chip", (e) => {
+		// The workspace can be rendered repeatedly on the same panel. Remove the
+		// previous delegated handlers first, otherwise one click/scan is handled
+		// once per render and quantities multiply for a single physical scan.
+		panel.off(".chStockTransfer");
+		panel.on("click.chStockTransfer", ".ch-st-tabs .ch-pos-category-chip", (e) => {
 			const tab = $(e.currentTarget).data("tab");
 			panel.find(".ch-st-tabs .ch-pos-category-chip").removeClass("active");
 			$(e.currentTarget).addClass("active");
@@ -66,16 +70,16 @@ export class StockTransferWorkspace {
 				this._load_tab(panel, tab);
 			}
 		});
-		panel.on("click", ".ch-st-view-detail", function () {
+		panel.on("click.chStockTransfer", ".ch-st-view-detail", function () {
 			frappe.set_route("Form", "Stock Entry", $(this).data("name"));
 		});
-		panel.on("click", ".ch-st-accept-btn", function () {
+		panel.on("click.chStockTransfer", ".ch-st-accept-btn", function () {
 			const name = $(this).data("name");
 			panel.trigger("st:accept", [name]);
 		});
-		panel.on("st:accept", (e, name) => this._accept_transfer(panel, name));
+		panel.on("st:accept.chStockTransfer", (e, name) => this._accept_transfer(panel, name));
 
-		panel.on("click", ".ch-st-handover-btn", (e) => {
+		panel.on("click.chStockTransfer", ".ch-st-handover-btn", (e) => {
 			const name = $(e.currentTarget).data("name");
 			frappe.confirm(
 				__("Confirm handover of {0}? This will move stock to the transit warehouse.", [name]),
@@ -96,7 +100,7 @@ export class StockTransferWorkspace {
 			);
 		});
 
-		panel.on("click", ".ch-st-cancel-btn", (e) => {
+		panel.on("click.chStockTransfer", ".ch-st-cancel-btn", (e) => {
 			const name = $(e.currentTarget).data("name");
 			frappe.confirm(
 				__("Cancel transfer {0}? This will delete the draft Stock Entry.", [name]),
@@ -272,7 +276,10 @@ export class StockTransferWorkspace {
 	_render_new_transfer(panel) {
 		const body = panel.find(".ch-st-body");
 		const loading = panel.find(".ch-st-loading").hide();
+		body.off(".chStockTransferNew");
+		panel.off(".chStockTransferNew");
 		this.transfer_items = [];
+		this._transfer_scans_in_flight = new Set();
 
 		body.html(`
 			<div class="ch-pos-section-card ch-st-card">
@@ -465,7 +472,7 @@ export class StockTransferWorkspace {
 		});
 
 		// Scanner: Enter = consume scan
-		body.on("keydown", ".ch-st-scan-input", (e) => {
+		body.on("keydown.chStockTransferNew", ".ch-st-scan-input", (e) => {
 			if (e.key !== "Enter") return;
 			e.preventDefault();
 			const $inp = $(e.currentTarget);
@@ -479,18 +486,23 @@ export class StockTransferWorkspace {
 			}
 
 			// Local duplicate check before round-trip
-			const already = (this.transfer_items || []).some(r => (r.serial_nos || []).includes(barcode));
-			if (already) {
+			const scan_key = barcode.toLowerCase();
+			const already = (this.transfer_items || []).some(r =>
+				(r.serial_nos || []).some(serial => String(serial).trim().toLowerCase() === scan_key)
+			);
+			if (already || this._transfer_scans_in_flight.has(scan_key)) {
 				$inp.val("");
 				this._scan_feedback(body, "warn", __("{0} already scanned", [barcode]));
 				return;
 			}
 
+			this._transfer_scans_in_flight.add(scan_key);
 			$inp.prop("disabled", true);
 			frappe.call({
 				method: "ch_pos.api.pos_api.scan_for_stock_transfer",
 				args: { barcode, from_warehouse: from_wh },
 				callback: (r) => {
+					this._transfer_scans_in_flight.delete(scan_key);
 					$inp.prop("disabled", false);
 					$inp.val("");
 					$inp.trigger("focus");
@@ -498,6 +510,17 @@ export class StockTransferWorkspace {
 					if (!res || !res.ok) {
 						const msg = (res && res.message) || __("Scan failed");
 						this._scan_feedback(body, "error", msg);
+						return;
+					}
+					const returned_serial = String(res.serial_no || "").trim();
+					const returned_key = returned_serial.toLowerCase();
+					const returned_already = (this.transfer_items || []).some(item =>
+						(item.serial_nos || []).some(serial =>
+							String(serial).trim().toLowerCase() === returned_key
+						)
+					);
+					if (!returned_serial || returned_already) {
+						this._scan_feedback(body, "warn", __("{0} already scanned", [returned_serial || barcode]));
 						return;
 					}
 					// Append to line (group by item_code)
@@ -519,6 +542,7 @@ export class StockTransferWorkspace {
 					this._render_transfer_items(body);
 				},
 				error: () => {
+					this._transfer_scans_in_flight.delete(scan_key);
 					$inp.prop("disabled", false);
 					$inp.trigger("focus");
 					this._scan_feedback(body, "error", __("Scan failed — try again"));
@@ -526,16 +550,16 @@ export class StockTransferWorkspace {
 			});
 		});
 
-		body.on("click", ".ch-st-remove-row", function () {
+		body.on("click.chStockTransferNew", ".ch-st-remove-row", function () {
 			const idx = $(this).data("idx");
 			panel.trigger("st:removeline", [idx]);
 		});
-		panel.on("st:removeline", (e, idx) => {
+		panel.on("st:removeline.chStockTransferNew", (e, idx) => {
 			this.transfer_items.splice(idx, 1);
 			this._render_transfer_items(body);
 		});
 
-		body.on("click", ".ch-st-remove-serial", (e) => {
+		body.on("click.chStockTransferNew", ".ch-st-remove-serial", (e) => {
 			const $btn = $(e.currentTarget);
 			const idx = parseInt($btn.data("idx"));
 			const serial = $btn.data("serial");
@@ -547,7 +571,7 @@ export class StockTransferWorkspace {
 			this._render_transfer_items(body);
 		});
 
-		body.on("click", ".ch-st-submit-transfer", () => this._submit_transfer(panel, body));
+		body.on("click.chStockTransferNew", ".ch-st-submit-transfer", () => this._submit_transfer(panel, body));
 		this._render_transfer_items(body);
 
 		// Initial focus on scanner
