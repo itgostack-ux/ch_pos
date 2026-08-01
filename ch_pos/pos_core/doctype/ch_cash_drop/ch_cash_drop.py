@@ -94,6 +94,13 @@ class CHCashDrop(Document):
         self._validate_session_active()
         self._validate_company_match()
         self._validate_amount()
+
+    def before_submit(self):
+        # Approval gates POSTING, not drafting. The status field already models
+        # Draft -> Submitted -> Approved, so a sensitive movement must be able
+        # to exist as an unapproved request; enforcing the approver at validate
+        # made that impossible and forced petty cash to be captured only at
+        # settlement, after the money had already left the drawer.
         self._validate_approval()
 
     def on_submit(self):

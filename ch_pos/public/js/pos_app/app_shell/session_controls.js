@@ -11,6 +11,7 @@
  */
 import { PosState, EventBus } from "../state.js";
 import { SessionClosingDashboard } from "../shared/session_closing_dashboard.js";
+import { format_number } from "../shared/helpers.js";
 
 export class SessionControls {
 	constructor() {
@@ -123,6 +124,10 @@ export class SessionControls {
 								<i class="fa fa-money"></i>
 								<span>${__("Cash Drop")}</span>
 							</button>
+							<button class="ch-session-menu-item ch-btn-petty-cash" ${(has_session && !is_locked) ? "" : "disabled"}>
+								<i class="fa fa-coffee"></i>
+								<span>${__("Petty Cash")}</span>
+							</button>
 							<button class="ch-session-menu-item ch-btn-switch-company">
 								<i class="fa fa-building-o"></i>
 								<span>${__("Switch Company")}</span>
@@ -166,7 +171,7 @@ export class SessionControls {
 		const has_session = Boolean(PosState.session_name);
 
 		slot.find(".ch-btn-x-report, .ch-btn-settlement, .ch-btn-close-session, .ch-session-menu-lock").prop("disabled", !has_session);
-		slot.find(".ch-btn-cash-drop, .ch-btn-switch-user").prop("disabled", !has_session || is_locked);
+		slot.find(".ch-btn-cash-drop, .ch-btn-petty-cash, .ch-btn-switch-user").prop("disabled", !has_session || is_locked);
 		slot.find(".ch-session-menu-lock i").attr("class", `fa ${is_locked ? "fa-unlock" : "fa-lock"}`);
 		slot.find(".ch-session-menu-label").text(is_locked ? __("Unlock Session") : __("Lock Session"));
 	}
@@ -192,6 +197,10 @@ export class SessionControls {
 		container.find(".ch-btn-cash-drop").on("click", () => {
 			container.find(".ch-session-profile-shell").removeClass("open");
 			this._show_cash_drop();
+		});
+		container.find(".ch-btn-petty-cash").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_petty_cash();
 		});
 		container.find(".ch-btn-switch-company").on("click", () => {
 			container.find(".ch-session-profile-shell").removeClass("open");
@@ -357,6 +366,113 @@ export class SessionControls {
 				</div>`,
 				wide: true,
 			});
+		});
+	}
+
+	_show_petty_cash() {
+		if (!PosState.session_name) return frappe.msgprint(__("No active session"));
+
+		// Ask the server for the float first: the cashier needs to see what is
+		// left before deciding, and the auto-approve category list is
+		// per-store configuration, not something the client should guess.
+		frappe.call({
+			method: "ch_pos.api.petty_cash.get_petty_cash_status",
+			args: { pos_profile: PosState.pos_profile },
+			callback: (r) => {
+				const st = r.message || {};
+				const auto = st.auto_categories || [];
+				const needs_approval = st.approval_categories || [];
+				const options = [...auto, ...needs_approval];
+
+				const dlg = new frappe.ui.Dialog({
+					title: __("Petty Cash"),
+					fields: [
+						{
+							fieldtype: "HTML",
+							fieldname: "float_info",
+							options: `<div style="padding:10px 12px;border-radius:8px;margin-bottom:8px;
+								background:${flt(st.remaining) > 0 ? "#ecfdf5" : "#fef2f2"};
+								border:1px solid ${flt(st.remaining) > 0 ? "#6ee7b7" : "#fca5a5"};font-size:12px">
+								<div style="font-weight:700;color:${flt(st.remaining) > 0 ? "#065f46" : "#991b1b"}">
+									${__("Float remaining today")}: ₹${format_number(flt(st.remaining))}
+								</div>
+								<div class="text-muted" style="margin-top:2px">
+									${__("Daily float")} ₹${format_number(flt(st.daily_limit))} ·
+									${__("spent")} ₹${format_number(flt(st.spent_today))}
+								</div>
+							</div>`,
+						},
+						{
+							fieldname: "category",
+							fieldtype: "Select",
+							label: __("Expense Category"),
+							options: options.join("\n"),
+							default: auto[0] || options[0] || "",
+							reqd: 1,
+						},
+						{
+							fieldname: "amount",
+							fieldtype: "Currency",
+							label: __("Amount (₹)"),
+							reqd: 1,
+						},
+						{
+							fieldname: "reason",
+							fieldtype: "Data",
+							label: __("What was it for?"),
+							reqd: 1,
+						},
+						{ fieldname: "remarks", fieldtype: "Small Text", label: __("Remarks") },
+						{
+							fieldtype: "HTML",
+							fieldname: "policy",
+							options: `<div class="text-muted" style="font-size:11px;margin-top:4px">
+								<i class="fa fa-info-circle"></i>
+								${__("{0} inside the float post immediately. Everything else needs approval before the cash leaves the drawer.",
+									[auto.join(", ") || __("Pre-authorised categories")])}
+							</div>`,
+						},
+					],
+					primary_action_label: __("Record Expense"),
+					primary_action: (values) => {
+						dlg.disable_primary_action();
+						frappe.call({
+							method: "ch_pos.api.petty_cash.request_petty_expense",
+							args: {
+								session: PosState.session_name,
+								amount: values.amount,
+								category: values.category,
+								reason: values.reason,
+								remarks: values.remarks || "",
+							},
+							callback: (res) => {
+								const m = res.message;
+								if (!m) return dlg.enable_primary_action();
+								dlg.hide();
+								if (m.auto_approved) {
+									frappe.show_alert({
+										message: __("₹{0} recorded and posted. Float left: ₹{1}",
+											[format_number(flt(values.amount)),
+											 format_number(flt(m.float && m.float.remaining))]),
+										indicator: "green",
+									}, 7);
+								} else {
+									// Say plainly that no cash should move yet —
+									// the whole point of the gate.
+									frappe.msgprint({
+										title: __("Approval Required"),
+										indicator: "orange",
+										message: __("{0}<br><br>Request <b>{1}</b> is awaiting approval. Do not pay out until it is approved.",
+											[m.reason || "", m.cash_drop]),
+									});
+								}
+							},
+							error: () => dlg.enable_primary_action(),
+						});
+					},
+				});
+				dlg.show();
+			},
 		});
 	}
 
