@@ -2982,8 +2982,24 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			});
 		};
 
+		// A staged credit that cannot be replayed as an exchange must never
+		// silently become a discount: the server would bill the full amount
+		// while the till collected the reduced one.
+		if (flt(PosState.product_exchange_credit) > 0
+			&& !(PosState.product_exchange_invoice && (PosState.return_items || []).length)) {
+			frappe.msgprint({
+				title: __("Exchange Credit Cannot Be Applied"),
+				indicator: "red",
+				message: __("The return behind this credit is no longer in session, so it cannot be billed as an exchange. Re-run the Product Exchange, then take payment."),
+			});
+			return;
+		}
+
+		const has_product_exchange = Boolean(
+			PosState.product_exchange_invoice && (PosState.return_items || []).length
+		);
 		const is_replacement_sale = this._is_replacement_sale_type(PosState.sale_type || "");
-		if (is_replacement_sale) {
+		if (is_replacement_sale || has_product_exchange) {
 			const original_invoice = PosState.product_exchange_invoice || PosState.sale_reference;
 			const return_items = PosState.return_items || [];
 			if (!original_invoice || !return_items.length) {
@@ -3015,40 +3031,6 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 						? frappe.utils.strip_html(server_msg)
 						: __("Replacement billing failed");
 					frappe.msgprint({ title: __("Replacement Failed"), indicator: "red", message: msg });
-					this._on_error(msg);
-				},
-			});
-		} else if (PosState.product_exchange_invoice && (PosState.return_items || []).length) {
-			frappe.call({
-				method: "ch_pos.api.pos_api.create_pos_return",
-				args: {
-					original_invoice: PosState.product_exchange_invoice,
-					return_items:     PosState.return_items,
-					sales_executive:  PosState.sales_executive || null,
-					// Product-exchange flow: the customer is swapping a device for a new
-					// purchase, so the operator is not asked for a free-form remark.
-					// `create_pos_return` requires a non-empty justification (>=10 chars)
-					// to satisfy compliance rules — supply a deterministic default that
-					// records the business reason in the audit trail.
-					return_reason:    "Product Exchange",
-					return_remarks:   "Product exchange — old device returned for credit applied to new purchase.",
-				},
-				callback: r => {
-					if (r.message) {
-						frappe.show_alert({ message: __("Return {0} processed", [r.message.name]), indicator: "blue" });
-						do_create();
-					} else {
-						this._on_error(__("Return creation failed"));
-					}
-				},
-				error: (xhr) => {
-					const resp = xhr && xhr.responseJSON;
-					const server_msg = resp && (resp.message || resp.exc_type);
-					const msg = server_msg
-						? frappe.utils.strip_html(server_msg)
-						: __("Return creation failed");
-					// Show as a dialog so it is clearly visible above the payment popup
-					frappe.msgprint({ title: __("Return Failed"), indicator: "red", message: msg });
 					this._on_error(msg);
 				},
 			});

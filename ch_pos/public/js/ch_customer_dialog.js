@@ -62,6 +62,7 @@
 		let autofill_watch_timer = null;
 		let last_otp_trigger_at = 0;
 		let otp_request_in_flight = false;
+		let customer_create_in_flight = false;
 
 
 		const PHONE_RULES = {
@@ -480,6 +481,7 @@
 			size: "large",
 			primary_action_label: __("Create"),
 			primary_action: async (values) => {
+				if (customer_create_in_flight) return;
 				const customer_name = input_value("customer_name");
 				const phone = input_value("mobile_no");
 				if (!phone) {
@@ -545,33 +547,51 @@
 						return;
 					}
 				}
-				frappe.xcall("ch_pos.api.pos_api.quick_create_customer", {
-					customer_name,
-					mobile_no: phone,
-					email_id: email,
-					customer_group: values.customer_group || "Individual",
-					company: company,
-					alternate_phone: values.alternate_phone || "",
-					whatsapp_number: whatsapp,
-					address_line1: values.address_line1 || "",
-					address_line2: values.address_line2 || "",
-					state: values.state || "",
-					city: values.city || "",
-					pincode: values.pincode || "",
-					area: values.area || "",
-					gstin: values.gstin || "",
-					pan_number: pan_raw || "",
-					otp_verification_token,
-					same_as_billing: values.same_as_billing ? 1 : 0,
-					shipping_address_line1: values.shipping_address_line1 || "",
-					shipping_city: values.shipping_city || "",
-					shipping_state: values.shipping_state || "",
-					shipping_pincode: values.shipping_pincode || "",
-				}).then((name) => {
+				customer_create_in_flight = true;
+				const create_button = d.get_primary_btn && d.get_primary_btn().get(0);
+				if (create_button) create_button.disabled = true;
+				try {
+					const name = await frappe.xcall("ch_pos.api.pos_api.quick_create_customer", {
+						customer_name,
+						mobile_no: phone,
+						email_id: email,
+						customer_group: values.customer_group || "Individual",
+						company: company,
+						alternate_phone: values.alternate_phone || "",
+						whatsapp_number: whatsapp,
+						address_line1: values.address_line1 || "",
+						address_line2: values.address_line2 || "",
+						state: values.state || "",
+						city: values.city || "",
+						pincode: values.pincode || "",
+						area: values.area || "",
+						gstin: values.gstin || "",
+						pan_number: pan_raw || "",
+						otp_verification_token,
+						same_as_billing: values.same_as_billing ? 1 : 0,
+						shipping_address_line1: values.shipping_address_line1 || "",
+						shipping_city: values.shipping_city || "",
+						shipping_state: values.shipping_state || "",
+						shipping_pincode: values.shipping_pincode || "",
+					});
 					d.hide();
 					frappe.show_alert({ message: __("Customer {0} created", [name]), indicator: "green" });
 					if (opts.on_success) opts.on_success(name, phone);
-				});
+				} catch (err) {
+					const message = otp_error_message(err, __("Customer creation failed"));
+					if (/approval is invalid|expired|already used/i.test(message)) {
+						otp_verified_number = "";
+						otp_verification_token = "";
+						d.fields_dict.otp_status.$wrapper.html(status_html(
+							__("OTP verification expired. Send and verify a new OTP."),
+							"#b91c1c"
+						));
+						toggle_send_otp_button();
+					}
+				} finally {
+					customer_create_in_flight = false;
+					if (create_button) create_button.disabled = false;
+				}
 			},
 		});
 

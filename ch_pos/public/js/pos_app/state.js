@@ -56,6 +56,7 @@ export const PosState = {
 	return_against: null,
 	return_items: [],
 	product_exchange_credit: 0,
+	product_exchange_customer: null,
 	product_exchange_invoice: null,
 
 	// ── Payment Mode State ──────────────────────────────
@@ -111,7 +112,8 @@ export const PosState = {
 	// carry per-line ``sales_order`` + ``so_detail`` so the backend can map
 	// them back to the SO and pull the advance via ``set_advances()``.
 	sales_order_reference: null,       // Sales Order being billed at pickup
-	sales_order_advance: 0,            // Advance already paid on the SO (auto-applied at PAY)
+	sales_order_advance: 0,            // POSTED advance only (submitted PEs) — billable
+	sales_order_advance_pending: 0,    // Draft advance awaiting approval — display only
 	sales_order_grand_total: 0,        // SO grand total — used to render the cart banner
 	sales_order_summary: null,         // { name, customer_name, due_date, reserved_serials }
 
@@ -149,6 +151,7 @@ export const PosState = {
 		this.return_against = null;
 		this.return_items = [];
 		this.product_exchange_credit = 0;
+		this.product_exchange_customer = null;
 		this.product_exchange_invoice = null;
 		this.is_credit_sale = false;
 		this.is_free_sale = false;
@@ -168,6 +171,7 @@ export const PosState = {
 		this.billing_gstin = "";
 		this.sales_order_reference = null;
 		this.sales_order_advance = 0;
+		this.sales_order_advance_pending = 0;
 		this.sales_order_grand_total = 0;
 		this.sales_order_summary = null;
 		// Proforma → Sale conversion linkage (cleared per transaction)

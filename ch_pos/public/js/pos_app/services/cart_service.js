@@ -19,7 +19,84 @@ export class CartService {
 		this._bind_events();
 		// POS-10 fix: Restore active cart from localStorage on page load
 		this._restore_active_cart();
+		this._bind_exchange_credit_owner();
 		this._start_exception_status_poll();
+	}
+
+	// ── Product-exchange credit belongs to ONE customer ────────
+	// The credit note behind an exchange is only created at payment time,
+	// so the credit is provisional client state until then. It must still
+	// follow the customer it was raised for: applying it to somebody else
+	// under-charges them, and deleting it outright (the previous fix)
+	// destroyed a credit the original customer is still owed. Park it
+	// against its owner instead, so switching away and back is lossless.
+	_stash_exchange_credit() {
+		try {
+			const credit = flt(PosState.product_exchange_credit);
+			if (!credit || !PosState.product_exchange_customer) return;
+			localStorage.setItem("ch_pos_exchange_credit", JSON.stringify({
+				customer: PosState.product_exchange_customer,
+				credit,
+				invoice: PosState.product_exchange_invoice,
+				return_items: PosState.return_items || [],
+				timestamp: frappe.datetime.now_datetime(),
+			}));
+		} catch (e) { /* storage unavailable - non-critical */ }
+	}
+
+	_read_exchange_stash() {
+		try {
+			const raw = localStorage.getItem("ch_pos_exchange_credit");
+			if (!raw) return null;
+			const s = JSON.parse(raw);
+			if (!s || !s.customer || !flt(s.credit)) return null;
+			// Same 12h horizon the cart restore uses.
+			if (s.timestamp && (Date.now() - new Date(s.timestamp).getTime()) / 3600000 > 12) {
+				localStorage.removeItem("ch_pos_exchange_credit");
+				return null;
+			}
+			return s;
+		} catch (e) { return null; }
+	}
+
+	clear_exchange_stash() {
+		try { localStorage.removeItem("ch_pos_exchange_credit"); } catch (e) { /* noop */ }
+	}
+
+	_bind_exchange_credit_owner() {
+		EventBus.on("customer:set", (cust) => {
+			const stash = this._read_exchange_stash();
+			const owner = PosState.product_exchange_customer;
+
+			// Leaving the owner: park the credit, never destroy it.
+			if (owner && cust !== owner && flt(PosState.product_exchange_credit)) {
+				this._stash_exchange_credit();
+				PosState.product_exchange_credit = 0;
+				PosState.product_exchange_invoice = null;
+				PosState.product_exchange_customer = null;
+				PosState.return_items = [];
+				frappe.show_alert({
+					message: __("Exchange credit parked - it stays with {0}", [owner]),
+					indicator: "orange",
+				}, 6);
+				EventBus.emit("cart:updated");
+				return;
+			}
+
+			// Returning to the owner: put it back.
+			if (stash && cust === stash.customer && !flt(PosState.product_exchange_credit)) {
+				PosState.product_exchange_credit = flt(stash.credit);
+				PosState.product_exchange_invoice = stash.invoice;
+				PosState.product_exchange_customer = stash.customer;
+				PosState.return_items = stash.return_items || [];
+				frappe.show_alert({
+					message: __("Exchange credit of ₹{0} restored for {1}",
+						[format_number(flt(stash.credit)), stash.customer]),
+					indicator: "green",
+				}, 6);
+				EventBus.emit("cart:updated");
+			}
+		});
 	}
 
 	_release_kiosk_billing(revertCurrent = true) {
@@ -57,6 +134,12 @@ export class CartService {
 				exchange_order: PosState.exchange_order,
 				product_exchange_credit: PosState.product_exchange_credit,
 				product_exchange_invoice: PosState.product_exchange_invoice,
+				product_exchange_customer: PosState.product_exchange_customer,
+				// Without these the exchange cannot be replayed: payment_dialog
+				// gates on return_items, so losing them silently downgrades the
+				// sale to a plain invoice at full price while the till still
+				// shows the discounted total.
+				return_items: PosState.return_items || [],
 				sale_type: PosState.sale_type,
 				is_credit_sale: PosState.is_credit_sale || false,
 				is_free_sale: PosState.is_free_sale || false,
@@ -86,7 +169,25 @@ export class CartService {
 			}
 
 			const has_cart     = data.cart && data.cart.length > 0;
-			const has_exchange = flt(data.exchange_amount) > 0 || flt(data.product_exchange_credit) > 0;
+			let   has_exchange = flt(data.exchange_amount) > 0 || flt(data.product_exchange_credit) > 0;
+
+			// An exchange credit with no cart belongs to a transaction that was
+			// abandoned before payment (reset_transaction only runs on a
+			// completed sale). Restoring it silently discounts whatever the
+			// cashier rings up next: the client deducts it from the displayed
+			// total while the server does not, so the till shows a smaller
+			// amount than the invoice and payment fails with
+			// "Payments ... do not add up to the invoice total".
+			// Drop the orphan rather than carry it into an unrelated sale.
+			if (!has_cart && has_exchange) {
+				localStorage.removeItem("ch_pos_active_cart");
+				frappe.show_alert({
+					message: __("A leftover exchange credit of ₹{0} from an unfinished transaction was discarded",
+						[format_number(flt(data.product_exchange_credit) || flt(data.exchange_amount))]),
+					indicator: "orange",
+				}, 10);
+				has_exchange = false;
+			}
 
 			if (!has_cart && !has_exchange) return;
 
@@ -112,6 +213,42 @@ export class CartService {
 						indicator: "orange",
 					}, 7);
 				}
+
+				// Self-heal: builds before the plan-classification fix stamped
+				// every attached plan as is_warranty, so a Protection Plan / VAS
+				// row was saved with flags the server rejects as "forged or
+				// stale". Recompute from the persisted plan_type; rows saved
+				// before plan_type was stored cannot be classified offline, so
+				// drop them rather than restore a cart that can never be billed.
+				let reclassified = 0;
+				let unclassifiable = 0;
+				PosState.cart = PosState.cart.filter((row) => {
+					if (!row || !row.warranty_plan) return true;
+					if (!row.plan_type) {
+						unclassifiable += 1;
+						return false;
+					}
+					const vas = ["Value Added Service", "Protection Plan"].includes(row.plan_type);
+					const warr = ["Own Warranty", "Extended Warranty", "Post-Repair Warranty"].includes(row.plan_type);
+					if (!!row.is_vas !== vas || !!row.is_warranty !== warr) {
+						row.is_vas = vas;
+						row.is_warranty = warr;
+						reclassified += 1;
+					}
+					return true;
+				});
+				if (reclassified) {
+					frappe.show_alert({
+						message: __("{0} plan line(s) reclassified in the restored cart", [reclassified]),
+						indicator: "blue",
+					}, 7);
+				}
+				if (unclassifiable) {
+					frappe.show_alert({
+						message: __("{0} plan line(s) from an older build were removed — please add them again", [unclassifiable]),
+						indicator: "orange",
+					}, 10);
+				}
 			}
 			if (data.customer) PosState.customer = data.customer;
 			if (data.additional_discount_pct) PosState.additional_discount_pct = data.additional_discount_pct;
@@ -125,6 +262,22 @@ export class CartService {
 			if (data.exchange_order) PosState.exchange_order = data.exchange_order;
 			if (data.product_exchange_credit) PosState.product_exchange_credit = flt(data.product_exchange_credit);
 			if (data.product_exchange_invoice) PosState.product_exchange_invoice = data.product_exchange_invoice;
+			if (data.product_exchange_customer) PosState.product_exchange_customer = data.product_exchange_customer;
+			if (data.return_items) PosState.return_items = data.return_items;
+			// A credit with no return basis cannot be billed as an exchange:
+			// process_return_with_replacement needs the lines coming back. Drop
+			// the discount rather than under-tender against a full-price invoice.
+			if (flt(PosState.product_exchange_credit) > 0
+				&& !(PosState.return_items || []).length) {
+				const lost = flt(PosState.product_exchange_credit);
+				PosState.product_exchange_credit = 0;
+				PosState.product_exchange_invoice = null;
+				PosState.product_exchange_customer = null;
+				frappe.show_alert({
+					message: __("Exchange credit of ₹{0} could not be restored — re-run the Product Exchange", [format_number(lost)]),
+					indicator: "red",
+				}, 12);
+			}
 			if (data.sale_type) PosState.sale_type = data.sale_type;
 			PosState.is_credit_sale = data.is_credit_sale || false;
 			PosState.is_free_sale = data.is_free_sale || false;
@@ -1589,9 +1742,19 @@ export class CartService {
 				const plan = plans[idx];
 				if (!plan) return;
 
-				// Duplicate check
+				// Classify from the plan master, never by which panel added it.
+				// free_sale_api recomputes is_vas/is_warranty from
+				// CH Warranty Plan.plan_type and rejects a cart row whose flags
+				// disagree ("forged or stale ... classification"), so hardcoding
+				// is_warranty here made every Protection Plan / VAS attach
+				// unpayable. Mirrors upsell_service.js.
+				const is_vas_plan = ["Value Added Service", "Protection Plan"].includes(plan.plan_type);
+				const is_warranty_plan = ["Own Warranty", "Extended Warranty", "Post-Repair Warranty"].includes(plan.plan_type);
+
+				// Duplicate check — a VAS plan is not is_warranty, so key the
+				// lookup on the plan itself rather than on the classification.
 				const dup = PosState.cart.find(
-					(c) => c.is_warranty && c.warranty_plan === plan.name
+					(c) => (c.is_warranty || c.is_vas) && c.warranty_plan === plan.name
 						&& c.for_item_code === cart_item.item_code
 						&& (c.for_serial_no || "") === (cart_item.serial_no || "")
 				);
@@ -1602,17 +1765,20 @@ export class CartService {
 
 				PosState.cart.push({
 					item_code: plan.service_item || plan.name,
-					item_name: `🛡 ${plan.plan_name} (${plan.duration_months}m)`,
+					item_name: `${is_vas_plan ? "✦" : "🛡"} ${plan.plan_name} (${plan.duration_months}m)`,
 					qty: 1, rate: flt(plan.price), mrp: flt(plan.price),
 					uom: "Nos", discount_percentage: 0, discount_amount: 0,
 					offers: [], applied_offer: null, warranty_plan: plan.name,
 					for_item_code: cart_item.item_code, for_serial_no: cart_item.serial_no || "",
-					is_warranty: true, is_vas: false,
+					// Persisted so _restore_active_cart can re-derive the flags
+					// offline instead of discarding the line.
+					plan_type: plan.plan_type,
+					is_warranty: is_warranty_plan, is_vas: is_vas_plan,
 				});
 				EventBus.emit("cart:updated");
 				frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
 				$row.addClass("ch-attach-done");
-				this._log_attach("Warranty", "Accepted", item_data.item_code, plan.name, null, covered_serial);
+				this._log_attach(is_vas_plan ? "VAS" : "Warranty", "Accepted", item_data.item_code, plan.name, null, covered_serial);
 			} else {
 				// VAS or Accessory — add item to cart
 				const attach_item_code = $btn.data("item");

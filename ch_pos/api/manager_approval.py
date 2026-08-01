@@ -275,7 +275,9 @@ def issue_action_grant(kind: str, payload: dict, expires_in: int | None = None) 
     return grant
 
 
-def consume_action_grant(kind: str, token, expected: dict) -> dict:
+def consume_action_grant(
+    kind: str, token, expected: dict, *, restore_on_rollback: bool = False
+) -> dict:
     """Atomically consume an action grant and validate its transaction anchors."""
     token = str(token or "").strip()
     if len(token) < 40:
@@ -286,4 +288,14 @@ def consume_action_grant(kind: str, token, expected: dict) -> dict:
     required = {"requested_by": frappe.session.user, **expected}
     if any(str(payload.get(key) or "") != str(value or "") for key, value in required.items()):
         frappe.throw(_("Manager approval does not match this transaction."), frappe.PermissionError)
+
+    if restore_on_rollback:
+        # Redis is outside the SQL transaction. If a later insert fails, put the
+        # already-validated one-time grant back so the user can safely retry.
+        key = _cache_key(f"action:{kind}", token)
+
+        def restore_grant():
+            frappe.cache().set_value(key, payload, expires_in_sec=_grant_ttl())
+
+        frappe.db.after_rollback.add(restore_grant)
     return payload

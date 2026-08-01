@@ -73,6 +73,21 @@ export class StockTransferWorkspace {
 		panel.on("click.chStockTransfer", ".ch-st-view-detail", function () {
 			frappe.set_route("Form", "Stock Entry", $(this).data("name"));
 		});
+		panel.on("click.chStockTransfer", ".ch-st-manifest-btn", function () {
+			frappe.set_route("Form", "CH Transfer Manifest", $(this).data("manifest"));
+		});
+		panel.on("click.chStockTransfer", ".ch-st-eway-btn", (e) => {
+			const name = $(e.currentTarget).data("name");
+			frappe.call({
+				method: "ch_pos.api.pos_api.generate_packed_transfer_ewaybill",
+				args: { stock_entry: name },
+				freeze: true,
+				freeze_message: __("Generating e-Way Bill..."),
+				callback: (r) => {
+					if (r.message) frappe.show_alert({ message: __("e-Way Bill generation queued"), indicator: "green" });
+				},
+			});
+		});
 		panel.on("click.chStockTransfer", ".ch-st-accept-btn", function () {
 			const name = $(this).data("name");
 			panel.trigger("st:accept", [name]);
@@ -184,7 +199,9 @@ export class StockTransferWorkspace {
 			: __(`${se.item_count || 0} items`);
 
 		// Receive button — only when ready (after logistics delivers)
-		const can_receive = tab === "incoming" && ["Ready For Receive", "Receive At Transit"].includes(cs);
+		const can_receive = tab === "incoming" && [
+			"Ready For Receive", "Receive At Transit", "Partially Transferred",
+		].includes(cs);
 		const accept_btn = can_receive
 			? `<button class="btn btn-xs btn-success ch-st-accept-btn" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
 				<i class="fa fa-barcode"></i> ${__("Scan & Receive")}
@@ -204,6 +221,16 @@ export class StockTransferWorkspace {
 		const cancel_btn = can_cancel
 			? `<button class="btn btn-xs btn-danger ch-st-cancel-btn" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
 				<i class="fa fa-times"></i> ${__("Cancel")}
+			   </button>`
+			: "";
+		const manifest_btn = se.custom_transfer_manifest
+			? `<button class="btn btn-xs btn-outline-primary ch-st-manifest-btn" data-manifest="${frappe.utils.escape_html(se.custom_transfer_manifest)}" style="border-radius:var(--pos-radius-sm)">
+				<i class="fa fa-file-text-o"></i> ${__("Manifest / E-Way Bill")}
+			   </button>`
+			: "";
+		const eway_btn = se.custom_transfer_manifest && ["Pending With Goods", "Ready For Pickup"].includes(cs)
+			? `<button class="btn btn-xs btn-outline-success ch-st-eway-btn" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
+				<i class="fa fa-road"></i> ${__("Generate E-Way Bill")}
 			   </button>`
 			: "";
 
@@ -255,6 +282,8 @@ export class StockTransferWorkspace {
 							${accept_btn}
 							${handover_btn}
 							${cancel_btn}
+							${manifest_btn}
+							${eway_btn}
 							<button class="btn btn-xs btn-outline-secondary ch-st-view-detail" data-name="${frappe.utils.escape_html(se.name)}" style="border-radius:var(--pos-radius-sm)">
 								<i class="fa fa-external-link"></i>
 							</button>
@@ -366,7 +395,7 @@ export class StockTransferWorkspace {
 
 					<div class="ch-st-new-actions" style="display:none;text-align:right;padding-top:12px;border-top:1px solid var(--pos-border-light);margin-top:12px">
 						<button class="btn btn-primary ch-st-submit-transfer" style="border-radius:var(--pos-radius-sm)">
-							<i class="fa fa-paper-plane"></i> ${__("Create Transfer")}
+							<i class="fa fa-paper-plane"></i> ${__("Submit for Approval")}
 						</button>
 					</div>
 				</div>
@@ -688,7 +717,7 @@ export class StockTransferWorkspace {
 		const handover_notes = body.find(".ch-st-handover-notes").val() || "";
 
 		frappe.call({
-			method: "ch_pos.api.pos_api.create_stock_transfer",
+			method: "ch_pos.api.pos_api.create_store_transfer_request",
 			args: {
 				from_warehouse: from_wh,
 				to_warehouse: to_wh,
@@ -698,16 +727,14 @@ export class StockTransferWorkspace {
 					uom: r.uom,
 					serial_no: (r.serial_nos || []).join("\n"),
 				})),
-				courier_name: courier_name || undefined,
-				courier_tracking: courier_tracking || undefined,
-				handover_notes: handover_notes || undefined,
+				notes: [handover_notes, courier_name ? `Courier: ${courier_name}` : "", courier_tracking ? `Tracking: ${courier_tracking}` : ""].filter(Boolean).join(" | ") || undefined,
 				expected_delivery_date: expected_delivery_date || undefined,
 			},
 			freeze: true,
-			freeze_message: __("Creating Stock Transfer..."),
+			freeze_message: __("Submitting transfer request for approval..."),
 			callback: (r) => {
 				if (r.message) {
-					frappe.show_alert({ message: __("Stock Entry {0} created", [r.message]), indicator: "green" });
+					frappe.show_alert({ message: __("Transfer request {0} submitted for ZSM / Category Head approval", [r.message.name]), indicator: "orange" });
 					this.transfer_items = [];
 					// Switch to outgoing tab
 					panel.find(".ch-st-tabs .ch-pos-category-chip").removeClass("active");
@@ -739,7 +766,7 @@ export class StockTransferWorkspace {
 			item_code: item.item_code,
 			item_name: item.item_name || item.item_code,
 			qty: item.qty,
-			received: 0,
+			received: flt(item.received_qty),
 		}));
 
 		const _render_items = () => {

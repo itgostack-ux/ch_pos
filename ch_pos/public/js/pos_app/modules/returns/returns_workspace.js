@@ -86,12 +86,36 @@ export class ReturnsWorkspace {
 							: `<span style="font-size:10px;background:#dcfce7;color:#166534;padding:2px 6px;border-radius:999px;border:1px solid #86efac;" title="${__("{0} days since purchase — within 14-day return window", [days])}">
 									<i class="fa fa-check-circle"></i> ${days}d
 								</span>`;
-						return `<div class="ch-ret-inv-card" data-name="${inv.name}">
+						// A fully returned/exchanged sale has nothing left to give
+						// back. `status` alone misses partial returns and
+						// exchanges, so trust the server's settlement flags and
+						// keep the reason visible rather than a dead button.
+						const settled = cint(inv.fully_returned);
+						const settled_word = cint(inv.has_exchange) ? __("exchanged") : __("returned");
+						const settled_title = settled
+							? __("Already fully {0} via {1}", [settled_word, inv.settled_by || "-"])
+							: "";
+						const settled_badge = settled
+							? `<span style="font-size:10px;background:#fee2e2;color:#991b1b;padding:2px 6px;border-radius:999px;border:1px solid #fca5a5;">
+									<i class="fa fa-ban"></i> ${cint(inv.has_exchange) ? __("Exchanged") : __("Returned")}
+								</span>`
+							: (cint(inv.has_return)
+								? `<span style="font-size:10px;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:999px;border:1px solid #fcd34d;" title="${__("{0} of {1} qty returned", [inv.returned_qty, inv.sold_qty])}">
+										<i class="fa fa-undo"></i> ${__("Part returned")}
+									</span>`
+								: "");
+						const settled_note = settled
+							? `<div style="font-size:11px;color:#991b1b;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;padding:4px 8px;margin-top:4px;">
+									<i class="fa fa-ban"></i> ${__("Already fully {0} — see {1}", [settled_word, frappe.utils.escape_html(inv.settled_by || "-")])}
+								</div>`
+							: "";
+						return `<div class="ch-ret-inv-card" data-name="${inv.name}" style="${settled ? "opacity:.75" : ""}">
 							<div class="ch-ret-inv-top">
 								<div style="display:flex;align-items:center;gap:6px">
 									<span class="ch-ret-inv-id">${inv.name}</span>
 									<span class="ch-pos-badge badge-${status_cls}">${inv.status}</span>
 									${window_badge}
+									${settled_badge}
 								</div>
 								<span class="ch-ret-inv-total">₹${format_number(inv.grand_total)}</span>
 							</div>
@@ -102,14 +126,17 @@ export class ReturnsWorkspace {
 							${expired ? `<div style="font-size:11px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:4px 8px;margin-top:4px;">
 								<i class="fa fa-exclamation-triangle"></i> ${__("{0} days since purchase — outside 14-day return window. Manager approval may be required.", [days])}
 							</div>` : ""}
+							${settled_note}
 							<div class="ch-ret-inv-actions">
 								<button class="btn btn-sm btn-warning ch-ret-select-return"
-									data-name="${inv.name}" ${inv.status === "Credit Note Issued" ? "disabled" : ""}
+									data-name="${inv.name}" ${settled ? "disabled" : ""}
+									title="${settled ? settled_title : __("Return items from this sale")}"
 									style="border-radius:var(--pos-radius-sm);font-weight:700">
 									<i class="fa fa-undo"></i> ${__("Return Items")}
 								</button>
 								<button class="btn btn-sm btn-primary ch-ret-select-exchange"
-									data-name="${inv.name}" ${inv.status === "Credit Note Issued" ? "disabled" : ""}
+									data-name="${inv.name}" ${settled ? "disabled" : ""}
+									title="${settled ? settled_title : __("Exchange a product from this sale")}"
 									style="border-radius:var(--pos-radius-sm);font-weight:700">
 									<i class="fa fa-retweet"></i> ${__("Product Exchange")}
 								</button>
@@ -412,7 +439,7 @@ export class ReturnsWorkspace {
 										physical_condition: values.physical_condition || "Resalable",
 									});
 								} else {
-									this._process_product_exchange(invoice_name, return_items, total_credit);
+									this._preview_and_apply_product_exchange(invoice_name, return_items, total_credit);
 								}
 							}).catch(() => {
 								frappe.show_alert({ message: __("Error checking return eligibility"), indicator: "red" });
@@ -434,7 +461,7 @@ export class ReturnsWorkspace {
 								physical_condition: values.physical_condition || "Resalable",
 							});
 						} else {
-							this._process_product_exchange(invoice_name, return_items, total_credit);
+							this._preview_and_apply_product_exchange(invoice_name, return_items, total_credit);
 						}
 					},
 				});
@@ -532,12 +559,16 @@ export class ReturnsWorkspace {
 	_process_product_exchange(invoice_name, return_items, total_credit) {
 		PosState.product_exchange_invoice = invoice_name;
 		PosState.product_exchange_credit = total_credit;
+		// Bind the credit to its customer so it can never be spent on
+		// another person's bill, and can be handed back to this one.
+		PosState.product_exchange_customer = null;
 		PosState.return_items = return_items;
 
 		// Set customer from original invoice
 		frappe.db.get_value("Sales Invoice", invoice_name, "customer").then((r) => {
 			if (r.message && r.message.customer) {
 				PosState.customer = r.message.customer;
+				PosState.product_exchange_customer = r.message.customer;
 				EventBus.emit("customer:set", r.message.customer);
 			}
 		});
@@ -553,5 +584,30 @@ export class ReturnsWorkspace {
 			message: __("Exchange credit ₹{0} applied. Add new items to cart.", [format_number(total_credit)]),
 			indicator: "blue",
 		});
+	}
+
+	async _preview_and_apply_product_exchange(invoice_name, return_items, fallback_credit) {
+		try {
+			const preview = await frappe.xcall(
+				"ch_pos.api.pos_api.preview_return_with_replacement",
+				{
+					original_invoice: invoice_name,
+					return_items,
+					replacement_total: 0,
+				}
+			);
+			const authoritative_credit = flt(preview && preview.return_value);
+			this._process_product_exchange(
+				invoice_name,
+				return_items,
+				authoritative_credit || fallback_credit
+			);
+		} catch (err) {
+			frappe.msgprint({
+				title: __("Exchange Credit Error"),
+				indicator: "red",
+				message: __("Could not calculate the tax-inclusive exchange credit. Please retry."),
+			});
+		}
 	}
 }

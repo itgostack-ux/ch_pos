@@ -2,6 +2,7 @@ import datetime
 import re
 
 import frappe
+from frappe.query_builder.functions import Count, Sum
 from frappe import _
 from frappe.rate_limiter import rate_limit
 from frappe.utils import (
@@ -5673,13 +5674,106 @@ def search_invoices_for_return(search_term, pos_profile=None) -> list:
             )
         }
     return_window_days = max(1, cint(profile.custom_return_window_days) or 30)
+    settled = _get_return_exchange_state(invoice_names)
     for inv in invoices:
         inv["items_count"] = item_counts.get(inv.name, 0)
         days = cint(date_diff(today, str(inv["posting_date"])))
         inv["days_since_purchase"] = days
         inv["return_window_expired"] = days > return_window_days
+        inv.update(settled.get(inv.name) or _EMPTY_RETURN_STATE)
 
     return invoices
+
+
+#: Shape returned by :func:`_get_return_exchange_state` for an untouched invoice.
+_EMPTY_RETURN_STATE = {
+    "has_return": 0,
+    "has_exchange": 0,
+    "fully_returned": 0,
+    "returned_qty": 0.0,
+    "sold_qty": 0.0,
+    "settled_by": None,
+}
+
+
+def _assert_not_already_settled(invoice_name) -> None:
+    """Refuse a second return / exchange against a fully settled invoice.
+
+    The UI disables the buttons, but that is a convenience: this is the gate
+    that holds for a stale POS tab, a replayed request, or a direct API call.
+    A *partly* returned invoice is deliberately still open — only the remaining
+    quantity is returnable, which ``get_invoice_items_for_return`` computes.
+    """
+    state = _get_return_exchange_state([invoice_name]).get(invoice_name)
+    if not state or not state.get("fully_returned"):
+        return
+    frappe.throw(
+        _("Invoice {0} has already been fully {1} (see {2}). Nothing is left to return.").format(
+            invoice_name,
+            _("exchanged") if state.get("has_exchange") else _("returned"),
+            state.get("settled_by") or "-",
+        ),
+        title=_("Already Returned") if not state.get("has_exchange") else _("Already Exchanged"),
+    )
+
+
+def _get_return_exchange_state(invoice_names) -> dict:
+    """Per-invoice return / exchange history, keyed by invoice name.
+
+    ``Sales Invoice.status`` alone cannot drive the POS buttons: it only reaches
+    "Credit Note Issued" on a *full* credit note, so a partially returned or
+    exchanged invoice still looked untouched and could be returned again.
+
+    ``fully_returned`` compares returned quantity against sold quantity rather
+    than trusting status, so a part return correctly leaves the remaining lines
+    returnable while a completed one is closed off.
+    """
+    if not invoice_names:
+        return {}
+
+    sold = {
+        row.parent: flt(row.qty)
+        for row in frappe.db.sql(
+            """
+            SELECT parent, SUM(qty) AS qty FROM `tabSales Invoice Item`
+             WHERE parent IN %(invoices)s GROUP BY parent
+            """,
+            {"invoices": invoice_names},
+            as_dict=True,
+        )
+    }
+    rows = frappe.db.sql(
+        """
+        SELECT si.return_against            AS parent,
+               SUM(ABS(sii.qty))            AS qty,
+               GROUP_CONCAT(DISTINCT si.name) AS docs,
+               MAX(CASE WHEN IFNULL(si.ch_exchange_order,'') <> ''
+                         OR IFNULL(si.custom_exchange_assessment,'') <> ''
+                        THEN 1 ELSE 0 END)  AS is_exchange
+          FROM `tabSales Invoice` si
+          JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
+         WHERE si.docstatus = 1 AND si.is_return = 1
+           AND si.return_against IN %(invoices)s
+         GROUP BY si.return_against
+        """,
+        {"invoices": invoice_names},
+        as_dict=True,
+    )
+
+    state = {}
+    for row in rows:
+        sold_qty = flt(sold.get(row.parent))
+        returned_qty = flt(row.qty)
+        state[row.parent] = {
+            "has_return": 1,
+            "has_exchange": cint(row.is_exchange),
+            # Tolerance guards float noise on fractional-UOM lines.
+            "fully_returned": 1 if sold_qty and returned_qty >= sold_qty - 0.0001 else 0,
+            "returned_qty": returned_qty,
+            "sold_qty": sold_qty,
+            "settled_by": row.docs,
+        }
+    return state
 
 
 @frappe.whitelist()
@@ -5697,6 +5791,7 @@ def get_invoice_items_for_return(invoice_name) -> dict:
     assert_sales_invoice_scope(invoice_name, allow_disabled=True)
     if inv.docstatus != 1 or inv.is_return:
         frappe.throw(frappe._("Only submitted non-return invoices can be returned"))
+    _assert_not_already_settled(invoice_name)
     max_lines = max(1, min(cint(get_control_setting("return_max_line_items", 100)), 1000))
     if len(inv.items) > max_lines:
         frappe.throw(
@@ -5958,12 +6053,61 @@ def _cancel_linked_sold_plans(plan_names, return_invoice_name) -> list:
         plan = frappe.get_doc("Active VAS Plans", plan_name)
         if plan.docstatus == 1 and plan.status not in ("Cancelled", "Void"):
             plan.check_permission("cancel")
+            _void_vouchers_for_sold_plan(plan_name, return_invoice_name)
             if hasattr(plan, "remarks"):
                 suffix = f"\nAuto-cancelled: device returned via {return_invoice_name}"
                 plan.remarks = (plan.remarks or "") + suffix
             plan.cancel()
             cancelled.append(plan_name)
     return cancelled
+
+
+def _void_vouchers_for_sold_plan(plan_name, return_invoice_name) -> list:
+    """Void the vouchers a VAS sale issued, before its plan is cancelled.
+
+    Buying a VAS plan issues the customer a CH Voucher (``sold_plan`` -> plan,
+    ``source_document`` -> the sales invoice). Two things go wrong if the return
+    ignores it:
+
+      * Frappe's link-integrity check refuses to cancel a plan that a *submitted*
+        voucher still points at, so the whole return fails with "Cannot delete or
+        cancel because Active VAS Plans ... is linked with CH Voucher ...".
+      * If it somehow succeeded, the customer would keep spendable store credit
+        for a product they just handed back.
+
+    A voucher the customer has already drawn against is NOT voided silently —
+    that is a refund dispute, not a bookkeeping step, so the return is blocked
+    with the remaining balance spelled out for the operator.
+    """
+    voided = []
+    vouchers = frappe.get_all(
+        "CH Voucher",
+        filters={"sold_plan": plan_name, "docstatus": 1},
+        fields=["name", "status", "original_amount", "balance"],
+    )
+    for row in vouchers:
+        if row.status in ("Cancelled", "Expired", "Fully Used"):
+            continue
+        if flt(row.balance) < flt(row.original_amount):
+            frappe.throw(
+                _(
+                    "Voucher {0} issued with this plan has already been partly "
+                    "redeemed ({1} of {2} left). Settle or write off the voucher "
+                    "before returning this sale."
+                ).format(row.name, flt(row.balance), flt(row.original_amount)),
+                title=_("Voucher Already Redeemed"),
+            )
+        voucher = frappe.get_doc("CH Voucher", row.name)
+        voucher.check_permission("cancel")
+        if voucher.meta.has_field("reason"):
+            voucher.db_set(
+                "reason",
+                f"{voucher.reason or ''}\nVoided: sale returned via {return_invoice_name}".strip(),
+                update_modified=False,
+            )
+        voucher.cancel()
+        voided.append(row.name)
+    return voided
 
 
 def _normalize_return_items(orig, return_items) -> list[dict]:
@@ -6306,13 +6450,38 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
                     title=frappe._("Serial Return Blocked"),
                 )
 
-    # Taxes from original — must be added BEFORE calculating grand_total
+    # Taxes from original — must be added BEFORE calculating grand_total.
+    #
+    # A credit memo MIRRORS the tax determination of the document it reverses.
+    # That is the rule in Oracle Receivables (credit memo inherits the invoice's
+    # tax lines and inclusive basis), D365 F&O (credit note copies the sales tax
+    # group / item sales tax group and the "Prices include sales tax" flag) and
+    # SAP (credit memo copies the billing document's pricing procedure and
+    # condition records). The credit must be an exact reversal, never a fresh
+    # tax computation.
+    #
+    # Copying only charge_type/account_head/rate dropped
+    # ``included_in_print_rate``. Under GST-inclusive pricing ERPNext then read
+    # the gross rate as pre-tax and ADDED tax on top instead of extracting it:
+    # a 1,000.00 sale (847.46 net + 152.54 GST) produced a 1,180.00 credit note.
+    # The customer was over-refunded by the tax rate and the excess was posted
+    # against output tax, so GSTR-1 credit notes were overstated too. GL still
+    # balanced, which is why nothing downstream caught it.
     for tax in (orig.taxes or []):
         ret.append("taxes", {
             "charge_type": tax.charge_type,
             "account_head": tax.account_head,
             "rate": tax.rate,
             "description": tax.description or tax.account_head,
+            # Tax basis — the field whose loss caused the over-refund.
+            "included_in_print_rate": cint(tax.get("included_in_print_rate")),
+            "included_in_paid_amount": cint(tax.get("included_in_paid_amount")),
+            # "On Previous Row Amount/Total" is meaningless without the row it
+            # references; dropping it silently re-bases cascading tax lines.
+            "row_id": tax.get("row_id"),
+            # Keep the credit in the same cost centre / dimension as the sale so
+            # the reversal nets to zero in management reporting, not just in GL.
+            "cost_center": tax.get("cost_center"),
             "tax_amount": -1 * flt(tax.tax_amount) if tax.charge_type == "Actual" else 0,
         })
 
@@ -6676,9 +6845,13 @@ def preview_return_with_replacement(original_invoice, return_items,
     for ri in return_items:
         return_subtotal += flt(ri.get("qty", 0)) * flt(ri.get("rate", 0))
 
-    # Apply original invoice's effective tax rate to the return subtotal
-    base_total = flt(orig.net_total) or 0.01
-    tax_factor = (flt(orig.grand_total) / base_total) if base_total else 1.0
+    # Rates in POS cart/return payloads follow the original invoice's pricing
+    # convention. Use `total` (sum of displayed item rates), not `net_total`
+    # (tax-exclusive accounting value), or GST-inclusive prices are taxed a
+    # second time. Example: a displayed ₹1,599 item must return ₹1,599, not
+    # ₹1,886.82.
+    displayed_total = flt(orig.total) or 0.01
+    tax_factor = (flt(orig.grand_total) / displayed_total) if displayed_total else 1.0
     return_value = round(return_subtotal * tax_factor, 2)
     replacement_total = flt(replacement_total)
     if replacement_total < 0:
@@ -6795,11 +6968,11 @@ def process_return_with_replacement(
     replacement_total_raw = sum(
         flt(it.get("qty", 0)) * flt(it.get("rate", 0)) for it in replacement_items
     )
-    # Apply original invoice's effective tax factor as a quick estimate.
-    # The exact total is recomputed by ERPNext on save() -- this preview is
-    # only used to validate the settlement payload before any DB writes.
-    base_total = flt(orig.net_total) or 0.01
-    tax_factor = (flt(orig.grand_total) / base_total) if base_total else 1.0
+    # Apply the original invoice's displayed-price factor as a quick estimate.
+    # POS rates are GST-inclusive when `total == grand_total`; dividing by
+    # net_total would add GST for a second time and inflate the settlement.
+    displayed_total = flt(orig.total) or 0.01
+    tax_factor = (flt(orig.grand_total) / displayed_total) if displayed_total else 1.0
     replacement_total_est = round(replacement_total_raw * tax_factor, 2)
 
     return_subtotal = sum(
@@ -6876,8 +7049,19 @@ def process_return_with_replacement(
     rp.pop("amount_paid", None)
 
     if delta > 0.5:
-        # Use settlement payments to cover the difference
-        rp["payments"] = settlement_payments
+        # The submitted return invoice carries a negative payment row. Add an
+        # equal offset on the replacement invoice, then collect only the net
+        # difference from the customer. Without this offset a ₹2,500 sale with
+        # ₹1,999 returned credit and ₹501 cash is rejected as only ₹501 paid.
+        offset_mop = "Cash"
+        for p in (orig.payments or []):
+            if p.default:
+                offset_mop = p.mode_of_payment
+                break
+        rp["payments"] = list(settlement_payments) + [{
+            "mode_of_payment": offset_mop,
+            "amount": return_value,
+        }]
     else:
         # Replacement is fully (or more than fully) covered by the return.
         # Pay the full replacement_total via Cash placeholder; the actual cash
@@ -9742,6 +9926,7 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
                              ) AS to_warehouse,
                              se.remarks,
                se.custom_status, se.custom_logistics_status,
+               se.custom_transfer_manifest,
                se.custom_logistics_person,
                COALESCE(drv.full_name, se.custom_logistics_person) AS custom_logistics_person_name,
                (SELECT COUNT(*) FROM `tabStock Entry Detail` sed
@@ -10206,6 +10391,141 @@ def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | N
         [serial_no], warehouse, include_exchange=False
     )
     return reserved.get(serial_no)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_store_transfer_request(from_warehouse, to_warehouse, items,
+                                  notes=None, expected_delivery_date=None) -> dict:
+    """Raise an approval-controlled direct store-to-store transfer request."""
+    require_configured_roles(
+        "stock_transfer_roles",
+        defaults=("Store Manager", "Stock Manager", "Stock User"),
+        action=_("raise a store-to-store transfer request"),
+    )
+    frappe.has_permission("Material Request", "create", throw=True)
+    if isinstance(items, str):
+        items = frappe.parse_json(items)
+    if not isinstance(items, list) or not items:
+        frappe.throw(_("At least one item is required."))
+    if not from_warehouse or not to_warehouse or from_warehouse == to_warehouse:
+        frappe.throw(_("Choose two different store warehouses."))
+
+    company = frappe.db.get_value("Warehouse", from_warehouse, "company")
+    if not company or frappe.db.get_value("Warehouse", to_warehouse, "company") != company:
+        frappe.throw(_("Store transfers must remain within one company."))
+    assert_store_scope(warehouse=from_warehouse, company=company)
+    source_profile = frappe.db.get_value(
+        "POS Profile",
+        {"warehouse": from_warehouse, "company": company, "disabled": 0},
+        "name",
+    )
+    if not source_profile:
+        frappe.throw(_("Source warehouse is not linked to an active POS Profile."))
+    if not is_privileged_user() and to_warehouse not in set(
+        get_transfer_warehouse_scope(source_profile).get("target_warehouses") or []
+    ):
+        frappe.throw(_("Destination store is outside the configured transfer network."), frappe.PermissionError)
+
+    seen_serials = set()
+    mr = frappe.new_doc("Material Request")
+    mr.material_request_type = "Material Transfer"
+    mr.company = company
+    mr.transaction_date = nowdate()
+    mr.schedule_date = expected_delivery_date or frappe.utils.add_days(nowdate(), 1)
+    mr.set_from_warehouse = from_warehouse
+    mr.set_warehouse = to_warehouse
+    mr.custom_store = frappe.db.get_value("CH Store", {"warehouse": to_warehouse}, "name")
+    mr.custom_pos_profile = source_profile
+    mr.custom_priority = "Standard"
+    mr.custom_approval_status = "Pending Approval"
+    mr.custom_request_datetime = frappe.utils.now_datetime()
+    mr.custom_preferred_source_warehouse = from_warehouse
+    mr.custom_request_notes = str(notes or "")[:1000]
+
+    for item in items:
+        raw = item.get("serial_no") or item.get("serials") or ""
+        serials = raw if isinstance(raw, list) else str(raw).splitlines()
+        serials = [str(value).strip() for value in serials if str(value).strip()]
+        if len(serials) != len(set(serials)) or seen_serials.intersection(serials):
+            frappe.throw(_("A serial/IMEI cannot appear more than once in a transfer request."))
+        seen_serials.update(serials)
+        item_code = item.get("item_code")
+        if not item_code:
+            frappe.throw(_("Item code is required."))
+        qty = len(serials) if serials else flt(item.get("qty"))
+        if qty <= 0:
+            frappe.throw(_("Transfer quantity must be greater than zero."))
+        if serials:
+            serial_rows = frappe.get_all(
+                "Serial No",
+                filters={"name": ("in", serials)},
+                fields=["name", "item_code", "warehouse"],
+            )
+            valid = {
+                row.name for row in serial_rows
+                if row.item_code == item_code and row.warehouse == from_warehouse
+            }
+            if valid != set(serials):
+                frappe.throw(_("Every scanned IMEI must belong to the requested item and source store."))
+        mr.append("items", {
+            "item_code": item_code,
+            "qty": qty,
+            "uom": item.get("uom") or "Nos",
+            "from_warehouse": from_warehouse,
+            "warehouse": to_warehouse,
+            "schedule_date": mr.schedule_date,
+            "custom_serial_no": "\n".join(serials),
+            "custom_scanned_qty": len(serials),
+        })
+    mr.insert()
+    return {
+        "name": mr.name,
+        "status": mr.custom_approval_status,
+        "source_warehouse": from_warehouse,
+        "destination_warehouse": to_warehouse,
+    }
+
+
+@frappe.whitelist(methods=["POST"])
+def generate_packed_transfer_ewaybill(stock_entry) -> dict:
+    """Queue the Part-A e-Way Bill for a packed, handed-over store transfer."""
+    require_configured_roles(
+        "stock_transfer_roles",
+        defaults=("Store Manager", "Stock Manager", "Stock User"),
+        action=_("generate a store-transfer e-Way Bill"),
+    )
+    se = frappe.get_doc("Stock Entry", stock_entry)
+    if se.stock_entry_type != "Material Transfer":
+        frappe.throw(_("Stock Entry is not a Material Transfer."))
+    assert_store_scope(warehouse=se.from_warehouse, company=se.company)
+    if se.custom_status not in ("Pending With Goods", "Ready For Pickup"):
+        frappe.throw(_("Hand over the packed goods before generating the e-Way Bill."))
+    manifest_name = se.get("custom_transfer_manifest")
+    if not manifest_name:
+        frappe.throw(_("This transfer has no manifest."))
+    manifest = frappe.get_doc("CH Transfer Manifest", manifest_name)
+    if manifest.status not in ("Packed", "Assigned"):
+        frappe.throw(_("The transfer manifest must be Packed before e-Way Bill generation."))
+
+    gst_settings = frappe.get_cached_doc("GST Settings")
+    if not (
+        gst_settings.enable_e_waybill
+        and gst_settings.enable_e_waybill_for_sc
+        and gst_settings.enable_api
+    ):
+        manifest.db_set("ewaybill_status", "Not Required", update_modified=False)
+        return {"stock_entry": se.name, "manifest": manifest.name, "status": "Not Required"}
+
+    from ch_erp15.ch_erp15.custom.stock_entry import _auto_generate_ewaybill
+    _auto_generate_ewaybill(se, require_prerequisites=True)
+    manifest.db_set(
+        {
+            "ewaybill_status": "Generating",
+            "ewaybill_last_synced_at": frappe.utils.now_datetime(),
+        },
+        update_modified=False,
+    )
+    return {"stock_entry": se.name, "manifest": manifest.name, "status": "Generating"}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -11949,10 +12269,14 @@ def get_executive_incentive_summary(pos_executive, from_date=None, to_date=None)
             "posting_date": ("between", [from_date, to_date]),
             "status": ("!=", "Cancelled"),
         },
+        # Frappe v16 rejects raw SQL aggregates passed as strings in `fields`
+        # ("SQL functions are not allowed as strings in SELECT"), which made
+        # this endpoint throw on every POS dashboard load. Use the query-builder
+        # Function objects, which are the supported form.
         fields=[
-            "sum(incentive_amount) as total_incentive",
-            "sum(billing_amount) as total_billing",
-            "count(name) as total_transactions",
+            Sum("incentive_amount").as_("total_incentive"),
+            Sum("billing_amount").as_("total_billing"),
+            Count("name").as_("total_transactions"),
             "transaction_type",
         ],
         group_by="transaction_type",
@@ -13101,6 +13425,7 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         "customer_otp",
         otp_verification_token,
         {"mobile_no": whatsapp_number},
+        restore_on_rollback=True,
     )
 
     cust = frappe.new_doc("Customer")
@@ -15760,9 +16085,13 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
             it["reserved_serials"] = []
 
     today = getdate(nowdate())
+    # Same ledger-truth rule as the pickup loader: the prebook list must not
+    # advertise a balance that assumes an unapproved advance was received.
+    adv_split = {r.name: get_so_advance_split(r.name) for r in rows}
     out = []
     for r in rows:
-        bal = flt(r.grand_total) - flt(r.advance_paid)
+        _a = adv_split.get(r.name) or {"posted": 0.0, "pending": 0.0}
+        bal = flt(r.grand_total) - flt(_a["posted"])
         dd = getdate(r.delivery_date) if r.delivery_date else None
         days = (dd - today).days if dd else None
         reserved = serials_by_parent.get(r.name, [])
@@ -15775,7 +16104,8 @@ def list_pickup_prebookings(pos_profile, search=None, days_ahead=30,
             "days_to_delivery": days,
             "is_overdue": bool(dd and dd < today),
             "grand_total": flt(r.grand_total),
-            "advance_paid": flt(r.advance_paid),
+            "advance_paid": flt(_a["posted"]),
+            "advance_pending": flt(_a["pending"]),
             "balance_due": bal if bal > 0 else 0,
             "currency": r.currency,
             "status": r.status,
@@ -16277,7 +16607,11 @@ def load_sales_order_to_cart(pos_profile, sales_order):
             row["serial_no"] = ""
             cart_items.append(row)
 
-    advance = flt(so.advance_paid)
+    # Ledger truth, not SO.advance_paid — a draft (unapproved) advance PE must
+    # never be offered as spendable at the till.
+    _adv = get_so_advance_split(so.name)
+    advance = flt(_adv["posted"])
+    advance_pending = flt(_adv["pending"])
     grand_total = flt(so.grand_total)
     balance_due = max(grand_total - advance, 0)
 
@@ -16288,6 +16622,7 @@ def load_sales_order_to_cart(pos_profile, sales_order):
         "sale_type": sale_type,
         "grand_total": grand_total,
         "advance_paid": advance,
+        "advance_pending": advance_pending,
         "balance_due": balance_due,
         "currency": so.currency,
         "delivery_date": str(so.delivery_date) if so.delivery_date else None,
@@ -16295,6 +16630,40 @@ def load_sales_order_to_cart(pos_profile, sales_order):
         "items": cart_items,
         "item_count": len(cart_items),
     }
+
+
+def get_so_advance_split(sales_order) -> dict:
+    """Split a Sales Order's advance into what is POSTED vs merely PENDING.
+
+    ``Sales Order.advance_paid`` is not a safe number to bill against. The
+    pre-booking flow deliberately leaves its advance Payment Entry in **draft**
+    for maker-checker approval, and a draft PE has never touched the ledger.
+    Offering that money at the till produced
+    "Requested advance adjustment ... exceeds the customer's unallocated
+    advance balance 0.00" at payment, because the validator counts only
+    submitted Payment Entries.
+
+    ``posted``  — allocated by submitted Payment Entries. Real money; billable.
+    ``pending`` — sitting in draft Payment Entries awaiting approval. Shown to
+                  the cashier so an unapplied advance is explained rather than
+                  silently missing, but never deducted.
+    """
+    rows = frappe.db.sql(
+        """
+        SELECT pe.docstatus AS docstatus, SUM(per.allocated_amount) AS amount
+          FROM `tabPayment Entry Reference` per
+          JOIN `tabPayment Entry` pe ON pe.name = per.parent
+         WHERE per.reference_doctype = 'Sales Order'
+           AND per.reference_name = %(so)s
+           AND pe.docstatus IN (0, 1)
+         GROUP BY pe.docstatus
+        """,
+        {"so": sales_order},
+        as_dict=True,
+    )
+    posted = sum(flt(r.amount) for r in rows if cint(r.docstatus) == 1)
+    pending = sum(flt(r.amount) for r in rows if cint(r.docstatus) == 0)
+    return {"posted": posted, "pending": pending}
 
 
 @frappe.whitelist()

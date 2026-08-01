@@ -928,6 +928,8 @@ export class PickupWorkspace {
 			});
 			PosState.sales_order_reference = res.sales_order;
 			PosState.sales_order_advance = flt(res.advance_paid || 0);
+			// Draft (unapproved) advance — surfaced, never deducted.
+			PosState.sales_order_advance_pending = flt(res.advance_pending || 0);
 			PosState.sales_order_grand_total = flt(res.grand_total || 0);
 			PosState.sales_order_summary = {
 				name: res.sales_order,

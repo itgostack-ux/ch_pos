@@ -792,7 +792,7 @@ _render_dashboard(panel, data) {
 
 	// ── Submit Claim ────────────────────────────────────────────────
 
-	_submit_claim(panel) {
+	async _submit_claim(panel) {
 		const data = this._dashboard;
 		const dev = this._selected_device;
 		if (!data || !dev) {
@@ -843,6 +843,44 @@ _render_dashboard(panel, data) {
 		const filled = img_files.filter(f => f.file);
 		if (filled.length < 4) {
 			frappe.show_alert({ message: __("Please upload at least 4 device images"), indicator: "orange" });
+			return;
+		}
+
+		// Frappe stores identical file content under one shared URL. Detect that
+		// before staging so the server's distinct-evidence rule can be explained
+		// using the actual camera slots instead of a generic duplicate error.
+		const fingerprints = await Promise.all(filled.map(async ({ field, file }) => {
+			let fingerprint = `${file.name}:${file.size}:${file.lastModified}`;
+			if (window.crypto && window.crypto.subtle) {
+				const digest = await window.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+				fingerprint = Array.from(new Uint8Array(digest))
+					.map((byte) => byte.toString(16).padStart(2, "0"))
+					.join("");
+			}
+			return { field, fingerprint };
+		}));
+		const first_slot = new Map();
+		const duplicates = [];
+		for (const entry of fingerprints) {
+			if (first_slot.has(entry.fingerprint)) {
+				duplicates.push([first_slot.get(entry.fingerprint), entry.field]);
+			} else {
+				first_slot.set(entry.fingerprint, entry.field);
+			}
+		}
+		if (duplicates.length) {
+			const label = (field) => field
+				.replace("device_image_", "")
+				.replace(/_/g, " ")
+				.replace(/\b\w/g, (char) => char.toUpperCase());
+			const pairs = duplicates
+				.map(([first, duplicate]) => `${label(first)} / ${label(duplicate)}`)
+				.join(", ");
+			frappe.msgprint({
+				title: __("Distinct Device Photos Required"),
+				indicator: "orange",
+				message: __("The same photo was selected for: {0}. Retake or choose a different photo for each device side.", [pairs]),
+			});
 			return;
 		}
 

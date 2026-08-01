@@ -54,6 +54,15 @@ frappe.pages["ch-pos-app"].on_page_hide = function (wrapper) {
 	$("body").removeClass("ch-pos-fullscreen");
 	$("header.navbar").show();
 	$(".body-sidebar-container, .body-sidebar").show();
+
+	// Older POS builds wrote these values inline on shared Desk containers.
+	// Clear any leaked values so a Form opened from POS gets the normal Desk
+	// sizing and the main section remains the sole vertical scroll owner.
+	$(".main-section, .page-container").css({
+		margin: "",
+		padding: "",
+		"max-width": "",
+	});
 };
 
 frappe.pages["ch-pos-app"].refresh = function (wrapper) {

@@ -1476,6 +1476,10 @@ export class CartPanel {
 			return;
 		}
 		const advance = flt(PosState.sales_order_advance);
+		// An advance stuck in maker-checker is invisible money to the
+		// cashier otherwise: they see a balance that ignores it and
+		// assume the system lost the deposit.
+		const advance_pending = flt(PosState.sales_order_advance_pending);
 		const summary = PosState.sales_order_summary || {};
 		const reserved_count = (summary.reserved_serials || []).length;
 		const due = summary.delivery_date ? `· ${__("Due")}: ${summary.delivery_date}` : "";
@@ -1493,7 +1497,12 @@ export class CartPanel {
 					<div class="text-muted" style="font-size:11px">
 						${advance > 0
 							? __("Advance ₹{0} will be auto-applied at PAY", [format_number(advance)])
-							: __("No advance on this order")}
+							: (advance_pending > 0
+								? __("No advance applied — ₹{0} is awaiting approval", [format_number(advance_pending)])
+								: __("No advance on this order"))}
+						${advance_pending > 0
+							? `<div style="margin-top:3px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:4px;padding:2px 6px;display:inline-block"><i class="fa fa-clock-o"></i> ${__("₹{0} advance pending approval — not collected as paid", [format_number(advance_pending)])}</div>`
+							: ""}
 						${due}
 					</div>
 				</div>

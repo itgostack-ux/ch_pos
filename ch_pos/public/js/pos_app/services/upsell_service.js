@@ -164,6 +164,9 @@ export class UpsellService {
 					offers: [],
 					applied_offer: null,
 					warranty_plan: s.warranty_plan || s.item_code,
+					// Persisted so _restore_active_cart can re-derive the flags
+					// offline instead of discarding the line.
+					plan_type: s.plan_type,
 					is_warranty: is_warranty_plan,
 					is_vas: is_vas_plan,
 					has_serial_no: 0,

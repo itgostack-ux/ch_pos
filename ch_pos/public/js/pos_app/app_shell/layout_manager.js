@@ -45,9 +45,6 @@ export class LayoutManager {
 		this.wrapper.find(".page-head").hide();
 		$("header.navbar").hide();
 		$("body").addClass("ch-pos-fullscreen");
-		// Ensure absolute full-screen by removing any Frappe page padding
-		$(".main-section").css({ margin: 0, padding: 0, "max-width": "100%" });
-		$(".page-container").css({ margin: 0, padding: 0, "max-width": "100%" });
 	}
 
 	/** Build the 3-column DOM structure */
@@ -202,6 +199,7 @@ export class LayoutManager {
 	destroy() {
 		$("body").removeClass("ch-pos-fullscreen");
 		$("header.navbar").show();
+		$(".body-sidebar-container, .body-sidebar").show();
 		$(document).off("keydown.ch_pos_shortcuts");
 		EventBus.clear();
 	}
