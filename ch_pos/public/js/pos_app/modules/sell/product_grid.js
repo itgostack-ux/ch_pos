@@ -397,6 +397,15 @@ export class ProductGrid {
 		frappe.call({
 			method: "ch_pos.api.search.get_nearby_stock",
 			args: { item_code, pos_profile: PosState.pos_profile },
+			// Server throws DoesNotExistError when item_code doesn't resolve to a
+			// real Item (for example a raw search term with no match) — surface
+			// that instead of frappe's default error dialog.
+			error: () => {
+				frappe.show_alert({
+					message: __("No matching item found for {0}", [item_code]),
+					indicator: "orange",
+				});
+			},
 			callback: (r) => {
 				const stores = r.message || [];
 				let body = "";

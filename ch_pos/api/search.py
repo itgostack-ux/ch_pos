@@ -554,26 +554,60 @@ def get_nearby_stock(item_code, pos_profile) -> dict:
     """Full nearby-store stock check for a single item (for item detail popup).
 
     Returns Sellable-bin qty only — damaged/reserved/transfer stock excluded.
+    Stores are scoped to the caller's zone (falls back to city/pincode via
+    `_get_nearby_warehouses`), and only each store's selling warehouse
+    (`CH Store.warehouse`) is queried — never the group/aggregate warehouse.
     """
     assert_pos_profile_scope(pos_profile)
+
+    # `item_code` may be a raw search term (e.g. "Check Other Stores" clicked
+    # from the no-results empty state), not a real Item. Resolve it first —
+    # otherwise every store falsely reports 0 qty for a code that never
+    # existed, which reads as "out of stock everywhere" instead of the true
+    # "no such item" state.
+    resolved_item_code = frappe.db.get_value("Item", item_code, "name") or \
+        frappe.db.get_value("Item Barcode", {"barcode": item_code}, "parent")
+    if not resolved_item_code:
+        frappe.throw(
+            frappe._("No matching item found for {0}").format(frappe.bold(item_code)),
+            frappe.DoesNotExistError,
+        )
+    item_code = resolved_item_code
+
     stores = _get_nearby_warehouses(pos_profile)
     warehouses = [s.warehouse for s in stores if s.warehouse]
     qty_by_warehouse = {}
     if warehouses:
-        qty_rows = frappe.db.sql(
-            """
-            SELECT sn.warehouse, COUNT(sn.name) AS qty
-              FROM `tabSerial No` sn
-              LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
-             WHERE sn.item_code = %(item_code)s
-               AND sn.warehouse IN %(warehouses)s
-               AND sn.status = 'Active'
-               AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
-             GROUP BY sn.warehouse
-            """,
-            {"item_code": item_code, "warehouses": warehouses},
-            as_dict=True,
-        )
+        has_serial_no = cint(frappe.db.get_value("Item", item_code, "has_serial_no"))
+        if has_serial_no:
+            qty_rows = frappe.db.sql(
+                """
+                SELECT sn.warehouse, COUNT(sn.name) AS qty
+                  FROM `tabSerial No` sn
+                  LEFT JOIN `tabCH Stock Bin` sb ON sb.serial_no = sn.name
+                 WHERE sn.item_code = %(item_code)s
+                   AND sn.warehouse IN %(warehouses)s
+                   AND sn.status = 'Active'
+                   AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
+                 GROUP BY sn.warehouse
+                """,
+                {"item_code": item_code, "warehouses": warehouses},
+                as_dict=True,
+            )
+        else:
+            # Quantity-only (non-serialized) items carry no Serial No rows —
+            # on-hand qty lives on the standard Bin instead.
+            qty_rows = frappe.db.sql(
+                """
+                SELECT b.warehouse, b.actual_qty AS qty
+                  FROM `tabBin` b
+                 WHERE b.item_code = %(item_code)s
+                   AND b.warehouse IN %(warehouses)s
+                   AND b.actual_qty > 0
+                """,
+                {"item_code": item_code, "warehouses": warehouses},
+                as_dict=True,
+            )
         qty_by_warehouse = {row.warehouse: row.qty for row in qty_rows}
 
     result = []

@@ -1043,7 +1043,7 @@ export class PrebookWorkspace {
 		const pe_links = pe_names.length
 			? pe_names.map((pe) => {
 				const open_url = `/app/payment-entry/${encodeURIComponent(pe)}`;
-				const print_url = `/printview?doctype=Payment%20Entry&name=${encodeURIComponent(pe)}&no_letterhead=0`;
+				const print_url = `/printview?doctype=Payment%20Entry&name=${encodeURIComponent(pe)}&format=Pre-Booking%20Advance%20Receipt&no_letterhead=1`;
 				const st = pe_state_map[pe] || { receipt_state: "Draft", docstatus: 0 };
 				const is_final = cint(st.docstatus) === 1 || String(st.receipt_state || "").toLowerCase() === "final";
 				const badge = `<span class="badge" style="background:${is_final ? "#dcfce7" : "#fef3c7"};color:${is_final ? "#166534" : "#92400e"};margin-left:6px;">${is_final ? __("Receipt Final") : __("Receipt Draft")}</span>`;

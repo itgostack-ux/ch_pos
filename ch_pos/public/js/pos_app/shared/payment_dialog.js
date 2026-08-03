@@ -2878,6 +2878,22 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			sales_order:      c.sales_order || null,
 			so_detail:        c.so_detail || null,
 		}));
+		const vas_source_invoices = [...new Set(
+			PosState.cart.filter(c => c.is_vas && c.original_invoice)
+				.map(c => c.original_invoice)
+		)];
+		if (vas_source_invoices.length > 1) {
+			frappe.msgprint({
+				title: __("Multiple Original Invoices"),
+				message: __("VAS plans linked to devices from different original invoices must be billed separately."),
+				indicator: "orange",
+			});
+			this._submitting = false;
+			this._overlay.find("#ch-pay-submit").prop("disabled", false);
+			this._overlay.find("#ch-pay-submit-label").text(__("Complete Sale"));
+			return;
+		}
+		const vas_source_invoice = vas_source_invoices[0] || null;
 
 		const payments = this._is_free_sale ? [] : this._payments.map(p => ({
 			mode_of_payment:      p.mode,
@@ -2940,8 +2956,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			free_sale_approved_by:          this._is_free_sale ? this._free_sale_approved_by : "",
 			free_sale_approved_at:          this._is_free_sale ? (this._free_sale_approved_at || null) : null,
 			free_sale_approval_name:        this._is_free_sale ? (this._free_sale_approval_name || "") : "",
-			original_invoice:               this._original_invoice || null,
-			original_invoice_reason:        this._original_invoice_reason || null,
+			original_invoice:               this._original_invoice || vas_source_invoice || null,
+			original_invoice_reason:        this._original_invoice_reason || (vas_source_invoice ? "VAS After Sale" : null),
 			advance_amount:                 advance > 0 ? advance : 0,
 			sales_order:                    PosState.sales_order_reference || null,
 			kiosk_token:                    PosState.kiosk_token || null,

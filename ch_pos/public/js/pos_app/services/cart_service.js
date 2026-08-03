@@ -2037,19 +2037,36 @@ export class CartService {
 		}));
 		const selected_device = [opts.for_item, PosState.last_vas_target]
 			.find((item) => item && !item.is_warranty && !item.is_vas) || null;
-		frappe.xcall("ch_pos.api.pos_api.get_vas_plans_with_rules", {
-			cart_items,
-		}).then((plans) => {
+		const history_request = (PosState.customer && PosState.pos_profile)
+			? frappe.xcall("ch_pos.api.pos_api.get_customer_sold_devices", {
+				customer: PosState.customer,
+				pos_profile: PosState.pos_profile,
+			}).catch(() => [])
+			: Promise.resolve([]);
+		history_request.then((historical_devices) => {
+			const eligibility_items = [
+				...cart_items,
+				...(historical_devices || []).map((d) => ({
+					item_code: d.item_code,
+					rate: d.rate,
+					is_warranty: false,
+					is_vas: false,
+				})),
+			];
+			return frappe.xcall("ch_pos.api.pos_api.get_vas_plans_with_rules", {
+				cart_items: eligibility_items,
+			}).then((plans) => ({ plans, historical_devices: historical_devices || [] }));
+		}).then(({ plans, historical_devices }) => {
 			if (!plans || !plans.length) {
 				frappe.show_alert({ message: __("No VAS plans available"), indicator: "orange" });
 				return;
 			}
-			this._render_vas_selector(plans, selected_device);
+			this._render_vas_selector(plans, selected_device, historical_devices);
 			PosState.last_vas_target = null;
 		});
 	}
 
-	_render_vas_selector(plans, selected_device = null) {
+	_render_vas_selector(plans, selected_device = null, historical_devices = []) {
 		// ── Coverage Subject model (Oracle Service Contracts / SAP IBase /
 		// MS Dynamics Customer Asset parity). Two mutually-exclusive modes:
 		//   • "in_store"  → covered device is on this bill or in our inventory
@@ -2066,9 +2083,15 @@ export class CartService {
 		const device_options = device_items
 			.map((c) => c.item_code + (c.serial_no ? ` (${c.serial_no})` : ""))
 			.filter((value, index, list) => value && list.indexOf(value) === index);
+		const historical_option_map = {};
+		const historical_options = (historical_devices || []).map((device) => {
+			const value = `${device.item_name || device.item_code} (${device.serial_no}) · ${device.invoice}`;
+			historical_option_map[value] = device;
+			return value;
+		}).filter((value, index, list) => value && list.indexOf(value) === index);
 		const prioritized_device_options = selected_device_value
-			? [selected_device_value, ...device_options.filter((value) => value !== selected_device_value)]
-			: device_options;
+			? [selected_device_value, ...device_options.filter((value) => value !== selected_device_value), ...historical_options.filter((value) => value !== selected_device_value && !device_options.includes(value))]
+			: [...device_options, ...historical_options.filter((value) => !device_options.includes(value))];
 		const has_in_store_options = prioritized_device_options.length > 0;
 
 		// Default mode: prefer in-store if cart has devices, else customer-owned.
@@ -2167,7 +2190,9 @@ export class CartService {
 					options: prioritized_device_options.join("\n"),
 					depends_on: "eval:doc.coverage_mode === 'in_store'",
 					mandatory_depends_on: "eval:doc.coverage_mode === 'in_store'",
-					description: __("Pick the device on this bill that this plan should cover."),
+					description: historical_options.length
+						? __("Pick a device on this bill or a device previously purchased by this customer.")
+						: __("No previous serialized purchase was found for this customer; add a device to this bill."),
 				},
 				{
 					fieldname: "in_store_imei",
@@ -2262,9 +2287,10 @@ export class CartService {
 
 				// mode === "in_store"
 				const for_raw = values.for_item || "";
-				for_item_code = for_raw.split(" (")[0] || null;
+				const historical_device = historical_option_map[for_raw] || null;
+				for_item_code = historical_device ? historical_device.item_code : (for_raw.split(" (")[0] || null);
 				const serial_match = for_raw.match(/\(([^)]+)\)/);
-				for_serial_no = serial_match ? serial_match[1] : "";
+				for_serial_no = historical_device ? historical_device.serial_no : (serial_match ? serial_match[1] : "");
 
 				if (!for_serial_no) {
 					const imei = (values.in_store_imei || "").trim();
@@ -2275,7 +2301,10 @@ export class CartService {
 					for_serial_no = imei;
 				}
 
-				this._add_vas_to_cart(dialog, plan, for_item_code, for_serial_no);
+				this._add_vas_to_cart(
+					dialog, plan, for_item_code, for_serial_no, null, false,
+					historical_device ? historical_device.invoice : null
+				);
 			},
 		});
 
@@ -2352,7 +2381,7 @@ export class CartService {
 		setTimeout(apply_selected_device, 100);
 	}
 
-	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no, external_device_model_item = null, external_intent = false) {
+	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no, external_device_model_item = null, external_intent = false, original_invoice = null) {
 		// Prevent duplicate: same plan on same device/IMEI
 		const dup = PosState.cart.find(
 			(c) => c.is_vas && c.warranty_plan === plan.name
@@ -2388,6 +2417,7 @@ export class CartService {
 			for_serial_no,
 			customer_imei: external_intent ? for_serial_no : null,
 			external_device_model_item,
+			original_invoice,
 			is_warranty: false,
 			is_vas: true,
 		});

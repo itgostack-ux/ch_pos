@@ -108,7 +108,12 @@ _WARRANTY_PLAN_TYPES = frozenset(
 )
 
 
-def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
+def canonicalize_cart_items(
+    items,
+    company: str | None = None,
+    original_invoice: str | None = None,
+    customer: str | None = None,
+) -> list[dict]:
     """Return cart rows with classification and billable values normalized.
 
     ``is_vas`` and ``is_warranty`` are presentation hints from the browser,
@@ -252,6 +257,43 @@ def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
         ),
         default=0,
     )
+
+    # A VAS-only follow-up bill has no device row in the current cart. Resolve
+    # the authoritative device value from the customer's original submitted
+    # invoice instead of trusting the browser-supplied VAS rate.
+    historical_prices_by_serial = {}
+    historical_prices_by_item = {}
+    if original_invoice and customer and company:
+        valid_source = frappe.db.get_value(
+            "Sales Invoice",
+            {
+                "name": original_invoice,
+                "customer": customer,
+                "company": company,
+                "docstatus": 1,
+                "is_return": 0,
+            },
+            "name",
+        )
+        if valid_source:
+            source_rows = frappe.get_all(
+                "Sales Invoice Item",
+                filters={"parent": valid_source, "parenttype": "Sales Invoice"},
+                fields=["item_code", "serial_no", "rate", "amount", "qty"],
+                order_by="idx asc",
+            )
+            for source_row in source_rows:
+                source_rate = flt(source_row.rate)
+                if not source_rate and flt(source_row.qty):
+                    source_rate = flt(source_row.amount) / flt(source_row.qty)
+                if source_rate <= 0:
+                    continue
+                historical_prices_by_item.setdefault(source_row.item_code, source_rate)
+                for serial_no in (source_row.serial_no or "").split("\n"):
+                    serial_no = serial_no.strip()
+                    if serial_no:
+                        historical_prices_by_serial[serial_no] = source_rate
+
     for index, item in enumerate(normalized, start=1):
         plan_name = item.get("warranty_plan")
         if not plan_name:
@@ -266,6 +308,16 @@ def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
         if not external_intent and availability == "External Only":
             frappe.throw(_("Warranty plan {0} is available only for customer-provided devices.").format(plan_name))
 
+        covered_device_price = max_device_price
+        if not external_intent and historical_prices_by_serial:
+            covered_serial = str(item.get("for_serial_no") or "").strip()
+            covered_item = str(item.get("for_item_code") or "").strip()
+            covered_device_price = (
+                historical_prices_by_serial.get(covered_serial)
+                or historical_prices_by_item.get(covered_item)
+                or max_device_price
+            )
+
         if external_intent:
             expected_rate = flt(plan.external_device_price)
             if expected_rate == 0 and not cint(plan.allow_zero_external_price):
@@ -274,7 +326,7 @@ def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
                 )
         elif plan.pricing_mode == "Percentage of Device Price":
             expected_rate = round(
-                max_device_price * flt(plan.percentage_value) / 100,
+                covered_device_price * flt(plan.percentage_value) / 100,
                 2,
             )
         else:
@@ -290,9 +342,9 @@ def canonicalize_cart_items(items, company: str | None = None) -> list[dict]:
                 ),
                 frappe.PermissionError,
             )
-        if not external_intent and plan.min_device_price and max_device_price < flt(plan.min_device_price):
+        if not external_intent and plan.min_device_price and covered_device_price < flt(plan.min_device_price):
             frappe.throw(_("Warranty plan {0} is not valid for this device value.").format(plan_name))
-        if not external_intent and plan.max_device_price and max_device_price > flt(plan.max_device_price):
+        if not external_intent and plan.max_device_price and covered_device_price > flt(plan.max_device_price):
             frappe.throw(_("Warranty plan {0} is not valid for this device value.").format(plan_name))
     return normalized
 

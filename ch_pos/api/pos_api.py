@@ -2990,7 +2990,12 @@ def create_pos_invoice(
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     from ch_pos.api.free_sale_api import canonicalize_cart_items
 
-    items = canonicalize_cart_items(items or [], company=profile.company)
+    items = canonicalize_cart_items(
+        items or [],
+        company=profile.company,
+        original_invoice=original_invoice,
+        customer=customer,
+    )
     _GST_RATE_CACHE.clear()
     _FIELD_MAP_CACHE.clear()
 
@@ -11555,6 +11560,61 @@ def validate_swap_eligibility(invoice_name, swap_window_days=7) -> dict:
 
 # ── VAS Eligibility ──────────────────────────────────────────
 @frappe.whitelist()
+def get_customer_sold_devices(customer, pos_profile) -> list:
+    """Return devices previously sold to this customer for a VAS add-on sale.
+
+    The original submitted invoice is retained so the later VAS-only invoice
+    can prove device ownership, purchase date, price, and plan purchase-window
+    eligibility without putting the phone on the new bill again.
+    """
+    if not customer or not pos_profile:
+        return []
+
+    anchors = assert_pos_profile_scope(pos_profile)
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    if not frappe.db.exists("Customer", customer):
+        return []
+
+    rows = frappe.db.sql(
+        """
+        SELECT sii.parent AS invoice, si.posting_date, sii.item_code,
+               sii.item_name, sii.serial_no, sii.rate, sii.amount
+          FROM `tabSales Invoice Item` sii
+          JOIN `tabSales Invoice` si ON si.name = sii.parent
+          JOIN `tabItem` item ON item.name = sii.item_code
+         WHERE si.docstatus = 1
+           AND si.is_return = 0
+           AND si.customer = %(customer)s
+           AND si.company = %(company)s
+           AND item.is_stock_item = 1
+           AND COALESCE(sii.serial_no, '') != ''
+         ORDER BY si.posting_date DESC, si.posting_time DESC, sii.idx ASC
+         LIMIT 100
+        """,
+        {"customer": customer, "company": anchors.get("company")},
+        as_dict=True,
+    )
+
+    devices = []
+    seen = set()
+    for row in rows:
+        serials = [value.strip() for value in (row.serial_no or "").split("\n") if value.strip()]
+        for serial_no in serials:
+            if serial_no in seen:
+                continue
+            seen.add(serial_no)
+            devices.append({
+                "invoice": row.invoice,
+                "posting_date": row.posting_date,
+                "item_code": row.item_code,
+                "item_name": row.item_name or row.item_code,
+                "serial_no": serial_no,
+                "rate": flt(row.rate or row.amount),
+            })
+    return devices
+
+
+@frappe.whitelist()
 def get_vas_plans_with_rules(cart_items=None) -> dict:
     """Return sellable CH Warranty Plans with device-dependency rules.
 
@@ -15350,7 +15410,8 @@ def _get_prebooking_advance_receipts(
         GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS linked_sales_orders,
         GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS items_summary,
         'Payment Entry' AS __doctype,
-        'Standard' AS __print_format,
+        'Pre-Booking Advance Receipt' AS __print_format,
+        1 AS __no_letterhead,
         pe.docstatus AS __docstatus,
         CASE WHEN pe.docstatus = 1 THEN 'Final' ELSE 'Draft' END AS receipt_state
     """
