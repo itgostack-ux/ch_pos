@@ -110,7 +110,7 @@ def verify_manager_pin(pin, store=None, permission=None):
     )
     allowed_roles = sorted(
         get_configured_roles(
-            "manager_pin_roles", ("Store Manager", "POS Manager", "Sales Manager")
+            "manager_pin_roles", ("Store Manager", "POS Manager", "Sales Manager", "CH Store Executive", "POS User", "Sales User"),
         )
         | {"System Manager"}
     )

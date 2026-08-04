@@ -104,7 +104,7 @@ def _assert_customer_pos_access(customer, pos_profile=None, action="access") -> 
         return
     require_configured_roles(
         "customer_override_roles",
-        defaults=("POS Manager", "Store Manager"),
+        defaults=("POS Manager", "Store Manager", "CH Store Executive", "POS User"),
         action=_("{0} a customer with no transaction at this store").format(action),
     )
 
@@ -501,9 +501,28 @@ def get_pos_profile_data(pos_profile) -> dict:
     }
 
 
+# @frappe.whitelist()
+# def get_sale_types(company=None) -> list:
+#     """Return enabled sale types with their sub-types, optionally filtered by company."""
+#     _assert_company_scope(company, _("load POS sale types"))
+# updated
+
 @frappe.whitelist()
 def get_sale_types(company=None) -> list:
     """Return enabled sale types with their sub-types, optionally filtered by company."""
+    if not company:
+        # Fallback: resolve company from user's active POS session or scope
+        from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+        session = get_active_session(None)
+        if session:
+            company = session.get("company")
+        if not company:
+            scope_company = frappe.db.get_value(
+                "CH User Scope Company",
+                {"parent": frappe.session.user},
+                "company"
+            )
+            company = scope_company
     _assert_company_scope(company, _("load POS sale types"))
     frappe.has_permission("CH Sale Type", "read", throw=True)
     filters = {"enabled": 1}
