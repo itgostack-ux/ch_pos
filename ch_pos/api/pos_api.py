@@ -12199,7 +12199,7 @@ def _get_executive_access(user, warehouse):
     own_companies = {e.company for e in own}
     is_manager = has_configured_roles(
         "session_override_roles",
-        ("Store Manager", "POS Manager"),
+        ("Store Manager", "POS Manager", "CH Store Executive", "POS User"),
         user=user,
     )
 
