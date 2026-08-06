@@ -147,4 +147,33 @@ fixtures = [
         "dt": "Workspace",
         "filters": [["name", "in", ["CH Store Operations", "CH Finance & Compliance"]]],
     },
+    {
+        "dt": "Custom DocPerm",
+        "filters": [
+            ["parent", "in", [
+                # Original 15
+                "Buyback Assessment", "Buyback Order", "Buyback Price Master",
+                "Buyback Pricing Rule", "CH POS Closing Entry", "Company",
+                "Customer", "Grade Master", "Item", "Loyalty Point Entry",
+                "Loyalty Program", "Payment Entry", "POS Opening Entry",
+                "Sales Invoice", "Service Request",
+                # Newly identified (29)
+                "CH Store Zone", "CH Exception Reason", "CH Warranty Claim",
+                "CH Attach Log", "POS Kiosk Token", "CH Business Audit Log",
+                "CH Transfer Manifest", "CH POS Session", "CH Serial Lifecycle",
+                "VAS Partner", "CH Gift Redemption", "POS Profile",
+                "CH Device Master", "POS Guided Session", "Sales Order",
+                "CH Cash Drop", "CH Cycle Count", "CH Free Sale Approval",
+                "CH Payment Machine", "CH Exception Request", "CH Attach Rule",
+                "CH Sale Type", "CH POS Settlement", "CH Business Date",
+                "Warehouse", "Serial No", "GoFix Token",
+                "Spare Parts Usage", "POS Incentive Ledger",
+            ]],
+            ["role", "in", [
+                "POS User", "POS Manager",
+                "CH Store Executive", "CH Store Manager",
+                "Store Manager", "Store Executive",
+            ]],
+        ],
+    },
 ]

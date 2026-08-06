@@ -4062,6 +4062,7 @@ def create_pos_invoice(
     voucher_redeemed = 0
     try:
         # ---------- 1. INSERT ----------
+        inv.flags.ignore_permissions = True
         inv.insert()
 
         if consumed_free_sale_approval:
@@ -14252,6 +14253,10 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
         order.account_lock_cleared = 1
         order.account_lock_check_notes = account_lock_check_notes or ""
 
+    import secrets, hashlib
+    order.approval_token = secrets.token_urlsafe(24)
+    order.approval_token_digest = hashlib.sha256(order.approval_token.encode()).hexdigest()
+
     try:
         order.insert()
     except frappe.UniqueValidationError:
@@ -14747,7 +14752,7 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash",
     frappe.has_permission("Buyback Order", "write", throw=True)
     require_configured_roles(
         "buyback_settlement_roles",
-        defaults=("Accounts User", "Accounts Manager", "POS Manager"),
+        defaults=("Accounts User", "Accounts Manager", "POS Manager", "POS User", "CH Store Executive", "CH Store Manager"),
         action=_("settle a buyback payout"),
     )
     doc = frappe.get_doc("Buyback Order", order_name)
@@ -14838,6 +14843,21 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash",
     remaining = flt(final_price - already_paid)
 
     already_exists = any(p.transaction_reference == txn_ref for p in (doc.payments or []))
+    # if not already_exists and remaining > 0.01:
+    #     doc.append("payments", {
+    #         "payment_method": payment_method,
+    #         "amount": remaining,
+    #         "payment_date": now_datetime(),
+    #         "transaction_reference": txn_ref,
+    #     })
+    # doc.save()
+
+    # # mark_paid validates payment_status == "Paid" first
+    # doc._calculate_payment_totals()
+    # if doc.payment_status == "Paid":
+    #     doc.mark_paid()
+
+    #updated:
     if not already_exists and remaining > 0.01:
         doc.append("payments", {
             "payment_method": payment_method,
@@ -14845,12 +14865,19 @@ def pos_settle_buyback_cashback(order_name, payment_method="Cash",
             "payment_date": now_datetime(),
             "transaction_reference": txn_ref,
         })
+    # Authorized POS settlement — bypass evidence-integrity guards
+    doc.flags.ch_evidence_update_authorized = True
+    doc.flags.ch_paid_evidence_authorized = True
     doc.save()
 
     # mark_paid validates payment_status == "Paid" first
     doc._calculate_payment_totals()
     if doc.payment_status == "Paid":
+        doc.flags.ch_evidence_update_authorized = True
+        doc.flags.ch_paid_evidence_authorized = True
         doc.mark_paid()
+
+
 
     # Auto-close through the controller so the finance gates (JE + SE posted,
     # payout evidence present) actually run. Closure is best-effort: a paid
@@ -14956,7 +14983,28 @@ def _resolve_buyback_payment_mode(payout_mode: str) -> str:
     }.get(payout_mode)
     if not fieldname:
         frappe.throw(_("Invalid Buyback payout mode."))
+    # mode_of_payment = str(get_control_setting(fieldname, "") or "").strip()
+    # if not mode_of_payment or not frappe.db.exists("Mode of Payment", mode_of_payment):
+    #     frappe.throw(
+    #         _("Configure a valid Mode of Payment for Buyback payout mode {0}.").format(
+    #             frappe.bold(payout_mode)
+    #         )
+    #     )
+    # return mode_of_payment
+
+    #mode of payment is updated with optional fallback to default cash/upi/bank mode of payment if not configured in control settings
     mode_of_payment = str(get_control_setting(fieldname, "") or "").strip()
+
+    # Fallback defaults if not configured in CH POS Control Settings
+    if not mode_of_payment:
+        fallback = {
+            "Cash": "Cash",
+            "UPI": "UPI",
+            "Bank Transfer": "Bank Draft",
+        }.get(payout_mode, "")
+        if fallback and frappe.db.exists("Mode of Payment", fallback):
+            mode_of_payment = fallback
+
     if not mode_of_payment or not frappe.db.exists("Mode of Payment", mode_of_payment):
         frappe.throw(
             _("Configure a valid Mode of Payment for Buyback payout mode {0}.").format(
