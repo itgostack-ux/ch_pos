@@ -1,30 +1,3 @@
-/**
- * CH POS — Stock Audit Workspace
- *
- * Tabs:
- *   • Stock Report      — on-hand snapshot with last-verified status
- *   • Cycle Count       — kick off a count (ABC / due-only filter)
- *   • Count History     — recent CH Cycle Count rows for this warehouse
- *   • Variance Requests — Stock Count Variance approval audit log
- *
- * DESIGN NOTES (no-image layout):
- *   • Top-right toolbar shows only "Refresh"
- *   • Section-header actions: "Print Snapshot" · "Download Report" · "Start Cycle Count"
- *   • Stock table uses ONE merged "Item" column (name above, code below)
- *
- * Excel Download (5 sheets):
- *   Sheet 1 — Qty Sheet         (main warehouse)
- *   Sheet 2 — IMEI Sheet        (main warehouse, Serial No)
- *   Sheet 3 — Damaged Stock
- *   Sheet 4 — Demo Stock
- *   Sheet 5 — Buyback Stock
- *
- * Notes on Frappe field restrictions:
- *   - `Serial No` doctype does NOT permit `item_name` in `frappe.client.get_list`.
- *   - `Item` doctype also blocks `item_name` on some sites — we use
- *     `frappe.client.get_value` (single-record lookup, allowed) as fallback.
- */
-
 import { PosState, EventBus } from "../../state.js";
 import { wh_label } from "../../shared/helpers.js";
 
@@ -35,10 +8,35 @@ const TABS = [
     { key: "variance", icon: "fa-balance-scale",   label: __("Variance Requests") },
 ];
 
+// ─── Item doctype field names (CH Item Master section) ───────────────────────
+const ITEM_FIELD_CATEGORY     = "ch_category";
+const ITEM_FIELD_SUB_CATEGORY = "ch_sub_category";
+const ITEM_FIELD_MODEL        = "ch_model";
+
 // ─── In-Transit status tokens ─────────────────────────────────────────────────
 const IN_TRANSIT_TOKENS = new Set(["in transit", "intransit", "in-transit"]);
 const _norm = (s) => (s || "").toLowerCase().replace(/[\s_-]+/g, " ").trim();
 const _is_in_transit = (status) => IN_TRANSIT_TOKENS.has(_norm(status));
+
+// ─── Warehouse short-name formatter ──────────────────────────────────────────
+const CATEGORY_TOKENS = /-(Sellable|Damaged|Demo|Buyback)$/i;
+
+const _short_wh = (name) => {
+    if (!name) return "";
+    let s = String(name).trim();
+
+    const dash_idx = s.lastIndexOf(" - ");
+    if (dash_idx !== -1) s = s.slice(0, dash_idx).trim();
+
+    if (s.indexOf("-") !== -1) {
+        const first_dash = s.indexOf("-");
+        const tail       = s.slice(first_dash + 1);
+        if (CATEGORY_TOKENS.test(tail)) {
+            s = tail;
+        }
+    }
+    return s;
+};
 
 export class StockAuditWorkspace {
 
@@ -111,17 +109,15 @@ export class StockAuditWorkspace {
         this._switch_tab(this._active_tab);
     }
 
-    // ─────────────────────────── XLSX LIBRARY LOADER ───────────────────────────
 
     _load_xlsx_library() {
         if (typeof XLSX !== "undefined") { this._xlsx_loaded = true; return; }
-        const url = "https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js";
+        const url = "https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js";
         frappe.require(url, () => {
             this._xlsx_loaded = (typeof XLSX !== "undefined");
         });
     }
 
-    // ─────────────────────────── BIND ──────────────────────────────────────────
 
     _bind(panel) {
         panel.on("click", ".ch-sa-tab", (e) => {
@@ -166,7 +162,6 @@ export class StockAuditWorkspace {
         panel.on("click", ".ch-sa-open-stock",  () => this._switch_tab("stock"));
     }
 
-    // ─────────────────────────── TAB SWITCH ────────────────────────────────────
 
     _switch_tab(tab) {
         this._active_tab = tab;
@@ -675,7 +670,7 @@ export class StockAuditWorkspace {
 
         if (typeof XLSX === "undefined") {
             frappe.dom.freeze(__("Loading Excel library…"));
-            const url = "https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js";
+            const url = "https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js";
             frappe.require(url, () => {
                 frappe.dom.unfreeze();
                 if (typeof XLSX === "undefined") {
@@ -698,13 +693,10 @@ export class StockAuditWorkspace {
 
     _silent_xcall(method, args) {
         return new Promise((resolve) => {
-            // Temporarily suppress Frappe's msgprint dialog for this call
             const original_msgprint = frappe.msgprint;
-            let suppressed = false;
             frappe.msgprint = function (opts) {
                 const msg = typeof opts === "string" ? opts : (opts && opts.message) || "";
                 if (msg && /Field not permitted in query/i.test(msg)) {
-                    suppressed = true;
                     return;
                 }
                 return original_msgprint.apply(this, arguments);
@@ -720,7 +712,6 @@ export class StockAuditWorkspace {
                     resolve(null);
                 })
                 .finally(() => {
-                    // Guard: restore after a tick even if promise chain is odd
                     setTimeout(() => { frappe.msgprint = original_msgprint; }, 0);
                 });
         });
@@ -816,39 +807,36 @@ export class StockAuditWorkspace {
         }).catch(() => candidates);
     }
 
-  
+
     _fetch_warehouse_stock(warehouse) {
         if (!warehouse) return Promise.resolve([]);
-        return frappe.xcall("frappe.client.get_list", {
+        return this._silent_xcall("frappe.client.get_list", {
             doctype: "Bin",
             filters: {
                 warehouse:   warehouse,
                 actual_qty: [">", 0],
             },
             fields: [
-                "item_code", "item_name", "warehouse",
+                "item_code", "warehouse",
                 "actual_qty", "stock_value", "valuation_rate",
             ],
             limit_page_length: 0,
             order_by: "item_code",
         }).then((bins) =>
             (bins || []).map((b) => ({
-                item_code:   b.item_code  || "",
-                item_name:   b.item_name  || b.item_code || "",
-                warehouse:   b.warehouse  || warehouse,
+                item_code:   b.item_code || "",
+                item_name:   b.item_code || "",
+                warehouse:   b.warehouse || warehouse,
                 on_hand_qty: flt(b.actual_qty),
                 stock_value: flt(b.stock_value),
             }))
-        ).catch(() => []);
+        );
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Fetch Serial No rows for a warehouse (In-Transit excluded)
-    // ──────────────────────────────────────────────────────────────────────────
-
+   
     _fetch_warehouse_serials(warehouse) {
         if (!warehouse) return Promise.resolve([]);
-        return frappe.xcall("frappe.client.get_list", {
+        return this._silent_xcall("frappe.client.get_list", {
             doctype: "Serial No",
             filters: {
                 warehouse: warehouse,
@@ -857,11 +845,24 @@ export class StockAuditWorkspace {
             fields: ["name", "item_code", "warehouse", "status"],
             limit_page_length: 0,
             order_by: "item_code, name",
-        }).catch(() => []);
+        }).then((rows) => rows || []);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Sheet-name sanitiser (Excel forbids \ / ? * [ ] : and >31 chars)
+    // Fetch company name from POS Profile
+    // ──────────────────────────────────────────────────────────────────────────
+
+    _fetch_company_name() {
+        if (!PosState.pos_profile) return Promise.resolve("");
+        return this._silent_xcall("frappe.client.get_value", {
+            doctype:   "POS Profile",
+            filters:   { name: PosState.pos_profile },
+            fieldname: "company",
+        }).then((res) => (res && res.company) || "").catch(() => "");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Sheet-name sanitiser
     // ──────────────────────────────────────────────────────────────────────────
 
     _safe_sheet_name(name) {
@@ -871,61 +872,125 @@ export class StockAuditWorkspace {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Build item_code → item_name map.
-    //
-    // Strategy:
-    //   1. Seed from Bin rows (which DO allow item_name).
-    //   2. For any codes still missing (serials whose item has no stock in any
-    //      queried warehouse), use `frappe.client.get_value` per item — a
-    //      per-record call that respects field-level read permissions.
-    //   3. Fall back to item_code itself if the lookup fails.
-    //
-    //  We use `_silent_xcall` so any residual permission errors are swallowed
-    //  without popping the "Field not permitted in query" dialog.
+    // Build ITEM CODE → item details map.
     // ──────────────────────────────────────────────────────────────────────────
 
-    _build_item_name_map(sources, missing_codes) {
+    _build_item_details_map(sources, all_codes) {
         const map = {};
 
-        // 1) Seed from Bin sources
+        (all_codes || []).forEach((c) => {
+            if (c && !map[c]) {
+                map[c] = {
+                    item_name:     "",
+                    item_category: "",
+                    sub_category:  "",
+                    model:         "",
+                    __resolved:    false,
+                };
+            }
+        });
+
         (sources || []).forEach((rows) => {
             (rows || []).forEach((r) => {
-                if (r && r.item_code && r.item_name && !map[r.item_code]) {
-                    map[r.item_code] = r.item_name;
+                if (r && r.item_code && r.item_name && r.item_name !== r.item_code) {
+                    if (!map[r.item_code]) {
+                        map[r.item_code] = {
+                            item_name: "", item_category: "",
+                            sub_category: "", model: "", __resolved: false,
+                        };
+                    }
+                    if (!map[r.item_code].item_name) {
+                        map[r.item_code].item_name = r.item_name;
+                    }
                 }
             });
         });
 
-        // 2) Find codes still missing
-        const need = (missing_codes || []).filter((c) => c && !map[c]);
-        if (!need.length) return Promise.resolve(map);
+        const codes = Object.keys(map);
+        if (!codes.length) return Promise.resolve(map);
 
-        // 3) Batched per-item lookup via frappe.client.get_value
-        //    (Runs in parallel — should be fast even for 100+ items.)
-        const lookups = need.map((code) =>
-            this._silent_xcall("frappe.client.get_value", {
+        const ITEM_FIELDS = [
+            "name",
+            "item_name",
+            ITEM_FIELD_CATEGORY,
+            ITEM_FIELD_SUB_CATEGORY,
+            ITEM_FIELD_MODEL,
+        ];
+
+        const CHUNK = 200;
+        const chunks = [];
+        for (let i = 0; i < codes.length; i += CHUNK) {
+            chunks.push(codes.slice(i, i + CHUNK));
+        }
+
+        const bulk_calls = chunks.map((chunk) =>
+            this._silent_xcall("frappe.client.get_list", {
                 doctype: "Item",
-                filters: { name: code },
-                fieldname: "item_name",
-            }).then((res) => {
-                if (res && res.item_name) {
-                    map[code] = res.item_name;
-                } else {
-                    map[code] = code;   // fallback to code itself
-                }
+                filters: { name: ["in", chunk] },
+                fields:  ITEM_FIELDS,
+                limit_page_length: 0,
+            }).then((rows) => {
+                (rows || []).forEach((it) => {
+                    const code = it.name;
+                    if (!code || !map[code]) return;
+                    if (it.item_name) map[code].item_name = it.item_name;
+                    map[code].item_category = it[ITEM_FIELD_CATEGORY]     || "";
+                    map[code].sub_category  = it[ITEM_FIELD_SUB_CATEGORY] || "";
+                    map[code].model         = it[ITEM_FIELD_MODEL]        || "";
+                    map[code].__resolved    = true;
+                });
             })
         );
 
-        return Promise.all(lookups).then(() => map).catch(() => map);
+        return Promise.all(bulk_calls).then(() => {
+            const unresolved = codes.filter((c) => !map[c].__resolved);
+            if (!unresolved.length) return map;
+
+            const lookups = unresolved.map((code) =>
+                this._silent_xcall("frappe.client.get_value", {
+                    doctype:   "Item",
+                    filters:   { name: code },
+                    fieldname: [
+                        "item_name",
+                        ITEM_FIELD_CATEGORY,
+                        ITEM_FIELD_SUB_CATEGORY,
+                        ITEM_FIELD_MODEL,
+                    ],
+                }).then((res) => {
+                    if (res) {
+                        if (res.item_name) map[code].item_name = res.item_name;
+                        map[code].item_category = res[ITEM_FIELD_CATEGORY]     || "";
+                        map[code].sub_category  = res[ITEM_FIELD_SUB_CATEGORY] || "";
+                        map[code].model         = res[ITEM_FIELD_MODEL]        || "";
+                    }
+                    map[code].__resolved = true;
+                })
+            );
+
+            return Promise.all(lookups).then(() => map);
+
+        }).then((m) => {
+            Object.keys(m).forEach((code) => {
+                if (!m[code].item_name) m[code].item_name = code;
+            });
+            return m;
+        }).catch(() => {
+            Object.keys(map).forEach((code) => {
+                if (!map[code].item_name) map[code].item_name = code;
+            });
+            return map;
+        });
     }
 
-    
     _fetch_and_generate_excel() {
         frappe.dom.freeze(__("Preparing Excel report…"));
 
-        frappe.xcall("ch_pos.api.stock_report.get_store_stock_report", {
-            pos_profile: PosState.pos_profile,
-        }).then((stock_data) => {
+        Promise.all([
+            frappe.xcall("ch_pos.api.stock_report.get_store_stock_report", {
+                pos_profile: PosState.pos_profile,
+            }),
+            this._fetch_company_name(),
+        ]).then(([stock_data, company_name]) => {
 
             const warehouse = stock_data.warehouse || "";
 
@@ -940,6 +1005,7 @@ export class StockAuditWorkspace {
                     damaged: damaged_wh,
                     demo:    demo_wh,
                     buyback: buyback_wh,
+                    company: company_name,
                 });
 
                 Promise.all([
@@ -956,38 +1022,67 @@ export class StockAuditWorkspace {
                     damaged_serial, demo_serial, buyback_serial,
                 ]) => {
 
-                    const all_serials = []
-                        .concat(serial_list    || [])
-                        .concat(damaged_serial || [])
-                        .concat(demo_serial    || [])
-                        .concat(buyback_serial || []);
+                    const codes_from_serials = []
+                        .concat((serial_list    || []).map((s) => s.item_code))
+                        .concat((damaged_serial || []).map((s) => s.item_code))
+                        .concat((demo_serial    || []).map((s) => s.item_code))
+                        .concat((buyback_serial || []).map((s) => s.item_code));
 
-                    const missing_codes = Array.from(
-                        new Set(all_serials.map((s) => s.item_code).filter(Boolean))
-                    );
+                    const codes_from_bins = []
+                        .concat((stock_data.rows || []).map((r) => r.item_code))
+                        .concat((damaged_rows    || []).map((r) => r.item_code))
+                        .concat((demo_rows       || []).map((r) => r.item_code))
+                        .concat((buyback_rows    || []).map((r) => r.item_code));
 
-                    this._build_item_name_map(
+                    const all_codes = Array.from(new Set(
+                        [...codes_from_serials, ...codes_from_bins].filter(Boolean)
+                    ));
+
+                    this._build_item_details_map(
                         [
                             stock_data.rows || [],
                             damaged_rows    || [],
                             demo_rows       || [],
                             buyback_rows    || [],
                         ],
-                        missing_codes
-                    ).then((name_map) => {
+                        all_codes
+                    ).then((details_map) => {
 
-                        const enrich = (arr) => (arr || []).map((s) => ({
-                            ...s,
-                            item_name: name_map[s.item_code] || s.item_code || "",
-                        }));
+                        const enrich_serials = (arr) => (arr || []).map((s) => {
+                            const d = details_map[s.item_code] || {};
+                            return {
+                                ...s,
+                                item_name:     d.item_name     || s.item_code || "",
+                                item_category: d.item_category || "",
+                                sub_category:  d.sub_category  || "",
+                                model:         d.model         || "",
+                            };
+                        });
+
+                        const enrich_rows = (arr) => (arr || []).map((r) => {
+                            const d = details_map[r.item_code] || {};
+                            const real_name =
+                                (r.item_name && r.item_name !== r.item_code)
+                                    ? r.item_name
+                                    : (d.item_name || r.item_code || "");
+                            return {
+                                ...r,
+                                item_name:     real_name,
+                                item_category: d.item_category || "",
+                                sub_category:  d.sub_category  || "",
+                                model:         d.model         || "",
+                            };
+                        });
 
                         frappe.dom.unfreeze();
                         this._generate_workbook(
                             stock_data,
-                            enrich(serial_list),
-                            { warehouse: damaged_wh, rows: damaged_rows || [], serials: enrich(damaged_serial) },
-                            { warehouse: demo_wh,    rows: demo_rows    || [], serials: enrich(demo_serial)    },
-                            { warehouse: buyback_wh, rows: buyback_rows || [], serials: enrich(buyback_serial) }
+                            enrich_serials(serial_list),
+                            { warehouse: damaged_wh, rows: enrich_rows(damaged_rows), serials: enrich_serials(damaged_serial) },
+                            { warehouse: demo_wh,    rows: enrich_rows(demo_rows),    serials: enrich_serials(demo_serial)    },
+                            { warehouse: buyback_wh, rows: enrich_rows(buyback_rows), serials: enrich_serials(buyback_serial) },
+                            details_map,
+                            company_name
                         );
                     });
 
@@ -1003,227 +1098,231 @@ export class StockAuditWorkspace {
         });
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // BUILD WORKBOOK
-    // ══════════════════════════════════════════════════════════════════════════
+   
+    _generate_workbook(stock_data, serial_list, damaged, demo, buyback, details_map, company_name) {
 
-    _generate_workbook(stock_data, serial_list, damaged, demo, buyback) {
-
+        const dmap      = details_map || {};
         const warehouse = stock_data.warehouse || "";
         const all_rows  = stock_data.rows      || [];
-        const rows      = all_rows.filter((r) => !_is_in_transit(r.status));
+        const main_rows = all_rows.filter((r) => !_is_in_transit(r.status));
+        const company   = company_name || "";
+
+        const detail_of = (r, field) => {
+            if (r && r[field]) return r[field];
+            const d = dmap[r && r.item_code];
+            return (d && d[field]) || "";
+        };
 
         const wb = XLSX.utils.book_new();
 
-        // ── Sheet 1 — Qty Sheet ─────────────────────────────────────────
+        // ── Shared styles ───────────────────────────────────────────────
+        const TITLE_STYLE = {
+            font:      { bold: true, sz: 13, color: { rgb: "FFFFFF" } },
+            fill:      { patternType: "solid", fgColor: { rgb: "0E7490" } },
+            alignment: { horizontal: "center", vertical: "center" },
+        };
+        const HDR_STYLE = {
+            font:      { bold: true, sz: 11, color: { rgb: "FFFFFF" } },
+            fill:      { patternType: "solid", fgColor: { rgb: "1F4E79" } },
+            alignment: { horizontal: "center", vertical: "center", wrapText: true },
+            border: {
+                top:    { style: "thin", color: { rgb: "9CA3AF" } },
+                bottom: { style: "thin", color: { rgb: "9CA3AF" } },
+                left:   { style: "thin", color: { rgb: "9CA3AF" } },
+                right:  { style: "thin", color: { rgb: "9CA3AF" } },
+            },
+        };
+
+        const apply_row_style = (ws, row_idx, ncols, style) => {
+            for (let c = 0; c < ncols; c++) {
+                const ref = XLSX.utils.encode_cell({ r: row_idx, c });
+                if (!ws[ref]) ws[ref] = { t: "s", v: "" };
+                ws[ref].s = style;
+            }
+        };
+
+        // ══════════════════════════════════════════════════════════════
+        // Combine ALL warehouses (Main + Damaged + Demo + Buyback)
+        // ══════════════════════════════════════════════════════════════
+
+        const tag_rows = (rows, category, fallback_wh) =>
+            (rows || []).map((r) => ({
+                ...r,
+                __category: category,
+                warehouse:  r.warehouse || fallback_wh || "",
+            }));
+
+        const combined_qty_rows = []
+            .concat(tag_rows(main_rows,       "Main",    warehouse))
+            .concat(tag_rows(damaged.rows,    "Damaged", damaged.warehouse))
+            .concat(tag_rows(demo.rows,       "Demo",    demo.warehouse))
+            .concat(tag_rows(buyback.rows,    "Buyback", buyback.warehouse));
+
+        const combined_serials = []
+            .concat(tag_rows(serial_list,     "Main",    warehouse))
+            .concat(tag_rows(damaged.serials, "Damaged", damaged.warehouse))
+            .concat(tag_rows(demo.serials,    "Demo",    demo.warehouse))
+            .concat(tag_rows(buyback.serials, "Buyback", buyback.warehouse))
+            .filter((s) => !_is_in_transit(s.status));
+
+        const cat_order = { "Main": 0, "Damaged": 1, "Demo": 2, "Buyback": 3 };
+
+        // ══════════════════════════════════════════════════════════════
+        // Sheet 1 — Qty Sheet (ALL warehouses)
+        // ══════════════════════════════════════════════════════════════
         const qty_map = {};
-        rows.forEach((r) => {
-            const wh   = r.warehouse || warehouse || __("Unknown");
-            const code = r.item_code || "";
-            if (!qty_map[wh]) qty_map[wh] = {};
-            if (!qty_map[wh][code]) {
-                qty_map[wh][code] = {
-                    item_name:     r.item_name || code,
+        combined_qty_rows.forEach((r) => {
+            const wh_short = _short_wh(r.warehouse) || __("Unknown");
+            const code     = r.item_code || "";
+            const key      = `${wh_short}||${code}`;
+            if (!qty_map[key]) {
+                qty_map[key] = {
+                    wh:            wh_short,
+                    code,
+                    category:      r.__category,
+                    item_name:     detail_of(r, "item_name")     || code,
+                    item_category: detail_of(r, "item_category"),
+                    sub_category:  detail_of(r, "sub_category"),
+                    model:         detail_of(r, "model"),
                     qty:           0,
-                    value:         0,
                     class:         r.cycle_count_class || "—",
                     last_verified: r.last_verified     || null,
                     due:           false,
                 };
             }
-            qty_map[wh][code].qty   += flt(r.on_hand_qty);
-            qty_map[wh][code].value += flt(r.stock_value);
-            if (r.due) qty_map[wh][code].due = true;
+            qty_map[key].qty += flt(r.on_hand_qty);
+            if (r.due) qty_map[key].due = true;
         });
 
-        const qty_rows = [];
-        Object.keys(qty_map).sort((a, b) => a.localeCompare(b)).forEach((wh) => {
-            Object.keys(qty_map[wh]).sort((a, b) => a.localeCompare(b)).forEach((code) => {
-                const it = qty_map[wh][code];
-                qty_rows.push({
-                    wh, code,
-                    item_name: it.item_name,
-                    qty:       it.qty,
-                    value:     it.value,
-                    class:     it.class,
-                    last_verified: it.last_verified
-                        ? frappe.datetime.str_to_user(it.last_verified) : __("Never"),
-                    due: it.due ? __("Yes") : __("No"),
-                });
-            });
+        const qty_rows_all = Object.values(qty_map).sort((a, b) => {
+            const co = (cat_order[a.category] ?? 9) - (cat_order[b.category] ?? 9);
+            if (co !== 0) return co;
+            const wc = (a.wh || "").localeCompare(b.wh || "");
+            if (wc !== 0) return wc;
+            return (a.code || "").localeCompare(b.code || "");
         });
 
-        const item_count_main = qty_rows.length;
+        // Title: "<Company> — Stock Report — Qty Wise (All Warehouses)"
+        const qty_title_txt = [
+            company,
+            __("Stock Report — Qty Wise (All Warehouses)"),
+        ].filter(Boolean).join(" — ");
 
-        const qty_title = [`${wh_label(warehouse)} — ${__("Qty")} (${item_count_main} ${__("items")})`];
+        const qty_title   = [qty_title_txt];
         const qty_headers = [
-            __("S.No"), __("Warehouse"), __("Item Code"), __("Item Name"),
-            __("On Hand Qty"), __("Stock Value"), __("ABC Class"),
+            __("S.No"), __("Category"), __("Warehouse"),
+            __("Item Category"), __("Sub Category"), __("Model"),
+            __("Item Code"), __("Item Name"),
+            __("On Hand Qty"), __("ABC Class"),
             __("Last Verified"), __("Due for Count"),
         ];
-        const qty_data_rows = qty_rows.map((it, i) => [
-            i + 1, it.wh, it.code, it.item_name,
-            it.qty, it.value, it.class, it.last_verified, it.due,
+        const qty_data_rows = qty_rows_all.map((it, i) => [
+            i + 1,
+            it.category,
+            it.wh,
+            it.item_category,
+            it.sub_category,
+            it.model,
+            it.code,
+            it.item_name,
+            it.qty,
+            it.class,
+            it.last_verified
+                ? frappe.datetime.str_to_user(it.last_verified) : __("Never"),
+            it.due ? __("Yes") : __("No"),
         ]);
 
-        const ws1 = XLSX.utils.aoa_to_sheet([qty_title, [], qty_headers, ...qty_data_rows]);
-        ws1["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } }];
-        const t1_ref = XLSX.utils.encode_cell({ r: 0, c: 0 });
-        if (ws1[t1_ref]) {
-            ws1[t1_ref].s = {
-                font:      { bold: true, sz: 13, color: { rgb: "0E7490" } },
-                fill:      { fgColor: { rgb: "ECFEFF" } },
-                alignment: { horizontal: "left" },
-            };
-        }
+        // NO empty row: title (row 0), headers (row 1), data (row 2+)
+        const ws1 = XLSX.utils.aoa_to_sheet([qty_title, qty_headers, ...qty_data_rows]);
+
+        ws1["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: qty_headers.length - 1 } }];
+        apply_row_style(ws1, 0, qty_headers.length, TITLE_STYLE);
+        apply_row_style(ws1, 1, qty_headers.length, HDR_STYLE);
+        ws1["!rows"] = [{ hpt: 30 }, { hpt: 32 }];
+
+        // Auto-filter on header row (row 2 in Excel, index 1)
+        const qty_last_col = XLSX.utils.encode_col(qty_headers.length - 1);
+        const qty_last_row = 2 + qty_data_rows.length;   // header at row 2 + data rows
+        ws1["!autofilter"] = { ref: `A2:${qty_last_col}${qty_last_row}` };
+        ws1["!freeze"]     = { xSplit: 0, ySplit: 2 };
+
         ws1["!cols"] = [
-            { wch: 6  }, { wch: 30 }, { wch: 18 }, { wch: 34 },
-            { wch: 14 }, { wch: 16 }, { wch: 10 }, { wch: 16 }, { wch: 14 },
+            { wch: 6  }, { wch: 12 }, { wch: 30 },
+            { wch: 20 }, { wch: 20 }, { wch: 20 },
+            { wch: 18 }, { wch: 36 },
+            { wch: 14 }, { wch: 10 }, { wch: 16 }, { wch: 14 },
         ];
 
-        // ── Sheet 2 — IMEI Sheet ────────────────────────────────────────
-        const serials_main = (serial_list || [])
-            .filter((s) => !_is_in_transit(s.status))
-            .sort((a, b) => {
-                const wc = (a.warehouse || "").localeCompare(b.warehouse || "");
-                if (wc !== 0) return wc;
-                const ic = (a.item_code || "").localeCompare(b.item_code || "");
-                if (ic !== 0) return ic;
-                return (a.name || "").localeCompare(b.name || "");
-            });
+        // ══════════════════════════════════════════════════════════════
+        // Sheet 2 — IMEI Sheet (ALL warehouses)
+        // ══════════════════════════════════════════════════════════════
+        const serials_all = combined_serials.slice().sort((a, b) => {
+            const co = (cat_order[a.__category] ?? 9) - (cat_order[b.__category] ?? 9);
+            if (co !== 0) return co;
+            const wc = (_short_wh(a.warehouse) || "").localeCompare(_short_wh(b.warehouse) || "");
+            if (wc !== 0) return wc;
+            const ic = (a.item_code || "").localeCompare(b.item_code || "");
+            if (ic !== 0) return ic;
+            return (a.name || "").localeCompare(b.name || "");
+        });
 
-        const serial_count_main = serials_main.length;
+        const imei_title_txt = [
+            company,
+            __("Stock Report — IMEI Wise (All Warehouses)"),
+        ].filter(Boolean).join(" — ");
 
-        const imei_title = [`${wh_label(warehouse)} — ${__("IMEI")} (${serial_count_main} ${__("serials")})`];
+        const imei_title   = [imei_title_txt];
         const imei_headers = [
-            __("S.No"), __("Warehouse"), __("Item Code"), __("Item Name"),
+            __("S.No"), __("Category"), __("Warehouse"),
+            __("Item Category"), __("Sub Category"), __("Model"),
+            __("Item Code"), __("Item Name"),
             __("IMEI / Serial No"), __("Status"),
         ];
-        const imei_data_rows = serials_main.map((s, i) => [
+        const imei_data_rows = serials_all.map((s, i) => [
             i + 1,
-            s.warehouse || warehouse || __("Unknown"),
+            s.__category || "Main",
+            _short_wh(s.warehouse) || __("Unknown"),
+            detail_of(s, "item_category"),
+            detail_of(s, "sub_category"),
+            detail_of(s, "model"),
             s.item_code || "",
-            s.item_name || s.item_code || "",
-            s.name      || "",
-            s.status    || __("Active"),
+            detail_of(s, "item_name") || s.item_code || "",
+            s.name   || "",
+            s.status || __("Active"),
         ]);
 
-        const ws2 = XLSX.utils.aoa_to_sheet([imei_title, [], imei_headers, ...imei_data_rows]);
-        ws2["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 5 } }];
-        const t2_ref = XLSX.utils.encode_cell({ r: 0, c: 0 });
-        if (ws2[t2_ref]) {
-            ws2[t2_ref].s = {
-                font:      { bold: true, sz: 13, color: { rgb: "0E7490" } },
-                fill:      { fgColor: { rgb: "ECFEFF" } },
-                alignment: { horizontal: "left" },
-            };
-        }
+        const ws2 = XLSX.utils.aoa_to_sheet([imei_title, imei_headers, ...imei_data_rows]);
+        ws2["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: imei_headers.length - 1 } }];
+        apply_row_style(ws2, 0, imei_headers.length, TITLE_STYLE);
+        apply_row_style(ws2, 1, imei_headers.length, HDR_STYLE);
+        ws2["!rows"] = [{ hpt: 30 }, { hpt: 32 }];
+
+        const imei_last_col = XLSX.utils.encode_col(imei_headers.length - 1);
+        const imei_last_row = 2 + imei_data_rows.length;
+        ws2["!autofilter"] = { ref: `A2:${imei_last_col}${imei_last_row}` };
+        ws2["!freeze"]     = { xSplit: 0, ySplit: 2 };
+
         ws2["!cols"] = [
-            { wch: 6 }, { wch: 30 }, { wch: 18 }, { wch: 34 }, { wch: 24 }, { wch: 14 },
+            { wch: 6 }, { wch: 12 }, { wch: 30 },
+            { wch: 20 }, { wch: 20 }, { wch: 20 },
+            { wch: 18 }, { wch: 36 },
+            { wch: 26 }, { wch: 14 },
         ];
 
-        // ── Category sheet builder ──────────────────────────────────────
-        const build_category_sheet = (label, cat) => {
-            const cat_rows = (cat.rows || []).slice().sort(
-                (a, b) => (a.item_code || "").localeCompare(b.item_code || "")
-            );
-            const cat_serials = (cat.serials || [])
-                .filter((s) => !_is_in_transit(s.status))
-                .sort((a, b) => {
-                    const ic = (a.item_code || "").localeCompare(b.item_code || "");
-                    return ic !== 0 ? ic : (a.name || "").localeCompare(b.name || "");
-                });
-
-            const cat_wh = cat.warehouse || "";
-
-            const qty_title_row = [
-                `${label} — ${__("Qty")} (${cat_rows.length} ${__("items")}) — ${cat_wh || __("N/A")}`,
-            ];
-            const qty_col_hdrs = [
-                __("S.No"), __("Warehouse"), __("Item Code"), __("Item Name"),
-                __("On Hand Qty"), __("Stock Value"),
-            ];
-            const qty_section = cat_rows.map((r, i) => [
-                i + 1,
-                r.warehouse   || cat_wh,
-                r.item_code   || "",
-                r.item_name   || r.item_code || "",
-                r.on_hand_qty || 0,
-                r.stock_value || 0,
-            ]);
-
-            const imei_title_row = [`${label} — ${__("IMEI")} (${cat_serials.length} ${__("serials")})`];
-            const imei_col_hdrs = [
-                __("S.No"), __("Warehouse"), __("Item Code"), __("Item Name"),
-                __("IMEI / Serial No"), __("Status"),
-            ];
-            const imei_section = cat_serials.map((s, i) => [
-                i + 1,
-                s.warehouse || cat_wh,
-                s.item_code || "",
-                s.item_name || s.item_code || "",
-                s.name      || "",
-                s.status    || __("Active"),
-            ]);
-
-            const aoa = [
-                qty_title_row, [], qty_col_hdrs, ...qty_section, [],
-                imei_title_row, [], imei_col_hdrs, ...imei_section,
-            ];
-
-            const ws = XLSX.utils.aoa_to_sheet(aoa);
-            const imei_title_row_idx = 3 + cat_rows.length + 1;
-            ws["!merges"] = [
-                { s: { r: 0,                  c: 0 }, e: { r: 0,                  c: 5 } },
-                { s: { r: imei_title_row_idx, c: 0 }, e: { r: imei_title_row_idx, c: 5 } },
-            ];
-            const style_title = {
-                font:      { bold: true, sz: 12, color: { rgb: "1E3A5F" } },
-                fill:      { fgColor: { rgb: "DBEAFE" } },
-                alignment: { horizontal: "left" },
-            };
-            const r0 = XLSX.utils.encode_cell({ r: 0,                  c: 0 });
-            const r1 = XLSX.utils.encode_cell({ r: imei_title_row_idx, c: 0 });
-            if (ws[r0]) ws[r0].s = style_title;
-            if (ws[r1]) ws[r1].s = style_title;
-            ws["!cols"] = [
-                { wch: 6 }, { wch: 30 }, { wch: 18 }, { wch: 34 }, { wch: 24 }, { wch: 16 },
-            ];
-            return ws;
-        };
-
         // ── Register sheets ─────────────────────────────────────────────
-        XLSX.utils.book_append_sheet(wb, ws1,
-            this._safe_sheet_name(`${__("Qty Sheet")} (${item_count_main})`));
-        XLSX.utils.book_append_sheet(wb, ws2,
-            this._safe_sheet_name(`${__("IMEI Sheet")} (${serial_count_main})`));
-
-        const damaged_serial_count = (damaged.serials || []).filter((s) => !_is_in_transit(s.status)).length;
-        const demo_serial_count    = (demo.serials    || []).filter((s) => !_is_in_transit(s.status)).length;
-        const buyback_serial_count = (buyback.serials || []).filter((s) => !_is_in_transit(s.status)).length;
-
-        XLSX.utils.book_append_sheet(wb, build_category_sheet(__("Damaged Stock"), damaged),
-            this._safe_sheet_name(`${__("Damaged")} (${damaged.rows.length}-${damaged_serial_count})`));
-        XLSX.utils.book_append_sheet(wb, build_category_sheet(__("Demo Stock"), demo),
-            this._safe_sheet_name(`${__("Demo")} (${demo.rows.length}-${demo_serial_count})`));
-        XLSX.utils.book_append_sheet(wb, build_category_sheet(__("Buyback Stock"), buyback),
-            this._safe_sheet_name(`${__("Buyback")} (${buyback.rows.length}-${buyback_serial_count})`));
+        XLSX.utils.book_append_sheet(wb, ws1, this._safe_sheet_name(__("Qty Sheet")));
+        XLSX.utils.book_append_sheet(wb, ws2, this._safe_sheet_name(__("IMEI Sheet")));
 
         const safe_wh  = (warehouse || "all").replace(/[^a-zA-Z0-9]/g, "_");
         const filename = `stock_audit_${safe_wh}_${frappe.datetime.now_date()}.xlsx`;
         XLSX.writeFile(wb, filename);
 
         frappe.show_alert({
-            message: __(
-                "Downloaded: {0} — Main: {1} items · {2} serials · Damaged: {3} · Demo: {4} · Buyback: {5}",
-                [filename, item_count_main, serial_count_main,
-                 damaged.rows.length, demo.rows.length, buyback.rows.length]
-            ),
+            message: __("Downloaded: {0}", [filename]),
             indicator: "green",
         });
     }
 
-    // ═══════════════════════════ PRINT ═════════════════════════════════════════
 
     _print_stock_snapshot(payload) {
         const rows       = payload.rows      || [];
@@ -1474,7 +1573,6 @@ export class StockAuditWorkspace {
         d.show();
     }
 
-    // ═══════════════════════════ HELPERS ═══════════════════════════════════════
 
     _empty(msg) {
         return `<div class="text-muted text-center" style="padding:32px">
@@ -1483,3 +1581,4 @@ export class StockAuditWorkspace {
         </div>`;
     }
 }
+
