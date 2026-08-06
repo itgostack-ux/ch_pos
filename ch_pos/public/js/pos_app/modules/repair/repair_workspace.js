@@ -498,7 +498,7 @@ export class RepairWorkspace {
 			// Build initial parts rows HTML
 			const parts_rows_html = (d.spare_parts || []).map((p, i) =>
 				this._part_row_html(i, p, mop_opts_html)
-			).join("") || this._part_row_html(0, {}, mop_opts_html);
+			).join("") || `<tr><td colspan="5" class="text-muted text-center">${__("No consumed spares to bill")}</td></tr>`;
 
 			// Solutions summary
 			const solutions_html = (d.solutions || []).length ? d.solutions.map(s => {
@@ -591,11 +591,9 @@ export class RepairWorkspace {
 
   <!-- 3. Spare Parts -->
   <div class="ch-closure-section">
-    <div class="ch-closure-section-title" style="display:flex;align-items:center;gap:6px">
-      <span><i class="fa fa-puzzle-piece"></i> ${__("2. Spare Parts")}</span>
-      <button class="btn btn-xs btn-outline-primary ch-cld-add-part" style="margin-left:auto;border-radius:20px">
-        <i class="fa fa-plus"></i> ${__("Add Part")}
-      </button>
+	<div class="ch-closure-section-title" style="display:flex;align-items:center;gap:6px">
+	  <span><i class="fa fa-puzzle-piece"></i> ${__("2. Spare Parts")}</span>
+	  <span class="text-muted" style="margin-left:auto;font-size:11px">${__("From submitted spare usage")}</span>
     </div>
     <table class="table table-sm" style="margin-bottom:4px">
       <thead><tr>
@@ -742,17 +740,6 @@ export class RepairWorkspace {
 				});
 			});
 
-			// Add part row
-			dlg.$body.on("click", ".ch-cld-add-part", () => {
-				const idx = dlg.$body.find(".ch-cld-part-row").length;
-				dlg.$body.find(".ch-cld-parts-body").append(this._part_row_html(idx, {}, mop_opts_html));
-				recalc();
-			});
-			dlg.$body.on("click", ".ch-cld-remove-part", (e) => {
-				$(e.currentTarget).closest("tr").remove();
-				recalc();
-			});
-
 			// Add payment row
 			dlg.$body.on("click", ".ch-cld-add-payment", () => {
 				const row = $(`<tr class="ch-cld-payment-row">
@@ -768,46 +755,6 @@ export class RepairWorkspace {
 				recalc();
 			});
 
-			// Item autocomplete for part rows
-			let _item_search_timer = null;
-			dlg.$body.on("input", ".ch-cld-part-name", function () {
-				const inp = $(this);
-				const q = inp.val().trim();
-				const sug = inp.closest("td").find(".ch-item-suggestions");
-				inp.closest("tr").find(".ch-cld-part-code").val(""); // clear resolved code
-				clearTimeout(_item_search_timer);
-				if (q.length < 2) { sug.hide(); return; }
-				_item_search_timer = setTimeout(() => {
-					frappe.call({
-						method: "frappe.desk.search.search_link",
-						args: { txt: q, doctype: "Item", ignore_user_permissions: 0, page_len: 8, filters: { has_variants: 0 } },
-						callback: (r) => {
-							const results = r.message || [];
-							if (!results.length) { sug.hide(); return; }
-							sug.html(results.map(res =>
-								`<div class="ch-item-sug-row" data-code="${frappe.utils.escape_html(res.value)}"
-									style="padding:6px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid #f0f0f0">
-									<b>${frappe.utils.escape_html(res.value)}</b>
-									${res.description ? `<span style="color:#888;margin-left:6px">${frappe.utils.escape_html(res.description)}</span>` : ""}
-								</div>`
-							).join("")).show();
-						},
-					});
-				}, 300);
-			});
-			dlg.$body.on("click", ".ch-item-sug-row", function () {
-				const code = $(this).data("code");
-				const label = $(this).find("b").text();
-				const td = $(this).closest("td");
-				td.find(".ch-cld-part-code").val(code);
-				td.find(".ch-cld-part-name").val(label);
-				td.find(".ch-item-suggestions").hide();
-			});
-			dlg.$body.on("focusout", ".ch-cld-part-name", function () {
-				// Delay hide to allow click on suggestion to register
-				setTimeout(() => $(this).closest("td").find(".ch-item-suggestions").hide(), 200);
-			});
-
 			// Trigger initial recalc
 			recalc();
 
@@ -816,6 +763,7 @@ export class RepairWorkspace {
 	}
 
 	_part_row_html(i, p = {}, _mop_opts_html = "") {
+		const usage = frappe.utils.escape_html(p.spare_usage || "");
 		const item = frappe.utils.escape_html(p.spare_part_item || "");
 		const name = frappe.utils.escape_html(p.item_name || "");
 		const qty  = p.qty  || "";
@@ -830,16 +778,16 @@ export class RepairWorkspace {
 		const display = name || item;
 		return `<tr class="ch-cld-part-row">
 			<td style="position:relative">
+				<input type="hidden" class="ch-cld-spare-usage" value="${usage}">
 				<input type="hidden" class="ch-cld-part-code" value="${item}">
 				<input type="text" class="form-control form-control-sm ch-cld-part-name" value="${display}"
-					placeholder="${__("Type to search item…")}" autocomplete="off">
+					readonly style="background:transparent;border:none">
 				<div style="display:flex;gap:4px;flex-wrap:wrap">${warranty_badge}${from_mapping}</div>
-				<div class="ch-item-suggestions" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:9999;background:#fff;border:1px solid #ddd;border-radius:4px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
 			</td>
-			<td><input type="number" class="form-control form-control-sm ch-cld-part-qty" value="${qty}" min="0" placeholder="1" style="text-align:center"></td>
-			<td><input type="number" class="form-control form-control-sm ch-cld-part-rate" value="${rate}" min="0" placeholder="0.00" style="text-align:right"></td>
+			<td><input type="number" class="form-control form-control-sm ch-cld-part-qty" value="${qty}" readonly style="text-align:center;background:transparent;border:none"></td>
+			<td><input type="number" class="form-control form-control-sm ch-cld-part-rate" value="${rate}" readonly style="text-align:right;background:transparent;border:none"></td>
 			<td><input type="number" class="form-control form-control-sm ch-cld-part-amount" value="${amount}" readonly style="text-align:right;background:transparent;border:none"></td>
-			<td><button class="btn btn-xs btn-danger ch-cld-remove-part" style="border-radius:50%;padding:1px 5px">&times;</button></td>
+			<td><i class="fa fa-lock text-muted" title="${__("Posted stock usage")}"></i></td>
 		</tr>`;
 	}
 
@@ -851,12 +799,13 @@ export class RepairWorkspace {
 		// Gather spare parts
 		const spare_parts = [];
 		dlg.$body.find(".ch-cld-part-row").each(function () {
+			const spare_usage = $(this).find(".ch-cld-spare-usage").val().trim();
 			const code = $(this).find(".ch-cld-part-code").val().trim();
 			const name = $(this).find(".ch-cld-part-name").val().trim();
 			const qty  = parseFloat($(this).find(".ch-cld-part-qty").val()) || 0;
 			const rate = parseFloat($(this).find(".ch-cld-part-rate").val()) || 0;
 			if ((code || name) && qty) {
-				spare_parts.push({ spare_part_item: code || name, item_name: name, qty, rate, uom: "Nos" });
+				spare_parts.push({ spare_usage, spare_part_item: code || name, item_name: name, qty, rate, uom: "Nos" });
 			}
 		});
 

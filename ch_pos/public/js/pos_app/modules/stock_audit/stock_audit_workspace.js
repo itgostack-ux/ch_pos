@@ -483,6 +483,15 @@ export class StockAuditWorkspace {
 			frappe.msgprint(__("Popup blocked. Please allow popups for print."));
 			return;
 		}
+		frappe.xcall("ch_pos.api.print_api.log_client_print", {
+			pos_profile: PosState.pos_profile,
+			report_name: "Stock Audit Snapshot",
+			filters: {
+				warehouse,
+				items: flt(summary.items || rows.length),
+				total_stock_value: flt(summary.total_stock_value || 0),
+			},
+		}).catch((err) => console.warn("Stock Audit print audit log failed", err));
 		win.document.open();
 		win.document.write(html);
 		win.document.close();

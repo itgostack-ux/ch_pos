@@ -523,20 +523,112 @@ class CHPOSSession(Document):
             self.status = "Closed"
             self.closing_evidence_signature = update_fields["closing_evidence_signature"]
 
-            # Mark the linked ERPNext POS Opening Entry as closed so that
-            # check_opening_entry() (which filters pos_closing_entry=None) stops
-            # showing this entry in the "Open POS Session" dialog.
-            if getattr(self, "pos_opening_entry", None):
-                frappe.db.set_value(
-                    "POS Opening Entry",
-                    self.pos_opening_entry,
-                    {"pos_closing_entry": self.name, "status": "Closed"},
-                    update_modified=False,
-                )
+            # Close through ERPNext's standard POS Closing Entry.  CH POS
+            # Session retains operational evidence, but it is not an accounting
+            # voucher and must never be written into POS Opening Entry's Link.
+            self._mirror_close_to_opening_entry()
 
             self._log_close_event()
         finally:
             frappe.db.sql("SELECT RELEASE_LOCK(%s)", (_lk,))
+
+    def _mirror_close_to_opening_entry(self) -> str | None:
+        """Create and submit the authoritative ERPNext POS Closing Entry."""
+        entry = getattr(self, "pos_opening_entry", None)
+
+        if not entry:
+            # Adopt a still-open entry for this profile. Scoped to the session's
+            # own profile and owner so it can never swallow another cashier's
+            # live till.
+            entry = frappe.db.get_value(
+                "POS Opening Entry",
+                {
+                    "pos_profile": self.pos_profile,
+                    "user": self.owner,
+                    "docstatus": 1,
+                    "status": "Open",
+                    "pos_closing_entry": ("in", ("", None)),
+                },
+                "name",
+                order_by="creation desc",
+            )
+            if entry:
+                self.db_set("pos_opening_entry", entry, update_modified=False)
+
+        if not entry:
+            frappe.throw(
+                _(
+                    "Session {0} has no submitted POS Opening Entry. "
+                    "Repair the opening record before closing the till."
+                ).format(self.name),
+                frappe.ValidationError,
+            )
+
+        opening = frappe.get_doc("POS Opening Entry", entry)
+        if opening.docstatus != 1:
+            frappe.throw(_("POS Opening Entry {0} is not submitted.").format(entry))
+
+        linked_closing = opening.get("pos_closing_entry")
+        if linked_closing and frappe.db.exists("POS Closing Entry", linked_closing):
+            return entry
+        if linked_closing:
+            # Repair the historical bug where a CH POS Session name was stored
+            # in the standard POS Closing Entry link.
+            if linked_closing != self.name:
+                frappe.throw(
+                    _("POS Opening Entry {0} has an invalid closing link {1}.").format(
+                        entry, linked_closing
+                    )
+                )
+            frappe.db.set_value(
+                "POS Opening Entry",
+                entry,
+                {"pos_closing_entry": None, "status": "Open"},
+                update_modified=False,
+            )
+            opening.reload()
+        elif opening.status != "Open":
+            frappe.db.set_value("POS Opening Entry", entry, "status", "Open", update_modified=False)
+            opening.reload()
+
+        from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
+            make_closing_entry_from_opening,
+        )
+
+        closing = make_closing_entry_from_opening(opening)
+        opening_by_mode = {
+            row.mode_of_payment: flt(row.opening_amount) for row in opening.balance_details
+        }
+        session_by_mode = {row.mode_of_payment: row for row in (self.payment_details or [])}
+        reconciliation = {row.mode_of_payment: row for row in closing.payment_reconciliation}
+        for mode, opening_amount in opening_by_mode.items():
+            if mode not in reconciliation:
+                reconciliation[mode] = closing.append(
+                    "payment_reconciliation",
+                    {"mode_of_payment": mode, "opening_amount": 0, "expected_amount": 0},
+                )
+
+        cash_recorded = False
+        for mode, row in reconciliation.items():
+            opening_amount = flt(opening_by_mode.get(mode))
+            row.opening_amount = opening_amount
+            row.expected_amount = flt(row.expected_amount) + opening_amount
+            is_cash = frappe.db.get_value("Mode of Payment", mode, "type") == "Cash"
+            if is_cash and not cash_recorded:
+                row.closing_amount = flt(self.closing_cash_actual) + flt(self.total_cash_drops)
+                cash_recorded = True
+            elif mode in session_by_mode:
+                row.closing_amount = flt(session_by_mode[mode].counted_amount)
+            else:
+                row.closing_amount = row.expected_amount
+            row.difference = flt(row.closing_amount) - flt(row.expected_amount)
+
+        closing.flags.ignore_permissions = True
+        closing.insert(ignore_permissions=True)
+        closing.submit()
+        if frappe.db.get_value("POS Opening Entry", entry, "pos_closing_entry") != closing.name:
+            closing.update_opening_entry()
+        return entry
 
     def _log_close_event(self):
         try:

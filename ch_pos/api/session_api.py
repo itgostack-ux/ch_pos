@@ -524,9 +524,8 @@ def admin_reopen_session(session_name, reason) -> dict:
         ``_VALID_TRANSITIONS`` state machine (Closed is terminal).
       * Linked CH POS Settlement (submitted): cancelled so a fresh settlement
         can be raised at re-close.
-      * Linked POS Opening Entry: ``pos_closing_entry`` cleared and status
-        flipped back to ``Open`` so ERPNext's ``check_opening_entry`` resumes
-        offering this entry to the cashier.
+      * Linked standard POS Closing Entry is cancelled; ERPNext then reopens
+        the POS Opening Entry through its own voucher lifecycle.
       * CH Business Date: if it had advanced past this session's business_date
         (auto-advance after EOD), it is rolled back to the session's date so
         new invoices post on the correct day.
@@ -596,7 +595,23 @@ def admin_reopen_session(session_name, reason) -> dict:
             settlement.check_permission("cancel")
             settlement.cancel()
 
-        # 2. Reverse the session record. db_set bypasses _VALID_TRANSITIONS,
+        # 2. Cancel the authoritative standard POS Closing Entry first. If
+        #    ERPNext refuses the reversal, the custom session remains Closed.
+        if getattr(session, "pos_opening_entry", None):
+            closing_name = frappe.db.get_value(
+                "POS Opening Entry", session.pos_opening_entry, "pos_closing_entry"
+            )
+            if closing_name:
+                if not frappe.db.exists("POS Closing Entry", closing_name):
+                    frappe.throw(
+                        _("POS Opening Entry has an invalid closing link: {0}.").format(closing_name)
+                    )
+                closing = frappe.get_doc("POS Closing Entry", closing_name)
+                if closing.docstatus == 1:
+                    closing.check_permission("cancel")
+                    closing.cancel()
+
+        # 3. Reverse the session record. db_set bypasses _VALID_TRANSITIONS,
         #    which is necessary because Closed is a terminal state by design.
         frappe.db.set_value("CH POS Session", session_name, {
             "status": "Open",
@@ -610,8 +625,7 @@ def admin_reopen_session(session_name, reason) -> dict:
             "duration_minutes": 0,
         }, update_modified=True)
 
-        # 3. Reverse the linked POS Opening Entry so ERPNext's check_opening_entry
-        #    resumes offering it to the cashier on next launch.
+        # 4. Verify/repair the linked POS Opening Entry after standard cancel.
         if getattr(session, "pos_opening_entry", None):
             frappe.db.set_value(
                 "POS Opening Entry",
@@ -620,7 +634,7 @@ def admin_reopen_session(session_name, reason) -> dict:
                 update_modified=True,
             )
 
-        # 4. Rewind business date if auto-advance had moved it forward.
+        # 5. Rewind business date if auto-advance had moved it forward.
         bd_name = frappe.db.get_value(
             "CH Business Date",
             {"store": session.store, "is_active": 1},
@@ -655,7 +669,7 @@ def admin_reopen_session(session_name, reason) -> dict:
                 }, update_modified=True)
                 bd_status_change = "Closed → Closing Pending"
 
-        # 5. Audit log (best-effort).
+        # 6. Audit log (best-effort).
         try:
             from ch_pos.audit import log_business_event
             log_business_event(

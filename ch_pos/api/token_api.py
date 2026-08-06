@@ -141,7 +141,7 @@ def _assert_token_scope(token_name: str) -> None:
     )
     if not tok:
         frappe.throw(_("Queue token was not found."), frappe.DoesNotExistError)
-    assert_store_scope(store=tok.store, company=tok.company)
+    assert_store_scope(warehouse=tok.store, company=tok.company)
 
 
 def _assert_token_assignee(user: str, pos_profile: str) -> None:

@@ -60,7 +60,7 @@
   {
    "fieldname": "store",
    "fieldtype": "Link",
-   "label": "Store",
+   "label": "Store Warehouse",
    "options": "Warehouse",
    "in_standard_filter": 1,
    "search_index": 1

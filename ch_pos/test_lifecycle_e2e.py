@@ -9,7 +9,7 @@ major business operation in the system:
   Step 2  POS SALE    — create_pos_invoice → serial Delivered, Customer Device created
   Step 3  POS RETURN  — create_pos_return  → serial Active (back in stock)
   Step 4  POS RESALE  — create_pos_invoice → serial Delivered again (resell returned unit)
-  Step 5  REPAIR      — create_repair_intake → POS Repair Intake + Service Request
+  Step 5  REPAIR      — create_repair_intake compatibility API → Service Request
   Step 6  BUYBACK     — Assessment → Inspection → Order → Approve →
                         Customer Approve → Record Payment → Close
                         (Stock Entry auto-created → serial Active)
@@ -223,30 +223,17 @@ def _cleanup():
         except Exception as e:
             print(f"    ⚠  BA {ba.name}: {e}")
 
-    # 7. Cancel & delete POS Repair Intakes / Service Requests for this serial
-    ri_list = frappe.get_all(
-        "POS Repair Intake",
-        filters={"serial_no": TEST_IMEI},
-        fields=["name", "service_request", "docstatus"],
-    )
-    for ri in ri_list:
-        if ri.service_request:
-            try:
-                sr_doc = frappe.get_doc("Service Request", ri.service_request)
-                if sr_doc.docstatus == 1:
-                    sr_doc.cancel()
-                frappe.delete_doc("Service Request", ri.service_request, force=True)
-            except Exception:
-                pass
+    # 7. Cancel & delete canonical Service Requests for this serial
+    for sr_row in frappe.get_all(
+        "Service Request", filters={"serial_no": TEST_IMEI}, fields=["name", "docstatus"]
+    ):
         try:
-            if ri.docstatus == 1:
-                intake_doc = frappe.get_doc("POS Repair Intake", ri.name)
-                intake_doc.cancel()
-                frappe.db.commit()
-            frappe.delete_doc("POS Repair Intake", ri.name, force=True)
-            frappe.db.commit()
+            sr_doc = frappe.get_doc("Service Request", sr_row.name)
+            if sr_doc.docstatus == 1:
+                sr_doc.cancel()
+            frappe.delete_doc("Service Request", sr_row.name, force=True)
         except Exception as e:
-            print(f"    ⚠  Intake {ri.name}: {e}")
+            print(f"    ⚠  Service Request {sr_row.name}: {e}")
 
     # 8. Delete CH Customer Device records for this serial
     cd_list = frappe.get_all(
@@ -593,7 +580,7 @@ def step_5_repair_intake():
 
     result = create_repair_intake(
         data={
-            "store": WAREHOUSE,          # POS Repair Intake.store = Warehouse link
+            "store": WAREHOUSE,          # legacy payload key maps to SR.source_warehouse
             "customer": CUSTOMER_1,
             "customer_phone": MOBILE_NO,
             "device_brand": "Samsung",
@@ -612,19 +599,12 @@ def step_5_repair_intake():
     intake_name = result.get("intake_name")
     sr_name = result.get("service_request_name")
 
-    _check("Repair intake created", bool(intake_name), f"result={result}")
-    if intake_name:
-        intake = frappe.get_doc("POS Repair Intake", intake_name)
-        _check("Intake submitted", intake.docstatus == 1,
-               f"docstatus={intake.docstatus}")
-        _check("Intake linked to store", intake.store == WAREHOUSE)
-        _check("Intake linked to customer", intake.customer == CUSTOMER_1)
+    _check("Duplicate intake wrapper retired", intake_name is None, f"result={result}")
 
     _check("Service Request auto-created", bool(sr_name), f"sr={sr_name}")
     if sr_name:
         sr = frappe.get_doc("Service Request", sr_name)
-        _check("SR status Open", sr.status in ("Open", "Draft"),
-               f"status={sr.status}")
+        _check("SR decision Draft", sr.decision == "Draft", f"decision={sr.decision}")
 
     # Serial stays Delivered — repair intake doesn't move stock
     serial = frappe.get_doc("Serial No", TEST_IMEI)

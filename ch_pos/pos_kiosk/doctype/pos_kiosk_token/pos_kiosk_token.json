@@ -109,7 +109,7 @@
    "fieldname": "store",
    "fieldtype": "Link",
    "in_list_view": 1,
-   "label": "Store",
+   "label": "Store Warehouse",
    "options": "Warehouse"
   },
   {

@@ -19,6 +19,7 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt, now_datetime
 
+from ch_item_master.ch_core.cost_center import resolve_cost_center
 from ch_pos.api.scope_guard import assert_session_scope
 from ch_pos.config import assert_session_operator, is_privileged_user
 
@@ -192,7 +193,11 @@ class CHCashDrop(Document):
             return
 
         settings = frappe.get_cached_doc("CH POS Control Settings")
-        cost_center = frappe.db.get_value("Company", company, "cost_center")
+        cost_center = resolve_cost_center(
+            company,
+            store=self.store,
+            pos_profile=self.pos_profile,
+        )
         amount = flt(self.amount)
 
         if mt == "Cash Drop":

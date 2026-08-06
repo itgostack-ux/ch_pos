@@ -133,12 +133,14 @@ def _ensure_store_business_date_is_not_future(store):
 
 
 @frappe.whitelist()
-def get_pos_context() -> dict:
+def get_pos_context(all_companies=0) -> dict:
     """Called on POS launch. Auto-detects user→company→store→device→session.
 
     Returns everything the POS frontend needs to render the correct UI.
     System Manager users without an allocation get a store picker instead of
-    being blocked.
+    being blocked; that picker is scoped to the company they have selected in
+    the Desk switcher. ``all_companies=1`` is the deliberate opt-out for an
+    admin who needs to reach a store outside the active company.
     """
     frappe.has_permission("Sales Invoice", "read", throw=True)
     user = frappe.session.user
@@ -153,11 +155,36 @@ def get_pos_context() -> dict:
 
     # System Managers / Administrators always get a store picker
     if is_privileged_user(user):
+        active_company = "" if cint(all_companies) else get_active_company(user)
+        stores = _get_all_active_stores(company=active_company)
+        # An active company with no stores of its own would strand the admin on
+        # an empty picker, so fall back to the full list and say why.
+        scoped_out = bool(active_company and not stores)
+        if scoped_out:
+            stores = _get_all_active_stores()
+        if active_company and not scoped_out:
+            message = _("Showing stores for {0}. Select a store to continue.").format(
+                active_company
+            )
+        elif scoped_out:
+            message = _(
+                "{0} has no active stores — showing all companies."
+            ).format(active_company)
+        else:
+            message = _("You have administrative access. Select a store to continue.")
+
+        default_store = exec_record.store if exec_record else None
+        # Never pre-select a store outside the company being shown.
+        if default_store and not any(s["name"] == default_store for s in stores):
+            default_store = None
+
         return {
             "status": "select_store",
-            "message": _("You have administrative access. Select a store to continue."),
-            "stores": _get_all_active_stores(),
-            "default_store": exec_record.store if exec_record else None,
+            "message": message,
+            "stores": stores,
+            "default_store": default_store,
+            "active_company": active_company,
+            "showing_all_companies": bool(cint(all_companies) or scoped_out),
         }
 
     if not exec_record:
@@ -288,14 +315,41 @@ def get_pos_context_for_store(store) -> dict:
     }
 
 
-def _get_all_active_stores():
-    """Return list of active stores for System Manager store picker."""
+def get_active_company(user=None) -> str:
+    """Return the company the user currently has selected in the Desk switcher.
+
+    ``ch_erp15.company_lock.set_active_company_default`` writes the lowercase
+    ``company`` key; older rows used ``Company``. DefaultValue lookups are
+    case-insensitive on MariaDB but not on Postgres, so try both.
+    """
+    user = user or frappe.session.user
+    for key in ("company", "Company"):
+        company = frappe.defaults.get_user_default(key, user=user)
+        if company:
+            return company
+    return ""
+
+
+def _get_all_active_stores(company=None):
+    """Return active stores for the privileged store picker.
+
+    Scoped to ``company`` when one is given. The picker is only reached by
+    Administrator / System Manager, who are intentionally not restricted by
+    company *permissions* — but an admin who has explicitly selected a company
+    in the Desk switcher still expects the picker to honour that choice.
+    Without this filter the picker listed every store on the site, so selecting
+    GoFix and being offered GG-KELLYS (a Bestbuy store) looked like the company
+    filter was being ignored. Pass ``company=None`` to deliberately list all.
+    """
     result_limit = max(
         1, min(cint(get_control_setting("active_store_result_limit", 5000)) or 5000, 10000)
     )
+    filters = {"disabled": 0}
+    if company:
+        filters["company"] = company
     stores = frappe.get_all(
         "CH Store",
-        filters={"disabled": 0},
+        filters=filters,
         fields=["name", "store_name", "store_code", "company", "warehouse"],
         order_by="store_name asc",
         limit_page_length=result_limit + 1,

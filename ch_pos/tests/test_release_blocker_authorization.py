@@ -128,6 +128,16 @@ class TestReleaseBlockerContracts(IntegrationTestCase):
         ):
             self.assertNotIn("frappe.db.commit", inspect.getsource(function))
 
+    def test_pos_invoice_propagates_profile_cost_center_to_posting_rows(self):
+        from ch_pos.api.pos_api import create_pos_invoice, _force_insert_tax_rows
+
+        invoice_source = inspect.getsource(create_pos_invoice)
+        tax_source = inspect.getsource(_force_insert_tax_rows)
+
+        self.assertIn("inv.cost_center = pos_cost_center", invoice_source)
+        self.assertIn('"cost_center": pos_cost_center', invoice_source)
+        self.assertIn("transaction_cc or src.cost_center or default_cc", tax_source)
+
     def test_offer_lookup_requires_company_scope(self):
         from ch_pos.api.offers import get_applicable_offers
 

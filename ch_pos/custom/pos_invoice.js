@@ -11,12 +11,6 @@ frappe.ui.form.on("Sales Invoice", {
                 frappe.set_route("Form", "POS Guided Session", frm.doc.custom_guided_session);
             });
         }
-        if (frm.doc.custom_repair_intake) {
-            frm.sidebar.add_user_action(__("View Repair Intake"), () => {
-                frappe.set_route("Form", "POS Repair Intake", frm.doc.custom_repair_intake);
-            });
-        }
-
         // Margin scheme indicator
         if (frm.doc.custom_is_margin_scheme) {
             frm.dashboard.add_indicator(
@@ -169,4 +163,3 @@ function ch_pos_check_missing_free_items(frm) {
         },
     });
 }
-

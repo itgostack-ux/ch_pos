@@ -18,7 +18,7 @@ def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=
     Advisory-locked to prevent duplicate creation under concurrent POS
     submissions for the same serial (e.g. family plan, dual-device sale).
     """
-    if frappe.db.exists("CH Serial Lifecycle", serial_no):
+    if frappe.db.exists("CH Serial Lifecycle", {"serial_no": serial_no}):
         return
 
     if not item_code:
@@ -35,7 +35,7 @@ def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=
         )
         return
     try:
-        if frappe.db.exists("CH Serial Lifecycle", serial_no):
+        if frappe.db.exists("CH Serial Lifecycle", {"serial_no": serial_no}):
             return  # raced with another worker — already created
 
         store_name = (
@@ -328,6 +328,24 @@ def create_customer_device_records(doc, method=None):
     Delegates to ch_item_master's CHCustomerDevice.create_or_update_for_serial()
     which handles deduplication, warranty syncing, and field population.
     """
+    from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import (
+        CHCustomerDevice,
+    )
+
+    # A submitted return brings the inventory serial back into a warehouse;
+    # it must update the existing ownership projection, never create a new
+    # customer-owned device from the negative invoice row.
+    if doc.get("is_return"):
+        for item in doc.items:
+            for sn in _get_serial_nos_from_item(item, parent_doc=doc):
+                CHCustomerDevice.set_projection_status(
+                    sn,
+                    doc.customer,
+                    "Returned",
+                    verification_notes=_("Returned via {0}").format(doc.name),
+                )
+        return
+
     for item in doc.items:
         for sn in _get_serial_nos_from_item(item):
 
@@ -347,7 +365,6 @@ def create_customer_device_records(doc, method=None):
             }
             # Only set purchase_invoice if CH Customer Device has a pos_invoice field
             # (to avoid Link validation errors against tabSales Invoice)
-            from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import CHCustomerDevice
             cd_meta_fields = {f.fieldname for f in frappe.get_meta("CH Customer Device").fields}
             if "pos_invoice" in cd_meta_fields:
                 device_kwargs["pos_invoice"] = doc.name
@@ -423,7 +440,9 @@ def update_serial_lifecycle(doc, method=None):
             # If the device is still in "Received" state (e.g. goods receipt
             # happened but no explicit check-in), auto-advance to "In Stock"
             # first so the subsequent "Sold" transition is valid.
-            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            current_status = frappe.db.get_value(
+                "CH Serial Lifecycle", {"serial_no": sn}, "lifecycle_status"
+            )
             if current_status == "Received":
                 _update_serial_status(
                     serial_no=sn,
@@ -457,7 +476,9 @@ def _return_serial_lifecycle(doc):
             _ensure_lifecycle_exists(sn, item_code=item.item_code,
                                      company=doc.company, warehouse=item.warehouse)
 
-            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            current_status = frappe.db.get_value(
+                "CH Serial Lifecycle", {"serial_no": sn}, "lifecycle_status"
+            )
             if current_status == "Sold":
                 _update_serial_status(
                     serial_no=sn,
@@ -516,7 +537,9 @@ def reverse_serial_lifecycle(doc, method=None):
             _ensure_lifecycle_exists(sn, item_code=item.item_code,
                                      company=doc.company, warehouse=item.warehouse)
 
-            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            current_status = frappe.db.get_value(
+                "CH Serial Lifecycle", {"serial_no": sn}, "lifecycle_status"
+            )
             # Sold → Returned is a valid transition; then Returned → In Stock
             if current_status == "Sold":
                 _update_serial_status(
@@ -552,7 +575,9 @@ def _cancel_return_serial_lifecycle(doc):
             _ensure_lifecycle_exists(sn, item_code=item.item_code,
                                      company=doc.company, warehouse=item.warehouse)
 
-            current_status = frappe.db.get_value("CH Serial Lifecycle", sn, "lifecycle_status")
+            current_status = frappe.db.get_value(
+                "CH Serial Lifecycle", {"serial_no": sn}, "lifecycle_status"
+            )
             if current_status == "In Stock":
                 # Look up original sale details
                 sale_date = None
@@ -643,17 +668,33 @@ def _auto_create_token_for_invoice(doc):
 
 
 def deactivate_customer_devices(doc, method=None):
-    """Hook: on_cancel — deactivate customer device records created by this invoice."""
+    """Hook: on_cancel — reverse the customer-device ownership projection."""
+    from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import (
+        CHCustomerDevice,
+    )
+
     for item in doc.items:
         for sn in _get_serial_nos_from_item(item, parent_doc=doc):
-
-            device = frappe.db.get_value(
-                "CH Customer Device",
-                {"serial_no": sn, "customer": doc.customer, "purchase_invoice": doc.name},
-                "name",
-            )
-            if device:
-                frappe.db.set_value("CH Customer Device", device, "current_status", "Inactive")
+            if doc.get("is_return"):
+                CHCustomerDevice.set_projection_status(
+                    sn,
+                    doc.customer,
+                    "Owned",
+                    verification_notes=_("Return {0} cancelled").format(doc.name),
+                )
+            else:
+                device = frappe.db.get_value(
+                    "CH Customer Device",
+                    {"serial_no": sn, "customer": doc.customer, "purchase_invoice": doc.name},
+                    "name",
+                )
+                if device:
+                    CHCustomerDevice.set_projection_status(
+                        sn,
+                        doc.customer,
+                        "Inactive",
+                        verification_notes=_("Sale {0} cancelled").format(doc.name),
+                    )
 
 
 def revert_kiosk_token_status(doc, method=None):

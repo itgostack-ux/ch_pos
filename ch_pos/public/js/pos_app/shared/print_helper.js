@@ -18,7 +18,7 @@
  *   print_invoice_pdf("SINV-26-00031", "Custom Sales Invoice");
  */
 
-const PDF_ENDPOINT = "/api/method/frappe.utils.print_format.download_pdf";
+const PDF_ENDPOINT = "/api/method/ch_pos.api.print_api.download_pdf";
 const DEFAULT_SALES_INVOICE_FORMAT = "Custom Sales Invoice";
 
 async function resolve_sales_invoice_print_settings(invoice_name) {

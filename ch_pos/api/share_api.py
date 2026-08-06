@@ -2,7 +2,7 @@
 # Phase 2 — One-click multi-channel receipt sharing.
 #
 # Reuse-first audit findings:
-#   - PDF rendering uses frappe.utils.print_format.download_pdf  (no rewrite).
+#   - PDF rendering uses the audited CH POS wrapper around Frappe's renderer.
 #   - WhatsApp uses ch_item_master.ch_core.whatsapp.send_template_message
 #     (Gallabox integration; already deduped + enqueued).
 #   - Email uses frappe.sendmail with attached PDF (built-in).
@@ -66,7 +66,7 @@ def _resolve_print_settings(invoice_name: str) -> dict:
 def _pdf_download_url(invoice_name: str, print_format: str, no_letterhead: int = 0) -> str:
 	"""Return a fully-qualified PDF download URL (server-rendered, headered)."""
 	return (
-		f"/api/method/frappe.utils.print_format.download_pdf"
+		f"/api/method/ch_pos.api.print_api.download_pdf"
 		f"?doctype=Sales+Invoice"
 		f"&name={frappe.utils.escape_html(invoice_name)}"
 		f"&format={frappe.utils.escape_html(print_format)}"

@@ -36,7 +36,7 @@
   {
    "fieldname": "store",
    "fieldtype": "Link",
-   "label": "Store",
+   "label": "Store Warehouse",
    "options": "Warehouse"
   },
   {
