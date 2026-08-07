@@ -151,13 +151,11 @@ fixtures = [
         "dt": "Custom DocPerm",
         "filters": [
             ["parent", "in", [
-                # Original 15
                 "Buyback Assessment", "Buyback Order", "Buyback Price Master",
                 "Buyback Pricing Rule", "CH POS Closing Entry", "Company",
                 "Customer", "Grade Master", "Item", "Loyalty Point Entry",
                 "Loyalty Program", "Payment Entry", "POS Opening Entry",
                 "Sales Invoice", "Service Request",
-                # Newly identified (29)
                 "CH Store Zone", "CH Exception Reason", "CH Warranty Claim",
                 "CH Attach Log", "POS Kiosk Token", "CH Business Audit Log",
                 "CH Transfer Manifest", "CH POS Session", "CH Serial Lifecycle",
@@ -168,6 +166,8 @@ fixtures = [
                 "CH Sale Type", "CH POS Settlement", "CH Business Date",
                 "Warehouse", "Serial No", "GoFix Token",
                 "Spare Parts Usage", "POS Incentive Ledger",
+                "CH Exception Type", "CH Item Price", "Item Price",
+                "Material Request", "Stock Entry", "Stock Entry Type",
             ]],
             ["role", "in", [
                 "POS User", "POS Manager",

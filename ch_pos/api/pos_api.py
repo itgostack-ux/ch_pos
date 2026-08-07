@@ -858,6 +858,7 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
     # POS pre-booking already enforces practical store availability; skip
     # desk-style ATP advisory popup for this API flow to avoid cashier noise.
     so.flags.ch_skip_atp_warning = True
+    so.flags.ignore_permissions = True
     so.insert()
 
     submit_warning = None
@@ -6562,7 +6563,14 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     # Insert first with default Draft workflow state so _doc_before_save is
     # populated before we transition to Approved (matches create_pos_invoice
     # pattern at line ~846).
-    ret.insert()
+    ret.flags.ignore_permissions = True
+    _original_ignore = frappe.flags.ignore_permissions
+    frappe.flags.ignore_permissions = True
+    try:
+        ret.insert()
+    finally:
+        frappe.flags.ignore_permissions = _original_ignore
+
 
     # ── Persist the captured reason/remarks for audit ────────────────
     update_kwargs = {}
@@ -6636,6 +6644,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
                 " (manager PIN)" if pin_ok and not is_manager else "",
             ),
         )
+    ret.flags.ignore_permissions = True
     ret.submit()
 
     # Create return incentive (clawback) entries
@@ -7174,7 +7183,8 @@ def process_return_with_replacement(
     try:
         from ch_pos.audit import log_business_event
         log_business_event(
-            event_type="Return + Replacement Settled",
+            # event_type="Return + Replacement Settled",
+            event_type="Return Approved",
             ref_doctype="Sales Invoice", ref_name=replacement_inv_name,
             before=f"Return {return_inv_name} ({fmt_money(actual_return_value, currency=_cur)})",
             after=(
