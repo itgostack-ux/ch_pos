@@ -247,6 +247,14 @@ def _resolve_exchange_credit(assessment_name, buyback_order, customer, pos_profi
 def _caller_can_apply_discount(profile_anchors, effective_percentage) -> bool:
     if is_privileged_user():
         return True
+    matrix_limit = _approval_matrix_discount_limit(
+        frappe.session.user, profile_anchors
+    )
+    if matrix_limit is not None:
+        return matrix_limit > 0 and effective_percentage <= matrix_limit + 0.0001
+
+    # Compatibility fallback for installations without ch_erp15. Sites with
+    # the authority engine use its role-based percentage ceiling above.
     filters = {
         "user": frappe.session.user,
         "company": profile_anchors.get("company"),
@@ -266,6 +274,18 @@ def _caller_can_apply_discount(profile_anchors, effective_percentage) -> bool:
         if maximum <= 0 or effective_percentage <= maximum + 0.0001:
             return True
     return False
+
+
+def _approval_matrix_discount_limit(user, anchors):
+    """Return the central POS discount ceiling, or None if the app is absent."""
+    try:
+        from ch_erp15.ch_erp15.auth import authority as auth
+    except ImportError:
+        return None
+    company = anchors.get("company") if anchors else None
+    return auth.max_percent_for(
+        "Discount", "POS Invoice", user=user, doc={"company": company}
+    )
 
 
 def _ensure_prebook_reassign_access() -> None:
@@ -8848,8 +8868,10 @@ def verify_discount_auth(
     ):
         frappe.throw(_("Discount authorization request is invalid."))
 
-    max_pct = flt(exec_doc.max_discount_pct)
-    if max_pct > 0 and effective_pct > max_pct:
+    max_pct = _approval_matrix_discount_limit(exec_doc.user, anchors)
+    if max_pct is None:
+        max_pct = flt(exec_doc.max_discount_pct) or 100.0
+    if max_pct <= 0 or effective_pct > max_pct:
         frappe.throw(
             frappe._("Requested discount {0}% exceeds {1}'s authorised limit of {2}%.").format(
                 round(effective_pct, 2), exec_doc.executive_name, max_pct
