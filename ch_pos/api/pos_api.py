@@ -10428,6 +10428,293 @@ def _get_open_reserved_sales_order_for_serial(serial_no: str, warehouse: str | N
     return reserved.get(serial_no)
 
 
+
+
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#                                                                             #
+#  DISTANCE-SORTED TARGET WAREHOUSE PICKER — SELLABLE ONLY                    #
+#                                                                             #
+#  Used by the Stock Transfer workspace "To Warehouse" selector.              #
+#                                                                             #
+#  Sellable-only enforcement (any of these qualifies)                         #
+#  ─────────────────────────────────────────────────                          #
+#    A. Warehouse.ch_bin_type = 'Sellable'         ← canonical flag           #
+#    B. Warehouse is linked from CH Store.warehouse ← store's base            #
+#    C. Warehouse name matches "-Sellable"          ← legacy name convention  #
+#                                                                             #
+#  All operational sub-bins (Damaged / Reserved / Transit / Disposed /        #
+#  Buyback) are ALWAYS excluded — never valid as transfer destinations.       #
+#                                                                             #
+# ═════════════════════════════════════════════════════════════════════════════
+
+import math
+import frappe
+
+
+def _haversine_km(lat1: float, lon1: float,
+                  lat2: float, lon2: float) -> float:
+    """
+    Great-circle distance between two GPS points in kilometres.
+    Uses the Haversine formula — accurate for city-scale distances.
+    """
+    R = 6371.0                                # Earth radius (km)
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi        = math.radians(lat2 - lat1)
+    dlambda     = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi    / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2)
+        * math.sin(dlambda / 2) ** 2
+    )
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _valid_coords(lat, lng) -> bool:
+    """True only when both values are non-zero, castable floats."""
+    try:
+        return bool(float(lat)) and bool(float(lng))
+    except (TypeError, ValueError):
+        return False
+
+
+@frappe.whitelist()
+def get_transfer_target_warehouses(from_warehouse: str,
+                                    search: str = "",
+                                    company: str = None) -> list:
+    """
+    Return every SELLABLE target warehouse within the same company as
+    ``from_warehouse``, sorted by kilometre-distance from the source
+    (ascending). Warehouses without GPS coordinates are appended last.
+
+    Sellable-only rule
+    ──────────────────
+    A warehouse qualifies as "sellable" when it satisfies AT LEAST ONE:
+      * ch_bin_type = 'Sellable'
+      * Linked from CH Store.warehouse (means it's a store's base bin)
+      * Name contains '-Sellable'  (legacy naming convention)
+
+    Always excluded (regardless of the above):
+      * disabled = 1
+      * is_group = 1
+      * Sub-bins: Damaged / Reserved / Transit / Disposed / Buyback
+      * The source warehouse itself
+
+    Response shape
+    ──────────────
+    [
+        {
+            "warehouse":       str,
+            "warehouse_name":  str,
+            "company":         str,
+            "city":            str,
+            "distance_km":     float | None,
+            "has_coords":      bool,
+            "store_name":      str,
+            "store_code":      str,
+        },
+        ...
+    ]
+    """
+    if not from_warehouse:
+        return []
+
+    try:
+        # ── Read source warehouse info ───────────────────────────────────
+        src = frappe.db.get_value(
+            "Warehouse",
+            from_warehouse,
+            ["custom_latitude", "custom_longitude", "company"],
+            as_dict=True,
+        )
+        if not src:
+            frappe.logger("ch_pos").warning(
+                f"[transfer_targets] source '{from_warehouse}' not found"
+            )
+            return []
+
+        # Company scope — arg wins, then source's company
+        effective_company = (company or src.get("company") or "").strip()
+        if not effective_company:
+            frappe.logger("ch_pos").warning(
+                f"[transfer_targets] no company for {from_warehouse}"
+            )
+            return []
+
+        src_has_coords = _valid_coords(
+            src.get("custom_latitude"),
+            src.get("custom_longitude"),
+        )
+        src_lat = float(src.custom_latitude)  if src_has_coords else None
+        src_lng = float(src.custom_longitude) if src_has_coords else None
+
+        # ── Build the WHERE clause ───────────────────────────────────────
+        conditions = [
+            "w.disabled  = 0",
+            "w.is_group  = 0",
+            "w.name      != %(src)s",
+            "w.company   = %(company)s",
+
+            # ★ STRICT SELLABLE-ONLY GATE ★
+            # Must satisfy at least ONE of the three sellable criteria
+            "("
+            "  IFNULL(w.ch_bin_type, '') = 'Sellable'"
+            "  OR EXISTS ("
+            "     SELECT 1 FROM `tabCH Store` s"
+            "      WHERE s.warehouse = w.name"
+            "        AND s.disabled  = 0"
+            "  )"
+            "  OR w.name LIKE '%%-Sellable%%'"
+            ")",
+
+            # Absolute blocklist — never a target regardless of the above
+            "IFNULL(w.ch_bin_type, '') NOT IN "
+            "('Damaged', 'Reserved', 'Transit', 'Disposed', 'Buyback')",
+            "w.name NOT LIKE '%%-Damaged%%'",
+            "w.name NOT LIKE '%%-Reserved%%'",
+            "w.name NOT LIKE '%%-Transit%%'",
+            "w.name NOT LIKE '%%-Disposed%%'",
+            "w.name NOT LIKE '%%-Buyback%%'",
+        ]
+        values = {
+            "src":     from_warehouse,
+            "company": effective_company,
+        }
+
+        if search:
+            conditions.append(
+                "(w.name LIKE %(kw)s OR w.warehouse_name LIKE %(kw)s)"
+            )
+            values["kw"] = f"%{search}%"
+
+        where = " AND ".join(conditions)
+
+        rows = frappe.db.sql(
+            f"""
+            SELECT
+                w.name             AS warehouse,
+                w.warehouse_name   AS warehouse_name,
+                w.company          AS company,
+                w.city             AS city,
+                w.custom_latitude  AS latitude,
+                w.custom_longitude AS longitude,
+                w.ch_bin_type      AS ch_bin_type
+              FROM `tabWarehouse` w
+             WHERE {where}
+             ORDER BY w.warehouse_name
+             LIMIT 500
+            """,
+            values,
+            as_dict=True,
+        )
+
+        frappe.logger("ch_pos").info(
+            f"[transfer_targets] from={from_warehouse}  "
+            f"company={effective_company}  "
+            f"src_coords={src_has_coords}  "
+            f"sellable_candidates={len(rows)}"
+        )
+
+        # ── Distance calculation ─────────────────────────────────────────
+        with_dist    = []
+        without_dist = []
+
+        for r in rows:
+            has_coords = _valid_coords(
+                r.get("latitude"), r.get("longitude")
+            )
+            distance = None
+
+            if src_has_coords and has_coords:
+                try:
+                    distance = round(
+                        _haversine_km(
+                            src_lat, src_lng,
+                            float(r.latitude), float(r.longitude),
+                        ),
+                        3,
+                    )
+                except (TypeError, ValueError):
+                    distance = None
+
+            entry = {
+                "warehouse":      r.warehouse,
+                "warehouse_name": r.warehouse_name or r.warehouse,
+                "company":        r.company or "",
+                "city":           r.city or "",
+                "store_name":     "",
+                "store_code":     "",
+                "distance_km":    distance,
+                "has_coords":     bool(has_coords),
+            }
+
+            if distance is not None:
+                with_dist.append(entry)
+            else:
+                without_dist.append(entry)
+
+        # ── Enrich with CH Store info (single batch query) ───────────────
+        wh_names = [
+            e["warehouse"] for e in (with_dist + without_dist)
+        ]
+        if wh_names:
+            try:
+                store_rows = frappe.db.sql(
+                    """
+                    SELECT warehouse, store_name, store_code
+                      FROM `tabCH Store`
+                     WHERE warehouse IN %(whs)s
+                       AND disabled = 0
+                    """,
+                    {"whs": wh_names},
+                    as_dict=True,
+                )
+                store_map = {s.warehouse: s for s in store_rows}
+                for e in (with_dist + without_dist):
+                    s = store_map.get(e["warehouse"])
+                    if s:
+                        e["store_name"] = s.store_name or ""
+                        e["store_code"] = s.store_code or ""
+            except Exception:
+                # CH Store may not exist in some deployments — skip safely
+                pass
+
+        # ── Sort: nearest first → then coord-less alphabetical ───────────
+        with_dist.sort(key=lambda x: x["distance_km"])
+        without_dist.sort(key=lambda x: x["warehouse_name"].lower())
+
+        return with_dist + without_dist
+
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            "get_transfer_target_warehouses failed",
+        )
+        return []
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @frappe.whitelist(methods=["POST"])
 def create_store_transfer_request(from_warehouse, to_warehouse, items,
                                   notes=None, expected_delivery_date=None) -> dict:
