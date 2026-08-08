@@ -1,5 +1,5 @@
 import frappe
-from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+from frappe.custom.doctype.custom_field.custom_field import create_custom_fields, delete_custom_fields
 from textwrap import dedent
 
 
@@ -103,20 +103,11 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
         {
-            "fieldname": "custom_repair_intake",
-            "fieldtype": "Link",
-            "label": "Repair Intake",
-            "options": "POS Repair Intake",
-            "insert_after": "custom_guided_session",
-            "read_only": 1,
-            "module": "POS Core",
-        },
-        {
             "fieldname": "custom_exchange_assessment",
             "fieldtype": "Link",
             "label": "Exchange Assessment",
             "options": "Buyback Assessment",
-            "insert_after": "custom_repair_intake",
+            "insert_after": "custom_guided_session",
             "read_only": 1,
             "module": "POS Core",
         },
@@ -902,6 +893,20 @@ def after_install():
 
 
 def after_migrate():
+    # POS creates the canonical Service Request directly; never recreate the
+    # retired POS Repair Intake link from an older exported fixture.
+    delete_custom_fields({"Sales Invoice": ["custom_repair_intake"]})
+    field_order = frappe.db.get_value(
+        "Property Setter", "Sales Invoice-main-field_order", "value"
+    )
+    if field_order and '"custom_repair_intake"' in field_order:
+        frappe.db.set_value(
+            "Property Setter",
+            "Sales Invoice-main-field_order",
+            "value",
+            field_order.replace('"custom_repair_intake", ', ""),
+            update_modified=False,
+        )
     _scrub_broken_link_custom_fields(CUSTOM_FIELDS.keys())
     create_custom_fields(_filter_ready_fields(CUSTOM_FIELDS), update=False)
     sync_margin_receipt_format()

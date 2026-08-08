@@ -47,23 +47,10 @@ def _ensure_result_limit(rows, limit: int, label: str):
 # ---------------------------------------------------------------------------
 
 def _ensure_can_operate_token() -> None:
-    """Raise PermissionError unless the user has Operate authority on tokens.
-
-    Falls back to legacy role check if ch_erp15 isn't installed (defensive —
-    ch_pos can run standalone in test envs).
-    """
+    """Use the standard DocType write permission for token operations."""
     if is_privileged_user():
         return
-    try:
-        from ch_erp15.ch_erp15.auth import authority as auth
-    except ImportError:
-        require_configured_roles(
-            "token_operation_roles",
-            defaults=("POS User", "POS Manager"),
-            action=_("operate queue tokens"),
-        )
-        return
-    if auth.can("Operate", "POS Kiosk Token") or auth.can("Override", "POS Kiosk Token"):
+    if frappe.has_permission("POS Kiosk Token", ptype="write"):
         return
     frappe.throw(_("Not permitted"), frappe.PermissionError, title=_("API Error"))
 
@@ -141,7 +128,7 @@ def _assert_token_scope(token_name: str) -> None:
     )
     if not tok:
         frappe.throw(_("Queue token was not found."), frappe.DoesNotExistError)
-    assert_store_scope(store=tok.store, company=tok.company)
+    assert_store_scope(warehouse=tok.store, company=tok.company)
 
 
 def _assert_token_assignee(user: str, pos_profile: str) -> None:

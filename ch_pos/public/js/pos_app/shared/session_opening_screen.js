@@ -176,7 +176,7 @@ export class SessionOpeningScreen {
 							this._continue_with_store(resumeStore, _done);
 							return;
 						}
-						this._show_store_picker(stores, _done, this._get_saved_store() || ctx.default_store);
+						this._show_store_picker(stores, _done, this._get_saved_store() || ctx.default_store, ctx);
 					} else if (ctx.day_closed) {
 						// Day closed — no access until date is advanced (market standard)
 						this._show_day_closed_message({ store: ctx.store, business_date: ctx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
@@ -238,7 +238,7 @@ export class SessionOpeningScreen {
 						this._continue_with_store(resumeStore, resolve);
 						return;
 					}
-					this._show_store_picker(stores, resolve, this._get_saved_store() || freshCtx.default_store);
+					this._show_store_picker(stores, resolve, this._get_saved_store() || freshCtx.default_store, freshCtx);
 				} else if (freshCtx.day_closed) {
 					this._show_day_closed_message({ store: freshCtx.store, business_date: freshCtx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [freshCtx.business_date]) });
 				} else {
@@ -325,9 +325,10 @@ export class SessionOpeningScreen {
 		});
 	}
 
-	_show_store_picker(stores, resolve, defaultStore) {
+	_show_store_picker(stores, resolve, defaultStore, ctx) {
 		this._dismiss_dialog();
 		stores = stores || [];
+		ctx = ctx || {};
 		const storeOptions = stores.map(
 			s => `${s.name} — ${s.store_name || s.name}`
 		);
@@ -335,25 +336,46 @@ export class SessionOpeningScreen {
 			? storeOptions.find(o => o.startsWith(defaultStore + " — ")) || ""
 			: "";
 
+		// The list is scoped to the active company. Offer an explicit escape
+		// rather than silently hiding the other companies' stores.
+		const canWiden = !!ctx.active_company && !ctx.showing_all_companies;
+		const fields = [
+			{
+				fieldname: "info",
+				fieldtype: "HTML",
+				options: `<div class="alert alert-info" style="margin-bottom:10px">
+					${frappe.utils.escape_html(ctx.message || __("You have administrative access. Select a store to continue."))}
+				</div>`,
+			},
+			{
+				fieldname: "store",
+				fieldtype: "Select",
+				label: __("Store"),
+				options: ["", ...storeOptions],
+				reqd: 1,
+				default: defaultOption,
+			},
+		];
+		if (canWiden) {
+			fields.push({
+				fieldname: "all_companies",
+				fieldtype: "Check",
+				label: __("Show stores from all companies"),
+				default: 0,
+				description: __("Leave unticked to stay within {0}.", [ctx.active_company]),
+				change: () => {
+					if (!dlg.get_value("all_companies")) return;
+					dlg.hide();
+					this._reload_store_picker(resolve, defaultStore);
+				},
+			});
+		}
+
 		const dlg = new frappe.ui.Dialog({
-			title: __("Select Store"),
-			fields: [
-				{
-					fieldname: "info",
-					fieldtype: "HTML",
-					options: `<div class="alert alert-info" style="margin-bottom:10px">
-						${__("You have administrative access. Select a store to continue.")}
-					</div>`,
-				},
-				{
-					fieldname: "store",
-					fieldtype: "Select",
-					label: __("Store"),
-					options: ["", ...storeOptions],
-					reqd: 1,
-					default: defaultOption,
-				},
-			],
+			title: ctx.active_company && !ctx.showing_all_companies
+				? __("Select Store — {0}", [ctx.active_company])
+				: __("Select Store"),
+			fields,
 			primary_action_label: __("Continue"),
 			primary_action: (values) => {
 				const selectedLabel = values.store || "";
@@ -367,6 +389,21 @@ export class SessionOpeningScreen {
 		});
 		dlg.show();
 		this._dialog = dlg;
+	}
+
+	/** Re-fetch the picker unscoped after the admin opts into all companies. */
+	_reload_store_picker(resolve, defaultStore) {
+		frappe.call({
+			method: "ch_pos.api.isolation_api.get_pos_context",
+			args: { all_companies: 1 },
+			callback: (r) => {
+				const ctx = r.message || {};
+				this._show_store_picker(ctx.stores || [], resolve, defaultStore, ctx);
+			},
+			error: () => {
+				this._pending_promise = null;
+			},
+		});
 	}
 
 	_show_profile_and_opening(open_entries, resolve) {

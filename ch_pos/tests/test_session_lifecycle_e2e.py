@@ -210,6 +210,32 @@ def _cleanup_session(session_name):
     frappe.db.commit()
 
 
+def close_test_session_with_standard_voucher(session_name, closing_cash=0):
+    """Close a test session through production logic without changing live settings."""
+    original = frappe.db.get_single_value(
+        "CH POS Control Settings", "require_settlement_before_session_close"
+    )
+    try:
+        frappe.db.set_single_value(
+            "CH POS Control Settings", "require_settlement_before_session_close", 0
+        )
+        frappe.db.commit()
+        from ch_pos.api.session_api import close_session
+
+        return close_session(
+            session_name=session_name,
+            closing_cash=closing_cash,
+            manager_pin="1234",
+        )
+    finally:
+        frappe.db.set_single_value(
+            "CH POS Control Settings",
+            "require_settlement_before_session_close",
+            original or 0,
+        )
+        frappe.db.commit()
+
+
 # ── Test Scenarios ───────────────────────────────────────────────────────────
 
 def test_01_get_pos_context_system_manager():
@@ -539,18 +565,54 @@ def test_09_close_session():
 
 def test_10_override_business_date():
     """override_business_date advances the date correctly."""
+    bd_name = None
+    test_pin_name = None
     try:
         ctx = _get_test_context()
         if not ctx:
             skip("10 override_business_date", "No test context")
             return
 
-        pin = _ensure_manager_pin(ctx["store"])
-        if not pin:
-            skip("10 override_business_date", "No manager PIN")
-            return
-
         frappe.set_user("Administrator")
+
+        # Use a dedicated, short-lived credential. Never broaden an existing
+        # manager's permissions merely to satisfy this test.
+        import secrets
+
+        test_pin = f"{secrets.randbelow(1_000_000):06d}"
+        test_user = frappe.db.sql(
+            """
+            SELECT u.name
+              FROM `tabUser` u
+              JOIN `tabHas Role` r
+                ON r.parent = u.name
+               AND r.parenttype = 'User'
+               AND r.role = 'System Manager'
+             WHERE u.enabled = 1
+               AND u.name != 'Administrator'
+               AND NOT EXISTS (
+                    SELECT 1 FROM `tabCH POS Password` p WHERE p.user = u.name
+               )
+             ORDER BY u.name
+             LIMIT 1
+            """,
+            pluck=True,
+        )
+        if not test_user:
+            skip("10 override_business_date", "No unused System Manager test user")
+            return
+        pin_doc = frappe.get_doc({
+            "doctype": "CH POS Password",
+            "user": test_user[0],
+            "employee_name": "E2E Business Date Override",
+            "store": ctx["store"],
+            "pin_hash": test_pin,
+            "is_active": 1,
+            "can_override_business_date": 1,
+        })
+        pin_doc.insert(ignore_permissions=True)
+        test_pin_name = pin_doc.name
+        frappe.db.commit()
 
         # Set business date to past + Closed
         bd_name = frappe.db.get_value("CH Business Date", {"store": ctx["store"]}, "name")
@@ -566,7 +628,7 @@ def test_10_override_business_date():
             store=ctx["store"],
             new_date=nowdate(),
             reason="E2E test advance",
-            manager_pin="1234",
+            manager_pin=test_pin,
         )
 
         assert result.get("business_date") == nowdate(), f"Should advance to today, got {result.get('business_date')}"
@@ -576,15 +638,19 @@ def test_10_override_business_date():
         assert str(bd_row.business_date) == nowdate(), f"DB date should be today: {bd_row.business_date}"
 
         ok("10 override_business_date", f"Advanced from {old_date} to {nowdate()}")
-
-        # Reset for subsequent tests
-        frappe.db.set_value("CH Business Date", bd_name, {
-            "business_date": nowdate(),
-            "status": "Open",
-        })
-        frappe.db.commit()
     except Exception as e:
         fail("10 override_business_date", str(e))
+    finally:
+        if bd_name:
+            frappe.db.set_value("CH Business Date", bd_name, {
+                "business_date": nowdate(),
+                "status": "Open",
+            })
+        if test_pin_name and frappe.db.exists("CH POS Password", test_pin_name):
+            frappe.delete_doc(
+                "CH POS Password", test_pin_name, ignore_permissions=True, force=True
+            )
+        frappe.db.commit()
 
 
 def test_11_complete_lifecycle():
@@ -724,20 +790,6 @@ def test_13_open_session_blocked_on_closed_day():
         # Create a closed session for today to make the day "closed"
         bd_name = frappe.db.get_value("CH Business Date", {"store": ctx["store"]}, "name")
 
-        # Close orphaned opening entries first
-        stale_entries = frappe.db.get_all(
-            "POS Opening Entry",
-            filters={
-                "pos_profile": ctx["pos_profile"],
-                "status": "Open",
-                "docstatus": 1,
-                "pos_closing_entry": ("in", ["", None]),
-            },
-            pluck="name",
-        )
-        for se in stale_entries:
-            frappe.db.set_value("POS Opening Entry", se, "status", "Closed", update_modified=False)
-
         # Create+close a dummy session to make the day closed
         oe = frappe.get_doc({
             "doctype": "POS Opening Entry",
@@ -764,9 +816,10 @@ def test_13_open_session_blocked_on_closed_day():
         })
         closed_sess.insert(ignore_permissions=True)
         closed_sess.submit()
-        frappe.db.set_value("CH POS Session", closed_sess.name, "status", "Closed", update_modified=False)
-        frappe.db.set_value("CH Business Date", bd_name, "status", "Closed")
-        frappe.db.commit()
+
+        # Use the production close path so the test never leaves a custom session
+        # marked Closed while its standard POS Opening Entry remains Open.
+        close_test_session_with_standard_voucher(closed_sess.name, closing_cash=1000)
 
         # Now try to open — should fail
         from ch_pos.api.session_api import open_session

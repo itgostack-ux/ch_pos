@@ -24,7 +24,7 @@ from ch_pos.config import require_configured_roles
 
 
 def _assert_edc_scope(doc) -> None:
-	store = doc.store
+	store = None
 	warehouse = doc.store
 	if doc.session:
 		session = frappe.db.get_value(

@@ -27,6 +27,22 @@ def build_condition_and_backup(device_condition, accessories, data_disclaimer):
 	return product_condition_desc, backup_info
 
 
+def resolve_legacy_device_item(device_brand=None, device_model=None):
+	"""Resolve old POS brand/model payloads without retaining a wrapper DocType."""
+	search = f"{device_brand or ''} {device_model or ''}".strip()
+	if not search:
+		return None
+	return frappe.db.get_value(
+		"Item",
+		{
+			"item_name": ("like", f"%{search}%"),
+			"disabled": 0,
+			"ch_lifecycle_status": ("in", ("Active", "Obsolete")),
+		},
+		"name",
+	)
+
+
 @frappe.whitelist(methods=["POST"])
 def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	"""Create and SUBMIT a GoFix Service Request from the POS Service Intake form.
@@ -79,61 +95,27 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	sr.insert()
 	sr.submit()
 
-	return {"name": sr.name, "docstatus": sr.docstatus, "status": sr.status}
+	return {"name": sr.name, "docstatus": sr.docstatus, "status": sr.decision}
 
 
 @frappe.whitelist(methods=["POST"])
 def create_repair_intake(data, pos_profile=None) -> dict:
-    """Create POS Repair Intake and auto-generate Service Request on submit."""
-    if isinstance(data, str):
-        data = frappe.parse_json(data)
-
-    frappe.has_permission("POS Repair Intake", "create", throw=True)
-    anchors = assert_pos_profile_scope(pos_profile)
-
-    # Default store (GoGizmo source warehouse) from POS Profile when caller did not pass one.
-    # Ensures Service Request gets correctly tagged to the originating store even
-    # if the kiosk/POS UI omits it from the payload.
-    if data.get("store") and data.get("store") != anchors.get("warehouse"):
-        frappe.throw(_("Store does not match the active POS Profile."), frappe.PermissionError)
-    data["store"] = anchors.get("warehouse")
-
-    # Validate and normalise phone number if provided
-    if data.get("customer_phone"):
-        data["customer_phone"] = validate_indian_phone(
-            data["customer_phone"], "Customer Phone"
-        )
-
-    doc = frappe.new_doc("POS Repair Intake")
-    for field in (
-        "store", "customer", "customer_phone",
-        "device_category", "device_brand", "device_model",
-        "serial_no", "imei_number",
-        "issue_category", "issue_description",
-        "mode_of_service", "password_pattern",
-        "device_condition", "accessories_received",
-        "data_backup_disclaimer",
-    ):
-        if data.get(field):
-            doc.set(field, data[field])
-
-    doc.insert()
-    doc.submit()
-
-    # Create walk-in token for this repair intake
-    if pos_profile:
-        try:
-            from ch_pos.api.token_api import log_counter_walkin
-            log_counter_walkin(
-                pos_profile=pos_profile,
-                visit_purpose="Repair",
-                customer_name=data.get("customer", "Walk-in"),
-                customer_phone=data.get("customer_phone", ""),
-            )
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), "Repair walk-in token failed")
-
-    return {
-        "intake_name": doc.name,
-        "service_request_name": doc.service_request,
-    }
+	"""Compatibility endpoint: create the canonical Service Request directly."""
+	if isinstance(data, str):
+		data = frappe.parse_json(data)
+	payload = dict(data or {})
+	payload["contact_number"] = payload.get("contact_number") or payload.get("customer_phone")
+	payload["serial_no"] = payload.get("serial_no") or payload.get("imei_number")
+	payload["source_warehouse"] = payload.get("source_warehouse") or payload.get("store")
+	if not payload.get("device_item"):
+		payload["device_item"] = resolve_legacy_device_item(
+			payload.get("device_brand"), payload.get("device_model")
+		)
+	result = create_service_intake_from_pos(payload, pos_profile=pos_profile)
+	return {
+		"intake_name": None,
+		"service_request_name": result["name"],
+		"name": result["name"],
+		"docstatus": result["docstatus"],
+		"status": result["status"],
+	}

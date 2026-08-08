@@ -21,6 +21,7 @@ from frappe.utils import (
 )
 
 from ch_item_master.ch_item_master.utils import validate_indian_phone
+from ch_item_master.ch_core.cost_center import apply_cost_center, resolve_cost_center
 from ch_pos.api.scope_guard import (
     assert_any_warehouse_scope,
     assert_pos_profile_scope,
@@ -117,7 +118,12 @@ def _assert_service_request_scope(service_request, permission="read"):
     )
     doc.check_permission(permission)
     warehouse = doc.get("source_warehouse")
-    store = doc.get("store")
+    location = doc.get("store")
+    store = location if location and frappe.db.exists("CH Store", location) else None
+    if location and not store and not warehouse and frappe.db.exists("Warehouse", location):
+        warehouse = location
+    if location and not store and not warehouse:
+        frappe.throw(_("Service Request has an invalid store/location value."), frappe.PermissionError)
     company = doc.get("company")
     if not any((warehouse, store, company)) and not is_privileged_user():
         frappe.throw(_("Service Request has no store or company scope."), frappe.PermissionError)
@@ -241,6 +247,14 @@ def _resolve_exchange_credit(assessment_name, buyback_order, customer, pos_profi
 def _caller_can_apply_discount(profile_anchors, effective_percentage) -> bool:
     if is_privileged_user():
         return True
+    matrix_limit = _approval_matrix_discount_limit(
+        frappe.session.user, profile_anchors
+    )
+    if matrix_limit is not None:
+        return matrix_limit > 0 and effective_percentage <= matrix_limit + 0.0001
+
+    # Compatibility fallback for installations without ch_erp15. Sites with
+    # the authority engine use its role-based percentage ceiling above.
     filters = {
         "user": frappe.session.user,
         "company": profile_anchors.get("company"),
@@ -260,6 +274,18 @@ def _caller_can_apply_discount(profile_anchors, effective_percentage) -> bool:
         if maximum <= 0 or effective_percentage <= maximum + 0.0001:
             return True
     return False
+
+
+def _approval_matrix_discount_limit(user, anchors):
+    """Return the central POS discount ceiling, or None if the app is absent."""
+    try:
+        from ch_erp15.ch_erp15.auth import authority as auth
+    except ImportError:
+        return None
+    company = anchors.get("company") if anchors else None
+    return auth.max_percent_for(
+        "Discount", "POS Invoice", user=user, doc={"company": company}
+    )
 
 
 def _ensure_prebook_reassign_access() -> None:
@@ -1112,6 +1138,7 @@ def _create_pre_booking_advance_pe(so, mode_of_payment: str, amount: float,
         "allocated_amount": amount,
     })
     pe.remarks = _("Pre-booking advance against Sales Order {0}").format(so.name)
+    apply_cost_center(pe, warehouse=so.set_warehouse)
     pe.insert()
     return pe.name
 
@@ -1521,6 +1548,7 @@ def _create_on_account_advance_pe(so, mode_of_payment, amount, reference_no=None
     pe.reference_no = reference_no or so.name
     pe.reference_date = nowdate()
     pe.remarks = _("Retained advance credit from cancelled pre-booking {0}").format(so.name)
+    apply_cost_center(pe, warehouse=so.set_warehouse)
     pe.insert()
     return pe.name
 
@@ -1551,6 +1579,7 @@ def _create_advance_refund_pe(so, mode_of_payment, amount):
     pe.reference_no = so.name
     pe.reference_date = nowdate()
     pe.remarks = _("Refund of pre-booking advance for cancelled {0}").format(so.name)
+    apply_cost_center(pe, warehouse=so.set_warehouse)
     pe.insert()
     return pe.name
 
@@ -1885,8 +1914,14 @@ def _force_insert_tax_rows(si_name, template_name):
             "DELETE FROM `tabSales Taxes and Charges` WHERE parent = %s",
             (si_name,))
 
-        company = frappe.db.get_value("Sales Invoice", si_name, "company")
-        default_cc = frappe.db.get_value("Company", company, "cost_center") or ""
+        invoice_values = frappe.db.get_value(
+            "Sales Invoice", si_name, ["company", "cost_center"], as_dict=True
+        )
+        company = invoice_values.company
+        transaction_cc = invoice_values.cost_center or ""
+        default_cc = transaction_cc or frappe.db.get_value(
+            "Company", company, "cost_center"
+        ) or ""
 
         if not default_cc:
             fallback = frappe.db.sql("""
@@ -1908,7 +1943,11 @@ def _force_insert_tax_rows(si_name, template_name):
                 "account_head": src.account_head,
                 "description":  src.description or src.account_head,
                 "rate":         flt(src.rate),
-                "cost_center":  src.cost_center or default_cc,
+                # POS Profile cost centers are transaction dimensions.  GST
+                # templates are company-wide and normally carry the company
+                # default, so allowing the template to win would silently
+                # move each store's tax legs back to Main.
+                "cost_center":  transaction_cc or src.cost_center or default_cc,
                 "tax_amount":   0,
                 "base_tax_amount": 0,
                 "tax_amount_after_discount_amount": 0,
@@ -3107,6 +3146,11 @@ def create_pos_invoice(
     inv.pos_profile = pos_profile
     inv.customer = customer
     inv.company = profile.company
+    pos_cost_center = profile.cost_center or frappe.db.get_value(
+        "Company", profile.company, "cost_center"
+    )
+    if pos_cost_center:
+        inv.cost_center = pos_cost_center
     inv.selling_price_list = profile.selling_price_list
     inv.currency = profile.currency or frappe.get_cached_value(
         "Company", profile.company, "default_currency")
@@ -3115,6 +3159,7 @@ def create_pos_invoice(
         str(active.get("business_date"))
         if active.get("business_date") else nowdate())
     inv.is_pos = 1
+    inv.is_created_using_pos = 1
     inv.update_stock = 1
     inv.due_date = None
     if exchange_context:
@@ -3427,6 +3472,7 @@ def create_pos_invoice(
             "price_list_rate": item_exception_original,
             "uom": item.get("uom", "Nos"),
             "warehouse": profile.warehouse,
+            "cost_center": pos_cost_center,
             "discount_percentage": 0,
             "discount_amount": 0,
         }
@@ -4251,11 +4297,11 @@ def create_pos_invoice(
     # to Invoiced, and close the Service Order so it doesn't linger as a
     # draft with a QC-Pass badge.
     for _svc_sr_name in (service_billing or {}):
-        _svc_updates = {"service_invoice": inv.name, "status": "Invoiced"}
+        _svc_updates = {"service_invoice": inv.name}
         for _svc_col in ("decision", "workflow_state"):
             if frappe.db.has_column("Service Request", _svc_col):
                 _svc_updates[_svc_col] = "Invoiced"
-        frappe.db.set_value("Service Request", _svc_sr_name, _svc_updates, update_modified=True)
+        frappe.get_doc("Service Request", _svc_sr_name).db_set(_svc_updates, update_modified=True)
         try:
             from gofix.gofix_services.api import auto_close_service_order_after_billing
 
@@ -4936,47 +4982,6 @@ def _create_active_plan(warranty_plan, customer, item_code, company, sales_invoi
     sp.sold_by = frappe.session.user
     sp.insert()
     sp.submit()
-
-    # Link active VAS plan back to CH Customer Device — create the device
-    # record on-the-fly if one does not exist yet. Previously we only
-    # linked when a CH Customer Device row already existed, which meant
-    # POS-sold VAS plans on brand-new (or IMEI-migrated) devices left the
-    # customer-device ledger blank and the plan was invisible in the
-    # customer 360 / warranty dashboards.
-    if serial_no:
-        cd_name = frappe.db.get_value("CH Customer Device", {"serial_no": serial_no})
-        if not cd_name:
-            frappe.has_permission("CH Customer Device", "create", throw=True)
-            customer_device_item = external_device_model_item or item_code
-            item_name = frappe.db.get_value("Item", customer_device_item, "item_name") or customer_device_item
-            item_brand = frappe.db.get_value("Item", customer_device_item, "brand")
-            cd = frappe.new_doc("CH Customer Device")
-            cd.customer = customer
-            cd.serial_no = serial_no
-            cd.item_code = customer_device_item
-            cd.item_name = item_name
-            if item_brand:
-                cd.brand = item_brand
-            cd.company = company
-            cd.imei_number = serial_no
-            cd.current_status = "Sold"
-            cd.purchase_date = today
-            cd.purchase_invoice = original_invoice or sales_invoice
-            cd.purchase_company = company
-            cd.purchase_price = flt(device_purchase_price)
-            cd.active_warranty_plan = sp.name
-            cd.warranty_status = "In Warranty"
-            cd.warranty_expiry = sp.end_date
-            cd.warranty_plan_name = frappe.db.get_value(
-                "CH Warranty Plan", warranty_plan, "plan_name"
-            ) or warranty_plan
-            cd.warranty_months = plan_doc.duration_months or 0
-            cd.insert()
-        else:
-            cd = frappe.get_doc("CH Customer Device", cd_name)
-            cd.check_permission("write")
-            cd.active_warranty_plan = sp.name
-            cd.save()
 
     return sp
 
@@ -6424,6 +6429,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     )
     ret.posting_date = str(_active.get("business_date")) if _active and _active.get("business_date") else nowdate()
     ret.is_pos = 1
+    ret.is_created_using_pos = 1
     ret.is_return = 1
     ret.return_against = orig.name
     # Phase D — credit-only returns skip the Stock Ledger Entry. POS Invoices
@@ -7634,8 +7640,10 @@ def check_serial_returnable(serial_no, original_invoice=None) -> dict:
         )}
 
     # Check CH Serial Lifecycle status — only "Sold" or "Delivered" devices can be returned
-    if frappe.db.exists("CH Serial Lifecycle", serial_no):
-        lifecycle_status = frappe.db.get_value("CH Serial Lifecycle", serial_no, "lifecycle_status")
+    if frappe.db.exists("CH Serial Lifecycle", {"serial_no": serial_no}):
+        lifecycle_status = frappe.db.get_value(
+            "CH Serial Lifecycle", {"serial_no": serial_no}, "lifecycle_status"
+        )
         if lifecycle_status and lifecycle_status not in ("Sold", "Delivered"):
             return {
                 "returnable": False,
@@ -7696,11 +7704,11 @@ def get_store_repairs(pos_profile) -> dict:
         "Service Request",
         filters={
             "source_warehouse": warehouse,
-            "status": ["in", ["Open", "Draft", "In Service", "Waiting for Parts", "Ready for Delivery", "Completed"]],
+            "decision": ["in", ["Draft", "Accepted", "In Service", "Completed"]],
         },
         fields=[
             "name", "customer", "customer_name", "device_item", "serial_no",
-            "issue_category", "status", "decision", "priority",
+            "issue_category", "decision", "priority",
             "service_order", "creation", "estimated_cost", "service_invoice",
         ],
         order_by="creation desc",
@@ -7747,6 +7755,7 @@ def get_store_repairs(pos_profile) -> dict:
         ))
 
     for sr in service_requests:
+        sr["status"] = sr.get("decision")
         sr["job_assignment"] = None
         sr["estimated_cost"] = flt(sr.estimated_cost)
         ja = assignments_by_order.get(sr.service_order)
@@ -7913,6 +7922,7 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     inv.warehouse = profile.warehouse
     inv.posting_date = nowdate()
     inv.is_pos = 1
+    inv.is_created_using_pos = 1
     inv.update_stock = 0  # Service item — no stock movement
 
     inv.append("items", {
@@ -8027,59 +8037,34 @@ def get_repair_closure_data(service_request, pos_profile=None) -> dict:
     else:
         eng_users = []
 
-    # --- Spare parts: prefer spare_lines (new), fall back to spare_parts (legacy) ---
+    # --- Executed spares: only submitted usage backed by ERPNext stock ---
     spare_parts = []
-    for row in sr.get("spare_lines", []):
-        if row.status == "Damaged":
-            continue
-        item_code = row.spare_item
+    usage_rows = frappe.get_all(
+        "Spare Parts Usage",
+        filters={
+            "service_request": service_request,
+            "docstatus": 1,
+            "status": "Active",
+            "deleted": 0,
+            "part_status": "Consumed",
+        },
+        fields=["name", "spare_part_item", "item_name", "qty_used", "uom", "sales_price"],
+        order_by="line_seq_no",
+        limit_page_length=500,
+    )
+    for row in usage_rows:
+        item_code = row.spare_part_item
         warranty_months = cint(frappe.db.get_value("Item", item_code, "ch_default_warranty_months")) if item_code else 0
         spare_parts.append({
+            "spare_usage": row.name,
             "spare_part_item": item_code,
             "item_name": row.item_name or "",
-            "qty": flt(row.qty) or 1,
-            "uom": row.get("uom") or "Nos",
-            "rate": flt(row.rate),
-            "amount": flt(row.amount or (row.qty * row.rate)),
+            "qty": flt(row.qty_used) or 1,
+            "uom": row.uom or "Nos",
+            "rate": flt(row.sales_price),
+            "amount": flt(row.qty_used) * flt(row.sales_price),
             "warranty_months": warranty_months,
         })
-    # Fallback 1: legacy spare_parts child table
-    if not spare_parts:
-        legacy = frappe.db.get_all(
-            "Service Request Spare Part",
-            filters={"parent": service_request, "parenttype": "Service Request"},
-            fields=["spare_part_item", "item_name", "qty", "uom", "rate", "amount"],
-            order_by="idx",
-        )
-        for row in legacy:
-            item_code = row.spare_part_item
-            warranty_months = cint(frappe.db.get_value("Item", item_code, "ch_default_warranty_months")) if item_code else 0
-            row["warranty_months"] = warranty_months
-        spare_parts = legacy
-    # Fallback 2: pull from Solution Spare Mapping if solutions exist but no spares recorded
-    if not spare_parts:
-        solution_names = [r.repair_solution for r in sr.get("solution_lines", []) if r.status == "Completed" and r.requires_spare]
-        if solution_names:
-            mappings = frappe.db.get_all(
-                "Solution Spare Mapping",
-                filters={"repair_solution": ["in", solution_names], "is_active": 1},
-                fields=["spare_item", "item_name", "default_qty", "uom"],
-            )
-            for m in mappings:
-                item_code = m.spare_item
-                rate = flt(frappe.db.get_value("Item Price",
-                    {"item_code": item_code, "selling": 1}, "price_list_rate")) if item_code else 0
-                warranty_months = cint(frappe.db.get_value("Item", item_code, "ch_default_warranty_months")) if item_code else 0
-                spare_parts.append({
-                    "spare_part_item": item_code,
-                    "item_name": m.item_name or "",
-                    "qty": flt(m.default_qty) or 1,
-                    "uom": m.uom or "Nos",
-                    "rate": rate,
-                    "amount": rate * (flt(m.default_qty) or 1),
-                    "warranty_months": warranty_months,
-                    "from_mapping": True,
-                })
 
     # --- Service items from SR ---
     service_items = []
@@ -8133,7 +8118,7 @@ def get_repair_closure_data(service_request, pos_profile=None) -> dict:
         "solutions": solutions,
         "technicians": eng_users,
         "issue_category": sr.issue_category or "",
-        "status": sr.status or "",
+        "status": sr.decision or "",
         "decision": sr.decision or "",
         "priority": sr.priority or "",
         "service_invoice": sr.service_invoice or "",
@@ -8152,6 +8137,11 @@ def _repair_billing_location(sr) -> dict:
 
 
 def _normalize_repair_spare_parts(sr, requested_parts) -> list[dict]:
+    """Return the complete authoritative executed-spare set for billing.
+
+    The client may confirm the rows it was shown, but cannot add, remove,
+    understate or reprice submitted stock consumption during checkout.
+    """
     if not isinstance(requested_parts, list):
         frappe.throw(_("Spare parts must be a list."))
     max_rows = max(
@@ -8161,57 +8151,62 @@ def _normalize_repair_spare_parts(sr, requested_parts) -> list[dict]:
     if len(requested_parts) > max_rows:
         frappe.throw(_("A repair closure may contain at most {0} spare rows.").format(max_rows))
 
-    authorized = {}
-    for row in sr.get("spare_lines", []) or []:
-        if row.status == "Damaged" or not row.spare_item:
-            continue
-        authorized[row.spare_item] = {
-            "item_code": row.spare_item,
-            "item_name": row.item_name or row.spare_item,
-            "qty": flt(row.qty) or 1,
-            "uom": row.get("uom") or "Nos",
-            "rate": flt(row.rate),
-        }
-    for row in sr.get("spare_parts", []) or []:
-        if not row.spare_part_item:
-            continue
-        authorized.setdefault(
-            row.spare_part_item,
-            {
-                "item_code": row.spare_part_item,
-                "item_name": row.item_name or row.spare_part_item,
-                "qty": flt(row.qty) or 1,
-                "uom": row.get("uom") or "Nos",
-                "rate": flt(row.rate),
-            },
-        )
+    usage_rows = frappe.get_all(
+        "Spare Parts Usage",
+        filters={
+            "service_request": sr.name,
+            "docstatus": 1,
+            "status": "Active",
+            "deleted": 0,
+            "part_status": "Consumed",
+        },
+        fields=["name", "spare_part_item", "item_name", "qty_used", "uom", "sales_price"],
+        order_by="line_seq_no, creation, name",
+        limit_page_length=max_rows,
+    )
+    if len(requested_parts) != len(usage_rows):
+        frappe.throw(_("Every consumed spare must be billed exactly once; refresh the repair closure."))
 
+    authorized = {row.name: row for row in usage_rows}
+    unused = {row.name for row in usage_rows}
     normalized = []
-    seen = set()
     for part in requested_parts:
         if not isinstance(part, dict):
             frappe.throw(_("Each spare part must be an object."))
-        item_code = str(part.get("spare_part_item") or "").strip()
-        source = authorized.get(item_code)
-        if not source:
-            frappe.throw(_("Spare part {0} is not authorized on this Service Request.").format(item_code))
-        if item_code in seen:
-            frappe.throw(_("Spare part {0} appears more than once.").format(item_code))
-        seen.add(item_code)
-        qty = flt(part.get("qty"))
-        if qty <= 0 or qty > source["qty"] + 0.0001:
-            frappe.throw(_("Invalid quantity for spare part {0}.").format(item_code))
-        if part.get("rate") is not None and abs(flt(part.get("rate")) - source["rate"]) > 0.005:
-            frappe.throw(_("Spare part rate must match the authorized Service Request rate."))
-        normalized.append(
-            {
-                "spare_part_item": item_code,
-                "item_name": source["item_name"],
-                "qty": qty,
-                "uom": source["uom"],
-                "rate": source["rate"],
-            }
-        )
+        usage_name = str(part.get("spare_usage") or "").strip()
+        if usage_name:
+            source = authorized.get(usage_name)
+        else:
+            # Compatibility for an older POS client: safe only when the item
+            # maps to one unambiguous executed usage row.
+            item_code = str(part.get("spare_part_item") or "").strip()
+            matches = [
+                row for row in usage_rows
+                if row.name in unused and row.spare_part_item == item_code
+            ]
+            if len(matches) != 1:
+                frappe.throw(_("Repair spare rows changed or are ambiguous; refresh the POS screen."))
+            source = matches[0]
+            usage_name = source.name
+        if not source or usage_name not in unused:
+            frappe.throw(_("Spare usage {0} is not authorized on this Service Request.").format(usage_name))
+        if str(part.get("spare_part_item") or "").strip() != source.spare_part_item:
+            frappe.throw(_("The billed spare item does not match its executed usage record."))
+        if abs(flt(part.get("qty")) - flt(source.qty_used)) > 0.0001:
+            frappe.throw(_("Consumed spare quantities cannot be changed during billing."))
+        if part.get("rate") is not None and abs(flt(part.get("rate")) - flt(source.sales_price)) > 0.005:
+            frappe.throw(_("Consumed spare rates cannot be changed during billing."))
+        unused.remove(usage_name)
+        normalized.append({
+            "spare_usage": source.name,
+            "spare_part_item": source.spare_part_item,
+            "item_name": source.item_name or source.spare_part_item,
+            "qty": flt(source.qty_used),
+            "uom": source.uom or "Nos",
+            "rate": flt(source.sales_price),
+        })
+    if unused:
+        frappe.throw(_("Every consumed spare must be billed exactly once; refresh the repair closure."))
     return normalized
 
 
@@ -8224,10 +8219,10 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
 
     Steps:
     1. Assign technician to Job Assignment (if provided)
-    2. Save spare parts onto Service Request (replace child rows)
+    2. Verify submitted Spare Parts Usage records selected for billing
     3. Set QC status on the linked Sales Order
     4. Create Sales Invoice with service charge line + one line per spare part
-    5. Create Material Issue Stock Entry for spare parts
+    5. Reuse Stock Entries already owned by submitted Spare Parts Usage
     6. Mark SR as delivered / closed
 
     payments: list of {mode_of_payment, amount, reference_no}
@@ -8355,7 +8350,8 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     inv.warehouse = profile.warehouse
     inv.posting_date = nowdate()
     inv.is_pos = 1
-    inv.update_stock = 0  # spare parts handled via Stock Entry below
+    inv.is_created_using_pos = 1
+    inv.update_stock = 0  # consumed spares already own submitted Stock Entries
 
     # Link GoFix service details
     inv.custom_gofix_service_request = service_request
@@ -8404,37 +8400,22 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     inv.custom_si_approval_state = "Approved"
     inv.submit()
 
-    # 5 — Stock Entry for spare parts consumption
-    stock_entry_name = None
-    if spare_parts and profile.warehouse:
-        frappe.has_permission("Stock Entry", "create", throw=True)
-        frappe.has_permission("Stock Entry", "submit", throw=True)
-        se = frappe.new_doc("Stock Entry")
-        se.stock_entry_type = "Material Issue"
-        se.company = profile.company
-        se.posting_date = nowdate()
-        se.remarks = f"Spare parts consumed for {service_request}"
-        for part in spare_parts:
-            if not flt(part.get("qty", 0)):
-                continue
-            se.append("items", {
-                "item_code": part["spare_part_item"],
-                "qty": flt(part.get("qty", 1)),
-                "uom": part.get("uom") or "Nos",
-                "s_warehouse": profile.warehouse,
-                "basic_rate": flt(part.get("rate", 0)),
-            })
-        se.insert()
-        se.submit()
-        stock_entry_name = se.name
+    # 5 — Stock authority is the submitted Spare Parts Usage record.
+    stock_entries = frappe.get_all(
+        "Spare Parts Usage",
+        filters={"service_request": service_request, "docstatus": 1, "part_status": "Consumed"},
+        pluck="stock_entry",
+        limit_page_length=500,
+    )
+    stock_entries = [name for name in stock_entries if name]
 
     # 6 — Mark SR closed
-    sr_updates = {"service_invoice": inv.name, "status": "Completed"}
+    sr_updates = {"service_invoice": inv.name, "decision": "Invoiced"}
     if int(delivery_ack):
         sr_updates["delivery_mode"] = "Walk-in"
     if delivery_note:
         sr_updates["customer_remarks"] = delivery_note
-    frappe.db.set_value("Service Request", service_request, sr_updates, update_modified=False)
+    sr.db_set(sr_updates, update_modified=False)
 
     if qc_result == "Pass" and sr.service_order:
         # Properly close the Service Order (submit + workflow Closed + native
@@ -8450,7 +8431,8 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     return {
         "invoice": inv.name,
         "grand_total": inv.grand_total,
-        "stock_entry": stock_entry_name,
+        "stock_entry": stock_entries[0] if len(stock_entries) == 1 else None,
+        "stock_entries": stock_entries,
     }
 
 
@@ -8897,8 +8879,10 @@ def verify_discount_auth(
     ):
         frappe.throw(_("Discount authorization request is invalid."))
 
-    max_pct = flt(exec_doc.max_discount_pct)
-    if max_pct > 0 and effective_pct > max_pct:
+    max_pct = _approval_matrix_discount_limit(exec_doc.user, anchors)
+    if max_pct is None:
+        max_pct = flt(exec_doc.max_discount_pct) or 100.0
+    if max_pct <= 0 or effective_pct > max_pct:
         frappe.throw(
             frappe._("Requested discount {0}% exceeds {1}'s authorised limit of {2}%.").format(
                 round(effective_pct, 2), exec_doc.executive_name, max_pct
@@ -9163,7 +9147,7 @@ def imei_history(serial_no, pos_profile=None) -> dict:
     # Service requests  
     out["services"] = frappe.db.sql("""
         SELECT name, customer_name, device_item_name, issue_category,
-               issue_description, decision, status, service_date as date, estimated_cost
+               issue_description, decision, decision AS status, service_date as date, estimated_cost
         FROM `tabService Request`
         WHERE (actual_imei = %(sn)s OR serial_no = %(sn)s)
           AND company = %(company)s
@@ -9310,7 +9294,7 @@ def customer_360(identifier, company=None, pos_profile=None) -> dict:
     # Service Requests
     out["service_requests"] = frappe.db.sql("""
         SELECT name, customer_name, device_item_name, issue_category,
-               decision, status, service_date, creation, estimated_cost
+               decision, decision AS status, service_date, creation, estimated_cost
         FROM `tabService Request`
         WHERE customer = %(customer)s
           AND company = %(company)s
@@ -16046,7 +16030,14 @@ def _post_free_sale_write_off(inv) -> None:
     promo_account_company = frappe.db.get_value("Account", promo_account, "company")
     if promo_account_company != company:
         frappe.throw(_("Promotional Expense Account must belong to the invoice company."))
-    cost_center = frappe.db.get_value("Company", company, "cost_center")
+    cost_center = (
+        inv.get("cost_center")
+        or resolve_cost_center(
+            company,
+            warehouse=inv.get("set_warehouse"),
+            pos_profile=inv.get("pos_profile"),
+        )
+    )
     total_cost = flt(0)
     je_accounts = []
 
@@ -17018,6 +17009,7 @@ def convert_prebooking_to_invoice(pos_profile, sales_order,
 
     # ── POS flip ──────────────────────────────────────────────
     inv.is_pos = 1
+    inv.is_created_using_pos = 1
     inv.update_stock = 1
     inv.pos_profile = pos_profile
     inv.custom_ch_pos_session = active.get("name")

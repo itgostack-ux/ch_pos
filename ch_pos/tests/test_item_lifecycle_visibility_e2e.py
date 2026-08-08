@@ -318,18 +318,11 @@ def test_repair_intake_resolver_hides_inactive():
         skip("T06_repair_resolver", "no Draft/Pending Review/Blocked items in DB")
         return
 
-    # Build an in-memory PosRepairIntake instance without inserting — we only
-    # invoke the pure method.
-    from ch_pos.pos_repair.doctype.pos_repair_intake.pos_repair_intake import (
-        POSRepairIntake,
-    )
+    from ch_pos.api.repair import resolve_legacy_device_item
 
-    doc = frappe.new_doc("POS Repair Intake")
     # Make brand/model match the hidden item's name exactly so the LIKE search
-    # would resolve to it if the filter were absent.
-    doc.device_brand = hidden["item_name"][:40] or hidden["name"]
-    doc.device_model = ""
-    resolved = POSRepairIntake._resolve_device_item(doc)
+    # would resolve to it if the lifecycle filter were absent.
+    resolved = resolve_legacy_device_item(hidden["item_name"][:40] or hidden["name"], "")
     if resolved == hidden["name"]:
         fail("T06_repair_resolver", f"resolver picked hidden item {hidden['name']}")
         return
