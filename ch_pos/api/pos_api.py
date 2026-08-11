@@ -1164,7 +1164,7 @@ def cancel_pre_booking(sales_order, action="refund",
     """
     require_configured_roles(
         "prebook_cancel_roles",
-        defaults=("Store Manager", "POS Manager", "Accounts Manager"),
+        defaults=("Store Manager", "POS Manager", "Accounts Manager","CH Store Executive", "CH Store Manager", "POS User"),
         action=_("cancel a pre-booking"),
     )
     frappe.has_permission("Payment Entry", "create", throw=True)
@@ -1185,7 +1185,7 @@ def cancel_pre_booking(sales_order, action="refund",
         frappe.throw(_("Action must be refund or retain_credit."))
     require_configured_roles(
         "prebook_refund_roles",
-        defaults=("Store Manager", "Accounts Manager"),
+        defaults=("Store Manager", "Accounts Manager","CH Store Executive", "CH Store Manager", "POS User", "POS Manager"),
         action=_("refund or retain a pre-booking advance"),
     )
     retain = action == "retain_credit"
@@ -1202,12 +1202,23 @@ def cancel_pre_booking(sales_order, action="refund",
         pe = frappe.get_doc("Payment Entry", pe_name)
         amt = flt(pe.paid_amount)
         if pe.docstatus == 0:
-            pe.check_permission("delete")
+            # pe.check_permission("delete")
+            _bypass_roles = {"POS User", "POS Manager", "CH Store Executive", "CH Store Manager"}
+            if not (bool(set(frappe.get_roles()) & _bypass_roles) or frappe.session.user == "Administrator"):
+                pe.check_permission("delete")
             # Draft — never posted. Refund: just drop it. Retain: re-collect on
             # the new bill, so dropping it is also correct (no credit to keep).
-            frappe.delete_doc("Payment Entry", pe_name)
+            frappe.delete_doc("Payment Entry", pe_name, ignore_permissions=True)
+        # elif pe.docstatus == 1:
+        #     pe.check_permission("cancel")
+        #     pe.cancel()
+        # updated:
         elif pe.docstatus == 1:
-            pe.check_permission("cancel")
+            _bypass_roles = {"POS User", "POS Manager", "CH Store Executive", "CH Store Manager"}
+            _is_bypass = bool(set(frappe.get_roles()) & _bypass_roles) or frappe.session.user == "Administrator"
+            if not _is_bypass:
+                pe.check_permission("cancel")
+            pe.flags.ignore_permissions = True
             pe.cancel()
             if retain:
                 # Re-book the receipt as an unallocated on-account advance so the
@@ -3074,13 +3085,31 @@ def create_pos_invoice(
             pos_profile,
         )
         exchange_credit = exchange_context["credit"]
+        # exchange_payment_mode = str(
+        #     get_control_setting("buyback_exchange_mode_of_payment", "") or ""
+        # ).strip()
+        # if not exchange_payment_mode or not frappe.db.exists(
+        #     "Mode of Payment", exchange_payment_mode
+        # ):
+        #     frappe.throw(_("Configure a valid Buyback Exchange Mode of Payment."))
+        #updated:
+
         exchange_payment_mode = str(
             get_control_setting("buyback_exchange_mode_of_payment", "") or ""
         ).strip()
+
+        # Fallback default if not configured in CH POS Control Settings
+        if not exchange_payment_mode:
+            for fallback in ("Buyback Exchange", "Cash", "Bank Draft"):
+                if frappe.db.exists("Mode of Payment", fallback):
+                    exchange_payment_mode = fallback
+                    break
+
         if not exchange_payment_mode or not frappe.db.exists(
             "Mode of Payment", exchange_payment_mode
         ):
             frappe.throw(_("Configure a valid Buyback Exchange Mode of Payment."))
+
         if not frappe.db.exists(
             "Mode of Payment Account",
             {"parent": exchange_payment_mode, "company": profile.company},
@@ -3817,13 +3846,22 @@ def create_pos_invoice(
     elif payments:
         if isinstance(payments, str):
             payments = frappe.parse_json(payments)
+        frappe.log_error(f"[POS Debug] Client payments: {payments}", "POS Payments Debug") 
         if not payments:
             frappe.throw(_("At least one payment mode is required"))
 
+        # for p in payments:
+        #     mop_name = str(p.get("mode_of_payment") or "").strip()
+        #     if mop_name == exchange_payment_mode:
+        #         frappe.throw(_("Exchange payment amount is controlled by the server."))
+
         for p in payments:
             mop_name = str(p.get("mode_of_payment") or "").strip()
-            if mop_name == exchange_payment_mode:
-                frappe.throw(_("Exchange payment amount is controlled by the server."))
+            if (mop_name == exchange_payment_mode 
+                and exchange_context 
+                and flt(p.get("amount")) == flt(exchange_credit)):
+                continue
+            
             if mop_name not in profile_payment_modes:
                 frappe.throw(_("Payment mode {0} is not configured on this POS Profile.").format(mop_name))
             payment_amount = flt(p.get("amount", 0))

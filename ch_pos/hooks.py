@@ -168,6 +168,7 @@ fixtures = [
                 "Spare Parts Usage", "POS Incentive Ledger",
                 "CH Exception Type", "CH Item Price", "Item Price",
                 "Material Request", "Stock Entry", "Stock Entry Type",
+                "Serial and Batch Bundle", 
             ]],
             ["role", "in", [
                 "POS User", "POS Manager",
