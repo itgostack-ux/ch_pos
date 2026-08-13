@@ -5029,6 +5029,17 @@ def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
     """Return active warranty plans (Own / Extended) applicable to an item."""
     today = nowdate()
     plan_limit = max(1, min(cint(get_control_setting("warranty_plan_result_limit", 200)), 1000))
+    item = frappe.db.get_value(
+        "Item",
+        item_code,
+        ["item_group", "brand", "ch_category", "ch_sub_category"],
+        as_dict=True,
+    ) or {}
+    item_group = item_group or item.get("item_group")
+    brand = brand or item.get("brand")
+    item_category = item.get("ch_category")
+    item_sub_category = item.get("ch_sub_category")
+
     filters = {
         "status": "Active",
         "plan_type": ["in", ["Own Warranty", "Extended Warranty"]],
@@ -5052,6 +5063,54 @@ def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
     _live = filter_sellable_items([p.service_item for p in plans])
     plans = [p for p in plans if not p.service_item or p.service_item in _live]
 
+    item_group_policies = {}
+    if item_group and frappe.db.table_exists("CH Warranty Plan Item Group"):
+        item_group_policies = {
+            row.parent: bool(row.matches)
+            for row in frappe.db.sql(
+                """
+                SELECT parent, MAX(item_group = %(item_group)s) AS matches
+                FROM `tabCH Warranty Plan Item Group`
+                WHERE parent IN %(plans)s
+                GROUP BY parent
+                """,
+                {"item_group": item_group, "plans": tuple(p.name for p in plans) or ("__none__",)},
+                as_dict=True,
+            )
+        }
+
+    category_policies = {}
+    if item_category and frappe.db.table_exists("CH Warranty Plan Category"):
+        category_policies = {
+            row.parent: bool(row.matches)
+            for row in frappe.db.sql(
+                """
+                SELECT parent, MAX(category = %(category)s) AS matches
+                FROM `tabCH Warranty Plan Category`
+                WHERE parent IN %(plans)s
+                GROUP BY parent
+                """,
+                {"category": item_category, "plans": tuple(p.name for p in plans) or ("__none__",)},
+                as_dict=True,
+            )
+        }
+
+    sub_category_policies = {}
+    if item_sub_category and frappe.db.table_exists("CH Warranty Plan Sub Category"):
+        sub_category_policies = {
+            row.parent: bool(row.matches)
+            for row in frappe.db.sql(
+                """
+                SELECT parent, MAX(sub_category = %(sub_category)s) AS matches
+                FROM `tabCH Warranty Plan Sub Category`
+                WHERE parent IN %(plans)s
+                GROUP BY parent
+                """,
+                {"sub_category": item_sub_category, "plans": tuple(p.name for p in plans) or ("__none__",)},
+                as_dict=True,
+            )
+        }
+
     device_price = 0
     if any(plan.pricing_mode == "Percentage of Device Price" for plan in plans):
         device_price = flt(frappe.db.get_value(
@@ -5064,6 +5123,14 @@ def get_warranty_plans(item_code, item_group=None, brand=None) -> dict:
     for plan in plans:
         # Filter by brand if plan specifies one
         if plan.brand and brand and plan.brand != brand:
+            continue
+        # Filter by item group if the plan explicitly declares a group list
+        if item_group and plan.name in item_group_policies and not item_group_policies[plan.name]:
+            continue
+        # Filter by category and sub-category if the plan explicitly declares those lists
+        if item_category and plan.name in category_policies and not category_policies[plan.name]:
+            continue
+        if item_sub_category and plan.name in sub_category_policies and not sub_category_policies[plan.name]:
             continue
         # Filter by date validity
         if plan.valid_from and str(plan.valid_from) > today:
@@ -12004,6 +12071,19 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         if cart_item.get("item_code"):
             device_item_codes.add(cart_item["item_code"])
 
+    item_groups = {}
+    if device_item_codes:
+        item_groups = {
+            row.name: row.item_group
+            for row in frappe.get_all(
+                "Item",
+                filters={"name": ("in", sorted(device_item_codes))},
+                fields=["name", "item_group"],
+                order_by="name ASC",
+                limit_page_length=cart_item_limit,
+            )
+        }
+
     item_categories = {}
     item_sub_categories = {}
     if device_item_codes:
@@ -12065,6 +12145,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
     has_device = False
     device_categories = set()
     device_sub_categories = set()
+    device_item_groups = set()
     max_device_price = 0.0
     for ci in device_rows:
         has_device = True
@@ -12075,6 +12156,9 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
         ch_sub_category = item_sub_categories.get(ic)
         if ch_sub_category:
             device_sub_categories.add(ch_sub_category)
+        ig = item_groups.get(ic)
+        if ig:
+            device_item_groups.add(ig)
         rate = flt(ci.get("rate") or ci.get("price") or ci.get("selling_price") or ci.get("amount"))
         if not rate and ic:
             rate = fallback_prices.get(ic, 0)
@@ -12112,6 +12196,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
 
     plan_categories = {}
     plan_sub_categories = {}
+    plan_item_groups = {}
     plan_names = [row.name for row in plan_rows]
     if plan_names:
         category_row_limit = max(
@@ -12137,6 +12222,20 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             order_by="parent ASC, idx ASC",
             limit_page_length=category_row_limit + 1,
         )
+        
+        item_group_rows = frappe.get_all(
+            "CH Warranty Plan Item Group",
+            filters={"parent": ("in", plan_names)},
+            fields=["parent", "item_group"],
+            order_by="parent ASC, idx ASC",
+            limit_page_length=category_row_limit + 1,
+        )
+        if len(item_group_rows) > category_row_limit:
+            frappe.throw(_("Warranty plan item group configuration exceeds the safe row limit."))
+        for ig_row in item_group_rows:
+            if ig_row.item_group:
+                plan_item_groups.setdefault(ig_row.parent, []).append(ig_row.item_group)
+
         if len(sub_category_rows) > category_row_limit:
             frappe.throw(_("Warranty plan sub-category configuration exceeds the safe row limit."))
         for sub_category_row in sub_category_rows:
@@ -12271,6 +12370,15 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
                     plan["blocked"] = True
                     plan["blocked_reason"] = frappe._("Requires an eligible device in cart")
                 # External-allowed plans stay unblocked; manual IMEI is validated before billing.
+
+# Item Group filtering (CH Warranty Plan Item Group child table).
+        applicable_item_groups = plan_item_groups.get(plan.name, [])
+        if not plan.get("blocked") and applicable_item_groups and device_item_groups:
+            if not device_item_groups.intersection(applicable_item_groups):
+                plan["blocked"] = True
+                plan["blocked_reason"] = frappe._("Not applicable for item group {0}").format(
+                    ", ".join(sorted(device_item_groups))
+                )
 
         applicable_sub_categories = plan_sub_categories.get(plan.name, [])
         plan["applicable_sub_categories"] = applicable_sub_categories

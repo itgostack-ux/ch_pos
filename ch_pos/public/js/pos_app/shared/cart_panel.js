@@ -1231,6 +1231,7 @@ export class CartPanel {
 		// derived from the device's plan, not exception-overridable here.
 		let inline_actions = "";
 		const _can_exception = !item.is_warranty && (item.serial_no || item.item_code);
+		const show_vas_action = !!item.serial_no && !item.is_warranty && !item.is_vas && item.has_vas_offer !== false;
 		if (item.serial_no && !item.is_warranty && !item.is_vas) {
 			// Serialized device: keep both VAS-attach and Exception buttons.
 			const exception_action = item.exception_request
@@ -1241,9 +1242,9 @@ export class CartPanel {
 					<i class="fa fa-exclamation-triangle"></i>
 				</button>`;
 			inline_actions = `
-				<button class="btn btn-xs cart-line-action ch-pos-line-action-vas ch-pos-line-vas" data-idx="${idx}" title="${__("Add VAS")}">
+				${show_vas_action ? `<button class="btn btn-xs cart-line-action ch-pos-line-action-vas ch-pos-line-vas" data-idx="${idx}" title="${__("Add VAS")}">
 					<i class="fa fa-shield"></i>
-				</button>
+				</button>` : ""}
 				${exception_action}`;
 		} else if (_can_exception) {
 			// VAS / Protection Plan / non-serial line: exception button only.

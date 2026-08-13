@@ -71,6 +71,12 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
     if not frappe.db.table_exists("CH Warranty Plan"):
         return []
 
+    item = frappe.db.get_value("Item", item_code, ["item_group", "brand", "ch_category", "ch_sub_category"], as_dict=True) or {}
+    item_group = item_group or item.get("item_group")
+    brand = brand or item.get("brand")
+    item_category = item.get("ch_category")
+    item_sub_category = item.get("ch_sub_category")
+
     today = nowdate()
     plan_limit = max(1, min(cint(get_control_setting("warranty_plan_result_limit", 200)), 1000))
     conditions = [
@@ -95,6 +101,32 @@ def _get_warranty_plans(item_code, item_group=None, brand=None):
             "))"
         )
         params["item_group"] = item_group
+    if item_category and frappe.db.table_exists("CH Warranty Plan Category"):
+        conditions.append(
+            "(NOT EXISTS ("
+            "SELECT 1 FROM `tabCH Warranty Plan Category` all_categories "
+            "WHERE all_categories.parent = wp.name AND all_categories.parenttype = 'CH Warranty Plan'"
+            ") OR EXISTS ("
+            "SELECT 1 FROM `tabCH Warranty Plan Category` matching_category "
+            "WHERE matching_category.parent = wp.name "
+            "AND matching_category.parenttype = 'CH Warranty Plan' "
+            "AND matching_category.category = %(item_category)s"
+            "))"
+        )
+        params["item_category"] = item_category
+    if item_sub_category and frappe.db.table_exists("CH Warranty Plan Sub Category"):
+        conditions.append(
+            "(NOT EXISTS ("
+            "SELECT 1 FROM `tabCH Warranty Plan Sub Category` all_sub_categories "
+            "WHERE all_sub_categories.parent = wp.name AND all_sub_categories.parenttype = 'CH Warranty Plan'"
+            ") OR EXISTS ("
+            "SELECT 1 FROM `tabCH Warranty Plan Sub Category` matching_sub_category "
+            "WHERE matching_sub_category.parent = wp.name "
+            "AND matching_sub_category.parenttype = 'CH Warranty Plan' "
+            "AND matching_sub_category.sub_category = %(item_sub_category)s"
+            "))"
+        )
+        params["item_sub_category"] = item_sub_category
     plans = frappe.db.sql(
         f"""
         SELECT wp.name, wp.plan_name, wp.plan_type, wp.duration_months, wp.price,

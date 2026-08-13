@@ -111,7 +111,7 @@ export class CartService {
 	// POS-10 fix: Auto-persist active cart state to localStorage on every change
 	_persist_active_cart() {
 		try {
-			const has_cart    = PosState.cart && PosState.cart.length > 0;
+			const has_cart = PosState.cart && PosState.cart.length > 0;
 			const has_exchange = flt(PosState.exchange_amount) > 0 || flt(PosState.product_exchange_credit) > 0;
 
 			// Clear storage only when there is nothing worth saving
@@ -168,8 +168,8 @@ export class CartService {
 				}
 			}
 
-			const has_cart     = data.cart && data.cart.length > 0;
-			let   has_exchange = flt(data.exchange_amount) > 0 || flt(data.product_exchange_credit) > 0;
+			const has_cart = data.cart && data.cart.length > 0;
+			let has_exchange = flt(data.exchange_amount) > 0 || flt(data.product_exchange_credit) > 0;
 
 			// An exchange credit with no cart belongs to a transaction that was
 			// abandoned before payment (reset_transaction only runs on a
@@ -393,19 +393,19 @@ export class CartService {
 				setTimeout(() => $st.removeClass("ch-saletype-required-pulse"), 2000);
 				return;
 			}
-			
+
 			// Check if this is a Pre Booking sale type
 			const current_sale_type = (PosState._sale_types_cache || []).find(
 				st => st.sale_type_name === PosState.sale_type
 			);
 			const is_prebook = (current_sale_type && current_sale_type.code || "").toUpperCase() === "PB";
-			
+
 			if (is_prebook) {
 				// Pre Booking flow: route to prebook workspace instead of payment
 				EventBus.emit("mode:switch", "prebook");
 				return;
 			}
-			
+
 			// Last-chance customer sync — Link control may not have fired change
 			EventBus.emit("cart:pre_pay_sync");
 			EventBus.emit("payment:open");
@@ -1010,6 +1010,7 @@ export class CartService {
 			is_warranty: false,
 			is_vas: false,
 			has_serial_no: cint(item_data.has_serial_no),
+			has_vas_offer: !!cint(item_data.has_serial_no),
 			// Always store as a string — IMEIs like 35600220100003 must never
 			// degrade to a JS Number (precision loss + backend .strip() crash).
 			serial_no: serial_no ? String(serial_no) : "",
@@ -1034,11 +1035,34 @@ export class CartService {
 		this._apply_best_offer(cart_item);
 		this._apply_exception_pricing_to_item(cart_item, PosState.exception_request_data);
 		PosState.cart.push(cart_item);
+		this._refresh_vas_offer_state(cart_item, item_data);
 		EventBus.emit("cart:updated");
 		EventBus.emit("cart:item_added", { item_data, cart_item });
 		this._prompt_warranty(item_data, cart_item);
 		this._prompt_bundle_items(item_data);
 		return cart_item;
+	}
+
+	_refresh_vas_offer_state(cart_item, item_data) {
+		if (!cart_item || !cart_item.item_code || !cart_item.has_serial_no || cart_item.is_warranty || cart_item.is_vas) {
+			cart_item.has_vas_offer = false;
+			return;
+		}
+		frappe.xcall("ch_pos.api.pos_api.get_vas_plans_with_rules", {
+			cart_items: [{
+				item_code: cart_item.item_code,
+				rate: flt(cart_item.rate || cart_item.price_list_rate || item_data.selling_price || 0),
+				is_warranty: 0,
+				is_vas: 0,
+			}],
+		}).then((plans) => {
+			const has_plan = Array.isArray(plans) && plans.some((p) => !p.blocked);
+			cart_item.has_vas_offer = !!has_plan;
+			EventBus.emit("cart:updated");
+		}).catch(() => {
+			cart_item.has_vas_offer = false;
+			EventBus.emit("cart:updated");
+		});
 	}
 
 	/** Show a popup to add free bundle items (accessories) when a main device is added */
@@ -1431,7 +1455,7 @@ export class CartService {
 
 
 
-	
+
 
 
 
@@ -1731,6 +1755,25 @@ export class CartService {
 			primary_action: () => dialog.hide(),
 		});
 
+		const set_row_action_state = ($row, chosen) => {
+			const $accept = $row.find(".ch-attach-accept");
+			const $skip = $row.find(".ch-attach-skip");
+			if (!chosen || chosen === "add") {
+				$accept.prop("disabled", true);
+				$skip.prop("disabled", false);
+				$row.removeClass("ch-attach-skipped").addClass("ch-attach-done");
+				return;
+			}
+			$accept.prop("disabled", false);
+			$skip.prop("disabled", true);
+			$row.removeClass("ch-attach-done").addClass("ch-attach-skipped");
+		};
+
+		// "Done" stays enabled — every offer is optional — but accept/skip
+		// call this to keep the button state in sync if a future revision
+		// ever gates it (e.g. on a mandatory offer being resolved).
+		const enable_done_button = () => dialog.enable_primary_action();
+
 		// Bind accept/skip events
 		dialog.$wrapper.on("click", ".ch-attach-accept", (e) => {
 			const $btn = $(e.currentTarget);
@@ -1777,7 +1820,8 @@ export class CartService {
 				});
 				EventBus.emit("cart:updated");
 				frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
-				$row.addClass("ch-attach-done");
+				set_row_action_state($row, "add");
+				enable_done_button();
 				this._log_attach(is_vas_plan ? "VAS" : "Warranty", "Accepted", item_data.item_code, plan.name, null, covered_serial);
 			} else {
 				// VAS or Accessory — add item to cart
@@ -1792,7 +1836,8 @@ export class CartService {
 							is_warranty: false, is_vas: false,
 						});
 					}
-					$row.addClass("ch-attach-done");
+					set_row_action_state($row, "add");
+					enable_done_button();
 					this._log_attach(type, "Accepted", item_data.item_code, attach_item_code, null, covered_serial);
 				});
 			}
@@ -1807,23 +1852,21 @@ export class CartService {
 				? (plans[$btn.data("idx")] || {}).name
 				: $btn.data("item");
 
+			set_row_action_state($row, "skip");
 			if (reason_required) {
 				frappe.prompt(
 					{ fieldname: "reason", fieldtype: "Small Text", label: __("Skip Reason"), reqd: 1 },
 					(values) => {
-						$row.addClass("ch-attach-skipped");
-						this._log_attach(type, "Skipped", item_data.item_code, plan_code, values.reason, covered_serial);
+						this._log_attach(type, "Skipped", item_data.item.code, plan_code, values.reason, covered_serial);
 					},
 					__("Reason for Skipping"),
 					__("Submit")
 				);
 			} else {
-				$row.addClass("ch-attach-skipped");
 				this._log_attach(type, "Skipped", item_data.item_code, plan_code, null, covered_serial);
 			}
+			enable_done_button();
 		});
-
-		dialog.show();
 
 		// Also log all offers as "Offered"
 		plans.forEach(p => this._log_attach("Warranty", "Offered", item_data.item_code, p.name, null, covered_serial));
@@ -1843,7 +1886,7 @@ export class CartService {
 			plan_code: plan_code || "",
 			skip_reason: skip_reason || "",
 			serial_no: serial_no || "",
-		}).catch(() => {});  // Non-blocking
+		}).catch(() => { });  // Non-blocking
 	}
 
 	// ── Coupon / Voucher ────────────────────────────────
@@ -2029,15 +2072,46 @@ export class CartService {
 
 	// ── VAS Dialog ──────────────────────────────────────
 	_show_vas_dialog(opts = {}) {
-		// Pass current cart items for device-dependency enforcement
-		const cart_items = PosState.cart.map((c) => ({
-			item_code: c.item_code,
-			is_warranty: c.is_warranty,
-			is_vas: c.is_vas,
-		}));
-		const selected_device = [opts.for_item, PosState.last_vas_target]
-			.find((item) => item && !item.is_warranty && !item.is_vas) || null;
-		const history_request = (PosState.customer && PosState.pos_profile)
+		// A stale target leaks across item changes when the cashier opens VAS,
+		// closes without adding, and then tries a different device. Use the
+		// current line item as the source of truth; never reuse the previous one.
+		const current_target = opts.for_item || null;
+		PosState.last_vas_target = current_target;
+
+		// Race guard: two round-trips (customer history + plan eligibility)
+		// separate the click from the result. Clicking "VAS" on item A then
+		// quickly on item B fires a second, independent chain — whichever
+		// resolves LAST wins the screen. Without this token, a slow reply for
+		// item A (e.g. "No VAS Available") can land after item B's dialog is
+		// already open and stomp it, making an eligible item look ineligible.
+		// Only the request matching the CURRENT click is allowed to act.
+		this._vas_request_seq = (this._vas_request_seq || 0) + 1;
+		const request_seq = this._vas_request_seq;
+		const is_stale = () => request_seq !== this._vas_request_seq;
+
+		const selected_device = current_target && !current_target.is_warranty && !current_target.is_vas
+			? current_target
+			: null;
+
+		// Eligibility must be scoped to the device the cashier is actually
+		// covering — never the whole cart. A mixed cart (e.g. a TV + a
+		// phone) previously sent every line to get_vas_plans_with_rules,
+		// so a phone-only plan like "Apple Care Protect+" would surface as
+		// available while adding VAS to the TV line, purely because SOME
+		// other line in the cart happened to match its category. When a
+		// specific line was clicked (selected_device set), scope to just
+		// that device. Only the generic "Sell VAS" quick-link (no line
+		// clicked, current_target null) has no device to scope to, so it
+		// falls back to the whole cart + purchase history for the device
+		// picker.
+		const cart_items = selected_device
+			? [{ item_code: selected_device.item_code, is_warranty: false, is_vas: false }]
+			: PosState.cart.map((c) => ({
+				item_code: c.item_code,
+				is_warranty: c.is_warranty,
+				is_vas: c.is_vas,
+			}));
+		const history_request = (!selected_device && PosState.customer && PosState.pos_profile)
 			? frappe.xcall("ch_pos.api.pos_api.get_customer_sold_devices", {
 				customer: PosState.customer,
 				pos_profile: PosState.pos_profile,
@@ -2057,8 +2131,23 @@ export class CartService {
 				cart_items: eligibility_items,
 			}).then((plans) => ({ plans, historical_devices: historical_devices || [] }));
 		}).then(({ plans, historical_devices }) => {
+			// A newer click already owns the screen — a stale reply must not
+			// show its (possibly wrong) result on top of it.
+			if (is_stale()) return;
+
 			if (!plans || !plans.length) {
+				PosState.last_vas_target = null;
 				frappe.show_alert({ message: __("No VAS plans available"), indicator: "orange" });
+				return;
+			}
+			const eligible_plans = plans.filter((p) => !p.blocked);
+			if (!eligible_plans.length) {
+				PosState.last_vas_target = null;
+				frappe.msgprint({
+					title: __("No VAS Available"),
+					message: __("No VAS available for this item."),
+					indicator: "orange",
+				});
 				return;
 			}
 			this._render_vas_selector(plans, selected_device, historical_devices);
@@ -2112,7 +2201,12 @@ export class CartService {
 			const blocked_html = blocked
 				? `<div class="text-danger" style="font-size:11px;margin-top:4px"><i class="fa fa-ban"></i> ${frappe.utils.escape_html(p.blocked_reason)}</div>`
 				: "";
-			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}" data-plan="${frappe.utils.escape_html(p.name)}" data-allows-external="${p.allows_external_device ? 1 : 0}" data-allows-in-store="${p.allows_in_store_device ? 1 : 0}" data-requires-device="${p.requires_device ? 1 : 0}">
+			return `<div class="ch-vas-card ${blocked ? 'ch-vas-blocked' : ''}"
+						data-plan="${frappe.utils.escape_html(p.name)}"
+						data-plan-name="${frappe.utils.escape_html(p.plan_name)}"
+						data-allows-external="${p.allows_external_device ? 1 : 0}"
+						data-allows-in-store="${p.allows_in_store_device ? 1 : 0}"
+						data-requires-device="${p.requires_device ? 1 : 0}">
 				<div class="ch-vas-card-body">
 					<div class="ch-vas-card-check"><i class="fa fa-check"></i></div>
 					<div style="flex:1;min-width:0">
@@ -2146,6 +2240,12 @@ export class CartService {
 					fieldname: "subject_help",
 					fieldtype: "HTML",
 					options: subject_help_html,
+				},
+				{
+					fieldname: "plan_search",
+					fieldtype: "Data",
+					label: __("Search Plans"),
+					placeholder: __("Search by plan name..."),
 				},
 				{
 					fieldname: "plans_html",
@@ -2350,7 +2450,26 @@ export class CartService {
 			mode_field && mode_field.refresh && mode_field.refresh();
 		});
 
+		dialog.onhide = () => {
+			PosState.last_vas_target = null;
+		};
 		dialog.show();
+
+		function apply_vas_filters() {
+			const query = (dialog.get_value("plan_search") || "").trim().toLowerCase();
+			dialog.$wrapper.find(".ch-vas-card").each(function () {
+				const $card = $(this);
+				const name = ($card.attr("data-plan-name") || "").toLowerCase();
+				const matches_search = query === "" || name.indexOf(query) !== -1;
+				const is_applicable = !$card.hasClass("ch-vas-blocked");
+				$card.toggle(matches_search && is_applicable);
+			});
+		}
+
+		setTimeout(() => {
+			dialog.fields_dict.plan_search.$input.on("input", apply_vas_filters);
+			apply_vas_filters(); // run once on open, in case something starts blocked
+		}, 100);
 
 		// Replace the bare value-only Select for coverage_mode with friendlier labels.
 		const apply_mode_labels = () => {
@@ -2383,6 +2502,15 @@ export class CartService {
 
 	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no, external_device_model_item = null, external_intent = false, original_invoice = null) {
 		// Prevent duplicate: same plan on same device/IMEI
+
+		if (plan.blocked) {
+			frappe.msgprint({
+				title: __("Plan Not Applicable"),
+				message: plan.blocked_reason || __("This plan is not applicable for the selected device."),
+				indicator: "red",
+			});
+			return;
+		}
 		const dup = PosState.cart.find(
 			(c) => c.is_vas && c.warranty_plan === plan.name
 				&& c.for_item_code === for_item_code
@@ -2724,7 +2852,7 @@ export class CartService {
 					const msg = invoice_no
 						? __("No {0} found for this number", [noun])
 						: (phone ? __("No {0} found for this phone number", [noun])
-						         : __("No {0} for this date", [noun]));
+							: __("No {0} for this date", [noun]));
 					container.html(`<div class="text-center text-muted" style="padding:20px">${msg}</div>`);
 					return;
 				}
@@ -2748,13 +2876,13 @@ export class CartService {
 						: (is_receipt
 							? `${__("State")}: ${receipt_state || "-"} · ${__("MOP")}: ${mop || "-"} · ${__("Sales Order")}: ${frappe.utils.escape_html(inv.linked_sales_orders || "-")}`
 							: `${__("Sale Type")}: ${sale_type || "-"} · ${__("MOP")}: ${mop || "-"}`);
-						const dt = frappe.utils.escape_html(inv.__doctype || "Sales Invoice");
-						const fmt = frappe.utils.escape_html(inv.__print_format || "");
-						const no_letterhead = cint(inv.__no_letterhead || 0);
-						return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
+					const dt = frappe.utils.escape_html(inv.__doctype || "Sales Invoice");
+					const fmt = frappe.utils.escape_html(inv.__print_format || "");
+					const no_letterhead = cint(inv.__no_letterhead || 0);
+					return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
 						<div style="flex:1">
 							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${type_tag} ${receipt_badge} ${is_ret}</div>
-							<div class="text-muted" style="font-size:12px">${customer} · ${sign}₹${format_number(flt(inv.grand_total))} · ${frappe.utils.escape_html(inv.posting_date || "")} ${frappe.utils.escape_html((inv.posting_time || "").substring(0,5))}</div>
+							<div class="text-muted" style="font-size:12px">${customer} · ${sign}₹${format_number(flt(inv.grand_total))} · ${frappe.utils.escape_html(inv.posting_date || "")} ${frappe.utils.escape_html((inv.posting_time || "").substring(0, 5))}</div>
 							<div class="text-muted" style="font-size:11px">${meta_line}</div>
 							${inv.items_summary ? `<div class="text-muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">${frappe.utils.escape_html(inv.items_summary)}</div>` : ""}
 						</div>
@@ -2883,23 +3011,23 @@ export class CartService {
 
 		// Print button — uses doctype + print format stamped on the row by the API
 		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
-				const $btn = $(e.currentTarget);
-				const name = $btn.data("name");
-				const dt = $btn.data("doctype") || "Sales Invoice";
-				let fmt = $btn.data("format") || "";
-				const opts = { doctype: dt };
-				if ($btn.attr("data-no-letterhead") !== undefined) {
-					opts.no_letterhead = cint($btn.data("no-letterhead") || 0);
-				}
-				if (!fmt) {
-					const is_gofix = $btn.data("gofix");
-					fmt = is_gofix ? "GoFix Service Invoice"
-			               : (dt === "Quotation"
-								? "Proforma Invoice"
-								: (dt === "Payment Entry" ? "Standard" : "Custom Sales Invoice"));
-				}
-				print_invoice_pdf(name, fmt, opts);
-			});
+			const $btn = $(e.currentTarget);
+			const name = $btn.data("name");
+			const dt = $btn.data("doctype") || "Sales Invoice";
+			let fmt = $btn.data("format") || "";
+			const opts = { doctype: dt };
+			if ($btn.attr("data-no-letterhead") !== undefined) {
+				opts.no_letterhead = cint($btn.data("no-letterhead") || 0);
+			}
+			if (!fmt) {
+				const is_gofix = $btn.data("gofix");
+				fmt = is_gofix ? "GoFix Service Invoice"
+					: (dt === "Quotation"
+						? "Proforma Invoice"
+						: (dt === "Payment Entry" ? "Standard" : "Custom Sales Invoice"));
+			}
+			print_invoice_pdf(name, fmt, opts);
+		});
 	}
 
 	// ── Manager Approval Dialog ─────────────────────────

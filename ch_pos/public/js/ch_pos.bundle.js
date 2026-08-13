@@ -22,7 +22,7 @@ import { SessionControls } from "./pos_app/app_shell/session_controls.js";
 
 // Services
 import { ItemService } from "./pos_app/services/item_service.js";
-import { CartService } from "./pos_app/services/cart_service.js?v=20260618a";
+import { CartService } from "./pos_app/services/cart_service.js?v=20260813a";
 import { SyncService } from "./pos_app/services/sync_service.js";
 import { UpsellService } from "./pos_app/services/upsell_service.js";
 
