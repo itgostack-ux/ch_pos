@@ -434,6 +434,13 @@ export class CartService {
 			this._apply_exception_pricing_to_cart(data);
 			EventBus.emit("cart:updated");
 		});
+		EventBus.on("cart:exception_invalid", (payload) => {
+			this._invalidate_exception_link(
+				payload?.exception_name,
+				payload?.data || {},
+				{ silent: !!payload?.silent }
+			);
+		});
 
 		EventBus.on("state:transaction_reset", () => {
 			this._exception_status_seen = {};
@@ -474,14 +481,31 @@ export class CartService {
 			const req = (item.exception_request || "").trim();
 			if (!req) return;
 			const status = ((item.exception_request_status || "") + "").trim();
-			if (status === "Approved" || status === "Auto-Approved" || status === "Rejected" || status === "Expired") return;
+			// Approved exceptions must continue to be checked: they can expire or
+			// be rejected by a manager while the cashier still has the cart open.
+			if (status === "Rejected" || status === "Expired" || status === "Consumed") return;
 			names.add(req);
 		});
+		if (PosState.exception_request) {
+			names.add(String(PosState.exception_request).trim());
+		}
 		return Array.from(names);
 	}
 
 	_sync_pending_exception_statuses() {
 		if (!PosState.cart || !PosState.cart.length) return;
+		// Self-heal carts restored from localStorage by an older build. Those
+		// builds retained rejected/expired approvals and made payment impossible.
+		const terminal_names = new Map();
+		PosState.cart.forEach((item) => {
+			const status = String(item.exception_request_status || "").trim();
+			if (["Rejected", "Expired", "Consumed"].includes(status) && item.exception_request) {
+				terminal_names.set(item.exception_request, status);
+			}
+		});
+		terminal_names.forEach((status, exception_name) => {
+			this._invalidate_exception_link(exception_name, { status });
+		});
 		const pending_names = this._collect_pending_exception_requests();
 		if (!pending_names.length) return;
 
@@ -504,6 +528,14 @@ export class CartService {
 	_apply_exception_status_to_cart(exception_name, data) {
 		if (!exception_name || !data) return;
 		const status = (data.status || "Pending").trim();
+		const approved = status === "Approved" || status === "Auto-Approved";
+		const terminal = ["Rejected", "Expired", "Consumed", "Cancelled"].includes(status);
+		// A once-approved request can become unusable because its validity window
+		// or business date elapsed even if its stored status still says Approved.
+		if (terminal || (approved && !data.valid)) {
+			this._invalidate_exception_link(exception_name, data);
+			return;
+		}
 		let changed = false;
 		let just_approved = false;
 
@@ -544,6 +576,39 @@ export class CartService {
 				indicator: "green",
 			});
 		}
+	}
+
+	_invalidate_exception_link(exception_name, data = {}, opts = {}) {
+		if (!exception_name) return false;
+		let changed = false;
+		(PosState.cart || []).forEach((item) => {
+			if ((item.exception_request || "") !== exception_name) return;
+			this._remove_exception_from_item(item);
+			changed = true;
+		});
+
+		if (PosState.exception_request === exception_name) {
+			PosState.exception_request = null;
+			PosState.exception_request_data = null;
+			changed = true;
+		}
+		if (!changed) return false;
+
+		EventBus.emit("cart:updated");
+		EventBus.emit("exception:invalidated", {
+			exception_name,
+			data,
+			silent: !!opts.silent,
+		});
+		const status = String(data.status || data.invalid_reason || "invalid");
+		if (!opts.silent && this._exception_status_seen[exception_name] !== `invalid:${status}`) {
+			this._exception_status_seen[exception_name] = `invalid:${status}`;
+			frappe.show_alert({
+				message: __("Exception {0} is {1}. Original pricing was restored; review the bill before payment.", [exception_name, status]),
+				indicator: "orange",
+			}, 10);
+		}
+		return true;
 	}
 
 	// ── Serial add-lock ─────────────────────────────────

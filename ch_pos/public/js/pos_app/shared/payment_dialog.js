@@ -99,6 +99,11 @@ export class PaymentDialog {
 		EventBus.on("payment:open", () => this.show());
 		EventBus.on("executive:changed", () => this._sync_executive_badge());
 		EventBus.on("profile:loaded", () => this._sync_executive_badge());
+		EventBus.on("exception:invalidated", () => {
+			if (!this._overlay) return;
+			this._submitting = false;
+			this._close(false);
+		});
 	}
 
 	show() {
@@ -2432,13 +2437,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		return "other";
 	}
 
-	_close() {
+	_close(preserve_state = true) {
 		clearTimeout(this._auto_timer);
 		clearInterval(this._approval_poll);
 		$(document).off("keydown.ch_pay_overlay");
 
 		// Save payment state to PosState so it persists when Back is clicked
-		PosState._payment_state = {
+		PosState._payment_state = preserve_state ? {
 			payments: this._payments,
 			loyalty_amount: this._loyalty_amount,
 			redeem_loyalty: this._redeem_loyalty,
@@ -2475,7 +2480,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			dlg_voucher_amount:  this._dlg_voucher_amount,
 			dlg_voucher_name:    this._dlg_voucher_name,
 			dlg_voucher_balance: this._dlg_voucher_balance,
-		};
+		} : null;
 
 		if (this._overlay) {
 			this._overlay.removeClass("ch-pay-visible");
@@ -2703,10 +2708,68 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		return { valid: true, gstin: normalized };
 	}
 
-	_submit_invoice() {
+	async _validate_exception_requests_before_submit() {
+		const names = new Set();
+		if (PosState.exception_request) names.add(String(PosState.exception_request).trim());
+		(PosState.cart || []).forEach((item) => {
+			if (item.exception_request) names.add(String(item.exception_request).trim());
+		});
+		if (!names.size) return true;
+
+		for (const exception_name of names) {
+			let data;
+			try {
+				data = await frappe.xcall(
+					"ch_item_master.ch_item_master.exception_api.check_exception_valid",
+					{ exception_name }
+				);
+			} catch (error) {
+				frappe.msgprint({
+					title: __("Exception Validation Failed"),
+					message: __("Could not validate exception {0}. Check the connection and try again.", [exception_name]),
+					indicator: "red",
+				});
+				return false;
+			}
+
+			if (data?.valid) continue;
+			const status = String(data?.status || "Pending").trim();
+			if (["Pending", "Escalated", "Awaiting Approval"].includes(status)) {
+				frappe.msgprint({
+					title: __("Exception Approval Pending"),
+					message: __("Exception {0} is still {1}. Wait for approval or remove it from the cart.", [exception_name, status]),
+					indicator: "orange",
+				});
+				return false;
+			}
+
+			EventBus.emit("cart:exception_invalid", {
+				exception_name,
+				data: data || { status },
+				silent: true,
+			});
+			// Tender amounts were calculated using the exception price. Discard
+			// them and return to the cart so the cashier explicitly reviews the
+			// restored total before attempting payment again.
+			this._close(false);
+			frappe.msgprint({
+				title: __("Exception Removed"),
+				message: __("Exception {0} is {1}. It was removed and original pricing was restored. Review the bill, then pay again or raise a new exception.", [exception_name, status]),
+				indicator: "orange",
+			});
+			return false;
+		}
+		return true;
+	}
+
+	async _submit_invoice() {
 		if (this._submitting) return;
 		// POS-19 fix: Set submitting flag immediately to prevent double-submit race
 		this._submitting = true;
+		if (!(await this._validate_exception_requests_before_submit())) {
+			this._submitting = false;
+			return;
+		}
 
 		// Sale type is mandatory before payment can proceed
 		if (!PosState.sale_type) {
