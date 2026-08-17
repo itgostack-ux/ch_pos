@@ -73,6 +73,22 @@ CUSTOM_FIELDS = {
             "description": "Role permitted to bill after the cut-off time. System Manager always bypasses.",
             "module": "POS Core",
         },
+        {
+            "fieldname": "ch_petty_cash_daily_limit",
+            "fieldtype": "Currency",
+            "label": "Petty Cash Daily Limit",
+            "insert_after": "ch_cutoff_override_role",
+            "description": "Store's daily petty-cash float (imprest amount). Spend inside this is disbursed on the spot for pre-authorised categories; anything beyond it needs approval. Leave blank to use the system default (₹500).",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "ch_petty_cash_auto_categories",
+            "fieldtype": "Small Text",
+            "label": "Petty Cash Auto-Approve Categories",
+            "insert_after": "ch_petty_cash_daily_limit",
+            "description": "One category per line. Spend in these categories posts immediately (inside the daily limit) without needing an approver — e.g. Tea / Coffee, Refreshments. Leave blank to use the system defaults.",
+            "module": "POS Core",
+        },
     ],
     "Sales Invoice": [
         {
