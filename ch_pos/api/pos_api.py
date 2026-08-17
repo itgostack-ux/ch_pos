@@ -8558,11 +8558,19 @@ def check_imei_blacklist(imei) -> dict:
 
 
 @frappe.whitelist()
-def calculate_buyback_valuation(item_code, condition_checks) -> dict:
+def calculate_buyback_valuation(
+    item_code, condition_checks, warranty_status=None, device_age_months=None
+) -> dict:
     """Calculate buyback valuation using the configured buyback pricing engine.
 
     condition_checks: dict with keys like screen, body, buttons, charging,
     camera, speaker_mic — each True (pass) or False (fail).
+
+    warranty_status ("In Warranty" / "Out of Warranty") and device_age_months
+    ("0-3 Months" … "12+ Months") select the price band and are required. They
+    used to be omitted entirely, which priced every device off the Out of
+    Warranty 11+ band no matter how new it was.
+
     Returns base_price, deductions list, final_price, grade.
     """
     if isinstance(condition_checks, str):
@@ -8593,6 +8601,8 @@ def calculate_buyback_valuation(item_code, condition_checks) -> dict:
     result = calculate_estimated_price(
         item_code=item_code,
         grade=provisional_grade,
+        warranty_status=warranty_status,
+        device_age_months=device_age_months,
         diagnostic_tests=diagnostic_tests,
         brand=brand,
         item_group=item_group,
@@ -8618,7 +8628,7 @@ def calculate_buyback_valuation(item_code, condition_checks) -> dict:
 def create_buyback_assessment_with_grading(
     mobile_no, item_code, imei_serial=None, customer=None,
     condition_checks=None, kyc_id_type=None, kyc_id_number=None, kyc_name=None,
-    pos_profile=None,
+    pos_profile=None, warranty_status=None, device_age_months=None,
 ) -> dict:
     """Create a Buyback Assessment with condition grading and KYC from POS."""
     frappe.has_permission("Buyback Assessment", "create", throw=True)
@@ -8652,7 +8662,11 @@ def create_buyback_assessment_with_grading(
             kyc_id_number = aadhaar_clean
 
     # Calculate valuation
-    valuation = calculate_buyback_valuation(item_code, condition_checks)
+    valuation = calculate_buyback_valuation(
+        item_code, condition_checks,
+        warranty_status=warranty_status,
+        device_age_months=device_age_months,
+    )
 
     doc = frappe.new_doc("Buyback Assessment")
     doc.source = "Store Manual"
@@ -8663,6 +8677,10 @@ def create_buyback_assessment_with_grading(
     doc.customer = customer or ""
     doc.item = item_code
     doc.imei_serial = imei_serial or ""
+    # Persist the band inputs the valuation was made from, so re-pricing the
+    # assessment later lands on the same cell.
+    doc.warranty_status = warranty_status
+    doc.device_age_months = device_age_months
     doc.estimated_grade = frappe.db.get_value(
         "Grade Master", {"grade_name": valuation["grade"]}, "name"
     ) or ""
@@ -14481,8 +14499,11 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             ins = frappe.get_doc("Buyback Inspection", a.buyback_inspection)
             _assert_buyback_doc_scope(ins, "read")
             # Grade options for selector
+            # Salvage grades (Scrap, Phone Dead) are engine outcomes, not
+            # choices — keep them out of the inspector's selector.
             grades = frappe.get_all(
                 "Grade Master", fields=["name", "grade_name"],
+                filters={"is_salvage": 0},
                 order_by="name asc",
                 limit_page_length=max(
                     1,
@@ -15491,9 +15512,11 @@ def pos_create_inspection(assessment_name) -> dict:
         ins = frappe.get_doc("Buyback Inspection", result["name"])
 
     # Also get grade options for the inline form selector
+    # Salvage grades (Scrap, Phone Dead) are engine outcomes, not choices.
     grades = frappe.get_all(
         "Grade Master",
         fields=["name", "grade_name"],
+        filters={"is_salvage": 0},
         order_by="name asc",
         limit_page_length=max(
             1, min(cint(get_control_setting("buyback_grade_result_limit", 100)), 500)
