@@ -563,7 +563,7 @@ def test_08_audit_log_updated_after_switch():
                     "CH Business Audit Log",
                     {
                         audit_col: "CH POS Session",
-                        "ref_name": session_name,
+                        "reference_name": session_name,
                         "event_type": "Cashier Switch",
                     },
                     "name",

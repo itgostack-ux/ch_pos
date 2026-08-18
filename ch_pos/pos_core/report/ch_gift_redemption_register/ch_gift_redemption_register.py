@@ -10,6 +10,7 @@ One row per CH Gift Redemption:
 """
 
 import frappe
+from ch_erp15.ch_erp15.report_scope import scope_where_clause
 from frappe import _
 
 
@@ -64,6 +65,13 @@ def get_data(filters):
 	if filters.get("to_date"):
 		conditions.append("DATE(g.issued_at) <= %(to_date)s")
 		values["to_date"] = filters.to_date
+
+	# Row-level scope: gifts issued OR redeemed at a store in the user's scope.
+	scope = scope_where_clause(
+		store_field="g.store", extra_store_fields=["g.redeemed_store"]
+	)
+	if scope:
+		conditions.append(scope)
 
 	return frappe.db.sql(
 		f"""

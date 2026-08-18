@@ -1824,7 +1824,13 @@ def _get_purchase_exempted_value_for_serial(serial, item_code=None):
         frappe.log_error(frappe.get_traceback(), "Serial purchase-value lifecycle lookup failed")
 
     try:
-        pr_name = frappe.db.get_value("Serial No", serial, "purchase_document")
+        # Serial No lost purchase_document in v15; skip this tier instead of
+        # raising into the except below on every single lookup.
+        pr_name = (
+            frappe.db.get_value("Serial No", serial, "purchase_document")
+            if frappe.get_meta("Serial No").has_field("purchase_document")
+            else None
+        )
         if pr_name:
             filters_sql = "pri.parent = %s"
             params = [pr_name]
@@ -11206,9 +11212,15 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
 
     # POS-14 fix: Notify store manager of the source store for approval
     try:
-        source_store_mgr = frappe.db.get_value(
-            "POS Profile", source_pos_profile, "custom_store_manager"
+        # POS Profile has no store-manager field; the roster lives in CH User
+        # Scope, reachable from the store the profile belongs to.
+        from ch_erp15.ch_erp15.scope import get_store_users
+
+        source_store = frappe.db.get_value(
+            "POS Profile", source_pos_profile, "custom_store"
         )
+        managers = get_store_users(source_store, role="CH Store Manager") if source_store else []
+        source_store_mgr = managers[0].get("user") if managers else None
         if source_store_mgr:
             request_url = frappe.utils.get_url_to_form("Material Request", mr.name)
             company_label = (
@@ -16514,8 +16526,11 @@ def _post_free_sale_write_off(inv) -> None:
         total_cost += item_cost
 
         # Credit: expense_account on item (the COGS account ERPNext used)
+        # expense_account is an Item Default row (per company), not an Item field.
         cogs_account = item.expense_account or frappe.db.get_value(
-            "Item", item.item_code, "expense_account"
+            "Item Default",
+            {"parent": item.item_code, "company": company},
+            "expense_account",
         ) or frappe.db.get_value("Company", company, "default_expense_account")
 
         if cogs_account:
