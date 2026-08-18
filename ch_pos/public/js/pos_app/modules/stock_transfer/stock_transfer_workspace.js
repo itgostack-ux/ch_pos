@@ -103,6 +103,11 @@ export class StockTransferWorkspace {
             });
 
         panel.on("click.chStockTransfer",
+            ".ch-st-id-link", (e) => {
+                this._show_item_list_popup($(e.currentTarget).data("name"));
+            });
+
+        panel.on("click.chStockTransfer",
             ".ch-st-manifest-btn", function () {
                 frappe.set_route(
                     "Form", "CH Transfer Manifest",
@@ -304,15 +309,33 @@ export class StockTransferWorkspace {
                 <i class="fa fa-times"></i> ${__("Cancel")}
             </button>` : "";
 
-        const manifest_btn = se.custom_transfer_manifest ? `
+        // Manifest / E-Way Bill buttons hidden on the Incoming tab per
+        // request — kept here commented (unchanged) so they can be restored
+        // by deleting the tab-guarded versions below and uncommenting these.
+        // const manifest_btn = se.custom_transfer_manifest ? `
+        //     <button class="btn btn-xs btn-outline-primary ch-st-manifest-btn"
+        //             data-manifest="${esc(se.custom_transfer_manifest)}"
+        //             style="border-radius:var(--pos-radius-sm)">
+        //         <i class="fa fa-file-text-o"></i>
+        //         ${__("Manifest / E-Way Bill")}
+        //     </button>` : "";
+        // const eway_btn = se.custom_transfer_manifest
+        //     && ["Pending With Goods", "Ready For Pickup"].includes(cs)
+        //     ? `<button class="btn btn-xs btn-outline-success ch-st-eway-btn"
+        //                 data-name="${esc(se.name)}"
+        //                 style="border-radius:var(--pos-radius-sm)">
+        //            <i class="fa fa-road"></i> ${__("Generate E-Way Bill")}
+        //        </button>`
+        //     : "";
+        const manifest_btn = (tab !== "incoming" && se.custom_transfer_manifest) ? `
             <button class="btn btn-xs btn-outline-primary ch-st-manifest-btn"
                     data-manifest="${esc(se.custom_transfer_manifest)}"
                     style="border-radius:var(--pos-radius-sm)">
                 <i class="fa fa-file-text-o"></i>
                 ${__("Manifest / E-Way Bill")}
             </button>` : "";
-        const eway_btn = se.custom_transfer_manifest
-            && ["Pending With Goods", "Ready For Pickup"].includes(cs)
+        const eway_btn = (tab !== "incoming" && se.custom_transfer_manifest
+            && ["Pending With Goods", "Ready For Pickup"].includes(cs))
             ? `<button class="btn btn-xs btn-outline-success ch-st-eway-btn"
                         data-name="${esc(se.name)}"
                         style="border-radius:var(--pos-radius-sm)">
@@ -373,8 +396,13 @@ export class StockTransferWorkspace {
                     <div style="display:flex;justify-content:space-between;
                                 align-items:flex-start;margin-bottom:8px">
                         <div>
-                            <div style="font-weight:700;
-                                        font-size:var(--pos-fs-sm)">
+                            <div class="ch-st-id-link"
+                                 data-name="${esc(se.name)}"
+                                 title="${__("View items in this transfer")}"
+                                 style="font-weight:700;
+                                        font-size:var(--pos-fs-sm);
+                                        cursor:pointer;
+                                        color:var(--pos-primary,inherit)">
                                 ${esc(se.name)}
                             </div>
                             <div style="font-size:var(--pos-fs-2xs);
@@ -434,6 +462,69 @@ export class StockTransferWorkspace {
                     ${logistics_person}
                 </div>
             </div>`;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Item list popup — click the transfer ID to see every item + qty
+    // (the card itself only ever shows the first item name + "+N more",
+    // and the server never sends those extra names/quantities to the
+    // browser at all, so this fetches the full line list on demand).
+    // ════════════════════════════════════════════════════════════════════════
+
+    _show_item_list_popup(se_name) {
+        frappe.call({
+            method: "ch_pos.api.pos_api.get_stock_transfer_items",
+            args:   { stock_entry: se_name },
+            freeze: true,
+            callback: (r) => {
+                if (!r.message) return;
+                const items = r.message.items || [];
+                const esc   = s => frappe.utils.escape_html(s || "");
+
+                const rows = items.length
+                    ? items.map(it => `
+                        <tr>
+                            <td>
+                                <div style="font-weight:600">
+                                    ${esc(it.item_name || it.item_code)}
+                                </div>
+                                <div style="font-size:11px;
+                                            color:var(--pos-text-muted)">
+                                    ${esc(it.item_code)}
+                                </div>
+                            </td>
+                            <td class="text-center" style="font-weight:600">
+                                ${flt(it.qty)} ${esc(it.uom || "")}
+                            </td>
+                        </tr>`).join("")
+                    : `<tr><td colspan="2" style="text-align:center;
+                           color:var(--pos-text-muted)">
+                           ${__("No items found")}</td></tr>`;
+
+                const dialog = new frappe.ui.Dialog({
+                    title: __("Items in {0}", [se_name]),
+                    fields: [{
+                        fieldtype: "HTML",
+                        fieldname: "items_html",
+                        options: `
+                            <table class="table table-bordered"
+                                   style="margin-bottom:0">
+                                <thead>
+                                    <tr>
+                                        <th>${__("Item")}</th>
+                                        <th class="text-center"
+                                            style="width:120px">
+                                            ${__("Qty")}
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody>${rows}</tbody>
+                            </table>`,
+                    }],
+                });
+                dialog.show();
+            },
+        });
     }
 
     // ════════════════════════════════════════════════════════════════════════
