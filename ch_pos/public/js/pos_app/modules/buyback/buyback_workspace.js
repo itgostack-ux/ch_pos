@@ -12,6 +12,7 @@
  *  - "Create Order & Send for Approval" only enabled after KYC uploaded
  */
 import { PosState, EventBus } from "../../state.js";
+import { BuybackIntake } from "./buyback_intake.js";
 import { format_number, validate_india_phone, validate_id_number } from "../../shared/helpers.js";
 
 // ──────────────────────────────────────────── Stage helpers ──────────
@@ -204,7 +205,7 @@ export class BuybackWorkspace {
 							<div class="ch-pos-empty-state" style="padding:40px 16px">
 								<div class="empty-icon"><i class="fa fa-mobile fa-2x"></i></div>
 								<div class="empty-title">${__("Search or create an assessment")}</div>
-								<div class="empty-subtitle">${__("Mobile diagnostics submitted from the app will appear here")}</div>
+								<div class="empty-subtitle">${__("Mobile diagnostics appear here — or tap New to assess a device at the counter")}</div>
 							</div>
 						</div>
 					</div>
@@ -250,12 +251,26 @@ export class BuybackWorkspace {
 			this._load_detail(panel, $(e.currentTarget).data("name"));
 		});
 		panel.on("click", ".ch-bb-new-btn", () => {
-			frappe.route_options = {
-				source: "Store Manual",
+			// Was frappe.new_doc("Buyback Assessment") — a 61-field desk form with
+			// 63 questions across four child tables, which is a back-office
+			// document rather than a counter tool. The guided intake collects the
+			// same inputs one section at a time and hands back the created name so
+			// the detail panel picks up the normal Assess -> Settle flow.
+			this._intake = new BuybackIntake({
 				store: PosState.warehouse || "",
-				_from_pos: "1",
-			};
-			frappe.new_doc("Buyback Assessment");
+				on_cancel: () => { this._intake = null; this.render(panel); },
+				on_created: (name) => {
+					this._intake = null;
+					this.render(panel);
+					panel.find(".ch-bb-search").val(name);
+					this._search(panel, name);
+					this._load_detail(panel, name);
+				},
+			});
+			// Take over the whole split, not just the detail column: squeezed into
+			// the narrow right pane the form stretched and the stale left-hand
+			// empty state stayed on screen beside it.
+			this._intake.open(panel.find(".ch-bb-split"));
 		});
 	}
 
@@ -552,12 +567,15 @@ export class BuybackWorkspace {
 		const diag_html = has_diag
 			? `<div class="ch-bb-section-label" style="margin-top:12px">${__("Diagnostic Results (from Mobile App)")}</div>
 			   <div class="ch-bb-diag-grid">
-				${data.diagnostics.map(d => `
-					<div class="ch-bb-diag-item ${d.result === "Pass" ? "pass" : "fail"}">
-						<i class="fa ${d.result === "Pass" ? "fa-check-circle" : "fa-times-circle"}"></i>
+				${data.diagnostics.map(d => {
+					const passed = d.is_pass === true || d.is_pass === 1;
+					return `
+					<div class="ch-bb-diag-item ${passed ? "pass" : "fail"}">
+						<i class="fa ${passed ? "fa-check-circle" : "fa-times-circle"}"></i>
 						<span>${frappe.utils.escape_html(d.test_name)}</span>
 						<span class="ch-bb-diag-result">${__(d.result)}</span>
-					</div>`).join("")}
+					</div>`;
+				}).join("")}
 			   </div>`
 			: `<div class="ch-bb-empty-note">${__("No automated diagnostics — manual condition check used for grading.")}</div>`;
 

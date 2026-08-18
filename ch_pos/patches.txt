@@ -7,3 +7,4 @@ ch_pos.patches.v1_0.backfill_gift_redemption_history
 ch_pos.patches.v1_0.retire_ch_pos_closing_entry
 ch_pos.patches.v1_0.backfill_standard_pos_invoice_closings
 ch_pos.patches.v1_0.retire_pos_repair_intake
+ch_pos.patches.v1_0.drop_pos_repair_intake_workspace_refs

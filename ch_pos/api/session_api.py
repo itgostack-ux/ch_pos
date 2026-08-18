@@ -26,6 +26,7 @@ from ch_pos.config import (
     require_configured_roles,
 )
 from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
+from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import is_session_stale
 from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import build_settlement_snapshot
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
     get_active_session,
@@ -69,9 +70,31 @@ def get_session_status(pos_profile) -> dict:
     """Check if an active session exists for this profile.
     Called on POS startup to decide: show opening screen or resume."""
     frappe.has_permission("Sales Invoice", "read", throw=True)
-    assert_pos_profile_scope(pos_profile)
+    # Explicitly exempt: this endpoint is how the UI LEARNS the till is stale.
+    # Relying on the cmd-based exemption would break it for internal callers,
+    # where there is no request cmd to match.
+    assert_pos_profile_scope(pos_profile, allow_stale_session=True)
 
     session = get_active_session(pos_profile)
+    if session and is_session_stale(session):
+        # The calendar has moved past this till's business date. Do NOT resume it
+        # for selling — return the same payload the opening screen already uses
+        # for an unclosed session, so the operator is sent to close it first.
+        # The stale-date rule below only guarded the "no active session" path, so
+        # a session that stayed open simply bypassed it.
+        return {
+            "has_session": False,
+            "unclosed_session": session.name,
+            "unclosed_user": session.user,
+            "unclosed_date": str(session.business_date),
+            "unclosed_profile": session.get("pos_profile") or pos_profile,
+            "stale": True,
+            "message": _(
+                "Session for business date {0} is still open. Close it before "
+                "billing on {1}."
+            ).format(session.business_date, nowdate()),
+        }
+
     if session:
         assert_session_operator(session, _("resume another cashier's POS session"))
         _ensure_store_business_date_is_not_future(session.store)

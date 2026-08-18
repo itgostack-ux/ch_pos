@@ -666,6 +666,27 @@ def get_active_session(pos_profile):
     )
 
 
+def is_session_stale(session) -> bool:
+	"""True when a session's business date is behind the calendar day.
+
+	A till belongs to ONE business date. Once the calendar rolls over, that
+	session may no longer take sales — it has to be counted and closed so the
+	day's cash and settlement land on the date they were earned.
+
+	auto_close_stale_sessions() below is the scheduled sweep for this, but it is
+	a cron job: with the scheduler off it never runs, and a session stayed open
+	for ten days taking sales against a stale date. So the rule is enforced
+	synchronously at the two points that matter — resuming a session and
+	billing — instead of relying on the sweep.
+	"""
+	if not session:
+		return False
+	bd = session.get("business_date") if hasattr(session, "get") else None
+	if not bd:
+		return False
+	return getdate(bd) < getdate(nowdate())
+
+
 def auto_close_stale_sessions():
     """Scheduler: force-close sessions from previous business dates.
 

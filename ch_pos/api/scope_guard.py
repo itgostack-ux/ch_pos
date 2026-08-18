@@ -87,7 +87,53 @@ def get_pos_profile_anchors(pos_profile: str, allow_disabled: bool = False) -> d
     }
 
 
-def assert_pos_profile_scope(pos_profile: str, user=None) -> dict:
+#: Methods that must keep working while a till is stale, or the operator is
+#: trapped: they are the very endpoints used to look at and close the session.
+#: Everything in the session lifecycle module qualifies, plus printing (the Z
+#: report is printed as part of closing).
+_STALE_SESSION_EXEMPT_PREFIXES = (
+    "ch_pos.api.session_api.",
+    "ch_pos.api.print_api.",
+)
+
+
+def _is_stale_exempt_request() -> bool:
+    cmd = (getattr(frappe.local, "form_dict", None) or {}).get("cmd") or ""
+    return any(cmd.startswith(p) for p in _STALE_SESSION_EXEMPT_PREFIXES)
+
+
+def assert_session_not_stale(pos_profile: str) -> None:
+    """Refuse ALL POS work while the open till belongs to a past business date.
+
+    A till belongs to one business date. Once the calendar rolls over, nothing
+    may be transacted against it — not billing, not buyback, not VAS, not
+    repair — until it is counted and closed, so the day's takings land on the
+    day they were earned.
+
+    This sits in assert_pos_profile_scope because every POS endpoint already
+    calls it, which makes this the one place the rule cannot be forgotten by a
+    new endpoint. It also catches the case the opening screen cannot: a session
+    that was open BEFORE midnight and is still on screen after it.
+    """
+    if not pos_profile or _is_stale_exempt_request():
+        return
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
+        get_active_session,
+        is_session_stale,
+    )
+
+    session = get_active_session(pos_profile)
+    if session and is_session_stale(session):
+        frappe.throw(
+            _("POS is locked: the open session is for business date {0}. "
+              "Close and settle it before working on {1}.").format(
+                session.get("business_date"), frappe.utils.nowdate()
+            ),
+            title=_("Session Must Be Closed"),
+        )
+
+
+def assert_pos_profile_scope(pos_profile: str, user=None, allow_stale_session=False) -> dict:
     anchors = get_pos_profile_anchors(pos_profile)
     assert_store_scope(
         store=anchors.get("store"),
@@ -95,6 +141,8 @@ def assert_pos_profile_scope(pos_profile: str, user=None) -> dict:
         company=anchors.get("company"),
         user=user,
     )
+    if not allow_stale_session:
+        assert_session_not_stale(pos_profile)
     return anchors
 
 

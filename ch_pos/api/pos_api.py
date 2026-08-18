@@ -3030,6 +3030,8 @@ def create_pos_invoice(
     active = get_active_session(pos_profile) if pos_profile else None
     if not active:
         frappe.throw(_("No active POS session. Open a session before billing."))
+    # Staleness is enforced centrally by assert_pos_profile_scope above, which
+    # locks every POS endpoint — not just billing — while the till is stale.
     session_name = active.get("name")
 
     if client_request_id:
@@ -6794,11 +6796,22 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Return audit log failed")
 
-    # Cancel any Active VAS Plans rows whose protected device or service item was
-    # part of this return. Failures here are logged but do not roll back the
-    # return -- the credit note is already submitted; plan cancellation can be
-    # retried by the warranty manager from Active VAS Plans list.
-    cancelled_plans = _cancel_linked_sold_plans(_plans_to_cancel, ret.name)
+    # Cancel linked VAS plans in a savepoint.  An active warranty claim can
+    # legitimately prevent cancellation; that must not turn an otherwise valid
+    # customer return into a failed API call or leave a half-cancelled plan.
+    cancelled_plans = []
+    vas_cancellation_warning = None
+    if _plans_to_cancel:
+        savepoint = "customer_return_vas_cancellation"
+        frappe.db.savepoint(savepoint)
+        try:
+            cancelled_plans = _cancel_linked_sold_plans(_plans_to_cancel, ret.name)
+        except Exception as exc:
+            frappe.db.rollback(save_point=savepoint)
+            vas_cancellation_warning = frappe._(
+                "Customer return completed, but linked VAS plan cancellation requires Warranty Manager action: {0}"
+            ).format(str(exc))
+            frappe.log_error(frappe.get_traceback(), f"VAS cancellation deferred for {ret.name}")
     phase4_side_effects = _apply_phase4_return_side_effects(ret)
 
     return {
@@ -6809,6 +6822,7 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
         "incentive_clawback": incentive_clawback,
         "auto_included_vas_rows": _auto_added_plans,
         "cancelled_sold_plans": cancelled_plans,
+        "vas_cancellation_warning": vas_cancellation_warning,
         "phase4": phase4_side_effects,
     }
 
@@ -14486,9 +14500,22 @@ def get_pos_buyback_detail(assessment_name) -> dict:
     # Diagnostic test results (from mobile app or manual)
     diagnostics = []
     for d in (a.diagnostic_tests or []):
+        result = (d.get("result") or "").strip()
+        result_key = result.casefold()
+        if result_key in ("pass", "passed", "ok", "yes"):
+            is_pass = True
+        elif result_key in ("fail", "failed", "no"):
+            is_pass = False
+        else:
+            # Preserve a sensible fallback for third-party diagnostic values:
+            # zero depreciation means pass, a positive rate means fail.
+            is_pass = flt(d.get("depreciation_percent")) <= 0
         diagnostics.append({
             "test_name": d.get("test_name") or d.get("test_code") or "",
-            "result": d.get("result") or "",
+            "test_code": d.get("test_code") or "",
+            "result": result,
+            "is_pass": is_pass,
+            "depreciation_percent": flt(d.get("depreciation_percent")),
             "details": d.get("details") or "",
         })
 
