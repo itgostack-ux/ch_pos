@@ -20,8 +20,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, flt, get_first_day, get_last_day, getdate, today
 from erpnext.accounts.doctype.monthly_distribution.monthly_distribution import (
-    get_periodwise_distribution_data,
-)
+    get_periodwise_distribution_data)
 from erpnext.accounts.report.financial_statements import get_period_list
 
 from ch_pos.config import has_configured_roles
@@ -30,9 +29,7 @@ from ch_pos.config import has_configured_roles
 
 def _is_manager():
     return has_configured_roles(
-        "incentive_report_roles",
-        ("Accounts Manager", "Accounts User", "POS Manager"),
-    )
+        "incentive_report_roles")
 
 
 def _scope_get_user_scope(user=None):
@@ -209,8 +206,7 @@ def _get_target_achievement_cards(filters, conditions, values):
         GROUP BY il.pos_executive, il.store
         """.format(conditions=conditions),
         values,
-        as_dict=True,
-    )
+        as_dict=True)
 
     achieved_by_store = {}
     executive_ids = set()
@@ -225,8 +221,7 @@ def _get_target_achievement_cards(filters, conditions, values):
         for pe in frappe.get_all(
             "POS Executive",
             filters={"name": ("in", list(executive_ids))},
-            fields=["name", "store", "sales_person"],
-        ):
+            fields=["name", "store", "sales_person"]):
             exec_map[pe.name] = pe
 
     exec_sales_persons = {
@@ -240,8 +235,7 @@ def _get_target_achievement_cards(filters, conditions, values):
         from_date=filters.get("from_date"),
         to_date=filters.get("to_date"),
         item_group=filters.get("item_group"),
-        company=filters.get("company"),
-    )
+        company=filters.get("company"))
 
     asm_stores = _get_scope_store_union("CH Area Sales Manager (ASM)")
     zsm_stores = _get_scope_store_union("CH Zonal Sales Manager (ZSM)")
@@ -265,15 +259,13 @@ def _get_target_achievement_cards(filters, conditions, values):
         from_date=filters.get("from_date"),
         to_date=filters.get("to_date"),
         item_group=filters.get("item_group"),
-        company=filters.get("company"),
-    )
+        company=filters.get("company"))
     target_zsm = _compute_sales_target(
         sales_persons=zsm_sales_persons,
         from_date=filters.get("from_date"),
         to_date=filters.get("to_date"),
         item_group=filters.get("item_group"),
-        company=filters.get("company"),
-    )
+        company=filters.get("company"))
 
     def _percent(achieved, target):
         if flt(target) <= 0:
@@ -299,8 +291,7 @@ def _get_scope_store_union(role_profile):
         users = frappe.get_all(
             "CH User Scope",
             filters={"enabled": 1, "role_profile": role_profile},
-            pluck="user",
-        )
+            pluck="user")
     except Exception:
         return stores
 
@@ -322,8 +313,7 @@ def _compute_sales_target(sales_persons, from_date, to_date, item_group=None, co
     target_rows = frappe.get_all(
         "Target Detail",
         filters={"parenttype": "Sales Person", "parent": ("in", list(sales_persons))},
-        fields=["parent", "fiscal_year", "distribution_id", "target_amount", "item_group"],
-    )
+        fields=["parent", "fiscal_year", "distribution_id", "target_amount", "item_group"])
     if item_group:
         target_rows = [r for r in target_rows if (r.item_group or "") == item_group]
 
@@ -339,8 +329,7 @@ def _compute_sales_target(sales_persons, from_date, to_date, item_group=None, co
             "Fiscal Year",
             row.fiscal_year,
             ["year_start_date", "year_end_date"],
-            as_dict=True,
-        )
+            as_dict=True)
         if not fy:
             continue
         if getdate(fy.year_end_date) < from_dt or getdate(fy.year_start_date) > to_dt:
@@ -355,8 +344,7 @@ def _compute_sales_target(sales_persons, from_date, to_date, item_group=None, co
                 "",
                 "Fiscal Year",
                 "Monthly",
-                company=company,
-            )
+                company=company)
         period_list = period_cache[period_key]
 
         dist_key = (row.distribution_id, row.fiscal_year, company)
@@ -364,8 +352,7 @@ def _compute_sales_target(sales_persons, from_date, to_date, item_group=None, co
             dist_cache[dist_key] = get_periodwise_distribution_data(
                 row.distribution_id,
                 period_list,
-                "Monthly",
-            )
+                "Monthly")
         dist_map = dist_cache[dist_key]
 
         for period in period_list:
@@ -438,8 +425,7 @@ def _build_conditions(filters):
                     city=filters.get("city"),
                     zone=filters.get("zone"),
                     store=filters.get("store"),
-                    user=frappe.session.user,
-                )
+                    user=frappe.session.user)
                 allowed_stores = effective.get("allowed_stores") or []
                 if not allowed_stores:
                     conditions.append("1 = 0")

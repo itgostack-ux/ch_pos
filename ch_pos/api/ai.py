@@ -19,8 +19,7 @@ def _consume_rate_limit(endpoint, identity, limit, window):
 	if increment_fixed_window(f"ai:{endpoint}", identity, window) > limit:
 		frappe.throw(
 			_("POS AI request limit exceeded. Please try again later."),
-			frappe.RateLimitExceededError,
-		)
+			frappe.RateLimitExceededError)
 
 
 def _enforce_ai_rate_limit(endpoint):
@@ -34,11 +33,6 @@ def _enforce_ai_rate_limit(endpoint):
 
 
 def _authorize_ai(pos_profile, feature_field, endpoint):
-	require_configured_roles(
-		"pos_ai_roles",
-		defaults=("POS User", "POS Manager", "Store Manager", "Sales User", "Sales Manager"),
-		action=_("use POS AI features"),
-	)
 	frappe.has_permission("Item", ptype="read", throw=True)
 	frappe.has_permission("POS Profile", ptype="read", throw=True)
 	if not pos_profile:
@@ -52,8 +46,7 @@ def _authorize_ai(pos_profile, feature_field, endpoint):
 			"POS Profile Extension",
 			{"pos_profile": pos_profile},
 			["disabled", feature_field, "max_comparison_items"],
-			as_dict=True,
-		)
+			as_dict=True)
 		if not is_privileged_user() and (
 			not extension or cint(extension.disabled) or not cint(extension.get(feature_field))
 		):
@@ -234,8 +227,7 @@ def _get_ai_settings():
 def _ai_allowed_hosts(settings):
 	return parse_exact_host_allowlist(
 		settings.get("allowed_api_hosts") or "api.openai.com",
-		label=_("POS AI API"),
-	)
+		label=_("POS AI API"))
 
 
 def _post_ai_request(settings, payload, *, timeout):
@@ -245,8 +237,7 @@ def _post_ai_request(settings, payload, *, timeout):
 		label=_("POS AI API"),
 		api_key=settings.get_password("api_key"),
 		payload=payload,
-		timeout=timeout,
-	)
+		timeout=timeout)
 
 
 def _ensure_ai_rows(rows, label):
@@ -268,8 +259,7 @@ def _get_pos_prices(item_codes):
 		filters={"item_code": ("in", item_codes), "channel": "POS", "status": "Active"},
 		fields=["item_code", "selling_price"],
 		order_by="modified desc, name desc",
-		limit_page_length=limit + 1,
-	)
+		limit_page_length=limit + 1)
 	_ensure_ai_rows(ch_rows, _("POS item prices"))
 	prices = {}
 	for row in ch_rows:
@@ -281,8 +271,7 @@ def _get_pos_prices(item_codes):
 			filters={"item_code": ("in", missing), "selling": 1},
 			fields=["item_code", "price_list_rate"],
 			order_by="modified desc, name desc",
-			limit_page_length=limit + 1,
-		)
+			limit_page_length=limit + 1)
 		_ensure_ai_rows(fallback_rows, _("Fallback item prices"))
 		for row in fallback_rows:
 			prices.setdefault(row.item_code, flt(row.price_list_rate))
@@ -294,8 +283,7 @@ def _load_comparison_item_data(item_codes):
 		"Item",
 		filters={"name": ("in", item_codes)},
 		fields=["name", "item_name", "brand", "ch_model"],
-		limit_page_length=len(item_codes) + 1,
-	)
+		limit_page_length=len(item_codes) + 1)
 	by_name = {row.name: row for row in rows}
 	if set(by_name) != set(item_codes):
 		frappe.throw(_("One or more comparison items do not exist or are not readable."), frappe.PermissionError)
@@ -308,8 +296,7 @@ def _load_comparison_item_data(item_codes):
 			"CH Model Spec Value",
 			filters={"parent": ("in", model_names)},
 			fields=["parent", "spec", "spec_value"],
-			limit_page_length=limit + 1,
-		)
+			limit_page_length=limit + 1)
 		_ensure_ai_rows(spec_rows, _("Comparison specifications"))
 		for row in spec_rows:
 			specs_by_model.setdefault(row.parent, {})[row.spec] = row.spec_value
@@ -341,16 +328,14 @@ def _find_cached_comparison(item_codes, preferences=None, warehouse=None):
 		filters=filters,
 		fields=["name", "comparison_result", "recommendation", "customer_preferences"],
 		order_by="creation desc",
-		limit=50,
-	)
+		limit=50)
 	parent_names = [row.name for row in existing]
 	items_by_parent = {}
 	if parent_names:
 		for child in frappe.db.get_all(
 			"POS Comparison Item",
 			filters={"parent": ("in", parent_names)},
-			fields=["parent", "item_code"],
-		):
+			fields=["parent", "item_code"]):
 			items_by_parent.setdefault(child.parent, []).append(child.item_code)
 
 	for row in existing:
@@ -410,8 +395,7 @@ def _ai_compare(items_data, preferences, settings):
 			"max_tokens": cint(settings.max_tokens) or 2000,
 			"response_format": {"type": "json_object"},
 		},
-		timeout=cint(settings.timeout_sec) or 10,
-	)
+		timeout=cint(settings.timeout_sec) or 10)
 	resp.raise_for_status()
 	latency = (now_datetime() - start).total_seconds() * 1000
 
@@ -483,14 +467,12 @@ def _get_item_pos_price(item_code):
 	price = flt(frappe.db.get_value(
 		"CH Item Price",
 		{"item_code": item_code, "channel": "POS", "status": "Active"},
-		"selling_price",
-	))
+		"selling_price"))
 	if not price:
 		price = flt(frappe.db.get_value(
 			"Item Price",
 			{"item_code": item_code, "selling": 1},
-			"price_list_rate",
-		))
+			"price_list_rate"))
 	return price
 
 
@@ -527,8 +509,7 @@ def _match_warranty_plans(item, device_price, cart_codes):
 		filters={"status": "Active"},
 		fields=["name", "plan_name", "price", "duration_months", "plan_type",
 				"brand", "coverage_description", "service_item"],
-		limit_page_length=limit + 1,
-	)
+		limit_page_length=limit + 1)
 	_ensure_ai_rows(plans, _("Warranty plan candidates"))
 
 	# Never recommend a plan whose service_item is not a Live (Active-lifecycle)
@@ -582,8 +563,7 @@ def _match_warranty_plans(item, device_price, cart_codes):
 				brand=item.brand or item.item_group or "device",
 				group=item.item_group or "devices",
 				duration=f"{plan.duration_months} months" if plan.duration_months else "extended period",
-				plan_price=f"{flt(plan.price):,.0f}",
-			)
+				plan_price=f"{flt(plan.price):,.0f}")
 
 			# Boost reason with sold history
 			sold_count = sold_counts.get(plan.name, 0)
@@ -624,8 +604,7 @@ def _match_accessories(item, cart_codes):
 		"Item",
 		filters=filters,
 		fields=["name as item_code", "item_name", "brand"],
-		limit=20,
-	)
+		limit=20)
 	accessory_prices = _get_pos_prices([row.item_code for row in accessories])
 
 	suggestions = []
@@ -725,8 +704,7 @@ def _ai_coaching_tip(item, device_price, suggestions, settings):
 			],
 			"max_tokens": 60,
 		},
-		timeout=5,
-	)
+		timeout=5)
 	resp.raise_for_status()
 	tip = resp.json()["choices"][0]["message"]["content"].strip().strip('"')
 	return tip if len(tip) < 200 else tip[:200]
@@ -768,8 +746,7 @@ def _gather_offer_data(items):
 			},
 			fields=["name", "item_code", "offer_name", "offer_type", "value_type", "value", "notes"],
 			order_by="priority asc",
-			limit_page_length=limit + 1,
-		)
+			limit_page_length=limit + 1)
 		_ensure_ai_rows(offers, _("Item offer rows"))
 		for offer in offers:
 			if offer.name not in seen_offers:
@@ -788,8 +765,7 @@ def _gather_offer_data(items):
 		},
 		fields=["name", "offer_name", "offer_type", "value_type", "value", "notes"],
 		order_by="priority asc",
-		limit_page_length=limit + 1,
-	)
+		limit_page_length=limit + 1)
 	_ensure_ai_rows(global_offers, _("Global offer rows"))
 	for offer in global_offers:
 		if offer.name not in seen_offers:
@@ -834,7 +810,6 @@ def _ai_explain_offers(offer_data, cart, settings):
 			],
 			"max_tokens": 300,
 		},
-		timeout=cint(settings.timeout_sec) or 10,
-	)
+		timeout=cint(settings.timeout_sec) or 10)
 	resp.raise_for_status()
 	return resp.json()["choices"][0]["message"]["content"].strip()

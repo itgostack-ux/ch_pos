@@ -73,16 +73,7 @@ def _require_inbound_role() -> None:
     intentionally skip this so the store can browse pending GRNs without
     needing GRN-issuing rights.
     """
-    require_configured_roles(
-        "inbound_receive_roles",
-        defaults=(
-            "Stock Manager",
-            "Stock User",
-            "Store Manager",
-            "POS Manager",
-        ),
-        action=_("run Inbound Receive"),
-    )
+    frappe.has_permission("Purchase Receipt", ptype="write", throw=True)
 
 
 def _resolve_store_warehouse(pos_profile: str) -> str:
@@ -170,8 +161,7 @@ def list_open_purchase_receipts(pos_profile: str, limit: int = 25) -> list[dict]
         LIMIT %(limit)s
         """,
         {"wh": warehouse, "limit": limit},
-        as_dict=True,
-    )
+        as_dict=True)
     return rows or []
 
 
@@ -220,8 +210,7 @@ def list_pending_purchase_orders(pos_profile: str, limit: int = 25) -> list[dict
         LIMIT %(limit)s
         """,
         {"wh": warehouse, "limit": limit},
-        as_dict=True,
-    )
+        as_dict=True)
     return rows or []
 
 
@@ -253,8 +242,7 @@ def get_pr_detail(pr_name: str, pos_profile: str) -> dict:
                 "Purchase Receipt {0} does not target this store's warehouse "
                 "({1})."
             ).format(pr_name, warehouse),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
 
     items = []
     for row in pr.items:
@@ -318,12 +306,10 @@ def create_pr_from_po(po_name: str, pos_profile: str) -> dict:
                 "Purchase Order {0} does not target this store's warehouse "
                 "({1})."
             ).format(po_name, warehouse),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
 
     from ch_erp15.ch_erp15.custom.purchase_order import (
-        make_purchase_receipt as _make_pr,
-    )
+        make_purchase_receipt as _make_pr)
 
     pr = _make_pr(po_name)
 
@@ -344,8 +330,7 @@ def pos_pr_set_imei_serials(
     pr_name: str,
     row_name: str,
     serials: str | list,
-    pos_profile: str,
-) -> dict:
+    pos_profile: str) -> dict:
     """Write scanned IMEIs to a PR row and flag it as Generated.
 
     Client hands a list (or newline-joined string) of serial numbers.
@@ -377,8 +362,7 @@ def pos_pr_set_imei_serials(
     if pr.set_warehouse != warehouse and warehouse not in row_warehouses:
         frappe.throw(
             _("Purchase Receipt does not target this store's warehouse."),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
 
     row = next((r for r in pr.items if r.name == row_name), None)
     if not row:
@@ -407,8 +391,7 @@ def pos_pr_set_imei_serials(
 def pos_pr_generate_barcode_serials(
     pr_name: str,
     row_name: str,
-    pos_profile: str,
-) -> dict:
+    pos_profile: str) -> dict:
     """Auto-generate barcode serials for a Barcode-type row.
 
     Reuses the single-source-of-truth generator
@@ -428,8 +411,7 @@ def pos_pr_generate_barcode_serials(
     if pr.set_warehouse != warehouse and warehouse not in row_warehouses:
         frappe.throw(
             _("Purchase Receipt does not target this store's warehouse."),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
 
     row = next((r for r in pr.items if r.name == row_name), None)
     if not row:
@@ -445,8 +427,7 @@ def pos_pr_generate_barcode_serials(
     minted = generate_barcode_serials(
         company=pr.company,
         posting_date=pr.posting_date,
-        qty=int(flt(row.qty)),
-    ) or {}
+        qty=int(flt(row.qty))) or {}
     serials = minted.get("serials") or []
 
     row.serial_no = "\n".join(serials)
@@ -482,8 +463,7 @@ def pos_pr_submit(pr_name: str, pos_profile: str) -> dict:
     if pr.set_warehouse != warehouse and warehouse not in row_warehouses:
         frappe.throw(
             _("Purchase Receipt does not target this store's warehouse."),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
 
     incomplete = [
         row.idx

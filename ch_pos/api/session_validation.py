@@ -35,11 +35,7 @@ def get_pending_tokens_for_store(store_code: str = None, pos_profile: str = None
 		}
 	"""
 	require_authenticated_user()
-	require_configured_roles(
-		"token_view_roles",
-		defaults=("POS User", "POS Manager", "Store Manager", "Technician"),
-		action=_("view pending store tokens"),
-	)
+	frappe.has_permission("POS Kiosk Token", ptype="read", throw=True)
 	user = frappe.session.user
 
 	# If pos_profile not provided, try to get it from recent POS sessions
@@ -48,8 +44,7 @@ def get_pending_tokens_for_store(store_code: str = None, pos_profile: str = None
 			"CH POS Session",
 			{"user": user, "docstatus": [">", 0]},  # Only submitted sessions
 			["pos_profile"],
-			order_by="creation desc",
-		)
+			order_by="creation desc")
 		if recent_session:
 			pos_profile = recent_session[0] if isinstance(recent_session, (list, tuple)) else recent_session
 	if not pos_profile:
@@ -73,8 +68,7 @@ def get_pending_tokens_for_store(store_code: str = None, pos_profile: str = None
 		fields=["name", "status", "customer_name", "creation"],
 		filters=filters,
 		limit_page_length=100,
-		order_by="creation desc",
-	)
+		order_by="creation desc")
 
 	warning = None
 	if total:
@@ -106,8 +100,7 @@ def validate_no_pending_tokens_on_logout() -> None:
 		"CH POS Session",
 		{"user": user, "docstatus": [">", 0]},
 		["pos_profile"],
-		order_by="creation desc",
-	)
+		order_by="creation desc")
 	if recent_session:
 		pos_profile = recent_session[0] if isinstance(recent_session, (list, tuple)) else recent_session
 
@@ -125,8 +118,7 @@ def validate_no_pending_tokens_on_logout() -> None:
 				count=pending_info["count"],
 				names=", ".join(t["name"] for t in pending_info["tokens"][:10])
 			),
-			title=_("Pending Queue Tokens"),
-		)
+			title=_("Pending Queue Tokens"))
 
 
 def auto_close_pending_tokens_at_eod() -> None:
@@ -156,8 +148,7 @@ def auto_close_pending_tokens_at_eod() -> None:
 		FOR UPDATE
 		""",
 		{"statuses": PENDING_STATUSES, "now": now, "limit": batch_limit},
-		as_dict=True,
-	)
+		as_dict=True)
 
 	closed_count = 0
 	errors = []
@@ -171,15 +162,13 @@ def auto_close_pending_tokens_at_eod() -> None:
 				"POS Kiosk Token",
 				{"name": ("in", cancelled_names)},
 				{"status": "Cancelled", "drop_reason": None},
-				update_modified=False,
-			)
+				update_modified=False)
 		if dropped_names:
 			frappe.db.set_value(
 				"POS Kiosk Token",
 				{"name": ("in", dropped_names)},
 				{"status": "Dropped", "drop_reason": "Auto-closed at EOD"},
-				update_modified=False,
-			)
+				update_modified=False)
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "EOD Token Auto-Close Update Failed")
 		raise
@@ -198,8 +187,7 @@ def auto_close_pending_tokens_at_eod() -> None:
 				after=new_status,
 				remarks="Auto-closed at EOD (expired or end-of-shift)",
 				store=token_row.store,
-				company=token_row.company or "",
-			)
+				company=token_row.company or "")
 		except Exception as exc:
 			err_msg = f"Audit log failed for {token_row.name}: {str(exc)}"
 			log.warning(err_msg)

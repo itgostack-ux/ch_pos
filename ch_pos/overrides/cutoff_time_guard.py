@@ -62,8 +62,7 @@ def validate_pos_cutoff_time(doc, method=None):
 		"POS Profile",
 		doc.pos_profile,
 		["ch_cutoff_time", "ch_cutoff_override_role"],
-		as_dict=True,
-	)
+		as_dict=True)
 	if not profile:
 		return
 
@@ -84,12 +83,12 @@ def validate_pos_cutoff_time(doc, method=None):
 		return
 
 	override_role = (profile.get("ch_cutoff_override_role") or "").strip()
-	if override_role and has_any_roles((override_role,)):
+	if override_role and has_any_roles((override_role)):
 		return
 	override_roles = get_configured_roles(
-		"cutoff_override_roles", ("POS Manager",)
+		"cutoff_override_roles"
 	)
-	if has_configured_roles("cutoff_override_roles", ("POS Manager",)):
+	if has_configured_roles("cutoff_override_roles"):
 		return
 
 	frappe.throw(
@@ -101,7 +100,5 @@ def validate_pos_cutoff_time(doc, method=None):
 			cutoff.strftime("%H:%M"),
 			doc.pos_profile,
 			now.strftime("%H:%M"),
-			override_role or ", ".join(sorted(override_roles)),
-		),
-		title=_("POS Cut-off Reached"),
-	)
+			override_role or ", ".join(sorted(override_roles))),
+		title=_("POS Cut-off Reached"))

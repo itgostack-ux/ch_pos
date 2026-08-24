@@ -32,8 +32,7 @@ def validate_pos_commercial_policy(doc, method=None):
 		get_commercial_policy,
 		validate_pos_discount,
 		log_pos_override,
-		check_offer_precedence,
-	)
+		check_offer_precedence)
 
 	policy = get_commercial_policy(company)
 	pos_channel = _resolve_pos_channel(doc)
@@ -105,18 +104,15 @@ def validate_pos_commercial_policy(doc, method=None):
 				item_code=item_code,
 				channel=pos_channel,
 				rate=rate,
-				company=company,
-			)
+				company=company)
 
 			if result and not result.get("allowed") and not result.get("needs_approval"):
 				# Hard block: below MOP without allowed tag
 				frappe.throw(
 					_("Item {0}: {1}").format(
 						frappe.bold(item_code),
-						result.get("reason"),
-					),
-					title=_("Commercial Policy Violation"),
-				)
+						result.get("reason")),
+					title=_("Commercial Policy Violation"))
 
 			if result and not result.get("allowed") and result.get("needs_approval"):
 				# Needs manager approval — check if it was pre-approved
@@ -126,35 +122,28 @@ def validate_pos_commercial_policy(doc, method=None):
 						  "Manager approval required to proceed."
 						).format(
 							frappe.bold(item_code),
-							result.get("reason"),
-						),
-						title=_("Discount Limit Exceeded"),
-					)
+							result.get("reason")),
+						title=_("Discount Limit Exceeded"))
 				else:
 					manager_user = item.get("custom_manager_user")
 					if not manager_user or not frappe.db.exists("User", manager_user):
 						frappe.throw(
 							_("Item {0}: A valid manager identity is required.").format(
 								frappe.bold(item_code)),
-							title=_("Invalid Manager Override"),
-						)
+							title=_("Invalid Manager Override"))
 					if not _is_server_verified(item, manager_user):
 						frappe.throw(
 							_("Item {0}: Manager approval was not verified by the server.").format(
 								frappe.bold(item_code)),
 							frappe.PermissionError,
-							title=_("Unauthorized Manager Override"),
-						)
+							title=_("Unauthorized Manager Override"))
 					if not has_configured_roles(
 						"discount_approval_roles",
-						("Store Manager", "Sales Manager", "POS Manager"),
-						user=manager_user,
-					):
+						user=manager_user):
 						frappe.throw(
 							_("Item {0}: User '{1}' cannot approve discounts.").format(
 								frappe.bold(item_code), manager_user),
-							title=_("Unauthorized Manager Override"),
-						)
+							title=_("Unauthorized Manager Override"))
 
 			# ── Log override if rate differs from CH Item Price ──────
 			if result and flt(result.get("discount_percent")) > 0:
@@ -183,8 +172,7 @@ def validate_pos_commercial_policy(doc, method=None):
 						company=company,
 						warehouse=item.warehouse or doc.set_warehouse,
 						customer=doc.customer,
-						posting_date=doc.posting_date,
-					)
+						posting_date=doc.posting_date)
 
 					# ── Also create a CH Exception Request for audit ────
 					_log_exception_request(
@@ -200,8 +188,7 @@ def validate_pos_commercial_policy(doc, method=None):
 						pos_invoice=doc.name,
 						customer=doc.customer,
 						approved=bool(item.get("custom_manager_approved")),
-						approver=item.get("custom_manager_user"),
-					)
+						approver=item.get("custom_manager_user"))
 
 		# ── Free-accessory gate (#3): detect ad-hoc free items ────────
 		if flt(item.rate) == 0 and not item.get("is_free_item"):
@@ -218,22 +205,19 @@ def validate_pos_commercial_policy(doc, method=None):
 				pos_invoice=doc.name,
 				customer=doc.customer,
 				approved=bool(item.get("custom_manager_approved")),
-				approver=item.get("custom_manager_user"),
-			)
+				approver=item.get("custom_manager_user"))
 			if not item.get("custom_manager_approved"):
 				frappe.throw(
 					_("Item {0} added at ₹0 without an active offer. "
 					  "Manager approval required.").format(frappe.bold(item_code)),
-					title=_("Free Accessory — Approval Required"),
-				)
+					title=_("Free Accessory — Approval Required"))
 			manager_user = item.get("custom_manager_user")
 			if not _is_server_verified(item, manager_user):
 				frappe.throw(
 					_("Item {0}: Free accessory approval was not verified by the server.").format(
 						frappe.bold(item_code)),
 					frappe.PermissionError,
-					title=_("Unauthorized Manager Override"),
-				)
+					title=_("Unauthorized Manager Override"))
 
 		# ── Below-margin check (#5): warn when selling below cost ─────
 		if rate > 0:
@@ -252,8 +236,7 @@ def validate_pos_commercial_policy(doc, method=None):
 					pos_invoice=doc.name,
 					customer=doc.customer,
 					approved=bool(item.get("custom_manager_approved")),
-					approver=item.get("custom_manager_user"),
-				)
+					approver=item.get("custom_manager_user"))
 
 	# ── Additional discount at document level ─────────────────────────
 	if flt(doc.additional_discount_percentage) > 0 or flt(doc.discount_amount) > 0:
@@ -264,8 +247,7 @@ def validate_pos_commercial_policy(doc, method=None):
 					_("Additional discount of {0}% exceeds maximum allowed {1}%").format(
 						doc.additional_discount_percentage, max_pct
 					),
-					title=_("Commercial Policy Violation"),
-				)
+					title=_("Commercial Policy Violation"))
 
 	# ── Store Discount Budget check ───────────────────────────────────
 	_check_discount_budget(doc)
@@ -286,16 +268,14 @@ def _check_discount_budget(doc):
 	ext = frappe.db.get_value(
 		"POS Profile Extension",
 		{"pos_profile": doc.pos_profile},
-		"name",
-	)
+		"name")
 	if not ext:
 		return
 
 	budgets = frappe.get_all(
 		"CH Store Discount Budget",
 		filters={"parent": ext, "parenttype": "POS Profile Extension"},
-		fields=["period", "max_discount_amount"],
-	)
+		fields=["period", "max_discount_amount"])
 	if not budgets:
 		return
 
@@ -361,21 +341,17 @@ def _check_discount_budget(doc):
 				  "This invoice adds ₹{3}. Manager override required.").format(
 					budget.period, frappe.format_value(utilized, "Currency"),
 					frappe.format_value(max_amt, "Currency"),
-					frappe.format_value(invoice_discount, "Currency"),
-				),
-				title=_("Discount Budget Exceeded"),
-			)
+					frappe.format_value(invoice_discount, "Currency")),
+				title=_("Discount Budget Exceeded"))
 		elif new_total > max_amt * 0.8:
 			frappe.msgprint(
 				_("{0} discount budget at {1}%: ₹{2} / ₹{3} utilized.").format(
 					budget.period,
 					round(new_total / max_amt * 100),
 					frappe.format_value(new_total, "Currency"),
-					frappe.format_value(max_amt, "Currency"),
-				),
+					frappe.format_value(max_amt, "Currency")),
 				title=_("Discount Budget Warning"),
-				indicator="orange",
-			)
+				indicator="orange")
 
 def _log_exception_request(exception_type, company, reason, requested_value=0,
                            original_value=0, item_code=None, serial_no=None,
@@ -402,16 +378,14 @@ def _log_exception_request(exception_type, company, reason, requested_value=0,
 			store_warehouse=store_warehouse,
 			pos_profile=pos_profile,
 			pos_invoice=pos_invoice,
-			customer=customer,
-		)
+			customer=customer)
 		# If pre-approved at POS, approve the exception immediately
 		if approved and result and result.get("status") == "Pending":
 			from ch_item_master.ch_item_master.exception_api import approve_exception
 			approve_exception(
 				exception_name=result["name"],
 				approver_user=approver,
-				channel="Manager PIN",
-			)
+				channel="Manager PIN")
 	except Exception:
 		frappe.log_error("Exception Request creation failed")
 
@@ -422,8 +396,7 @@ def _get_item_valuation(item_code, warehouse):
 		return 0
 	val = frappe.db.get_value("Bin",
 		{"item_code": item_code, "warehouse": warehouse},
-		"valuation_rate",
-	)
+		"valuation_rate")
 	return flt(val)
 
 
@@ -441,8 +414,7 @@ def _resolve_pos_channel(doc):
 		channel = frappe.db.get_value(
 			"CH Price Channel",
 			{"price_list": selling_price_list, "disabled": 0},
-			"name",
-		)
+			"name")
 		if channel:
 			return channel
 

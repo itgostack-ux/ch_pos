@@ -27,12 +27,11 @@ def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=
         return  # cannot create without item_code
 
     lock_key = f"serial_create_{frappe.scrub(str(serial_no))}_lifecycle"
-    got_lock = frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key,))[0][0]
+    got_lock = frappe.db.sql("SELECT GET_LOCK(%s, 10)", (lock_key))[0][0]
     if not got_lock:
         frappe.log_error(
             f"Could not acquire lifecycle lock for {serial_no}",
-            "POS Invoice Serial Lifecycle Auto-Create",
-        )
+            "POS Invoice Serial Lifecycle Auto-Create")
         return
     try:
         if frappe.db.exists("CH Serial Lifecycle", {"serial_no": serial_no}):
@@ -61,29 +60,26 @@ def _ensure_lifecycle_exists(serial_no, item_code=None, company=None, warehouse=
         lc.flags.ignore_validate = True
         lc.insert()
     finally:
-        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key))
 
 
 def _update_serial_status(serial_no, new_status, company=None, warehouse=None, remarks=None, **kwargs):
     """Call the centralized CH Serial Lifecycle API for status transitions."""
     from ch_item_master.ch_item_master.doctype.ch_serial_lifecycle.ch_serial_lifecycle import (
-        update_lifecycle_status_for_document as update_lifecycle_status,
-    )
+        update_lifecycle_status_for_document as update_lifecycle_status)
     return update_lifecycle_status(
         serial_no=serial_no,
         new_status=new_status,
         company=company,
         warehouse=warehouse,
         remarks=remarks,
-        **kwargs,
-    )
+        **kwargs)
 
 
 def _create_or_update_device(serial_no, customer, **kwargs):
     """Call the centralized CH Customer Device API for device registration."""
     from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import (
-        CHCustomerDevice,
-    )
+        CHCustomerDevice)
     return CHCustomerDevice.create_or_update_for_serial(serial_no, customer, **kwargs)
 
 
@@ -171,8 +167,7 @@ class CustomPOSInvoice(SalesInvoice):
                     _("Bundle offer for {0} is no longer active. "
                       "Please remove the free item {1} and re-add.").format(
                         parent_item, item.item_code),
-                    title=_("Expired Bundle Offer"),
-                )
+                    title=_("Expired Bundle Offer"))
             # Verify CH Item Price is still active for the bundle child
             if frappe.db.exists("DocType", "CH Item Price"):
                 active_price = frappe.db.exists("CH Item Price", {
@@ -183,8 +178,7 @@ class CustomPOSInvoice(SalesInvoice):
                     frappe.msgprint(
                         _("Warning: No active price found for bundle item {0}. "
                           "Pricing may be outdated.").format(item.item_code),
-                        indicator="orange",
-                    )
+                        indicator="orange")
 
     def before_cancel(self):
         _enforce_cancel_policy(self)
@@ -261,7 +255,7 @@ def _enforce_cancel_policy(doc):
         return
     if is_privileged_user():
         return
-    if has_configured_roles("cancellation_override_roles", ()):
+    if has_configured_roles("cancellation_override_roles"):
         return
     if not cint(doc.get("is_pos")):
         return
@@ -275,8 +269,7 @@ def _enforce_cancel_policy(doc):
                 "Sales Invoice {0} is dated {1} and cannot be cancelled. "
                 "The billing date has passed — please create a Sales Return instead."
             ).format(frappe.bold(doc.name), doc.posting_date),
-            title=frappe._("Cancellation Not Allowed"),
-        )
+            title=frappe._("Cancellation Not Allowed"))
 
     # Block if today's POS session is already closed (EOD processed)
     if doc.pos_profile:
@@ -290,22 +283,19 @@ def _enforce_cancel_policy(doc):
                         "Sales Invoice {1} cannot be cancelled after End of Day — "
                         "please create a Sales Return instead."
                     ).format(frappe.bold(doc.pos_profile), frappe.bold(doc.name)),
-                    title=frappe._("Cancellation Not Allowed"),
-                )
+                    title=frappe._("Cancellation Not Allowed"))
         except frappe.ValidationError:
             raise
         except Exception:
             frappe.log_error(
                 frappe.get_traceback(),
-                f"POS cancellation session lookup failed for {doc.name}",
-            )
+                f"POS cancellation session lookup failed for {doc.name}")
             frappe.throw(
                 frappe._(
                     "The active POS session could not be verified. Cancellation is blocked "
                     "until the session check succeeds; create a Sales Return if required."
                 ),
-                title=frappe._("Cancellation Verification Failed"),
-            )
+                title=frappe._("Cancellation Verification Failed"))
 
 
 # ── doc_event handlers (called via hooks.py) ─────────────────────
@@ -329,8 +319,7 @@ def create_customer_device_records(doc, method=None):
     which handles deduplication, warranty syncing, and field population.
     """
     from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import (
-        CHCustomerDevice,
-    )
+        CHCustomerDevice)
 
     # A submitted return brings the inventory serial back into a warehouse;
     # it must update the existing ownership projection, never create a new
@@ -342,8 +331,7 @@ def create_customer_device_records(doc, method=None):
                     sn,
                     doc.customer,
                     "Returned",
-                    verification_notes=_("Returned via {0}").format(doc.name),
-                )
+                    verification_notes=_("Returned via {0}").format(doc.name))
         return
 
     for item in doc.items:
@@ -449,8 +437,7 @@ def update_serial_lifecycle(doc, method=None):
                     new_status="In Stock",
                     company=doc.company,
                     warehouse=wh,
-                    remarks=f"Auto-advanced Received → In Stock on sale via {doc.name}",
-                )
+                    remarks=f"Auto-advanced Received → In Stock on sale via {doc.name}")
 
             _update_serial_status(
                 serial_no=sn,
@@ -462,8 +449,7 @@ def update_serial_lifecycle(doc, method=None):
                 sale_document=doc.name,
                 sale_rate=flt(item.rate),
                 customer=doc.customer,
-                customer_name=doc.customer_name,
-            )
+                customer_name=doc.customer_name)
 
 
 def _return_serial_lifecycle(doc):
@@ -489,15 +475,13 @@ def _return_serial_lifecycle(doc):
                     sale_document=None,
                     sale_rate=0,
                     customer=None,
-                    customer_name=None,
-                )
+                    customer_name=None)
                 _update_serial_status(
                     serial_no=sn,
                     new_status="In Stock",
                     company=doc.company,
                     warehouse=item.warehouse,
-                    remarks=f"Returned to stock — Sales Invoice {doc.name}",
-                )
+                    remarks=f"Returned to stock — Sales Invoice {doc.name}")
 
 
 def reverse_serial_lifecycle(doc, method=None):
@@ -507,7 +491,7 @@ def reverse_serial_lifecycle(doc, method=None):
     For returns: In Stock → Sold (re-mark as sold since the return is voided).
     """
     # Require a cancellation reason from non-system users
-    if not has_configured_roles("cancellation_override_roles", ()):
+    if not has_configured_roles("cancellation_override_roles"):
         if not (doc.get("custom_cancel_reason") or "").strip():
             frappe.throw(
                 frappe._("A cancellation reason is required to cancel Sales Invoice {0}").format(doc.name)
@@ -523,8 +507,7 @@ def reverse_serial_lifecycle(doc, method=None):
             before="Submitted",
             after="Cancelled",
             remarks=doc.get("custom_cancel_reason") or "",
-            company=doc.company,
-        )
+            company=doc.company)
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Audit log failed on Sales Invoice cancel")
 
@@ -551,16 +534,14 @@ def reverse_serial_lifecycle(doc, method=None):
                     sale_document=None,
                     sale_rate=0,
                     customer=None,
-                    customer_name=None,
-                )
+                    customer_name=None)
                 # Returned → In Stock
                 _update_serial_status(
                     serial_no=sn,
                     new_status="In Stock",
                     company=doc.company,
                     warehouse=item.warehouse,
-                    remarks=f"Returned to stock — Sales Invoice {doc.name} cancelled",
-                )
+                    remarks=f"Returned to stock — Sales Invoice {doc.name} cancelled")
 
 
 def _cancel_return_serial_lifecycle(doc):
@@ -611,8 +592,7 @@ def _cancel_return_serial_lifecycle(doc):
                     sale_document=orig_inv,
                     sale_rate=sale_rate,
                     customer=customer,
-                    customer_name=customer_name,
-                )
+                    customer_name=customer_name)
 
 
 def update_kiosk_token_status(doc, method=None):
@@ -670,8 +650,7 @@ def _auto_create_token_for_invoice(doc):
 def deactivate_customer_devices(doc, method=None):
     """Hook: on_cancel — reverse the customer-device ownership projection."""
     from ch_item_master.ch_customer_master.doctype.ch_customer_device.ch_customer_device import (
-        CHCustomerDevice,
-    )
+        CHCustomerDevice)
 
     for item in doc.items:
         for sn in _get_serial_nos_from_item(item, parent_doc=doc):
@@ -680,21 +659,18 @@ def deactivate_customer_devices(doc, method=None):
                     sn,
                     doc.customer,
                     "Owned",
-                    verification_notes=_("Return {0} cancelled").format(doc.name),
-                )
+                    verification_notes=_("Return {0} cancelled").format(doc.name))
             else:
                 device = frappe.db.get_value(
                     "CH Customer Device",
                     {"serial_no": sn, "customer": doc.customer, "purchase_invoice": doc.name},
-                    "name",
-                )
+                    "name")
                 if device:
                     CHCustomerDevice.set_projection_status(
                         sn,
                         doc.customer,
                         "Inactive",
-                        verification_notes=_("Sale {0} cancelled").format(doc.name),
-                    )
+                        verification_notes=_("Sale {0} cancelled").format(doc.name))
 
 
 def revert_kiosk_token_status(doc, method=None):
@@ -743,8 +719,7 @@ def increment_coupon_usage(doc, method=None):
             raise
         frappe.log_error(
             title="increment_coupon_usage failed",
-            message=f"Invoice {doc.name} coupon {coupon_name}: " + frappe.get_traceback(),
-        )
+            message=f"Invoice {doc.name} coupon {coupon_name}: " + frappe.get_traceback())
 
 
 def decrement_coupon_usage(doc, method=None):
@@ -760,8 +735,7 @@ def decrement_coupon_usage(doc, method=None):
             raise
         frappe.log_error(
             title="decrement_coupon_usage failed",
-            message=f"Invoice {doc.name} coupon {coupon_name}: " + frappe.get_traceback(),
-        )
+            message=f"Invoice {doc.name} coupon {coupon_name}: " + frappe.get_traceback())
 
 
 # ── Margin Scheme GST (selling side) ────────────────────────────
@@ -822,8 +796,7 @@ def _guard_imported_line_has_price(doc):
                 "in the uploaded file — imported sales must use the price from the "
                 "file, so the line, tax and ledger postings match the original sale."
             ).format(frappe.bold(item.get("item_code") or item.get("idx"))),
-            title=frappe._("Missing Price in Import"),
-        )
+            title=frappe._("Missing Price in Import"))
 
 
 def _hydrate_imported_item_prices(doc):
@@ -896,8 +869,7 @@ def _apply_import_item_details(doc, item, details):
         "income_account",
         "cost_center",
         "warehouse",
-        "item_tax_template",
-    ):
+        "item_tax_template"):
         value = details.get(fieldname)
         if value is not None and item.meta.get_field(fieldname) and not item.get(fieldname):
             item.set(fieldname, value)
@@ -1090,14 +1062,12 @@ def _apply_margin_scheme(doc):
                         f"purchase exempt value \u20b9{exempt_per_unit:.2f}; margin base "
                         "clamped to zero."
                     ),
-                    company=getattr(doc, "company", "") or "",
-                )
+                    company=getattr(doc, "company", "") or "")
             except Exception:
                 # Audit logger is best-effort; never block billing because of it.
                 frappe.log_error(
                     frappe.get_traceback(),
-                    f"Below-cost margin audit log failed for {item.item_code}",
-                )
+                    f"Below-cost margin audit log failed for {item.item_code}")
             base_value = 0
 
         # POS-15 fix: Dynamic GST rate lookup instead of hardcoded 1.18
@@ -1229,8 +1199,7 @@ def validate_eod_lock(doc, method=None):
                 ).format(
                     active.get("name"),
                     active.get("business_date"),
-                    doc.posting_date,
-                )
+                    doc.posting_date)
             )
 
 def _get_margin_gst_rate(item_code, doc):
@@ -1246,8 +1215,7 @@ def _get_margin_gst_rate(item_code, doc):
             rates = frappe.get_all(
                 "Item Tax Template Detail",
                 filters={"parent": item_tax_template},
-                fields=["tax_rate"],
-            )
+                fields=["tax_rate"])
             if rates:
                 return sum(_flt(r.tax_rate) for r in rates)
     # Fall back to document tax rows — sum all "On Net Total" rates
@@ -1293,7 +1261,7 @@ def _get_exempted_value(item):
                 AND sn.item_code = pri.item_code
             WHERE sn.name = %s
               AND sn.reference_doctype = 'Purchase Receipt'
-        """, (serial,), as_list=True)
+        """, (serial), as_list=True)
 
         exempt = flt(result[0][0]) if result and result[0] and result[0][0] else None
 

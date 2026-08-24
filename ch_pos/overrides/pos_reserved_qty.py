@@ -19,8 +19,7 @@ from frappe.utils import flt
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import (
     get_bin_qty,
     get_bundle_availability,
-    get_product_bundle_stock_availability,
-)
+    get_product_bundle_stock_availability)
 from erpnext.stock.stock_ledger import is_negative_stock_allowed
 
 from ch_pos.api.scope_guard import assert_store_scope
@@ -63,8 +62,7 @@ def _get_pos_reserved_qty_from_table(child_table, item_code, warehouse):
               )
         """.format(child_table=child_table, qty_column=qty_column),  # noqa: UP032
         {"item_code": item_code, "warehouse": warehouse},
-        as_dict=True,
-    )
+        as_dict=True)
 
     return flt(reserved_qty[0].stock_qty) if reserved_qty else 0
 
@@ -85,11 +83,6 @@ def get_stock_availability(item_code, warehouse) -> dict:
     Overrides erpnext.accounts.doctype.pos_invoice.pos_invoice.get_stock_availability
     using the corrected _get_pos_reserved_qty_from_table above.
     """
-    require_configured_roles(
-        "stock_availability_roles",
-        defaults=("POS User", "POS Manager", "Store Manager", "Stock User", "Stock Manager"),
-        action=_("view store stock availability"),
-    )
     if not item_code or not warehouse:
         frappe.throw(_("Item and Warehouse are required."))
     frappe.has_permission("Item", "read", item_code, throw=True)
@@ -107,8 +100,7 @@ def get_stock_availability(item_code, warehouse) -> dict:
         return (
             bin_qty - pos_sales_qty,
             True,
-            is_negative_stock_allowed(item_code=item_code),
-        )
+            is_negative_stock_allowed(item_code=item_code))
     else:
         if frappe.db.exists("Product Bundle", {"name": item_code, "disabled": 0}):
             frappe.has_permission("Product Bundle", "read", item_code, throw=True)

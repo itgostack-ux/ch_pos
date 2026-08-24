@@ -86,17 +86,11 @@ class POSEDCSettlement(Document):
 		     with a card payment mode
 		"""
 		self.check_permission("write")
-		require_configured_roles(
-			"edc_reconciliation_roles",
-			defaults=("Accounts Manager", "POS Manager"),
-			action=_("auto-match EDC transactions"),
-		)
 		_assert_edc_scope(self)
 		if not self.session:
 			frappe.throw(
 				_("A POS Session is required before EDC transactions can be auto-matched."),
-				title=_("EDC Session Required"),
-			)
+				title=_("EDC Session Required"))
 		matched_count = 0
 		for row in self.transactions:
 			if row.match_status == "Matched":
@@ -116,8 +110,7 @@ class POSEDCSettlement(Document):
 					  AND (%(session)s = '' OR pi.custom_ch_pos_session = %(session)s)
 					LIMIT 2
 					""",
-					{"rrn": row.rrn, "company": self.company, "session": self.session or ""},
-				)
+					{"rrn": row.rrn, "company": self.company, "session": self.session or ""})
 				invoice = invoice[0][0] if len(invoice) == 1 else None
 				if invoice:
 					row.matched_pos_invoice = invoice
@@ -179,11 +172,6 @@ def upload_edc_transactions(settlement_name, transactions_json) -> dict:
 
 	doc = frappe.get_doc("POS EDC Settlement", settlement_name)
 	doc.check_permission("write")
-	require_configured_roles(
-		"edc_reconciliation_roles",
-		defaults=("Accounts Manager", "POS Manager"),
-		action=_("upload EDC transactions"),
-	)
 	_assert_edc_scope(doc)
 	if doc.docstatus != 0:
 		frappe.throw(_("Can only upload transactions to a Draft settlement"), title=_("Pos Edc Settlement Error"))

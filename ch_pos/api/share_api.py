@@ -47,9 +47,7 @@ def _validate_recipient_overrides(doc, email=None, mobile_no=None) -> None:
 		return
 	require_configured_roles(
 		"invoice_recipient_override_roles",
-		defaults=("POS Manager", "Accounts Manager"),
-		action=_("share an invoice with a recipient not stored on the customer"),
-	)
+		action=_("share an invoice with a recipient not stored on the customer"))
 
 
 def _resolve_print_format(invoice_name: str) -> str:
@@ -81,8 +79,7 @@ def _generate_pdf_bytes(invoice_name: str, print_format: str, no_letterhead: int
 		name=invoice_name,
 		print_format=print_format,
 		as_pdf=True,
-		no_letterhead=bool(cint(no_letterhead)),
-	)
+		no_letterhead=bool(cint(no_letterhead)))
 	return pdf_bytes
 
 
@@ -112,8 +109,7 @@ def _share_email(invoice_name: str, fmt: str, recipient: str | None, no_letterhe
 		}],
 		reference_doctype="Sales Invoice",
 		reference_name=invoice_name,
-		now=False,
-	)
+		now=False)
 	return {"success": True, "recipient": email}
 
 
@@ -154,8 +150,7 @@ def _share_whatsapp(invoice_name: str, fmt: str, mobile_no: str | None) -> dict:
 			ref_doctype="Sales Invoice",
 			ref_name=invoice_name,
 			enqueue=True,
-			company=doc.company,
-		)
+			company=doc.company)
 		return {"success": True, "recipient": phone, "template": template_name}
 	except Exception as exc:
 		frappe.log_error(frappe.get_traceback(), "share_invoice: WhatsApp send failed")
@@ -187,8 +182,7 @@ def share_invoice(
 	invoice_name: str,
 	channels: list | str,
 	mobile_no: str | None = None,
-	email: str | None = None,
-) -> dict:
+	email: str | None = None) -> dict:
 	"""One-click receipt fanout across print / email / whatsapp / einvoice.
 
 	Returns: {"invoice": str, "results": {channel: {success, ...}}}
@@ -199,11 +193,6 @@ def share_invoice(
 	doc.check_permission("read")
 	# READ path (receipt reprint/share): tolerate a since-disabled POS Profile.
 	assert_sales_invoice_scope(invoice_name, allow_disabled=True)
-	require_configured_roles(
-		"invoice_share_roles",
-		defaults=("POS User", "POS Manager", "Accounts User", "Accounts Manager"),
-		action=_("share a POS invoice"),
-	)
 	_validate_recipient_overrides(doc, email=email, mobile_no=mobile_no)
 
 	if isinstance(channels, str):
@@ -216,12 +205,6 @@ def share_invoice(
 	channels = [c for c in (channels or []) if c in _VALID_CHANNELS]
 	if not channels:
 		frappe.throw(_("At least one valid channel is required."), title=_("Share Invoice"))
-	if "einvoice" in channels:
-		require_configured_roles(
-			"einvoice_generation_roles",
-			defaults=("Accounts Manager",),
-			action=_("generate an e-invoice"),
-		)
 
 	settings = _resolve_print_settings(invoice_name)
 	fmt = settings.get("print_format") or _resolve_print_format(invoice_name)

@@ -40,8 +40,7 @@ def _check_pin_rate_limit(store=None) -> str:
         frappe.throw(
             _("Too many invalid approval attempts. Try again later."),
             frappe.RateLimitExceededError,
-            title=_("Approval Temporarily Locked"),
-        )
+            title=_("Approval Temporarily Locked"))
     return key
 
 
@@ -110,8 +109,7 @@ def verify_manager_pin(pin, store=None, permission=None):
     )
     allowed_roles = sorted(
         get_configured_roles(
-            "manager_pin_roles", ("Store Manager", "POS Manager", "Sales Manager", "CH Store Executive", "POS User", "Sales User"),
-        )
+            "manager_pin_roles")
         | {"System Manager"}
     )
     values = {"roles": allowed_roles, "limit": candidate_limit + 1}
@@ -150,13 +148,11 @@ def verify_manager_pin(pin, store=None, permission=None):
          LIMIT %(limit)s
         """,
         values,
-        as_dict=True,
-    )
+        as_dict=True)
     if len(managers) > candidate_limit:
         frappe.throw(
             _("Manager PIN candidates exceed the configured store limit. Assign each manager to a store or raise the limit."),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
 
     matches = []
     undecryptable = []
@@ -225,8 +221,7 @@ def verify_manager_pin(pin, store=None, permission=None):
             "read on this site. Restore the original site_config.json "
             "encryption_key, or have these managers set a new PIN:\n"
             + "\n".join(undecryptable),
-            "CH POS Password decryption failed",
-        )
+            "CH POS Password decryption failed")
         if not managers or len(undecryptable) == len(managers):
             return {"valid": False, "message": _(
                 "Manager PINs cannot be read on this site — none are stored "

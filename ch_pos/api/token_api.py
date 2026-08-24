@@ -16,14 +16,12 @@ from buyback.utils import normalize_indian_phone, validate_indian_phone
 from ch_pos.api.scope_guard import (
     assert_pos_profile_scope,
     assert_store_scope,
-    get_pos_profile_anchors,
-)
+    get_pos_profile_anchors)
 from ch_pos.config import (
 	get_control_setting,
 	has_configured_roles,
 	is_privileged_user,
-	require_configured_roles,
-)
+	require_configured_roles)
 from ch_pos.rate_limits import increment_fixed_window
 
 
@@ -56,11 +54,7 @@ def _ensure_can_operate_token() -> None:
 
 
 def _ensure_can_view_tokens() -> None:
-    require_configured_roles(
-        "token_view_roles",
-        defaults=("POS User", "POS Manager", "Store Manager", "Technician"),
-        action=_("view queue tokens"),
-    )
+    frappe.has_permission("POS Kiosk Token", ptype="read", throw=True)
 
 
 # ---------------------------------------------------------------------------
@@ -140,17 +134,14 @@ def _assert_token_assignee(user: str, pos_profile: str) -> None:
         frappe.throw(_("The selected assignee is not an active System User."), frappe.PermissionError)
     if not has_configured_roles(
         "token_assignee_roles",
-        ("Technician", "POS User", "POS Manager", "Store Manager"),
-        user=user,
-    ):
+        user=user):
         frappe.throw(_("The selected user cannot be assigned queue tokens."), frappe.PermissionError)
     anchors = get_pos_profile_anchors(pos_profile)
     assert_store_scope(
         store=anchors.get("store"),
         warehouse=anchors.get("warehouse"),
         company=anchors.get("company"),
-        user=user,
-    )
+        user=user)
 
 
 def _assert_sales_executive(sales_executive: str, pos_profile: str) -> None:
@@ -160,8 +151,7 @@ def _assert_sales_executive(sales_executive: str, pos_profile: str) -> None:
         "POS Executive",
         sales_executive,
         ["name", "user", "company", "store", "is_active"],
-        as_dict=True,
-    )
+        as_dict=True)
     if not executive or not executive.is_active:
         frappe.throw(_("The selected POS Executive is inactive or unavailable."), frappe.PermissionError)
     anchors = get_pos_profile_anchors(pos_profile)
@@ -173,8 +163,7 @@ def _assert_sales_executive(sales_executive: str, pos_profile: str) -> None:
         store=executive.store,
         warehouse=anchors.get("warehouse"),
         company=executive.company,
-        user=executive.user,
-    )
+        user=executive.user)
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +184,7 @@ def _check_rate_limit(key: str):
         60,
         min(
             cint(get_control_setting("token_create_rate_limit_window_seconds", 3600)),
-            86400,
-        ),
-    )
+            86400))
     hits = increment_fixed_window("kiosk-token-create", key, window_seconds)
     if hits > request_limit:
         frappe.throw(_("Too many requests. Please try again later."), frappe.RateLimitExceededError, title=_("API Error"))
@@ -245,8 +232,7 @@ def _next_daily_seq(pos_profile: str) -> int:
            WHERE pos_profile = %s
              AND DATE(creation) = %s
         """,
-        (pos_profile, today),
-    )[0][0] or 0
+        (pos_profile, today))[0][0] or 0
     profile_digest = hashlib.sha256(pos_profile.encode()).hexdigest()[:24]
     series_key = f"CH-POS-TOKEN-{today}-{profile_digest}"
     frappe.db.sql(
@@ -256,8 +242,7 @@ def _next_daily_seq(pos_profile: str) -> int:
         ON DUPLICATE KEY UPDATE
             `current` = GREATEST(`current`, VALUES(`current`))
         """,
-        (series_key, cint(existing_max)),
-    )
+        (series_key, cint(existing_max)))
     return cint(getseries(series_key, 10))
 
 
@@ -285,8 +270,7 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
         "POS Profile",
         identifier,
         ["name", "company", "warehouse"],
-        as_dict=True,
-    )
+        as_dict=True)
     if profile:
         return profile
 
@@ -303,16 +287,14 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
                 ["pos_profile", "=", identifier],
             ],
             fields=["pos_profile"],
-            limit_page_length=5,
-        )
+            limit_page_length=5)
         mapped_profiles = sorted({(r.get("pos_profile") or "").strip() for r in store_candidates if r.get("pos_profile")})
         if len(mapped_profiles) == 1:
             profile = frappe.db.get_value(
                 "POS Profile",
                 mapped_profiles[0],
                 ["name", "company", "warehouse"],
-                as_dict=True,
-            )
+                as_dict=True)
             if profile:
                 return profile
 
@@ -321,8 +303,7 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
         "POS Profile",
         filters={"name": ["like", f"%{identifier}%"]},
         fields=["name", "company", "warehouse"],
-        limit_page_length=5,
-    )
+        limit_page_length=5)
     if len(candidates) == 1:
         return candidates[0]
 
@@ -331,13 +312,13 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
 
 def _with_pos_profile_lock(pos_profile: str, callback):
     lock_key = f"pos_billing_lock_{pos_profile}"
-    locked = frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key,))[0][0]
+    locked = frappe.db.sql("SELECT GET_LOCK(%s, 30)", (lock_key))[0][0]
     if locked != 1:
         frappe.throw(_("Another billing request is being processed. Please try again."), title=_("Billing Busy"))
     try:
         return callback()
     finally:
-        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key,))
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key))
 
 
 def _active_billing_token(pos_profile: str, exclude_token: str = "") -> dict | None:
@@ -353,8 +334,7 @@ def _active_billing_token(pos_profile: str, exclude_token: str = "") -> dict | N
         filters=filters,
         fields=["name", "token_display", "customer_name", "status"],
         order_by="modified desc",
-        limit_page_length=1,
-    )
+        limit_page_length=1)
     return rows[0] if rows else None
 
 
@@ -369,16 +349,14 @@ def _release_held_tokens(pos_profile: str) -> list[str]:
         },
         pluck="name",
         order_by="modified asc, name asc",
-        limit_page_length=batch_limit,
-    )
+        limit_page_length=batch_limit)
     if hold_names:
         frappe.db.set_value(
             "POS Kiosk Token",
             {"name": ("in", hold_names)},
             "status",
             "Waiting",
-            update_modified=False,
-        )
+            update_modified=False)
     return hold_names
 
 
@@ -393,8 +371,7 @@ def _bounded_public_text(value, label: str, max_length: int, *, required: bool =
     if len(text) > max_length:
         frappe.throw(
             _("{0} cannot exceed {1} characters").format(label, max_length),
-            title=_("API Error"),
-        )
+            title=_("API Error"))
     return text
 
 @frappe.whitelist(allow_guest=True)
@@ -423,15 +400,13 @@ def get_store_config(pos_profile: str) -> dict:
                  AND (ch_parent_brand IS NULL OR ch_parent_brand = '')
                  AND name != 'Test Brand'
                ORDER BY name ASC""",
-            as_dict=True,
-        )
+            as_dict=True)
     else:
         _raw_brands = frappe.db.sql(
             """SELECT name FROM `tabBrand`
                WHERE name != 'Test Brand'
                ORDER BY name ASC""",
-            as_dict=True,
-        )
+            as_dict=True)
     brands = [b.name for b in _raw_brands]
     if "Other" not in brands:
         brands.append("Other")
@@ -475,14 +450,12 @@ def get_brand_models(brand: str) -> dict:
         brand_rows = frappe.db.sql(
             "SELECT name FROM `tabBrand` WHERE name = %s OR ch_parent_brand = %s",
             (brand, brand),
-            as_dict=True,
-        )
+            as_dict=True)
     else:
         brand_rows = frappe.db.sql(
             "SELECT name FROM `tabBrand` WHERE name = %s",
-            (brand,),
-            as_dict=True,
-        )
+            (brand),
+            as_dict=True)
     db_brands = [r.name for r in brand_rows] or [brand]
 
     rows = frappe.get_all(
@@ -490,8 +463,7 @@ def get_brand_models(brand: str) -> dict:
         filters={"brand": ("in", db_brands), "disabled": 0},
         fields=["item_name"],
         order_by="item_name asc",
-        limit_page_length=200,
-    )
+        limit_page_length=200)
 
     seen = set()
     models = []
@@ -514,8 +486,7 @@ def create_token(
     device_brand: str,
     device_model: str,
     issue_category: str,
-    issue_description: str = "",
-) -> dict:
+    issue_description: str = "") -> dict:
     """
     Create a new queue token. Called from the kiosk (no login required).
     Returns the token display number and doc name.
@@ -639,8 +610,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
             "pos_profile", "company",
         ],
         order_by="creation desc",
-        limit_page_length=result_limit + 1,
-    )
+        limit_page_length=result_limit + 1)
     _ensure_result_limit(tokens, result_limit, _("Queue tokens"))
 
     technician_ids = sorted({t.technician for t in tokens if t.get("technician")})
@@ -650,8 +620,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
             "User",
             filters={"name": ("in", technician_ids)},
             fields=["name", "full_name"],
-            limit_page_length=result_limit + 1,
-        )
+            limit_page_length=result_limit + 1)
         _ensure_result_limit(user_rows, result_limit, _("Queue technicians"))
         technician_names = {row.name: row.full_name or row.name for row in user_rows}
 
@@ -702,8 +671,7 @@ def get_store_users(pos_profile: str = None, role: str = None) -> dict:
                     "User",
                     filters={"name": ("in", missing_users)},
                     fields=["name", "full_name"],
-                    limit_page_length=result_limit + 1,
-                )
+                    limit_page_length=result_limit + 1)
                 _ensure_result_limit(live_rows, result_limit, _("Store user details"))
                 live_names = {r.name: r.full_name or r.name for r in live_rows}
             for r in rows:
@@ -797,7 +765,7 @@ def engage_token(token_name: str, sales_executive: str = "") -> dict:
     _ensure_can_operate_token()
     _assert_token_scope(token_name)
     doc = frappe.get_doc("POS Kiosk Token", token_name)
-    if doc.status not in ("Waiting",):
+    if doc.status not in ("Waiting"):
         frappe.throw(_("Can only engage a Waiting token, current status is {0}").format(doc.status), title=_("API Error"))
     updates = {
         "status": "Engaged",
@@ -913,8 +881,7 @@ def recover_stale_pos_billing(timeout_minutes: int | None = None) -> dict:
         order_by="modified asc",
         limit_page_length=max(
             1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000)
-        ),
-    )
+        ))
 
     recovered: list[str] = []
     released_holds: list[str] = []
@@ -931,8 +898,7 @@ def recover_stale_pos_billing(timeout_minutes: int | None = None) -> dict:
                 filters={"name": ("in", token_names), "status": "In Progress", "docstatus": 1},
                 pluck="name",
                 order_by="modified asc, name asc",
-                limit_page_length=len(token_names),
-            )
+                limit_page_length=len(token_names))
             if not current_names:
                 return
             frappe.db.set_value(
@@ -940,8 +906,7 @@ def recover_stale_pos_billing(timeout_minutes: int | None = None) -> dict:
                 {"name": ("in", current_names)},
                 "status",
                 "Waiting",
-                update_modified=False,
-            )
+                update_modified=False)
             recovered.extend(current_names)
             released_holds.extend(_release_held_tokens(pos_profile))
 
@@ -950,8 +915,7 @@ def recover_stale_pos_billing(timeout_minutes: int | None = None) -> dict:
         except Exception:
             frappe.log_error(
                 frappe.get_traceback(),
-                f"Failed stale POS billing recovery for profile {pos_profile}",
-            )
+                f"Failed stale POS billing recovery for profile {pos_profile}")
 
     return {
         "timeout_minutes": timeout,
@@ -969,8 +933,7 @@ def quick_walkin(
     budget_range: str = "",
     customer_name: str = "",
     customer_phone: str = "",
-    sales_executive: str = "",
-) -> dict:
+    sales_executive: str = "") -> dict:
     """
     2-second retail walk-in entry — button-driven, no typing needed.
     Creates a token already in Engaged state with retail interest fields populated.
@@ -1047,8 +1010,7 @@ def audit_orphan_invoices(pos_profile: str = "", date: str = "") -> dict:
                     "POS Profile",
                     filters={"warehouse": ("in", list(warehouses))},
                     pluck="name",
-                    limit_page_length=profile_limit + 1,
-                )
+                    limit_page_length=profile_limit + 1)
                 _ensure_result_limit(profiles, profile_limit, _("Scoped POS profiles"))
                 filters["pos_profile"] = ("in", profiles or ["__none__"])
             elif companies:
@@ -1062,8 +1024,7 @@ def audit_orphan_invoices(pos_profile: str = "", date: str = "") -> dict:
         filters=filters,
         fields=["name", "pos_profile", "customer_name", "grand_total", "posting_date", "owner"],
         order_by="creation asc",
-        limit_page_length=report_limit + 1,
-    )
+        limit_page_length=report_limit + 1)
     _ensure_result_limit(orphans, report_limit, _("Orphan invoices"))
     return {
         "date": target_date,
@@ -1100,8 +1061,7 @@ def get_walkin_insights(pos_profile: str = "", days: int = 30) -> dict:
         ),
         staff_variance=max(
             0.0, min(frappe.utils.flt(get_control_setting("walkin_insight_staff_variance_pct", 20)), 100.0)
-        ),
-    )
+        ))
     end_date = frappe.utils.today()
     start_date = str(add_days(getdate(end_date), -(int(days) - 1)))
 
@@ -1123,8 +1083,7 @@ def get_walkin_insights(pos_profile: str = "", days: int = 30) -> dict:
             "creation", "engaged_at", "exit_at", "converted_invoice",
             "pos_profile",
         ],
-        limit_page_length=report_limit + 1,
-    )
+        limit_page_length=report_limit + 1)
     _ensure_result_limit(tokens, report_limit, _("Walk-in insight tokens"))
 
     if not tokens:
@@ -1240,8 +1199,7 @@ def get_walkin_insights(pos_profile: str = "", days: int = 30) -> dict:
                         "User",
                         filters={"name": ("in", [best, worst])},
                         fields=["name", "full_name"],
-                        limit_page_length=2,
-                    )
+                        limit_page_length=2)
                 }
                 best_name = names.get(best, best)
                 worst_name = names.get(worst, worst)
@@ -1323,8 +1281,7 @@ def find_customer_by_phone(phone: str, pos_profile: str = None) -> dict:
     direct = frappe.db.sql(
         f"SELECT c.name FROM `tabCustomer` c WHERE c.mobile_no = %s {customer_scope_clause} LIMIT 1",
         [phone, *profile_params],
-        as_dict=True,
-    )
+        as_dict=True)
     name = direct[0].name if direct else None
     if name:
         return name
@@ -1342,8 +1299,7 @@ def find_customer_by_phone(phone: str, pos_profile: str = None) -> dict:
             LIMIT 1
             """.format(customer_scope_clause=customer_scope_clause),
             [tail10, tail10, *profile_params],
-            as_dict=True,
-        )
+            as_dict=True)
         if by_mobile_tail:
             return by_mobile_tail[0].name
     # Try Dynamic Link on Contact
@@ -1355,8 +1311,7 @@ def find_customer_by_phone(phone: str, pos_profile: str = None) -> dict:
              {contact_scope_clause}
            LIMIT 1""".format(contact_scope_clause=contact_scope_clause),
         [phone, *profile_params],
-        as_dict=True,
-    )
+        as_dict=True)
     if contact:
         return contact[0].link_name
     if tail10 and len(tail10) == 10:
@@ -1369,8 +1324,7 @@ def find_customer_by_phone(phone: str, pos_profile: str = None) -> dict:
                  {contact_scope_clause}
                LIMIT 1""".format(contact_scope_clause=contact_scope_clause),
             [tail10, *profile_params],
-            as_dict=True,
-        )
+            as_dict=True)
         if contact_tail:
             return contact_tail[0].link_name
     return None
@@ -1389,8 +1343,7 @@ def log_counter_walkin(
     remarks: str = "",
     device_brand: str = "",
     device_model: str = "",
-    item_code: str = "",
-) -> dict:
+    item_code: str = "") -> dict:
     """
     Create a minimal POS Kiosk Token for a direct-counter walk-in.
     This replaces the old log_walkin counter-only approach.
@@ -1497,8 +1450,7 @@ def get_dashboard_stats(pos_profile: str = None, date_filter: str = "today") -> 
         "POS Kiosk Token",
         filters=filters,
         fields=["status", "creation", "completed_at", "pos_profile"],
-        limit_page_length=report_limit + 1,
-    )
+        limit_page_length=report_limit + 1)
     _ensure_result_limit(all_tokens, report_limit, _("Dashboard tokens"))
 
     total = len(all_tokens)
@@ -1555,11 +1507,7 @@ def get_technician_tokens(technician: str = None) -> dict:
     _ensure_can_view_tokens()
     tech = technician or frappe.session.user
     if tech != frappe.session.user and not is_privileged_user():
-        require_configured_roles(
-            "token_assignment_roles",
-            defaults=("POS Manager", "Store Manager"),
-            action=_("view another technician's queue"),
-        )
+        frappe.has_permission("POS Kiosk Token", ptype="write", throw=True)
     today = frappe.utils.today()
 
     token_filters = {
@@ -1579,8 +1527,7 @@ def get_technician_tokens(technician: str = None) -> dict:
             "pos_profile",
         ],
         order_by="creation desc",
-        limit_page_length=result_limit + 1,
-    )
+        limit_page_length=result_limit + 1)
     _ensure_result_limit(tokens, result_limit, _("Technician tokens"))
 
     for t in tokens:
@@ -1612,8 +1559,7 @@ def get_reports(pos_profile: str = None, days: int = 7) -> dict:
         "POS Kiosk Token",
         filters=base_filters,
         fields=["name", "status", "creation", "completed_at", "technician"],
-        limit_page_length=report_limit + 1,
-    )
+        limit_page_length=report_limit + 1)
     _ensure_result_limit(all_tokens, report_limit, _("Token report rows"))
 
     technician_ids = sorted({t.technician for t in all_tokens if t.technician})
@@ -1623,8 +1569,7 @@ def get_reports(pos_profile: str = None, days: int = 7) -> dict:
             "User",
             filters={"name": ("in", technician_ids)},
             fields=["name", "full_name"],
-            limit_page_length=report_limit + 1,
-        )
+            limit_page_length=report_limit + 1)
         _ensure_result_limit(user_rows, report_limit, _("Report technicians"))
         technician_names = {row.name: row.full_name or row.name for row in user_rows}
 
@@ -1713,8 +1658,7 @@ def get_pos_profiles() -> list:
     if frappe.session.user == "Guest":
         frappe.throw(
             frappe._("You must be signed in to list POS Profiles."),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
 
     result_limit = _configured_limit("token_profile_result_limit", 1000, 5000)
     if is_privileged_user():
@@ -1723,8 +1667,7 @@ def get_pos_profiles() -> list:
             filters={"disabled": 0},
             fields=["name", "company", "warehouse"],
             order_by="name asc",
-            limit_page_length=result_limit + 1,
-        )
+            limit_page_length=result_limit + 1)
         return _ensure_result_limit(all_profiles, result_limit, _("POS profiles"))
 
     try:
@@ -1739,8 +1682,7 @@ def get_pos_profiles() -> list:
             filters={"disabled": 0},
             fields=["name", "company", "warehouse"],
             order_by="name asc",
-            limit_page_length=result_limit + 1,
-        )
+            limit_page_length=result_limit + 1)
         return _ensure_result_limit(all_profiles, result_limit, _("POS profiles"))
 
     stores = scope.get("stores") or set()
@@ -1753,8 +1695,7 @@ def get_pos_profiles() -> list:
         "CH Store",
         filters={"name": ("in", list(stores))},
         pluck="pos_profile",
-        limit_page_length=result_limit + 1,
-    )
+        limit_page_length=result_limit + 1)
     _ensure_result_limit(profile_names, result_limit, _("Scoped store profiles"))
     entitled_profiles = {name for name in profile_names if name}
     if not entitled_profiles:
@@ -1765,8 +1706,7 @@ def get_pos_profiles() -> list:
         filters={"disabled": 0, "name": ("in", list(entitled_profiles))},
         fields=["name", "company", "warehouse"],
         order_by="name asc",
-        limit_page_length=result_limit + 1,
-    )
+        limit_page_length=result_limit + 1)
     return _ensure_result_limit(profiles, result_limit, _("Scoped POS profiles"))
 
 
@@ -1798,8 +1738,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                      ORDER BY FIELD(status, 'In Progress', 'Hold', 'Waiting', 'Engaged'), creation ASC
                      LIMIT %s""",
         (pos_profile, today, result_limit + 1),
-        as_dict=True,
-    )
+        as_dict=True)
     return _ensure_result_limit(tokens, result_limit, _("Waiting POS tokens"))
 
 

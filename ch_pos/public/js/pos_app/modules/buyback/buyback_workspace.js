@@ -2310,6 +2310,13 @@ export class BuybackWorkspace {
 					});
 					return;
 				}
+				if (!uploads.customer_photo) {
+					frappe.show_alert({
+						message: __("Customer photo is mandatory for KYC verification"),
+						indicator: "red",
+					});
+					return;
+				}
 				if (!values.kyc_id_type || !values.kyc_id_number) {
 					frappe.show_alert({
 						message: __("ID Type and ID Number are required"),
@@ -2457,12 +2464,12 @@ export class BuybackWorkspace {
 					<div class="ch-kyc-preview">${_existing_preview(uploads.customer_id_back)}</div>
 					<input type="file" accept="image/*" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:1" />
 				</div>
-				<div class="ch-kyc-box ${uploads.customer_photo ? "has-file" : ""}" data-upload="customer_photo">
+				<div class="ch-kyc-box required ${uploads.customer_photo ? "has-file" : ""}" data-upload="customer_photo">
 					<div class="ch-kyc-remove" title="${__("Remove")}"><i class="fa fa-times"></i></div>
-					<div class="ch-kyc-label">${__("Customer Photo")}</div>
+					<div class="ch-kyc-label">${__("Customer Photo")}<span class="ch-kyc-required-tag">${__("REQUIRED")}</span></div>
 					<div class="ch-kyc-default">
 						<div class="ch-kyc-icon"><i class="fa fa-user-circle-o"></i></div>
-						<div class="ch-kyc-text">${__("Optional selfie")}</div>
+						<div class="ch-kyc-text">${__("Selfie for identity verification")}</div>
 					</div>
 					<div class="ch-kyc-preview">${_existing_preview(uploads.customer_photo)}</div>
 					<input type="file" accept="image/*" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:1" />

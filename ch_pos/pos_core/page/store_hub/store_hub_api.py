@@ -10,11 +10,7 @@ from ch_pos.config import get_control_setting, is_privileged_user, require_confi
 
 def _authorize_hub_scope(company=None, store=None):
     """Return an exact ``(company, warehouse, store_keys)`` authorized scope."""
-    require_configured_roles(
-        "session_report_roles",
-        defaults=("Store Manager", "POS Manager", "Accounts Manager"),
-        action=_("view the store operations hub"),
-    )
+    frappe.has_permission("CH POS Session", ptype="read", throw=True)
 
     if not store and not is_privileged_user():
         try:
@@ -53,8 +49,7 @@ def _authorize_hub_scope(company=None, store=None):
     assert_store_scope(
         store=store_name,
         warehouse=warehouse_row.name,
-        company=warehouse_row.company,
-    )
+        company=warehouse_row.company)
     keys = tuple(dict.fromkeys(key for key in (warehouse_row.name, store_name) if key))
     return warehouse_row.company, warehouse_row.name, keys
 

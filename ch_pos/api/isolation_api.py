@@ -18,8 +18,7 @@ from ch_pos.config import (
     get_control_setting,
     has_configured_roles,
     is_privileged_user,
-    require_configured_roles,
-)
+    require_configured_roles)
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 
 
@@ -62,9 +61,7 @@ def _get_session_permissions(user, company=None, store=None):
         "can_approve_variance": cint(
             has_configured_roles(
                 "settlement_correction_roles",
-                ("Finance Manager", "Store Manager", "Accounts Manager"),
-                user=user,
-            )
+                user=user)
         ),
         "can_do_cash_drop": cint(
             frappe.has_permission("CH Cash Drop", "create", user=user)
@@ -87,8 +84,7 @@ def _get_store_pos_profile(store, company=None):
         "POS Profile Extension",
         filters=filters,
         fields=["pos_profile"],
-        order_by="modified desc",
-    )
+        order_by="modified desc")
     if not mappings:
         return None
 
@@ -98,8 +94,7 @@ def _get_store_pos_profile(store, company=None):
             "POS Profile",
             profile_name,
             ["name", "company", "disabled"],
-            as_dict=True,
-        )
+            as_dict=True)
         if not profile or cint(profile.disabled):
             continue
         if company and profile.company == company:
@@ -117,15 +112,13 @@ def _ensure_store_business_date_is_not_future(store):
     business_date = getdate(frappe.db.get_value(
         "CH Business Date",
         {"store": store, "is_active": 1},
-        "business_date",
-    ) or nowdate())
+        "business_date") or nowdate())
     if business_date > getdate(nowdate()):
         frappe.throw(
             _("Store {0} has an invalid future business date {1}. Reset it before using POS.").format(
                 store, business_date
             ),
-            title=_("Invalid Business Date"),
-        )
+            title=_("Invalid Business Date"))
     return business_date
 
 
@@ -150,8 +143,7 @@ def get_pos_context(all_companies=0) -> dict:
         "POS Executive",
         {"user": user, "is_active": 1},
         ["name", "company", "store"],
-        as_dict=True,
-    )
+        as_dict=True)
 
     # System Managers / Administrators always get a store picker
     if is_privileged_user(user):
@@ -204,8 +196,7 @@ def get_pos_context(all_companies=0) -> dict:
         device = frappe.db.get_value(
             "CH Device Master", device_name,
             ["name", "device_name", "company", "store", "pos_profile", "warehouse", "is_active"],
-            as_dict=True,
-        )
+            as_dict=True)
         if device and not device.is_active:
             device = None
 
@@ -225,8 +216,7 @@ def get_pos_context(all_companies=0) -> dict:
                 "docstatus": 1,
             },
             ["name", "user", "status", "opening_cash", "pos_profile"],
-            as_dict=True,
-        )
+            as_dict=True)
 
     # Check if day is closed
     day_closed = False
@@ -266,22 +256,17 @@ def get_pos_context_for_store(store) -> dict:
     frappe.has_permission("Sales Invoice", "read", throw=True)
     user = frappe.session.user
 
-    require_configured_roles(
-        "store_override_roles", defaults=(), action=_("override the active store")
-    )
 
     store_doc = frappe.db.get_value(
         "CH Store", store,
         ["name", "store_name", "company", "warehouse"],
-        as_dict=True,
-    )
+        as_dict=True)
     if not store_doc:
         frappe.throw(_("Store {0} not found.").format(store), title=_("API Error"))
     assert_store_scope(
         store=store_doc.name,
         warehouse=store_doc.warehouse,
-        company=store_doc.company,
-    )
+        company=store_doc.company)
 
     company = store_doc.company
 
@@ -352,8 +337,7 @@ def _get_all_active_stores(company=None):
         filters=filters,
         fields=["name", "store_name", "store_code", "company", "warehouse"],
         order_by="store_name asc",
-        limit_page_length=result_limit + 1,
-    )
+        limit_page_length=result_limit + 1)
     if len(stores) > result_limit:
         frappe.throw(
             _("Active stores exceed the configured limit of {0} rows.").format(result_limit)
@@ -412,8 +396,7 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
     existing = frappe.db.get_value(
         "CH POS Settlement",
         {"session": session_name, "docstatus": ("!=", 2)},
-        "name",
-    )
+        "name")
     if existing:
         frappe.throw(_("Settlement {0} already exists for this session.").format(existing), title=_("API Error"))
 
@@ -451,8 +434,7 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
                 _("Manager PIN is required because variance is ₹{0}, above the ₹{1} threshold.").format(
                     abs(variance_after_petty), threshold
                 ),
-                title=_("Settlement Error"),
-            )
+                title=_("Settlement Error"))
         from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
         pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_closing")
         if not pin_result.get("valid"):
@@ -576,11 +558,6 @@ def reopen_settlement(session_name, manager_pin) -> dict:
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
 
-    require_configured_roles(
-        "settlement_correction_roles",
-        defaults=("Finance Manager", "Store Manager", "Accounts Manager"),
-        action=_("correct a POS settlement"),
-    )
     assert_session_scope(session_name)
 
     session = frappe.get_doc("CH POS Session", session_name)
@@ -599,13 +576,11 @@ def reopen_settlement(session_name, manager_pin) -> dict:
               "For a Closed session use the Correct Closed Settlement action.").format(
                 session_name, session.status
             ),
-            title=_("Settlement Correction"),
-        )
+            title=_("Settlement Correction"))
     settlement_name = frappe.db.get_value(
         "CH POS Settlement",
         {"session": session_name, "docstatus": 1},
-        "name",
-    )
+        "name")
     if not settlement_name:
         frappe.throw(_("No submitted settlement found for session {0}.").format(session_name))
 
@@ -629,8 +604,7 @@ def reopen_settlement(session_name, manager_pin) -> dict:
             after="Open (reopened for re-settlement)",
             remarks="Settlement {} cancelled by {}. Session reopened to allow correction.".format(
                 settlement_name, manager_user
-            ),
-        )
+            ))
     except Exception:
         frappe.log_error(frappe.get_traceback(), "POS settlement reopen audit failed")
 
@@ -665,11 +639,6 @@ def correct_closed_settlement(session_name, correct_closing_cash,
     For sessions still in "Pending Close", use reopen_settlement() instead.
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
-    require_configured_roles(
-        "settlement_correction_roles",
-        defaults=("Finance Manager", "Store Manager", "Accounts Manager"),
-        action=_("correct a closed POS settlement"),
-    )
     assert_session_scope(session_name)
     correct_closing_cash = flt(correct_closing_cash)
 
@@ -691,15 +660,13 @@ def correct_closed_settlement(session_name, correct_closing_cash,
               "For Pending Close sessions, use Reopen Settlement instead.").format(
                 session_name, session.status
             ),
-            title=_("Settlement Correction"),
-        )
+            title=_("Settlement Correction"))
 
     # Get the submitted settlement
     settlement_name = frappe.db.get_value(
         "CH POS Settlement",
         {"session": session_name, "docstatus": 1},
-        "name",
-    )
+        "name")
     if not settlement_name:
         frappe.throw(_("No submitted settlement found for session {0}.").format(session_name))
 
@@ -724,8 +691,7 @@ def correct_closed_settlement(session_name, correct_closing_cash,
         ).format(
             old=old_cash, new=correct_closing_cash,
             ov=old_variance, nv=new_variance,
-            reason=correction_reason.strip(),
-        ),
+            reason=correction_reason.strip()),
     }, update_modified=True)
 
     # Mirror onto the session so the next session's expected_float is correct
@@ -748,8 +714,7 @@ def correct_closed_settlement(session_name, correct_closing_cash,
             ref_name=settlement_name,
             before="actual_closing_cash: {}, variance: {}".format(old_cash, old_variance),
             after="actual_closing_cash: {}, variance: {}".format(correct_closing_cash, new_variance),
-            remarks="Post-close correction by {}. Reason: {}".format(manager_user, correction_reason),
-        )
+            remarks="Post-close correction by {}. Reason: {}".format(manager_user, correction_reason))
     except Exception:
         frappe.log_error(frappe.get_traceback(), "POS settlement correction audit failed")
 
@@ -880,8 +845,7 @@ def validate_no_post_close_transaction(doc, method=None):
             closed = frappe.db.exists(
                 "CH POS Session",
                 {"pos_profile": doc.pos_profile, "business_date": business_date,
-                 "status": "Closed", "docstatus": 1},
-            )
+                 "status": "Closed", "docstatus": 1})
             if closed:
                 frappe.throw(
                     _("Session for {0} on {1} is already closed. No billing allowed after session close.").format(

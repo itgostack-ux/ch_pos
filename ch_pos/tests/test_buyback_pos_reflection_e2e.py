@@ -67,6 +67,12 @@ def _create_assessment():
     doc.device_age_months = "0-3 Months"
     doc.estimated_price = 1000
     doc.quoted_price = 1000
+    doc.kyc_id_type = "Aadhar Card"
+    doc.kyc_id_number = "123412341234"
+    doc.kyc_name = "QA Buyback POS Reflection"
+    doc.customer_id_front = "/private/files/qa-buyback-id-front.png"
+    doc.customer_id_back = "/private/files/qa-buyback-id-back.png"
+    doc.customer_photo = "/private/files/qa-buyback-customer.png"
     doc.flags.skip_duplicate_check = True
     doc.insert(ignore_permissions=True)
     doc.submit()
@@ -95,6 +101,11 @@ def run():
     )
     order_name = started["order_name"]
     order = frappe.get_doc("Buyback Order", order_name)
+    assert order.customer_id_type == "Aadhar Card", "Assessment KYC type did not reach order"
+    assert order.customer_id_number == "123412341234", "Assessment KYC number did not reach order"
+    assert order.customer_id_front, "Assessment ID image did not reach order"
+    assert order.customer_photo, "Assessment customer photo did not reach order"
+    assert order.kyc_verified == 1, "Complete POS KYC pack was not verified on order creation"
     if order.status != "Approved":
         order.db_set("status", "Approved", update_modified=True)
 

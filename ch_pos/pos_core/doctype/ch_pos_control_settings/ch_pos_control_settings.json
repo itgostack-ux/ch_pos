@@ -238,31 +238,35 @@
   },
   {
    "default": "POS User\nPOS Manager\nStore Manager\nTechnician\nSales User\nSales Manager\nStock User\nStock Manager\nAccounts User\nAccounts Manager",
-   "description": "Roles allowed to see the CH POS app. Administrator and System Manager always retain access.",
+   "description": "Roles allowed to see the CH POS app. Administrator and System Manager always retain access. Pick roles from the list.",
    "fieldname": "app_access_roles",
-   "fieldtype": "Small Text",
-   "label": "App Access Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "App Access Roles",
+   "options": "CH Role Link"
   },
   {
    "default": "System Manager\nAccounts Manager",
-   "description": "Roles allowed to reopen a closed POS session. Enter one role per line. Administrator always retains emergency access.",
+   "description": "Roles allowed to reopen a closed POS session.  Administrator always retains emergency access. Pick roles from the list.",
    "fieldname": "closed_session_reopen_roles",
-   "fieldtype": "Small Text",
-   "label": "Closed Session Reopen Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Closed Session Reopen Roles",
+   "options": "CH Role Link"
   },
   {
    "default": "Store Manager\nPOS Manager",
-   "description": "Roles allowed to operate a POS session owned by another cashier. Administrator and System Manager always retain access.",
+   "description": "Roles allowed to operate a POS session owned by another cashier. Administrator and System Manager always retain access. Pick roles from the list.",
    "fieldname": "session_override_roles",
-   "fieldtype": "Small Text",
-   "label": "Session Override Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Session Override Roles",
+   "options": "CH Role Link"
   },
   {
    "default": "Store Manager\nPOS Manager\nAccounts Manager",
-   "description": "Roles allowed to view reports for other cashiers or an entire store.",
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions).",
    "fieldname": "session_report_roles",
    "fieldtype": "Small Text",
-   "label": "Session Report Roles"
+   "label": "Session Report Roles",
+   "hidden": 1
   },
   {
    "default": "366",
@@ -451,26 +455,34 @@
   {
    "default": "Store Manager\nPOS Manager\nSales Manager",
    "fieldname": "manager_pin_roles",
-   "fieldtype": "Small Text",
-   "label": "Manager PIN Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Manager PIN Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "Store Manager\nStock Manager\nSystem Manager",
    "fieldname": "prebook_reassign_roles",
-   "fieldtype": "Small Text",
-   "label": "Pre-Booking Reassignment Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Pre-Booking Reassignment Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "Store Manager\nPOS Manager\nAccounts Manager",
    "fieldname": "prebook_cancel_roles",
    "fieldtype": "Small Text",
-   "label": "Pre-Booking Cancellation Roles"
+   "label": "Pre-Booking Cancellation Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "Store Manager\nAccounts Manager",
    "fieldname": "prebook_refund_roles",
    "fieldtype": "Small Text",
-   "label": "Pre-Booking Refund Roles"
+   "label": "Pre-Booking Refund Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "2",
@@ -483,27 +495,33 @@
    "default": "Store Manager\nStock Manager\nSystem Manager",
    "fieldname": "cross_store_transfer_roles",
    "fieldtype": "Small Text",
-   "label": "Cross-Store Transfer Roles"
+   "label": "Cross-Store Transfer Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "Store Manager\nStock Manager\nStock User",
    "fieldname": "stock_transfer_roles",
    "fieldtype": "Small Text",
-   "label": "Stock Transfer Roles"
+   "label": "Stock Transfer Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS User\nPOS Manager\nStore Manager\nStock User\nStock Manager",
-   "description": "Roles allowed to query stock for warehouses within their assigned store scope.",
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions).",
    "fieldname": "stock_availability_roles",
    "fieldtype": "Small Text",
-   "label": "Stock Availability Roles"
+   "label": "Stock Availability Roles",
+   "hidden": 1
   },
   {
    "default": "POS User\nPOS Manager\nStore Manager\nSales User\nSales Manager\nStock User",
-   "description": "Roles allowed to view model comparisons within an assigned POS Profile scope.",
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions).",
    "fieldname": "model_comparison_roles",
    "fieldtype": "Small Text",
-   "label": "Model Comparison Roles"
+   "label": "Model Comparison Roles",
+   "hidden": 1
   },
   {
    "default": "50",
@@ -579,10 +597,11 @@
   },
   {
    "default": "POS User\nPOS Manager\nStore Manager\nSales User\nSales Manager",
-   "description": "Roles allowed to use POS AI features within an assigned POS Profile scope.",
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions).",
    "fieldname": "pos_ai_roles",
    "fieldtype": "Small Text",
-   "label": "POS AI Roles"
+   "label": "POS AI Roles",
+   "hidden": 1
   },
   {
    "default": "60",
@@ -633,49 +652,65 @@
    "default": "System Manager",
    "fieldname": "store_override_roles",
    "fieldtype": "Small Text",
-   "label": "Store Override Roles"
+   "label": "Store Override Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "Finance Manager\nStore Manager\nSystem Manager\nAccounts Manager",
    "fieldname": "settlement_correction_roles",
-   "fieldtype": "Small Text",
-   "label": "Settlement Correction Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Settlement Correction Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "System Manager",
    "fieldname": "cancellation_override_roles",
-   "fieldtype": "Small Text",
-   "label": "Cancellation Override Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Cancellation Override Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "System Manager\nStock Manager\nStock User\nStore Manager\nPOS Manager",
    "fieldname": "inbound_receive_roles",
    "fieldtype": "Small Text",
-   "label": "Inbound Receive Roles"
+   "label": "Inbound Receive Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS User\nPOS Manager",
    "fieldname": "token_operation_roles",
    "fieldtype": "Small Text",
-   "label": "Token Operation Roles"
+   "label": "Token Operation Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS User\nPOS Manager\nStore Manager\nTechnician",
    "fieldname": "token_view_roles",
    "fieldtype": "Small Text",
-   "label": "Token View Roles"
+   "label": "Token View Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "Technician\nPOS User\nPOS Manager\nStore Manager",
    "fieldname": "token_assignee_roles",
-   "fieldtype": "Small Text",
-   "label": "Token Assignee Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Token Assignee Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "POS Manager\nStore Manager",
    "fieldname": "token_assignment_roles",
    "fieldtype": "Small Text",
-   "label": "Token Assignment Roles"
+   "label": "Token Assignment Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "200",
@@ -729,13 +764,17 @@
    "default": "Accounts Manager\nPOS Manager",
    "fieldname": "edc_reconciliation_roles",
    "fieldtype": "Small Text",
-   "label": "EDC Reconciliation Roles"
+   "label": "EDC Reconciliation Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS User\nPOS Manager\nAccounts User\nAccounts Manager",
    "fieldname": "payment_gateway_roles",
    "fieldtype": "Small Text",
-   "label": "Payment Gateway Roles"
+   "label": "Payment Gateway Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "pluraluat.v2.pinepg.in\napi.pluralpay.in",
@@ -766,62 +805,81 @@
    "default": "POS User\nPOS Manager\nAccounts User\nAccounts Manager",
    "fieldname": "invoice_share_roles",
    "fieldtype": "Small Text",
-   "label": "Invoice Share Roles"
+   "label": "Invoice Share Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS Manager\nAccounts Manager",
    "fieldname": "invoice_recipient_override_roles",
-   "fieldtype": "Small Text",
-   "label": "Invoice Recipient Override Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Invoice Recipient Override Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "Accounts Manager",
    "fieldname": "einvoice_generation_roles",
    "fieldtype": "Small Text",
-   "label": "E-Invoice Generation Roles"
+   "label": "E-Invoice Generation Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS User\nPOS Manager\nStore Manager",
    "fieldname": "reprint_roles",
    "fieldtype": "Small Text",
-   "label": "Invoice Reprint Roles"
+   "label": "Invoice Reprint Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS User\nPOS Manager\nSales User",
    "fieldname": "free_sale_request_roles",
    "fieldtype": "Small Text",
-   "label": "Free Sale Request Roles"
+   "label": "Free Sale Request Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS Manager\nStore Manager\nSales Manager",
    "fieldname": "free_sale_review_roles",
-   "fieldtype": "Small Text",
-   "label": "Free Sale Review Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Free Sale Review Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "POS User\nPOS Manager\nStore Manager",
    "fieldname": "gift_redemption_roles",
    "fieldtype": "Small Text",
-   "label": "Gift Redemption Roles"
+   "label": "Gift Redemption Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS Manager\nStore Manager",
-   "description": "Roles allowed to update customers who have no transaction at the active POS store.",
+   "description": "Roles allowed to update customers who have no transaction at the active POS store. Pick roles from the list.",
    "fieldname": "customer_override_roles",
-   "fieldtype": "Small Text",
-   "label": "Customer Override Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Customer Override Roles",
+   "options": "CH Role Link"
   },
   {
    "default": "System Manager",
    "fieldname": "test_utility_roles",
    "fieldtype": "Small Text",
-   "label": "Test Utility Roles"
+   "label": "Test Utility Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "POS Manager\nAccounts Manager\nSystem Manager",
    "fieldname": "return_approval_roles",
-   "fieldtype": "Small Text",
-   "label": "Return Approval Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Return Approval Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "100",
@@ -834,7 +892,9 @@
    "default": "POS User\nPOS Manager",
    "fieldname": "repair_operation_roles",
    "fieldtype": "Small Text",
-   "label": "Repair Operation Roles"
+   "label": "Repair Operation Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "100",
@@ -854,32 +914,41 @@
    "default": "Store Manager\nSales Manager\nSystem Manager",
    "fieldname": "credit_override_roles",
    "fieldtype": "Small Text",
-   "label": "Credit Override Roles"
+   "label": "Credit Override Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "Store Manager\nSales Manager\nSystem Manager",
    "fieldname": "discount_approval_roles",
-   "fieldtype": "Small Text",
-   "label": "Discount Approval Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Discount Approval Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "POS Manager\nStore Manager",
    "fieldname": "buyback_otp_bypass_roles",
-   "fieldtype": "Small Text",
-   "label": "Buyback OTP Bypass Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Buyback OTP Bypass Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "Accounts User\nAccounts Manager\nPOS Manager",
    "fieldname": "buyback_settlement_roles",
    "fieldtype": "Small Text",
-   "label": "Buyback Settlement Roles"
+   "label": "Buyback Settlement Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "Buyback Store Manager\nBuyback Manager\nBuyback Admin\nAccounts Manager",
-   "description": "Roles allowed to view unmasked buyback payout details, KYC identifiers, and KYC attachments. Administrator and System Manager always retain access.",
+   "description": "Roles allowed to view unmasked buyback payout details, KYC identifiers, and KYC attachments. Administrator and System Manager always retain access. Pick roles from the list.",
    "fieldname": "buyback_sensitive_data_roles",
-   "fieldtype": "Small Text",
-   "label": "Buyback Sensitive Data Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Buyback Sensitive Data Roles",
+   "options": "CH Role Link"
   },
   {
    "default": "100",
@@ -921,38 +990,50 @@
   {
    "default": "POS Manager\nSystem Manager",
    "fieldname": "cutoff_override_roles",
-   "fieldtype": "Small Text",
-   "label": "Cutoff Override Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Cutoff Override Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "System Manager\nAccounts Manager\nPOS Manager",
    "fieldname": "incentive_approval_roles",
-   "fieldtype": "Small Text",
-   "label": "Incentive Approval Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Incentive Approval Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "System Manager\nAccounts Manager",
    "fieldname": "incentive_payment_roles",
-   "fieldtype": "Small Text",
-   "label": "Incentive Payment Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Incentive Payment Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "System Manager\nAccounts Manager\nPOS Manager",
    "fieldname": "incentive_cancellation_roles",
-   "fieldtype": "Small Text",
-   "label": "Incentive Cancellation Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Incentive Cancellation Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "System Manager\nAccounts Manager\nAccounts User\nPOS Manager",
    "fieldname": "incentive_report_roles",
-   "fieldtype": "Small Text",
-   "label": "Incentive Report Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Incentive Report Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "System Manager\nPOS Manager\nAccounts Manager",
    "fieldname": "incentive_rebuild_roles",
    "fieldtype": "Small Text",
-   "label": "Incentive Rebuild Roles"
+   "label": "Incentive Rebuild Roles",
+   "hidden": 1,
+   "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
    "default": "200",
@@ -975,14 +1056,18 @@
   {
    "default": "Accounts Manager\nAccounts User",
    "fieldname": "finance_notification_roles",
-   "fieldtype": "Small Text",
-   "label": "Finance Notification Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "Finance Notification Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "RSM\nASM\nStock Manager\nPurchase Manager",
    "fieldname": "fifo_alert_roles",
-   "fieldtype": "Small Text",
-   "label": "FIFO Alert Roles"
+   "fieldtype": "Table MultiSelect",
+   "label": "FIFO Alert Roles",
+   "options": "CH Role Link",
+   "description": "Pick roles from the list."
   },
   {
    "default": "1",
@@ -994,18 +1079,20 @@
   {
    "default": "POS User\nPOS Manager\nStore Manager",
    "fieldname": "fifo_override_roles",
-   "fieldtype": "Small Text",
+   "fieldtype": "Table MultiSelect",
    "label": "FIFO Override Roles",
    "depends_on": "allow_fifo_override",
-   "description": "Roles allowed to raise a FIFO exception at the counter. One role per line."
+   "description": "Roles allowed to raise a FIFO exception at the counter. One role per line. Pick roles from the list.",
+   "options": "CH Role Link"
   },
   {
    "default": "POS Manager\nStore Manager",
    "fieldname": "fifo_override_approval_roles",
-   "fieldtype": "Small Text",
+   "fieldtype": "Table MultiSelect",
    "label": "FIFO Override Approval Roles",
    "depends_on": "allow_fifo_override",
-   "description": "Roles allowed to use reasons marked \"Manager Only\" in CH Exception Reason. One role per line."
+   "description": "Roles allowed to use reasons marked \"Manager Only\" in CH Exception Reason. One role per line. Pick roles from the list.",
+   "options": "CH Role Link"
   },
   {
    "fieldname": "cash_variance_account",

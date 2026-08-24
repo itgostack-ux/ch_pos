@@ -108,8 +108,7 @@ def issue_gift_for_invoice_hook(doc, method=None):
 	except Exception:
 		frappe.log_error(
 			frappe.get_traceback(),
-			f"CH Gift Redemption: issuance failed for {doc.name}",
-		)
+			f"CH Gift Redemption: issuance failed for {doc.name}")
 
 
 def issue_gift_for_invoice(sales_invoice) -> str | None:
@@ -121,8 +120,7 @@ def issue_gift_for_invoice(sales_invoice) -> str | None:
 	# Enforce the "max 1 spin per invoice" rule — user requirement.
 	existing = frappe.db.exists(
 		"CH Gift Redemption",
-		{"parent_sales_invoice": sales_invoice.name, "status": ("not in", ("Cancelled",))},
-	)
+		{"parent_sales_invoice": sales_invoice.name, "status": ("not in", ("Cancelled"))})
 	if existing:
 		return existing
 
@@ -171,8 +169,7 @@ def issue_gift_for_invoice(sales_invoice) -> str | None:
 		_send_gift_notifications,
 		queue="short",
 		gift_name=gift.name,
-		enqueue_after_commit=True,
-	)
+		enqueue_after_commit=True)
 	return gift.name
 
 
@@ -216,8 +213,7 @@ def _find_matching_gamified_offer(sales_invoice):
 			"wheel_style", "redemption_ttl_hours", "priority",
 			"trigger_item", "trigger_item_name",
 		],
-		order_by="priority desc, modified desc",
-	)
+		order_by="priority desc, modified desc")
 	if not rows:
 		return None
 
@@ -298,8 +294,7 @@ def _send_gift_notifications(gift_name: str) -> None:
 			gift.db_set(
 				"notification_error",
 				(gift.notification_error or "") + f"\nemail: {frappe.get_traceback()[:400]}",
-				update_modified=False,
-			)
+				update_modified=False)
 
 	# --- WhatsApp ---
 	if gift.customer_mobile:
@@ -317,16 +312,14 @@ def _send_gift_notifications(gift_name: str) -> None:
 				customer_name=gift.customer_name,
 				ref_doctype="CH Gift Redemption",
 				ref_name=gift.name,
-				company=gift.company,
-			)
+				company=gift.company)
 			gift.db_set("whatsapp_sent_at", now_datetime(), update_modified=False)
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), f"Gift WhatsApp failed for {gift.name}")
 			gift.db_set(
 				"notification_error",
 				(gift.notification_error or "") + f"\nwhatsapp: {frappe.get_traceback()[:400]}",
-				update_modified=False,
-			)
+				update_modified=False)
 
 
 def _send_gift_email(gift, spin_url: str) -> None:
@@ -364,8 +357,7 @@ def _send_gift_email(gift, spin_url: str) -> None:
 		message=body,
 		reference_doctype="CH Gift Redemption",
 		reference_name=gift.name,
-		delayed=False,
-	)
+		delayed=False)
 
 
 # ---------------------------------------------------------------------------
@@ -400,8 +392,7 @@ def _get_wheel_candidate_items(gift, limit: int = 8) -> list[str]:
 			},
 			fields=["reward_item", "reward_item_name"],
 			order_by="modified desc",
-			limit=limit * 2,
-		)
+			limit=limit * 2)
 	except Exception:
 		# Do not block the /spin page on a schema hiccup.
 		others = []
@@ -499,8 +490,7 @@ def _resolve_spin_token(token: str) -> str:
 		"CH Gift Redemption",
 		{"spin_token_digest": digest},
 		["name", "spin_token_digest", "spin_token_consumed_at"],
-		as_dict=True,
-	)
+		as_dict=True)
 	if (
 		not row
 		or not hmac.compare_digest(str(row.spin_token_digest or ""), digest)
@@ -528,11 +518,6 @@ def redeem_gift_code(code: str, pos_profile: str) -> dict:
 		frappe.throw(_("POS Profile is required."))
 
 	code = str(code).strip().upper()
-	require_configured_roles(
-		"gift_redemption_roles",
-		defaults=("POS User", "POS Manager", "Store Manager"),
-		action=_("redeem a POS gift"),
-	)
 	frappe.has_permission("CH Gift Redemption", "write", throw=True)
 	frappe.has_permission("Sales Invoice", "create", throw=True)
 	frappe.has_permission("Sales Invoice", "submit", throw=True)
@@ -557,8 +542,7 @@ def redeem_gift_code(code: str, pos_profile: str) -> dict:
 		frappe.throw(
 			_("Gift already redeemed on invoice {0} at {1}.").format(
 				gift.redeemed_invoice or "-",
-				frappe.utils.format_datetime(gift.redeemed_at) if gift.redeemed_at else "-",
-			)
+				frappe.utils.format_datetime(gift.redeemed_at) if gift.redeemed_at else "-")
 		)
 	if gift.status == "Expired":
 		frappe.throw(_("This gift has expired and cannot be redeemed."))
@@ -677,11 +661,6 @@ def lookup_gift_code(code: str, pos_profile: str) -> dict:
 	if not code:
 		frappe.throw(_("Redemption code is required."))
 	code = str(code).strip().upper()
-	require_configured_roles(
-		"gift_redemption_roles",
-		defaults=("POS User", "POS Manager", "Store Manager"),
-		action=_("look up a POS gift"),
-	)
 	frappe.has_permission("CH Gift Redemption", "read", throw=True)
 	profile_anchors = assert_pos_profile_scope(pos_profile)
 
@@ -745,13 +724,11 @@ def expire_stale_gift_redemptions():
 		},
 		pluck="name",
 		order_by="expires_at asc, name asc",
-		limit_page_length=batch_limit,
-	)
+		limit_page_length=batch_limit)
 	if names:
 		frappe.db.set_value(
 			"CH Gift Redemption",
 			{"name": ("in", names)},
 			"status",
 			"Expired",
-			update_modified=False,
-		)
+			update_modified=False)

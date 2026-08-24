@@ -62,14 +62,11 @@ def _resolve_manager_user(mobile_no: str, anchors: dict) -> dict:
          LIMIT 50
         """,
         {"phone": target},
-        as_dict=True,
-    )
+        as_dict=True)
     for user in candidates:
         if not has_configured_roles(
             "discount_approval_roles",
-            ("Store Manager", "Sales Manager", "POS Manager"),
-            user=user.name,
-        ):
+            user=user.name):
             continue
         # Predicate, not throw-and-catch: a swallowed frappe.throw still leaves
         # its denial in frappe.local.message_log, so filtering N candidate
@@ -81,8 +78,7 @@ def _resolve_manager_user(mobile_no: str, anchors: dict) -> dict:
             store=anchors.get("store"),
             warehouse=anchors.get("warehouse"),
             company=anchors.get("company"),
-            user=user.name,
-        ):
+            user=user.name):
             continue
         matches.append(user)
 
@@ -90,8 +86,7 @@ def _resolve_manager_user(mobile_no: str, anchors: dict) -> dict:
         frappe.throw(
             _("The mobile number is not uniquely assigned to an authorized manager for this store."),
             frappe.PermissionError,
-            title=_("Manager Not Authorized"),
-        )
+            title=_("Manager Not Authorized"))
     return matches[0]
 
 
@@ -103,8 +98,7 @@ def request_approval(
     rate=None,
     qty=1,
     reference_doctype=None,
-    reference_name=None,
-) -> dict:
+    reference_name=None) -> dict:
     frappe.has_permission("Sales Invoice", "create", throw=True)
     anchors = assert_pos_profile_scope(pos_profile)
     mobile_no = validate_indian_phone(mobile_no, "Manager Mobile Number")
@@ -141,8 +135,7 @@ def request_approval(
         mobile_no=mobile_no,
         purpose=purpose,
         reference_doctype=payload["reference_doctype"],
-        reference_name=payload["reference_name"],
-    )
+        reference_name=payload["reference_name"])
     channels = {}
     try:
         from buyback.buyback.whatsapp_notifications import send_otp
@@ -152,8 +145,7 @@ def request_approval(
             otp,
             purpose,
             ref_doctype=payload["reference_doctype"],
-            ref_name=payload["reference_name"],
-        )
+            ref_name=payload["reference_name"])
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Manager OTP delivery failed")
 
@@ -177,8 +169,7 @@ def verify_approval(approval_request, otp_code) -> dict:
         frappe.throw(
             _("Manager approval request is invalid or expired."),
             frappe.PermissionError,
-            title=_("Approval Expired"),
-        )
+            title=_("Approval Expired"))
 
     assert_pos_profile_scope(payload["pos_profile"])
     manager = _resolve_manager_user(payload["mobile_no"], payload)
@@ -192,16 +183,14 @@ def verify_approval(approval_request, otp_code) -> dict:
         purpose=payload["purpose"],
         otp_code=otp_code,
         reference_doctype=payload["reference_doctype"],
-        reference_name=payload["reference_name"],
-    )
+        reference_name=payload["reference_name"])
     if not result.get("valid"):
         return result
     if result.get("shadow_live"):
         frappe.throw(
             _("Shadow-live master OTP cannot authorize a manager override."),
             frappe.PermissionError,
-            title=_("Manager Verification Required"),
-        )
+            title=_("Manager Verification Required"))
 
     frappe.cache().delete_value(_cache_key("request", request_id))
     grant = secrets.token_urlsafe(48)
@@ -230,8 +219,7 @@ def _consume_cache_value(key: str):
             "local value = redis.call('GET', KEYS[1]); "
             "if value then redis.call('DEL', KEYS[1]); end; return value",
             1,
-            made_key,
-        )
+            made_key)
 
     if hasattr(frappe.local, "cache"):
         frappe.local.cache.pop(made_key, None)
@@ -270,8 +258,7 @@ def issue_action_grant(kind: str, payload: dict, expires_in: int | None = None) 
     frappe.cache().set_value(
         _cache_key(f"action:{kind}", grant),
         {**payload, "requested_by": frappe.session.user, "verified_at": str(now_datetime())},
-        expires_in_sec=expires_in,
-    )
+        expires_in_sec=expires_in)
     return grant
 
 

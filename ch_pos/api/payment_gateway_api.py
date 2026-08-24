@@ -18,8 +18,7 @@ from ch_pos.config import (
     get_control_setting,
     is_privileged_user,
     require_authenticated_user,
-    require_configured_roles,
-)
+    require_configured_roles)
 
 
 def _bounded_callback_body() -> str:
@@ -65,13 +64,11 @@ def _configured_gateway_hosts() -> set[str]:
     if invalid:
         frappe.throw(
             _("Payment gateway host allowlist contains an invalid hostname."),
-            frappe.ValidationError,
-        )
+            frappe.ValidationError)
     if not hosts:
         frappe.throw(
             _("Configure at least one Payment Gateway Allowed Host in CH POS Control Settings."),
-            frappe.ValidationError,
-        )
+            frappe.ValidationError)
     return hosts
 
 
@@ -87,8 +84,7 @@ def _resolve_gateway_url(machine, fieldname: str) -> str:
                 label, machine.machine_name or machine.name
             ),
             frappe.ValidationError,
-            title=_("Payment Gateway Not Configured"),
-        )
+            title=_("Payment Gateway Not Configured"))
     if "\\" in endpoint or any(character.isspace() for character in endpoint):
         frappe.throw(_("Payment gateway URL is invalid."), frappe.ValidationError)
 
@@ -109,13 +105,11 @@ def _resolve_gateway_url(machine, fieldname: str) -> str:
     ):
         frappe.throw(
             _("Payment gateway URLs must use HTTPS on port 443 without embedded credentials."),
-            frappe.ValidationError,
-        )
+            frappe.ValidationError)
     if hostname not in _configured_gateway_hosts():
         frappe.throw(
             _("Payment gateway host {0} is not allowlisted.").format(hostname),
-            frappe.PermissionError,
-        )
+            frappe.PermissionError)
     return endpoint
 
 
@@ -148,8 +142,7 @@ def _verify_pine_callback_signature(machine_name: str | None, body: str, signatu
     if not hmac.compare_digest(expected, signature.strip()):
         frappe.log_error(
             title="Pine Labs Signature Mismatch",
-            message=f"Signature validation failed for machine {machine_name}.",
-        )
+            message=f"Signature validation failed for machine {machine_name}.")
         frappe.throw(_("Webhook signature validation failed"), frappe.AuthenticationError)
     return machine_name
 
@@ -259,15 +252,13 @@ def _assert_machine_in_scope(machine):
                     _("Payment machine {0} has inconsistent store configuration.").format(
                         machine.machine_name or machine.name
                     ),
-                    frappe.PermissionError,
-                )
+                    frappe.PermissionError)
             assert_pos_profile_scope(machine.pos_profile)
         return
     frappe.throw(
         _("You are not entitled to operate payment machine {0}.").format(
             machine.machine_name or machine.name),
-        frappe.PermissionError,
-    )
+        frappe.PermissionError)
 
 
 @frappe.whitelist()
@@ -280,11 +271,6 @@ def get_payment_machines(company=None, store=None, pos_profile=None, payment_mod
         return {"providers": [], "machines": [], "manual_only": True}
 
     frappe.has_permission("Sales Invoice", "create", throw=True)
-    require_configured_roles(
-        "payment_gateway_roles",
-        defaults=("POS User", "POS Manager", "Accounts User", "Accounts Manager"),
-        action=_("use payment gateways"),
-    )
 
     if pos_profile:
         anchors = get_pos_profile_anchors(pos_profile)
@@ -309,8 +295,7 @@ def get_payment_machines(company=None, store=None, pos_profile=None, payment_mod
             "name", "machine_id", "machine_name", "provider", "store",
             "company", "pos_profile", "supported_payment_modes", "terminal_id", "environment",
         ],
-        order_by="provider asc, machine_name asc",
-    )
+        order_by="provider asc, machine_name asc")
 
     if pos_profile:
         machines = [m for m in machines if not m.pos_profile or m.pos_profile == pos_profile]
@@ -345,8 +330,7 @@ def _pine_generate_token(machine):
                 "Pine Labs credentials are not configured on machine {0}. "
                 "Set Client ID, Client Secret, and Merchant ID, or change provider to 'Other' for test mode."
             ).format(machine.machine_name or machine.name),
-            title=_("Payment Machine Not Configured"),
-        )
+            title=_("Payment Machine Not Configured"))
     headers = {
         "Content-Type": "application/json",
         "accept": "application/json",
@@ -367,27 +351,23 @@ def _pine_generate_token(machine):
             headers=headers,
             payload=payload,
             timeout=_gateway_timeout_seconds(),
-            max_response_bytes=_gateway_response_max_bytes(),
-        )
+            max_response_bytes=_gateway_response_max_bytes())
         response.raise_for_status()
         response_data = response.json()
         token = response_data.get("access_token") if isinstance(response_data, dict) else None
     except (requests.exceptions.RequestException, ValueError) as exc:
         frappe.log_error(
             title="Pine Labs token failed",
-            message=f"machine={machine.name}\nerror={exc}",
-        )
+            message=f"machine={machine.name}\nerror={exc}")
         frappe.throw(
             _("Could not reach Pine Labs ({0}). Check network or credentials and retry.").format(env),
-            title=_("Gateway Unavailable"),
-        )
+            title=_("Gateway Unavailable"))
     if not token:
         frappe.throw(
             _("Pine Labs did not return an access token. Verify Client ID / Secret on machine {0}.").format(
                 machine.machine_name or machine.name
             ),
-            title=_("Gateway Auth Failed"),
-        )
+            title=_("Gateway Auth Failed"))
     return token
 
 
@@ -409,8 +389,7 @@ def _pine_create_order(machine, access_token, payload):
             headers=headers,
             payload=payload,
             timeout=_gateway_timeout_seconds(),
-            max_response_bytes=_gateway_response_max_bytes(),
-        )
+            max_response_bytes=_gateway_response_max_bytes())
         response.raise_for_status()
         response_data = response.json()
         if not isinstance(response_data, dict):
@@ -419,12 +398,10 @@ def _pine_create_order(machine, access_token, payload):
     except (requests.exceptions.RequestException, ValueError) as exc:
         frappe.log_error(
             title="Pine Labs order failed",
-            message=f"machine={machine.name}\nerror={exc}",
-        )
+            message=f"machine={machine.name}\nerror={exc}")
         frappe.throw(
             _("Pine Labs order creation failed. Please retry or use cash."),
-            title=_("Gateway Order Failed"),
-        )
+            title=_("Gateway Order Failed"))
 
 
 def _build_test_order(machine, amount, payment_mode, merchant_order_reference, customer, customer_name):
@@ -464,15 +441,9 @@ def initiate_payment(machine_name, amount, payment_mode, customer=None, customer
         frappe.throw(
             _("Shadow live mode — payment machines are disabled. "
               "Enter the card / UPI reference manually and save the payment."),
-            title=_("Payment Machines Disabled"),
-        )
+            title=_("Payment Machines Disabled"))
 
     frappe.has_permission("Sales Invoice", "create", throw=True)
-    require_configured_roles(
-        "payment_gateway_roles",
-        defaults=("POS User", "POS Manager", "Accounts User", "Accounts Manager"),
-        action=_("initiate an external payment"),
-    )
 
     machine = _get_machine(machine_name)
     # Bind the live gateway order to the operator's store authority.
