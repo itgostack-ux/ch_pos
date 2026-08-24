@@ -271,8 +271,12 @@ export class StockTransferWorkspace {
         const arrow_color = tab === "incoming"
             ? "var(--pos-success)" : "var(--pos-danger)";
 
-        const from_wh = esc(se.from_warehouse || "—");
-        const to_wh   = esc(se.to_warehouse   || "—");
+        const from_wh = window.ch_wh_label_html
+            ? ch_wh_label_html(se.from_warehouse, "—")
+            : esc(se.from_warehouse || "—");
+        const to_wh   = window.ch_wh_label_html
+            ? ch_wh_label_html(se.to_warehouse, "—")
+            : esc(se.to_warehouse   || "—");
 
         const primary    = esc(
             se.primary_item_name || se.primary_item_code || ""
