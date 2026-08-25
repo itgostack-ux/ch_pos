@@ -659,8 +659,10 @@ def get_store_users(pos_profile: str = None, role: str = None) -> dict:
             from ch_erp15.ch_erp15.scope import get_store_users
 
             rows = [
-                {"user": _r.get("user"), "full_name": _r.get("full_name"),
-                 "role": _r.get("role_profile")}
+                # _dict, not a plain dict: the attribute access below (r.user /
+                # r.full_name) would raise AttributeError otherwise.
+                frappe._dict({"user": _r.get("user"), "full_name": _r.get("full_name"),
+                              "role": _r.get("role_profile")})
                 for _r in get_store_users(store_name, role=role, limit=result_limit + 1)
             ]
             _ensure_result_limit(rows, result_limit, _("Store users"))

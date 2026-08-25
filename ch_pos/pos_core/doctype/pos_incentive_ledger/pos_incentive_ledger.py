@@ -106,7 +106,6 @@ class POSIncentiveLedger(Document):
         elif new_status == "Paid":
             _ensure_role(
                 "incentive_payment_roles",
-                ("Accounts Manager"),
                 _("You do not have a configured incentive payment role."))
             if old_status != "Approved":
                 frappe.throw(
@@ -173,7 +172,6 @@ def approve_incentive(name: str):
 def mark_incentive_paid(name: str, payout_reference: str, payout_month: str | None = None):
     _ensure_role(
         "incentive_payment_roles",
-        ("Accounts Manager"),
         _("You do not have a configured incentive payment role."))
     if not payout_reference:
         frappe.throw(_("Payout Reference is mandatory."), title=_("Validation Error"))
