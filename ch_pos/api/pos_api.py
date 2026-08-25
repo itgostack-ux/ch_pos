@@ -35,6 +35,7 @@ from ch_pos.config import (
     require_configured_roles,
     require_privileged_user)
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+from ch_erp15.config import has_counter_staff_bypass
 
 
 def _split_serials(raw) -> list[str]:
@@ -1150,8 +1151,7 @@ def cancel_pre_booking(sales_order, action="refund",
         amt = flt(pe.paid_amount)
         if pe.docstatus == 0:
             # pe.check_permission("delete")
-            _bypass_roles = {"POS User", "POS Manager", "CH Store Executive", "CH Store Manager"}
-            if not (bool(set(frappe.get_roles()) & _bypass_roles) or frappe.session.user == "Administrator"):
+            if not has_counter_staff_bypass():
                 pe.check_permission("delete")
             # Draft — never posted. Refund: just drop it. Retain: re-collect on
             # the new bill, so dropping it is also correct (no credit to keep).
@@ -1161,8 +1161,7 @@ def cancel_pre_booking(sales_order, action="refund",
         #     pe.cancel()
         # updated:
         elif pe.docstatus == 1:
-            _bypass_roles = {"POS User", "POS Manager", "CH Store Executive", "CH Store Manager"}
-            _is_bypass = bool(set(frappe.get_roles()) & _bypass_roles) or frappe.session.user == "Administrator"
+            _is_bypass = has_counter_staff_bypass()
             if not _is_bypass:
                 pe.check_permission("cancel")
             pe.flags.ignore_permissions = True

@@ -284,9 +284,7 @@ class TestFinalResidualBlockers(TestCase):
 		self.assertFalse(config.has_app_permission("Guest"))
 		with patch.object(config, "has_configured_roles", return_value=True) as allowed:
 			self.assertTrue(config.has_app_permission("pos.user@example.com"))
-			allowed.assert_called_once_with(
-				"app_access_roles", config.APP_ACCESS_ROLE_DEFAULTS, "pos.user@example.com"
-			)
+			allowed.assert_called_once_with("app_access_roles", user="pos.user@example.com")
 
 	def test_pure_status_schedulers_use_set_based_updates(self):
 		for function in (pos_kiosk_token.expire_old_tokens, gift_redemption.expire_stale_gift_redemptions):

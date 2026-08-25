@@ -6,21 +6,8 @@ import frappe
 from frappe import _
 
 
-
 PRIVILEGED_USER = "Administrator"
 PRIVILEGED_ROLE = "System Manager"
-
-APP_ACCESS_ROLE_DEFAULTS = (
-	"POS User",
-	"POS Manager",
-	"Store Manager",
-	"Technician",
-	"Sales User",
-	"Sales Manager",
-	"Stock User",
-	"Stock Manager",
-	"Accounts User",
-	"Accounts Manager")
 
 
 def is_privileged_user(user: str | None = None) -> bool:

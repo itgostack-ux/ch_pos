@@ -99,7 +99,6 @@ class POSIncentiveLedger(Document):
         if new_status == "Approved":
             _ensure_role(
                 "incentive_approval_roles",
-                ("Accounts Manager", "POS Manager"),
                 _("You do not have a configured incentive approval role."))
             self.approved_by = frappe.session.user
             self.approved_on = now_datetime()
@@ -121,11 +120,10 @@ class POSIncentiveLedger(Document):
         elif new_status == "Cancelled":
             _ensure_role(
                 "incentive_cancellation_roles",
-                ("Accounts Manager", "POS Manager"),
                 _("You do not have a configured incentive cancellation role."))
 
 
-def _ensure_role(fieldname: str, defaults, message: str):
+def _ensure_role(fieldname: str, message: str):
     if has_configured_roles(fieldname):
         return
     frappe.throw(message, title=_("Not Permitted"), exc=frappe.PermissionError)
@@ -160,7 +158,6 @@ def get_incentive_ui_capabilities(name: str) -> dict:
 def approve_incentive(name: str):
     _ensure_role(
         "incentive_approval_roles",
-        ("Accounts Manager", "POS Manager"),
         _("You do not have a configured incentive approval role."))
     doc = frappe.get_doc("POS Incentive Ledger", name)
     doc.check_permission("write")
@@ -199,7 +196,6 @@ def mark_incentive_paid(name: str, payout_reference: str, payout_month: str | No
 def cancel_incentive(name: str):
     _ensure_role(
         "incentive_cancellation_roles",
-        ("Accounts Manager", "POS Manager"),
         _("You do not have a configured incentive cancellation role."))
     doc = frappe.get_doc("POS Incentive Ledger", name)
     doc.check_permission("write")

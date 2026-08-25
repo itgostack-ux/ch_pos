@@ -409,7 +409,7 @@ def test_backend_exchange_amount():
         result = create_pos_invoice(
             pos_profile=pos_profile,
             customer=customer,
-            cart=json.dumps(cart),
+            items=json.dumps(cart),
             payments=json.dumps(payments),
             exchange_assessment=assessment_name,
             exchange_amount=exchange_amount,

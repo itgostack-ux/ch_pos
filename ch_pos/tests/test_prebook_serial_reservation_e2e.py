@@ -199,7 +199,7 @@ def test_04_expired_reservation_releases():
     """An expired pre-booking (delivery_date past grace) no longer locks the IMEI."""
     so = None
     try:
-        from ch_pos.api.pos_api import _get_open_reserved_sales_order_for_serial, PREBOOK_HOLD_GRACE_DAYS
+        from ch_pos.api.pos_api import _get_open_reserved_sales_order_for_serial, _prebook_hold_grace_days
         lot = _free_serial_lot()
         if not lot:
             _skip("04 expired reservation releases", "no free serialized stock")
@@ -212,7 +212,7 @@ def test_04_expired_reservation_releases():
             return
         # Sanity: detected while in validity
         assert _get_open_reserved_sales_order_for_serial(lot.serial_no, lot.warehouse) == so.name
-        past = add_days(nowdate(), -(PREBOOK_HOLD_GRACE_DAYS + 5))
+        past = add_days(nowdate(), -(_prebook_hold_grace_days() + 5))
         frappe.db.set_value("Sales Order", so.name, "delivery_date", past, update_modified=False)
         detected = _get_open_reserved_sales_order_for_serial(lot.serial_no, lot.warehouse)
         assert detected is None, f"expired reservation still locks IMEI (got {detected})"
