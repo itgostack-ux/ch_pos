@@ -95,7 +95,33 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	sr.insert()
 	sr.submit()
 
-	return {"name": sr.name, "docstatus": sr.docstatus, "status": sr.decision}
+	# A counter check-in IS the acceptance. The customer has handed the device
+	# over and signed the intake, so parking the ticket in a Draft queue for
+	# someone to press "Accept" is a wait with no decision behind it — the
+	# device is already in the building. Open the job and let diagnosis start.
+	# The accept/reject gate belongs to remotely raised requests, where the
+	# device has not arrived yet.
+	opened = False
+	try:
+		from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import open_walkin_job
+
+		open_walkin_job(sr.name)
+		opened = True
+	except Exception:
+		# An intake must never fail because the job could not be opened — the
+		# device is already at the counter and the SR is the receipt for it.
+		# It falls back to Draft for the hub to accept: the old behaviour.
+		frappe.log_error(
+			frappe.get_traceback(), f"POS intake: could not open job for {sr.name}"
+		)
+
+	sr.reload()
+	return {
+		"name": sr.name,
+		"docstatus": sr.docstatus,
+		"status": sr.decision,
+		"job_opened": opened,
+	}
 
 
 @frappe.whitelist(methods=["POST"])

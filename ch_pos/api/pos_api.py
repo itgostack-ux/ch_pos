@@ -7581,10 +7581,18 @@ def create_repair_job_from_pos(service_request) -> dict:
     if not sr.expected_completion_date:
         sr.db_set("expected_completion_date", frappe.utils.add_days(frappe.utils.today(), 3), update_modified=False)
 
-    # Step 1: Accept SR → creates Service Order
+    # Step 1: Accept the SR. This opens the job; it does NOT raise the Service
+    # Order, because an un-diagnosed device has no price to put on one.
     service_order = accept_service_request(service_request)
     if not service_order:
-        frappe.throw(frappe._("Failed to create Service Order for {0}").format(service_request))
+        frappe.throw(
+            frappe._(
+                "{0} has been accepted and is now in Analysis, but a job cannot be "
+                "assigned yet — the Service Order is raised once the customer "
+                "confirms the estimate in the Ops Hub."
+            ).format(service_request),
+            title=frappe._("Awaiting Diagnosis"),
+        )
 
     # Step 2: Create Job Assignment from Service Order
     job_name = create_job_sheet_from_service_order(
@@ -12154,6 +12162,16 @@ def create_quick_job_card(customer, contact_number, device_item,
     except ImportError:
         frappe.throw(frappe._("GoFix app is not installed — cannot create repair jobs from POS."))
     service_order = accept_service_request(sr.name)
+    if not service_order:
+        # Accepting opens the job in Analysis; the order — and therefore the job
+        # assignment — waits for the confirmed estimate.
+        frappe.throw(
+            frappe._(
+                "{0} has been accepted and is now in Analysis. Assign the job once "
+                "the customer confirms the estimate in the Ops Hub."
+            ).format(sr.name),
+            title=frappe._("Awaiting Diagnosis"),
+        )
 
     # 3. Create Job Assignment
     try:
