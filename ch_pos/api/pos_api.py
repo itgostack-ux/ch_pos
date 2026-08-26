@@ -8452,13 +8452,25 @@ def create_buyback_assessment_with_grading(
         warranty_status=warranty_status,
         device_age_months=device_age_months)
 
+    if not customer:
+        customer = frappe.db.get_value("Customer", {"mobile_no": mobile_no}, "name")
+    if not customer:
+        # Walk-in with no existing Customer for this mobile number — create
+        # one now rather than leaving it blank. A blank customer here used
+        # to pass silently (Customer isn't mandatory on Buyback Assessment)
+        # and only fail later with a cryptic mandatory-field error when the
+        # assessment is converted to a Buyback Order (Customer IS mandatory
+        # there).
+        from buyback.api import _get_or_create_walkin_customer
+        customer = _get_or_create_walkin_customer(mobile_no)
+
     doc = frappe.new_doc("Buyback Assessment")
     doc.source = "Store Manual"
     doc.store = anchors.get("warehouse") or anchors.get("store") or ""
     if doc.meta.has_field("company"):
         doc.company = anchors.get("company")
     doc.mobile_no = mobile_no
-    doc.customer = customer or ""
+    doc.customer = customer
     doc.item = item_code
     doc.imei_serial = imei_serial or ""
     # Persist the band inputs the valuation was made from, so re-pricing the
@@ -14248,7 +14260,12 @@ def pos_start_buyback_order(assessment_name, pos_profile, final_price=None, insp
     order = frappe.new_doc("Buyback Order")
     order.buyback_assessment = assessment_name
     order.buyback_inspection = assessment.buyback_inspection or ""
-    order.customer = assessment.customer or ""
+    # Customer is mandatory here even though it isn't on the assessment —
+    # backfill from mobile_no rather than letting insert() below fail with
+    # a mandatory-field error for any assessment that slipped through
+    # without one.
+    from buyback.api import _get_or_create_walkin_customer
+    order.customer = assessment.customer or _get_or_create_walkin_customer(assessment.mobile_no)
     order.customer_name = assessment.customer_name or ""
     order.mobile_no = assessment.mobile_no or ""
     order.store = warehouse
@@ -15240,7 +15257,12 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         order = frappe.new_doc("Buyback Order")
         order.buyback_assessment = assessment_name
         order.buyback_inspection = inspection_name
-        order.customer = ins.customer or assessment.customer or ""
+        # See pos_start_buyback_order: Customer is mandatory on Buyback
+        # Order even though it isn't on the assessment/inspection.
+        from buyback.api import _get_or_create_walkin_customer
+        order.customer = ins.customer or assessment.customer or _get_or_create_walkin_customer(
+            ins.mobile_no or assessment.mobile_no
+        )
         order.customer_name = ins.customer_name or assessment.customer_name or ""
         order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
         order.store = ins.store or assessment.store or ""
