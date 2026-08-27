@@ -138,6 +138,7 @@ export class SessionOpeningScreen {
 						} else if (data.unclosed_session) {
 							this._show_must_close(data, profile, resolve);
 						} else {
+							if (data.warning_unclosed_session) this._show_stale_session_warning(data);
 							this._show_opening_form(profile, ctx.company, resolve, ctx);
 						}
 					},
@@ -272,6 +273,7 @@ export class SessionOpeningScreen {
 				} else if (data.unclosed_session) {
 					this._show_must_close(data, entry.pos_profile, resolve);
 				} else {
+					if (data.warning_unclosed_session) this._show_stale_session_warning(data);
 					this._show_opening_form(entry.pos_profile, ctx.company || entry.company, resolve, ctx);
 				}
 			},
@@ -299,10 +301,24 @@ export class SessionOpeningScreen {
 				} else if (data.unclosed_session) {
 					this._show_must_close(data, entry.pos_profile, resolve);
 				} else {
+					if (data.warning_unclosed_session) this._show_stale_session_warning(data);
 					this._show_opening_form(entry.pos_profile, entry.company, resolve);
 				}
 			},
 		});
+	}
+
+	_show_stale_session_warning(data) {
+		// Non-blocking, one-time nudge at login only — the operator can
+		// keep working at this new store.
+		frappe.show_alert({
+			message: __("You still have an unsettled session {0} open at {1} (since {2}). Settle and close it when you get a chance.", [
+				`<b>${data.warning_unclosed_session}</b>`,
+				data.warning_unclosed_store || "",
+				data.warning_unclosed_date,
+			]),
+			indicator: "orange",
+		}, 10);
 	}
 
 	_show_must_close(data, pos_profile, resolve) {
@@ -315,11 +331,13 @@ export class SessionOpeningScreen {
 			]),
 			indicator: "orange",
 			primary_action: {
-				label: __("Close Session"),
+				label: __("Settlement"),
 				action: () => {
-					// Switch to closing dashboard for the unclosed session
+					// Settlement first (close_session hard-fails without it) —
+					// session:force_settle chains straight into Close Session
+					// automatically once Settlement succeeds.
 					PosState._unclosed_session = data.unclosed_session;
-					EventBus.emit("session:force_close", data.unclosed_session);
+					EventBus.emit("session:force_settle", data.unclosed_session);
 				},
 			},
 		});

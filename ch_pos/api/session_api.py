@@ -73,11 +73,14 @@ def get_session_status(pos_profile) -> dict:
 
     session = get_active_session(pos_profile)
     if session and is_session_stale(session):
-        # The calendar has moved past this till's business date. Do NOT resume it
-        # for selling — return the same payload the opening screen already uses
-        # for an unclosed session, so the operator is sent to close it first.
-        # The stale-date rule below only guarded the "no active session" path, so
-        # a session that stayed open simply bypassed it.
+        # The calendar has moved past this till's business date. Do NOT
+        # resume it for selling, and do NOT auto-close it with a placeholder
+        # ₹0 count either — that skips real cash reconciliation for a day
+        # that actually had business on it. Route the operator to properly
+        # settle + close THIS session (its own real business_date, own real
+        # sales) via the Closing Dashboard before a new one can start; see
+        # _show_must_close in session_opening_screen.js, which opens that
+        # dashboard rather than just erroring out.
         return {
             "has_session": False,
             "unclosed_session": session.name,
@@ -113,7 +116,9 @@ def get_session_status(pos_profile) -> dict:
         if warehouse:
             store = frappe.db.get_value("CH Store", {"warehouse": warehouse}, "name")
 
-    # Check for unclosed sessions (must close before opening new), at store level first.
+    # Check for unclosed sessions at store level — this is the only real
+    # hard block: one physical till/cash drawer can't have two concurrent
+    # open sessions. Must be closed before opening a NEW one at this store.
     unclosed = None
     if store:
         unclosed = frappe.db.get_value(
@@ -126,13 +131,6 @@ def get_session_status(pos_profile) -> dict:
             ["name", "user", "business_date", "pos_profile"],
             as_dict=True)
 
-    if not unclosed:
-        unclosed = frappe.db.get_value(
-            "CH POS Session",
-            {"pos_profile": pos_profile, "status": ("in", ["Open", "Suspended", "Closing"]), "docstatus": 1},
-            ["name", "user", "business_date", "pos_profile"],
-            as_dict=True)
-
     if unclosed:
         return {
             "has_session": False,
@@ -141,6 +139,18 @@ def get_session_status(pos_profile) -> dict:
             "unclosed_date": str(unclosed.business_date),
             "unclosed_profile": unclosed.pos_profile,
         }
+
+    # A session left open under this SAME POS Profile but at a DIFFERENT
+    # store no longer blocks opening here — the cashier can log in and keep
+    # working at the new store; a non-blocking warning nudges them to go
+    # settle + close the old one instead of silently forgetting it. Real
+    # cash-drawer safety is the store-level check above (two sessions for
+    # the same physical till), which this does not weaken.
+    warning_unclosed = frappe.db.get_value(
+        "CH POS Session",
+        {"pos_profile": pos_profile, "status": ("in", ["Open", "Suspended", "Closing"]), "docstatus": 1},
+        ["name", "user", "business_date", "pos_profile", "store"],
+        as_dict=True)
 
     # If the day is already closed for this store, don't allow reopening.
     if store:
@@ -174,7 +184,15 @@ def get_session_status(pos_profile) -> dict:
                 ).format(business_date, store),
             }
 
-    return {"has_session": False}
+    result = {"has_session": False}
+    if warning_unclosed:
+        result.update({
+            "warning_unclosed_session": warning_unclosed.name,
+            "warning_unclosed_user": warning_unclosed.user,
+            "warning_unclosed_date": str(warning_unclosed.business_date),
+            "warning_unclosed_store": warning_unclosed.store,
+        })
+    return result
 
 
 @frappe.whitelist(methods=["POST"])
@@ -241,7 +259,12 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
     if not lock_result:
         frappe.throw(_("Store is busy processing another session request. Please try again in a moment."), title=_("Session Busy"))
     try:
-        # Check for unclosed sessions (strict store-level single session)
+        # Check for unclosed sessions (strict store-level single session).
+        # Deliberately no auto-close here even for a stale (past-date)
+        # session — that would skip real cash reconciliation for a day that
+        # actually had business on it. get_session_status is what routes the
+        # operator to properly settle + close a stale session first (via the
+        # Closing Dashboard, showing that session's own real business_date).
         unclosed = frappe.db.get_value(
             "CH POS Session",
             {

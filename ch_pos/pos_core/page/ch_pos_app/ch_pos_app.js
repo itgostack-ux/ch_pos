@@ -66,5 +66,15 @@ frappe.pages["ch-pos-app"].on_page_hide = function (wrapper) {
 };
 
 frappe.pages["ch-pos-app"].refresh = function (wrapper) {
-	// noop — handled inside PosApp
+	// Frappe calls this on every route change WITHIN this page (including
+	// browser Back/Forward, since those are just hash changes to Frappe's
+	// router) — the mode segment (/app/ch-pos-app/<mode>) is what lets Back
+	// step through recently-visited POS menus instead of leaving the app
+	// entirely. See sidebar.js, which pushes a route on every mode switch.
+	const pos = wrapper.pos;
+	if (!pos) return; // still loading (frappe.require callback hasn't run yet)
+	const route_mode = frappe.get_route()[1];
+	if (route_mode && route_mode !== pos.state.active_mode) {
+		pos.event_bus.emit("mode:route_change", route_mode);
+	}
 };

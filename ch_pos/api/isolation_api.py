@@ -145,8 +145,44 @@ def get_pos_context(all_companies=0) -> dict:
         ["name", "company", "store"],
         as_dict=True)
 
-    # System Managers / Administrators always get a store picker
+    # System Managers / Administrators always get a store picker — UNLESS
+    # they already have exactly one valid (today's business date, not
+    # stale) open session somewhere, in which case resume it directly
+    # instead of making them re-pick the same store on every refresh.
+    # Multiple candidates (or a stale one) stay ambiguous/blocked and fall
+    # through to the picker, same as before.
     if is_privileged_user(user):
+        today = getdate(nowdate())
+        own_sessions = frappe.get_all(
+            "CH POS Session",
+            filters={
+                "user": user,
+                "status": ("in", ["Open", "Locked", "Suspended"]),
+                "docstatus": 1,
+                "business_date": today,
+            },
+            fields=["name", "store", "pos_profile", "status", "opening_cash", "company", "device", "business_date"],
+        )
+        if len(own_sessions) == 1:
+            session = own_sessions[0]
+            return {
+                "status": "ok",
+                "user": user,
+                "company": session.company,
+                "store": session.store,
+                "device": session.device,
+                "business_date": str(session.business_date),
+                "day_closed": False,
+                "allocation": _get_session_permissions(user, company=session.company, store=session.store),
+                "existing_session": {
+                    "name": session.name,
+                    "user": user,
+                    "status": session.status,
+                    "opening_cash": flt(session.opening_cash),
+                    "pos_profile": session.pos_profile,
+                },
+            }
+
         active_company = "" if cint(all_companies) else get_active_company(user)
         stores = _get_all_active_stores(company=active_company)
         # An active company with no stores of its own would strand the admin on

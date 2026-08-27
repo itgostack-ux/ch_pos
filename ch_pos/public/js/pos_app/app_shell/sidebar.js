@@ -207,6 +207,19 @@ export class Sidebar {
 		// Full re-render to pick up executive access + module filtering
 		this.render();
 		if (this.collapsed) this._apply_collapsed(true);
+
+		// The active mode may have been restored from localStorage before
+		// real permissions were known (see get_remembered_mode) — if it
+		// turns out this operator can't access it here, fall back rather
+		// than leaving the workspace panel stuck on a now-hidden mode.
+		if (!this._is_mode_allowed(PosState.active_mode)) {
+			const first_valid = this.wrapper.find(".ch-pos-sidebar-item").first().data("mode");
+			if (first_valid && first_valid !== PosState.active_mode) {
+				PosState.active_mode = first_valid;
+				Sidebar._remember_mode(first_valid);
+				EventBus.emit("mode:switch", first_valid);
+			}
+		}
 	}
 
 	_show_walkin_dialog() {
@@ -437,6 +450,27 @@ export class Sidebar {
 			sidebar.find(".ch-pos-sidebar-item").removeClass("active");
 			$(this).addClass("active");
 			PosState.active_mode = mode;
+			Sidebar._remember_mode(mode);
+			EventBus.emit("mode:switch", mode);
+			// Explicit navigation (unlike the many internal mode:set/
+			// mode:switch calls elsewhere that auto-return to Sell after
+			// completing a task) — push a real browser history entry so
+			// Back steps through recently-visited POS menus instead of
+			// leaving the app entirely. ch_pos_app.js's refresh() reacts to
+			// the resulting route change on Back/Forward.
+			frappe.route_flags.replace_route = false;
+			frappe.set_route("ch-pos-app", mode);
+		});
+
+		// Browser Back/Forward landed on a different mode's route — mirror
+		// the sidebar click handler's UI update, but without pushing
+		// another route (the URL already reflects this state).
+		EventBus.on("mode:route_change", (mode) => {
+			if (mode === PosState.active_mode) return;
+			sidebar.find(".ch-pos-sidebar-item").removeClass("active");
+			sidebar.find(`.ch-pos-sidebar-item[data-mode="${mode}"]`).addClass("active");
+			PosState.active_mode = mode;
+			Sidebar._remember_mode(mode);
 			EventBus.emit("mode:switch", mode);
 		});
 
@@ -445,6 +479,7 @@ export class Sidebar {
 			sidebar.find(".ch-pos-sidebar-item").removeClass("active");
 			sidebar.find(`.ch-pos-sidebar-item[data-mode="${mode}"]`).addClass("active");
 			PosState.active_mode = mode;
+			Sidebar._remember_mode(mode);
 		});
 
 		// Network updates
@@ -466,6 +501,7 @@ export class Sidebar {
 				const first_valid = this.wrapper.find(".ch-pos-sidebar-item").first().data("mode");
 				if (first_valid) {
 					PosState.active_mode = first_valid;
+					Sidebar._remember_mode(first_valid);
 					EventBus.emit("mode:switch", first_valid);
 				}
 			}
@@ -495,5 +531,30 @@ export class Sidebar {
 	}
 	static get NON_TRANSACTIONAL_MODES() {
 		return ["imei", "customer360", "reports", "material_request", "inbound_receive", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
+	}
+
+	static get ALL_MODE_KEYS() {
+		return MODE_SECTIONS.flatMap((section) => section.modes.map((m) => m.key));
+	}
+
+	/** Persist the active mode so a browser refresh lands back on it instead
+	 * of always resetting to Sell — mirrors the existing sidebar-collapsed
+	 * localStorage pattern just above. */
+	static _remember_mode(mode) {
+		try {
+			localStorage.setItem("ch_pos_active_mode", mode);
+		} catch (e) { /* ignore storage issues in private mode/restricted browsers */ }
+	}
+
+	/** Read back the last active mode on boot, validated against the known
+	 * mode keys — an unrecognised/stale value (e.g. after an app update
+	 * renamed a mode) falls back to Sell rather than breaking the boot. */
+	static get_remembered_mode() {
+		try {
+			const mode = localStorage.getItem("ch_pos_active_mode");
+			return mode && Sidebar.ALL_MODE_KEYS.includes(mode) ? mode : "sell";
+		} catch (e) {
+			return "sell";
+		}
 	}
 }

@@ -56,6 +56,15 @@ export class SessionControls {
 		EventBus.on("session:force_close", (session_name) => {
 			this._closing_dashboard.show(session_name);
 		});
+
+		// A stale/unclosed session must be SETTLED before it can be closed
+		// (close_session hard-fails otherwise) — this routes straight into
+		// the Settlement dialog for that specific session, then chains into
+		// Close Session automatically once Settlement succeeds. See
+		// _show_must_close in session_opening_screen.js.
+		EventBus.on("session:force_settle", (session_name) => {
+			this._show_settlement(session_name);
+		});
 	}
 
 	_get_container(container) {
@@ -658,14 +667,19 @@ export class SessionControls {
 		});
 	}
 
-	_show_settlement() {
-		if (!PosState.session_name) return frappe.msgprint(__("No active session"));
+	_show_settlement(session_name = null) {
+		// session_name lets this be reused for a DIFFERENT (stale, unclosed)
+		// session than the operator's current one — see session:force_settle
+		// below, which routes "must close" straight into Settlement instead
+		// of a Close Session dialog that would just fail on the same guard.
+		const target = session_name || PosState.session_name;
+		if (!target) return frappe.msgprint(__("No active session"));
 
 		// First fetch X Report data for the settlement context
 		frappe.xcall("ch_pos.api.session_api.get_x_report", {
-			session_name: PosState.session_name,
+			session_name: target,
 		}).then((data) => {
-			this._render_settlement_dialog(data);
+			this._render_settlement_dialog(data, target);
 		}).catch((err) => {
 			console.error("Settlement load error:", err);
 			frappe.msgprint({
@@ -676,7 +690,9 @@ export class SessionControls {
 		});
 	}
 
-	_render_settlement_dialog(x_data) {
+	_render_settlement_dialog(x_data, session_name = null) {
+		const target_session = session_name || PosState.session_name;
+		const is_current_session = target_session === PosState.session_name;
 		const DENOMS = [2000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
 		const esc = frappe.utils.escape_html;
 		const money = (value) => frappe.format(Number(value || 0), { fieldtype: "Currency" });
@@ -901,7 +917,7 @@ export class SessionControls {
 				frappe.call({
 					method: "ch_pos.api.isolation_api.create_settlement",
 					args: {
-						session_name: PosState.session_name,
+						session_name: target_session,
 						actual_closing_cash: values.actual_closing_cash || 0,
 						denominations: JSON.stringify(denominations),
 						petty_expenses: JSON.stringify(petty.rows),
@@ -911,14 +927,24 @@ export class SessionControls {
 					callback: (r) => {
 						if (r.message) {
 							dlg.hide();
-							PosState.session_status = "Pending Close";
-							this._update_info();
+							if (is_current_session) {
+								PosState.session_status = "Pending Close";
+								this._update_info();
+							}
 							frappe.show_alert({
 								message: petty.rows.length
 									? __("Settlement submitted with petty cash logged. Session is now Pending Close.")
 									: __("Settlement submitted. Session is now Pending Close."),
 								indicator: "blue",
-							});
+							}, 6);
+							if (!is_current_session) {
+								// This was the "settle your stale session first"
+								// flow (session:force_settle) — chain straight
+								// into Close Session for that same session so
+								// the operator doesn't have to hunt for a
+								// second button.
+								this._closing_dashboard.show(target_session);
+							}
 						}
 					},
 					error: (err) => {

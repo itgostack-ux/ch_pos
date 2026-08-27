@@ -221,24 +221,17 @@ class CHPOSSession(Document):
                 )
 
     def _validate_no_duplicate_open(self):
-        """Ensure no other Open session exists for this POS Profile."""
-        if self.docstatus == 0:
-            existing = frappe.db.exists(
-                "CH POS Session",
-                {
-                    "pos_profile": self.pos_profile,
-                    "status": ("in", ["Open", "Locked", "Suspended"]),
-                    "docstatus": 1,
-                    "name": ("!=", self.name),
-                },
-            )
-            if existing:
-                frappe.throw(
-                    _("An open session {0} already exists for {1}. Close it first.").format(
-                        existing, self.pos_profile
-                    )
-                )
-              
+        """Was: block a second Open session under the same POS Profile,
+        anywhere. No longer enforced — a cashier's unresolved session at a
+        DIFFERENT store must not stop them opening a new one to keep
+        working; get_session_status now surfaces that as a non-blocking,
+        one-time warning at login instead. The real physical safety
+        constraint — never two concurrent open sessions for the SAME
+        store/till — is unchanged and still enforced by
+        _validate_no_duplicate_open_for_store below.
+        """
+        return
+
     def _validate_no_duplicate_open_for_store(self):
         """Block opening a second active session for the same store."""
         if self.docstatus != 0:
@@ -718,6 +711,10 @@ def auto_close_stale_sessions():
                     closing_cash=0,
                     variance_reason="Auto-closed: session was open past business date",
                 )
+                # close_session() persists its own fields via selective
+                # db_set() rather than save(), which silently drops the
+                # auto_closed=1 set above.
+                frappe.db.set_value("CH POS Session", s.name, "auto_closed", 1, update_modified=False)
                 frappe.logger("session").info(f"Auto-closed stale session {s.name} (biz date: {s.business_date})")
             except Exception:
                 frappe.db.rollback(save_point=savepoint)

@@ -13,6 +13,7 @@
  */
 import { PosState, EventBus } from "./pos_app/state.js";
 import { LayoutManager } from "./pos_app/app_shell/layout_manager.js";
+import { Sidebar } from "./pos_app/app_shell/sidebar.js";
 import { CartPanel } from "./pos_app/shared/cart_panel.js?v=20260618a";
 import { format_number } from "./pos_app/shared/helpers.js";
 
@@ -65,21 +66,68 @@ ch_pos.PosApp = class PosApp {
 		this.page = wrapper.page;
 		this.layout = new LayoutManager(wrapper);
 		this.cart_panel = null;
+		// state.js's PosState/EventBus are ES-module singletons, unreachable
+		// from ch_pos_app.js (a plain page script, not a module) — exposed
+		// here on window.cur_pos so its refresh() can react to Back/Forward
+		// route changes and drive the mode switch to match.
+		this.state = PosState;
+		this.event_bus = EventBus;
 		this.init();
 	}
 
 	init() {
+		// Restore the operator's last active menu (e.g. Bill Exceptions)
+		// before the sidebar's own first render reads PosState.active_mode
+		// to decide which item to highlight — otherwise the sidebar shows
+		// Sell as active even once mode:switch below renders the right
+		// workspace content. A URL that already names a mode (e.g. a
+		// bookmarked /app/ch-pos-app/repair, or a Back/Forward landing)
+		// wins over the merely-remembered one.
+		const route_mode = frappe.get_route()[1];
+		const initial_mode = (route_mode && Sidebar.ALL_MODE_KEYS.includes(route_mode))
+			? route_mode
+			: Sidebar.get_remembered_mode();
+		PosState.active_mode = initial_mode;
+		// Sync the URL to match — replacing rather than pushing, so this
+		// silent alignment doesn't cost the operator an extra Back-press
+		// before real navigation history (sidebar clicks) begins.
+		frappe.route_flags.replace_route = true;
+		frappe.set_route("ch-pos-app", initial_mode);
 		this.layout.init();
 		this._init_cart_panel();
 		this._init_services();
 		this._init_modules();
 		this.session_opening_screen = new SessionOpeningScreen();
 		this.session_controls = new SessionControls();
+		this._bind_back_forward();
 		this._check_pos_profile();
 
 		// Allow session restart from the "No Company Selected" overlay
 		EventBus.on("session:profile_reload", (entry) => {
 			this._load_profile(entry);
+		});
+	}
+
+	/**
+	 * Browser Back/Forward through recently-visited POS menus.
+	 *
+	 * sidebar.js pushes a real history entry (frappe.set_route) on every
+	 * explicit menu click, so Back/Forward change window.location — this
+	 * listens for that directly via the native popstate event rather than
+	 * routing through Frappe's page-refresh lifecycle, since a Page's
+	 * refresh() firing for a SUB-ROUTE-ONLY change (mode segment differs,
+	 * page name doesn't) isn't something to depend on without being able to
+	 * verify it live in a browser. popstate is a plain DOM event guaranteed
+	 * to fire on any history navigation, framework-independent.
+	 */
+	_bind_back_forward() {
+		window.addEventListener("popstate", () => {
+			const parts = window.location.pathname.split("/").filter(Boolean);
+			const idx = parts.indexOf("ch-pos-app");
+			const mode = idx >= 0 ? parts[idx + 1] : null;
+			if (mode && Sidebar.ALL_MODE_KEYS.includes(mode) && mode !== PosState.active_mode) {
+				EventBus.emit("mode:route_change", mode);
+			}
 		});
 	}
 
@@ -270,10 +318,12 @@ ch_pos.PosApp = class PosApp {
 						PosState.active_company_type = null;
 					}
 
-					// Trigger initial module load (default: sell mode)
+					// Trigger initial module load — PosState.active_mode was
+					// already restored in init() before the sidebar's first
+					// render, so this just renders the matching workspace.
 					EventBus.emit("profile:loaded", PosState);
 					EventBus.emit("executive_access:loaded", access);
-					EventBus.emit("mode:switch", "sell");
+					EventBus.emit("mode:switch", PosState.active_mode);
 
 					// Keyboard shortcuts
 					this._bind_keyboard_shortcuts();
