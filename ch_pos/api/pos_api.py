@@ -7928,18 +7928,20 @@ def get_repair_closure_data(service_request, pos_profile=None) -> dict:
         if _pos_profile_name:
             _store_name = frappe.db.get_value("CH Store", {"pos_profile": _pos_profile_name, "disabled": 0}, "name")
     if _store_name:
-        # Roster now derives from CH User Scope (CH Store User retired —
-        # ch_erp15 patch v34): stores are authored per user, read back per store.
-        from ch_erp15.ch_erp15.scope import get_store_users
+        # One roster for the whole bench, so this screen and the GoFix
+        # technician picker name the same people. Reading CH User Scope alone
+        # reported nobody at stores whose staff are kept on the POS roster.
+        #
+        # Read as dicts, because that is what they are: this used to build
+        # dicts and then reach for r.full_name, which raised the moment a store
+        # actually had a roster.
+        from ch_erp15.ch_erp15.scope import get_store_roster
 
-        _rows = [
-            {"name": _r.get("user"), "full_name": _r.get("full_name")}
-            for _r in get_store_users(_store_name)
+        eng_users = [
+            {"name": _r["user"], "full_name": _r.get("full_name") or _r["user"]}
+            for _r in get_store_roster(_store_name)
+            if _r.get("user")
         ]
-        for r in _rows:
-            if not r.full_name:
-                r.full_name = frappe.db.get_value("User", r.name, "full_name") or r.name
-        eng_users = _rows
     else:
         eng_users = []
 
