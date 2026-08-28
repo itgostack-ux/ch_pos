@@ -6274,3 +6274,16 @@ body > .desk-alert-container,
 }
 .ch-rpt-ai-allgood strong { display: block; color: #14532d; font-size: 0.95rem; }
 .ch-rpt-ai-allgood span { color: #15803d; font-size: 0.82rem; }
+
+/* Small icon-only "open full document" buttons attached to list rows
+   (Request Stock drafts/submitted, Stock Transfers, Inbound Receive,
+   Buyback inspection) — hidden per request. Labeled action buttons like
+   "Open in GoFix" / "Open Inspection Form" / "Open Sales Order" are a
+   different, intentional primary action and are NOT covered by this rule. */
+.ch-mr-view-detail,
+.ch-st-view-detail,
+.ch-inbound-view-desk,
+.ch-inbound-view-po,
+.ch-bb-inspection-to-desk {
+  display: none !important;
+}

@@ -274,7 +274,7 @@ class CHPOSSettlement(Document):
         cost_center = resolve_cost_center(
             self.company,
             store=self.store,
-            pos_profile=self.pos_profile,
+            pos_profile=frappe.db.get_value("CH POS Session", self.session, "pos_profile") if self.session else None,
         )
         amount = abs(variance)
         is_surplus = variance > 0
