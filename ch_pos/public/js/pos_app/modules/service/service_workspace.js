@@ -172,6 +172,11 @@ export class ServiceWorkspace {
 								title="${__("This store cannot do the repair — send the device to a hub")}">
 								<i class="fa fa-truck"></i> ${__("Send to Hub")}
 							</button>` : ""}
+						<button class="btn btn-sm btn-outline-secondary ch-svc-note" data-sr="${sr.name}"
+							style="border-radius:var(--pos-radius-sm);font-weight:700"
+							title="${__("Notes can be added at any point, including while the device is away")}">
+							<i class="fa fa-sticky-note-o"></i> ${__("Add Note")}
+						</button>
 						${(sr.transfer_actions || []).includes("receive") ? `
 							<button class="btn btn-sm btn-outline-success ch-svc-receive-transfer" data-sr="${sr.name}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700"
@@ -383,6 +388,40 @@ export class ServiceWorkspace {
 					});
 					d.show();
 				});
+		});
+
+		// The one action custody never blocks. It is deliberately here on the
+		// card rather than behind Open in Ops Hub, because the moment somebody
+		// most needs to write something down is while the ticket is frozen.
+		panel.on("click", ".ch-svc-note", (e) => {
+			const sr = $(e.currentTarget).data("sr");
+			if (!sr) return;
+			const d = new frappe.ui.Dialog({
+				title: __("Note on {0}", [sr]),
+				fields: [
+					{ fieldname: "note", fieldtype: "Small Text", reqd: 1,
+					  label: __("What happened?") },
+					{ fieldname: "visibility", fieldtype: "Select", default: "Internal",
+					  label: __("Who is this for?"), options: "Internal\nCustomer",
+					  description: __("Customer notes appear on what the customer sees.") },
+				],
+				primary_action_label: __("Add Note"),
+				primary_action: (v) => {
+					d.get_primary_btn().prop("disabled", true);
+					frappe.xcall("gofix.gofix_services.api.add_ticket_note", {
+						service_request: sr, note: v.note, visibility: v.visibility,
+					}).then(() => {
+						d.hide();
+						frappe.show_alert({ message: __("Note added."), indicator: "green" });
+						load_board();
+					}).catch((err) => {
+						d.get_primary_btn().prop("disabled", false);
+						frappe.msgprint({ title: __("Could not add the note"),
+							message: err.message || String(err), indicator: "red" });
+					});
+				},
+			});
+			d.show();
 		});
 
 		// The three legs a device travels after it leaves the counter. Each is a
