@@ -37,6 +37,10 @@ frappe.query_reports["Walkin Conversion Report"] = {
             label: __("Store / POS Profile"),
             fieldtype: "Link",
             options: "POS Profile",
-        },
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				return { filters: company ? { company } : {} };
+			},
+		},
     ],
 };

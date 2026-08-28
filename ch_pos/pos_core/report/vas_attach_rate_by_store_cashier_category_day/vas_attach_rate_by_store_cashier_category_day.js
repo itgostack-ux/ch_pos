@@ -25,6 +25,10 @@ frappe.query_reports["VAS Attach Rate by Store Cashier Category Day"] = {
 			label: __("POS Profile"),
 			fieldtype: "Link",
 			options: "POS Profile",
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				return { filters: company ? { company } : {} };
+			},
 		},
 		{
 			fieldname: "cashier",

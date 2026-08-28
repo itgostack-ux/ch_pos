@@ -26,6 +26,10 @@ frappe.query_reports["Cash Movement Report"] = {
 			label: __("Store"),
 			fieldtype: "Link",
 			options: "Warehouse",
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				return { filters: company ? { company } : {} };
+			},
 		},
 		{
 			fieldname: "to_date",
