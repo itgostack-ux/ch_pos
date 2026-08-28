@@ -176,6 +176,12 @@ export class ServiceWorkspace {
 							<span class="badge" style="background:#fff7ed;color:#9a3412;padding:4px 9px;border-radius:10px;font-size:11px;font-weight:700">
 								<i class="fa fa-truck"></i> ${frappe.utils.escape_html(sr.transfer_status)}${sr.transferred_to_store ? " → " + frappe.utils.escape_html(String(sr.transferred_to_store).split(" - ")[0]) : ""}
 							</span>` : ""}
+						${["Completed","Invoiced","Delivered"].includes(sr.decision) ? `
+							<button class="btn btn-sm btn-outline-danger ch-svc-reopen" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								title="${__("Customer is back — this repair has not held")}">
+								<i class="fa fa-undo"></i> ${__("Customer Returned")}
+							</button>` : ""}
 						${sr.transfer_status === "In Transit" ? `
 							<button class="btn btn-sm btn-outline-secondary ch-svc-cancel-transfer" data-sr="${sr.name}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700"
@@ -298,6 +304,66 @@ export class ServiceWorkspace {
 			const sr = $(e.currentTarget).data("sr");
 			if (!sr) return;
 			window.open(`/app/gofix-ops-hub?sr=${encodeURIComponent(sr)}`, "_blank");
+		});
+
+		// The customer is back and says it is not fixed. Ask WHICH repair, not
+		// just which ticket — a job can carry several, and only one usually
+		// failed.
+		panel.on("click", ".ch-svc-reopen", (e) => {
+			const sr = $(e.currentTarget).data("sr");
+			if (!sr) return;
+			frappe.xcall("gofix.gofix_services.api.get_reopenable_repairs", { service_request: sr })
+				.then((repairs) => {
+					const opts = [];
+					(repairs || []).forEach((r) => {
+						(r.solutions || []).forEach((s) => {
+							opts.push({
+								label: `${s.repair_solution} · ${r.service_date}` +
+								       (r.under_warranty ? ` — ${__("under warranty")}` : ""),
+								line: s.solution_line,
+							});
+						});
+					});
+					if (!opts.length) {
+						frappe.msgprint({
+							title: __("Nothing to reopen"),
+							message: __("No completed repair on this device to come back on."),
+							indicator: "orange",
+						});
+						return;
+					}
+					const d = new frappe.ui.Dialog({
+						title: __("Customer returned"),
+						fields: [
+							{ fieldname: "line", fieldtype: "Select", reqd: 1,
+							  label: __("Which repair has not held?"),
+							  options: opts.map((o) => o.label) },
+							{ fieldname: "note", fieldtype: "Small Text",
+							  label: __("What is the customer reporting?") },
+						],
+						primary_action_label: __("Reopen"),
+						primary_action: (v) => {
+							const picked = opts[opts.map((o) => o.label).indexOf(v.line)];
+							if (!picked) return;
+							d.get_primary_btn().prop("disabled", true);
+							frappe.xcall("gofix.gofix_services.api.reopen_repair", {
+								solution_line: picked.line, description: v.note,
+							}).then((r) => {
+								d.hide();
+								frappe.show_alert({
+									message: __("Reopened as {0}.", [r.service_request]),
+									indicator: "green",
+								});
+								load_board();
+							}).catch((err) => {
+								d.get_primary_btn().prop("disabled", false);
+								frappe.msgprint({ title: __("Could not reopen"),
+									message: err.message || String(err), indicator: "red" });
+							});
+						},
+					});
+					d.show();
+				});
 		});
 
 		// Call back a dispatch that has not been picked up.
