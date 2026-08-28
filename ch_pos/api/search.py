@@ -2,7 +2,7 @@ import frappe
 from frappe.utils import cint, flt
 
 from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_store_scope
-from ch_pos.config import get_control_setting
+from ch_pos.config import get_control_setting, get_repair_consumable_item_groups
 
 
 def _search_limit(fieldname, default, maximum):
@@ -250,29 +250,40 @@ def pos_item_search(
         )
         values["pos_company"] = company
 
-    # Usage context filter: sale, repair, or both
+    # Usage context filter: sale or repair.
+    #
+    # Item.custom_pos_usage is the item's own answer and always wins. It is
+    # blank on essentially the whole catalogue, though, so what the fallback
+    # does is what actually decides the shelf — and the fallback used to pull
+    # Spares INTO the sell list for a service company. That is how 1,307 screen
+    # and battery parts ended up offered over the counter at a GoFix store.
+    #
+    # A spare is fitted on a repair and billed on the service invoice. It is not
+    # counter stock, so an unconfigured item in a repair-consumable group is
+    # excluded from Sell and offered on Repair — the exact opposite of before.
     usage_context = (usage_context or "sale").lower()
     if has_pos_usage:
+        consumable_groups = get_repair_consumable_item_groups()
+        if consumable_groups:
+            values["consumable_groups"] = consumable_groups
+            in_consumable = "i.item_group IN %(consumable_groups)s"
+        else:
+            in_consumable = "0"
+
         if usage_context == "sale":
-            if is_service_company:
-                conditions.append(
-                    "(IFNULL(i.custom_pos_usage, '') = 'Sale and Repair'"
-                    " OR (IFNULL(i.custom_pos_usage, '') = '' AND i.item_group IN ('Accessories', 'Mobile Parts', 'Repair Services', 'Spares', 'Sub Assemblies')))"
-                )
-            else:
-                conditions.append(
-                    "(IFNULL(i.custom_pos_usage, '') IN ('', 'Sale', 'Sale and Repair'))"
-                )
+            conditions.append(
+                "(IFNULL(i.custom_pos_usage, '') IN ('Sale', 'Sale and Repair')"
+                f" OR (IFNULL(i.custom_pos_usage, '') = '' AND NOT ({in_consumable})))"
+            )
         elif usage_context == "repair":
-            if is_service_company:
-                conditions.append(
-                    "(IFNULL(i.custom_pos_usage, '') IN ('Repair Only', 'Sale and Repair')"
-                    " OR (IFNULL(i.custom_pos_usage, '') = '' AND i.item_group IN ('Accessories', 'Mobile Parts', 'Repair Services', 'Spares', 'Sub Assemblies')))"
-                )
-            else:
-                conditions.append(
-                    "(IFNULL(i.custom_pos_usage, '') IN ('', 'Repair Only', 'Sale and Repair'))"
-                )
+            conditions.append(
+                "(IFNULL(i.custom_pos_usage, '') IN ('Repair Only', 'Sale and Repair')"
+                f" OR (IFNULL(i.custom_pos_usage, '') = '' AND ({in_consumable}"
+                "  OR 1 = %(repair_allows_unset)s)))"
+            )
+            # Outside a service company a blank item was always repair-usable;
+            # keep that, so a retail store fitting an accessory is unaffected.
+            values["repair_allows_unset"] = 0 if is_service_company else 1
 
     where = " AND ".join(conditions)
 

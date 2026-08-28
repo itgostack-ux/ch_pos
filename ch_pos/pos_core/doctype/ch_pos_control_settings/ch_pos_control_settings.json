@@ -129,6 +129,7 @@
   "model_comparison_filter_limit",
   "model_comparison_related_row_limit",
   "pos_search_related_row_limit",
+  "repair_consumable_item_groups",
   "cb_stock_fifo_catalogue_discovery",
   "nearby_store_result_limit",
   "guided_catalog_result_limit",
@@ -211,7 +212,7 @@
    "default": "100",
    "fieldname": "variance_approval_threshold",
    "fieldtype": "Currency",
-   "label": "Variance Approval Threshold (\u20b9)",
+   "label": "Variance Approval Threshold (₹)",
    "description": "Manager approval required if cash variance exceeds this amount"
   },
   {
@@ -225,14 +226,14 @@
    "default": "0",
    "fieldname": "require_manager_on_opening_balance_above",
    "fieldtype": "Currency",
-   "label": "Require Manager for Opening Above (\u20b9)",
+   "label": "Require Manager for Opening Above (₹)",
    "description": "Manager PIN required if opening balance exceeds this. 0 = no limit."
   },
   {
    "default": "0",
    "fieldname": "require_manager_on_cash_drop_above",
    "fieldtype": "Currency",
-   "label": "Require Manager for Cash Drop Above (\u20b9)",
+   "label": "Require Manager for Cash Drop Above (₹)",
    "description": "Manager PIN required if cash drop exceeds this. 0 = always require."
   },
   {
@@ -350,14 +351,14 @@
    "fieldtype": "Link",
    "label": "Safe / Vault Account",
    "options": "Account",
-   "description": "Debited when cash is dropped from register to safe (Dr this \u2192 Cr POS Cash)."
+   "description": "Debited when cash is dropped from register to safe (Dr this → Cr POS Cash)."
   },
   {
    "fieldname": "petty_expense_account",
    "fieldtype": "Link",
    "label": "Petty Expense Account",
    "options": "Account",
-   "description": "Debited when petty cash is paid out from register (Dr this \u2192 Cr POS Cash)."
+   "description": "Debited when petty cash is paid out from register (Dr this → Cr POS Cash)."
   },
   {
    "fieldname": "promotional_expense_account",
@@ -440,7 +441,7 @@
    "fieldtype": "Check",
    "label": "Enforce Token Linkage Globally",
    "default": "0",
-   "description": "Override per-store setting \u2014 require kiosk token on ALL stores."
+   "description": "Override per-store setting — require kiosk token on ALL stores."
   },
   {
    "fieldname": "sb_access_isolation_company_modes",
@@ -1080,6 +1081,13 @@
    "fieldtype": "Int",
    "label": "POS Search Related Row Limit",
    "reqd": 1
+  },
+  {
+   "fieldname": "repair_consumable_item_groups",
+   "fieldtype": "Table MultiSelect",
+   "label": "Repair-Consumable Item Groups",
+   "options": "CH POS Item Group Link",
+   "description": "Item groups that exist to be fitted on a repair, not sold over the counter — spares and sub-assemblies. They stay out of the POS sell catalogue and remain available on service jobs. An item overrides this with its own POS Usage field."
   },
   {
    "fieldname": "cb_stock_fifo_catalogue_discovery",
