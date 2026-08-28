@@ -23,7 +23,11 @@ export class ServiceWorkspace {
 	}
 
 	render(panel) {
-		if (PosState.active_company_type !== "service") {
+		// A company whose stores do both retail and service resolves to "hybrid",
+		// not "service" — which is every GoFix store. Demanding an exact match
+		// hid the tracker from the only company it exists for.
+		const services_repairs = ["service", "hybrid"].includes(PosState.active_company_type);
+		if (!services_repairs) {
 			panel.html(`
 				<div class="ch-pos-mode-panel">
 					<div class="ch-pos-empty-state" style="padding:48px 20px;">
@@ -136,10 +140,20 @@ export class ServiceWorkspace {
 							: (sr.estimated_cost ? `<span style="font-weight:700;color:var(--pos-text-secondary)">Est: ₹${format_number(sr.estimated_cost)}</span>` : "")}
 					</div>
 					<div class="ch-svc-card-actions">
-						<button class="btn btn-sm btn-outline-primary ch-svc-open-sr" data-name="${sr.name}"
+						<button class="btn btn-sm btn-outline-primary ch-svc-open-hub" data-sr="${sr.name}"
 							style="border-radius:var(--pos-radius-sm);font-weight:700">
-							<i class="fa fa-external-link"></i> ${__("Open in GoFix")}
+							<i class="fa fa-external-link"></i> ${__("Open in Ops Hub")}
 						</button>
+						${["Draft", "Accepted", "In Service"].includes(sr.decision) && !sr.transfer_status ? `
+							<button class="btn btn-sm btn-outline-warning ch-svc-send-hub" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								title="${__("This store cannot do the repair — send the device to a hub")}">
+								<i class="fa fa-truck"></i> ${__("Send to Hub")}
+							</button>` : ""}
+						${sr.transfer_status ? `
+							<span class="badge" style="background:#fff7ed;color:#9a3412;padding:4px 9px;border-radius:10px;font-size:11px;font-weight:700">
+								<i class="fa fa-truck"></i> ${frappe.utils.escape_html(sr.transfer_status)}${sr.transferred_to_store ? " → " + frappe.utils.escape_html(String(sr.transferred_to_store).split(" - ")[0]) : ""}
+							</span>` : ""}
 						${inv ? `
 							<button class="btn btn-sm btn-outline-secondary ch-svc-view-invoice" data-name="${frappe.utils.escape_html(inv)}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700">
@@ -246,7 +260,59 @@ export class ServiceWorkspace {
 			});
 		});
 		panel.on("click", ".ch-svc-open-gofix", () => {
-			frappe.set_route("List", "Service Request");
+			// The Ops Hub is where a repair is actually worked; the raw list is
+			// not somewhere a counter operator can do anything.
+			frappe.set_route("gofix-ops-hub");
+		});
+
+		// Open ONE ticket straight in the Ops Hub, pre-selected.
+		panel.on("click", ".ch-svc-open-hub", (e) => {
+			const sr = $(e.currentTarget).data("sr");
+			if (!sr) return;
+			window.open(`/app/gofix-ops-hub?sr=${encodeURIComponent(sr)}`, "_blank");
+		});
+
+		// ── Send the device to a repair hub ──────────────────────────────
+		panel.on("click", ".ch-svc-send-hub", (e) => {
+			const sr = $(e.currentTarget).data("sr");
+			if (!sr) return;
+			const d = new frappe.ui.Dialog({
+				title: __("Send {0} to a repair hub", [sr]),
+				fields: [
+					{
+						fieldname: "to_store", fieldtype: "Link", options: "Warehouse",
+						label: __("Repair hub"), reqd: 1,
+						description: __("The device is dispatched into transit; the hub confirms receipt on arrival."),
+						get_query: () => ({ filters: { is_group: 0, disabled: 0, company: PosState.active_company || PosState.company } }),
+					},
+					{
+						fieldname: "reason", fieldtype: "Small Text", reqd: 1,
+						label: __("Why can this store not do it?"),
+					},
+				],
+				primary_action_label: __("Dispatch"),
+				primary_action: (v) => {
+					d.get_primary_btn().prop("disabled", true);
+					frappe.xcall("gofix.gofix_services.api.create_service_transfer", {
+						service_request: sr, to_store: v.to_store, reason: v.reason,
+					}).then(() => {
+						d.hide();
+						frappe.show_alert({
+							message: __("{0} dispatched to {1}. Track it in logistics.", [sr, v.to_store]),
+							indicator: "green",
+						});
+						load_board();
+					}).catch((err) => {
+						d.get_primary_btn().prop("disabled", false);
+						frappe.msgprint({
+							title: __("Could not dispatch"),
+							message: err.message || String(err),
+							indicator: "red",
+						});
+					});
+				},
+			});
+			d.show();
 		});
 
 		// ── Add a completed repair to the POS cart ───────────────────────
