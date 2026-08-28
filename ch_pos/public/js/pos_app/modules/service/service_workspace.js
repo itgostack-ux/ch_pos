@@ -172,6 +172,12 @@ export class ServiceWorkspace {
 								title="${__("This store cannot do the repair — send the device to a hub")}">
 								<i class="fa fa-truck"></i> ${__("Send to Hub")}
 							</button>` : ""}
+						${!["Delivered","Invoiced","Cancelled","Rejected","Withdrawn"].includes(sr.decision) ? `
+							<button class="btn btn-sm btn-outline-danger ch-svc-close-nofix" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								title="${__("End this job without a repair — device goes back to the customer")}">
+								<i class="fa fa-ban"></i> ${__("Close Without Repair")}
+							</button>` : ""}
 						<button class="btn btn-sm btn-outline-secondary ch-svc-note" data-sr="${sr.name}"
 							style="border-radius:var(--pos-radius-sm);font-weight:700"
 							title="${__("Notes can be added at any point, including while the device is away")}">
@@ -387,6 +393,76 @@ export class ServiceWorkspace {
 						},
 					});
 					d.show();
+				});
+		});
+
+		// Ending a job without a repair. At the counter as often as at the
+		// bench — the customer is standing there when they decline the quote —
+		// so it is the same server call the Ops Hub makes, with the same coded
+		// reasons. Two implementations of one decision drift.
+		panel.on("click", ".ch-svc-close-nofix", (e) => {
+			const sr = $(e.currentTarget).data("sr");
+			if (!sr) return;
+			frappe.xcall("gofix.gofix_services.api.get_repair_close_options", { service_request: sr })
+				.then((opts) => {
+					const outcomes = (opts && opts.outcomes) || [];
+					if (!outcomes.length) {
+						frappe.msgprint({ title: __("Nothing configured"), indicator: "orange",
+							message: __("No closing reasons are set up. Add them under Withdrawal Reason.") });
+						return;
+					}
+					const by_outcome = {};
+					outcomes.forEach((o) => { by_outcome[o.outcome] = o.reasons || []; });
+
+					const refresh_reasons = () => {
+						const chosen = d.get_value("outcome");
+						const rows = by_outcome[chosen] || [];
+						d.set_df_property("reason", "options",
+							rows.map((r) => ({ value: r.name, label: r.reason_name || r.name })));
+						d.set_value("reason", rows.length ? rows[0].name : "");
+						const needs = rows.length && rows[0].requires_note;
+						d.set_df_property("note", "reqd", needs ? 1 : 0);
+					};
+
+					const d = new frappe.ui.Dialog({
+						title: __("Close {0} without repair", [sr]),
+						fields: [
+							{ fieldname: "outcome", fieldtype: "Select", reqd: 1,
+							  label: __("How did it end?"),
+							  options: outcomes.map((o) => o.outcome),
+							  default: outcomes[0].outcome,
+							  onchange: () => refresh_reasons() },
+							{ fieldname: "reason", fieldtype: "Select", reqd: 1,
+							  label: __("Reason"),
+							  description: __("Coded, so it can be counted later.") },
+							{ fieldname: "note", fieldtype: "Small Text",
+							  label: __("What happened?"),
+							  description: __("Required for reasons that mean nothing on their own.") },
+						],
+						primary_action_label: __("Close Job"),
+						primary_action: (v) => {
+							d.get_primary_btn().prop("disabled", true);
+							frappe.xcall("gofix.repair_closure.close_without_repair", {
+								service_request: sr, outcome: v.outcome,
+								reason: v.reason, note: v.note,
+							}).then((r) => {
+								d.hide();
+								frappe.show_alert({
+									message: r.handback_entry
+										? __("Closed as {0}. Device issued back to the customer.", [r.outcome])
+										: __("Closed as {0}.", [r.outcome]),
+									indicator: "orange",
+								});
+								load_board();
+							}).catch((err) => {
+								d.get_primary_btn().prop("disabled", false);
+								frappe.msgprint({ title: __("Could not close the job"),
+									message: err.message || String(err), indicator: "red" });
+							});
+						},
+					});
+					d.show();
+					refresh_reasons();
 				});
 		});
 
