@@ -166,15 +166,34 @@ export class ServiceWorkspace {
 							style="border-radius:var(--pos-radius-sm);font-weight:700">
 							<i class="fa fa-external-link"></i> ${__("Open in Ops Hub")}
 						</button>
-						${["Draft", "Accepted", "In Service"].includes(sr.decision) && !sr.transfer_status ? `
+						${(sr.transfer_actions || []).includes("dispatch") && ["Draft", "Accepted", "In Service"].includes(sr.decision) ? `
 							<button class="btn btn-sm btn-outline-warning ch-svc-send-hub" data-sr="${sr.name}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700"
 								title="${__("This store cannot do the repair — send the device to a hub")}">
 								<i class="fa fa-truck"></i> ${__("Send to Hub")}
 							</button>` : ""}
+						${(sr.transfer_actions || []).includes("receive") ? `
+							<button class="btn btn-sm btn-outline-success ch-svc-receive-transfer" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								title="${__("Take the device into stock here — the consignment has arrived")}">
+								<i class="fa fa-sign-in"></i> ${__("Receive Device")}
+							</button>` : ""}
+						${(sr.transfer_actions || []).includes("return") ? `
+							<button class="btn btn-sm btn-outline-primary ch-svc-return-transfer" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								title="${__("Repair done — send the device back to the store that owns the ticket")}">
+								<i class="fa fa-reply"></i> ${__("Return to Store")}
+							</button>` : ""}
+						${(sr.transfer_actions || []).includes("confirm_return") ? `
+							<button class="btn btn-sm btn-success ch-svc-confirm-return" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								title="${__("The device is back — confirm it and the ticket can be billed here")}">
+								<i class="fa fa-check"></i> ${__("Confirm Return")}
+							</button>` : ""}
 						${sr.transfer_status ? `
-							<span class="badge" style="background:#fff7ed;color:#9a3412;padding:4px 9px;border-radius:10px;font-size:11px;font-weight:700">
-								<i class="fa fa-truck"></i> ${frappe.utils.escape_html(sr.transfer_status)}${sr.transferred_to_store ? " → " + frappe.utils.escape_html(String(sr.transferred_to_store).split(" - ")[0]) : ""}
+							<span class="badge" style="background:#fff7ed;color:#9a3412;padding:4px 9px;border-radius:10px;font-size:11px;font-weight:700"
+								title="${frappe.utils.escape_html(sr.movement_status ? __("Consignment is at: {0}", [sr.movement_status]) : __("No transfer document"))}">
+								<i class="fa fa-truck"></i> ${frappe.utils.escape_html(sr.awaiting_pickup ? __("Awaiting Pickup") : sr.transfer_status)}${sr.transferred_to_store ? " → " + frappe.utils.escape_html(String(sr.transferred_to_store).split(" - ")[0]) : ""}
 							</span>` : ""}
 						${["Completed","Invoiced","Delivered"].includes(sr.decision) ? `
 							<button class="btn btn-sm btn-outline-danger ch-svc-reopen" data-sr="${sr.name}"
@@ -182,7 +201,7 @@ export class ServiceWorkspace {
 								title="${__("Customer is back — this repair has not held")}">
 								<i class="fa fa-undo"></i> ${__("Customer Returned")}
 							</button>` : ""}
-						${sr.transfer_status === "In Transit" ? `
+						${(sr.transfer_actions || []).includes("cancel") ? `
 							<button class="btn btn-sm btn-outline-secondary ch-svc-cancel-transfer" data-sr="${sr.name}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700"
 								title="${__("Call the dispatch back — only while the device has not been picked up")}">
@@ -365,6 +384,53 @@ export class ServiceWorkspace {
 					d.show();
 				});
 		});
+
+		// The three legs a device travels after it leaves the counter. Each is a
+		// confirmation rather than a form: the server already knows the origin,
+		// the destination and whether the consignment has landed, so asking the
+		// operator to restate any of it only invites a wrong answer.
+		const movement_action = (selector, method, title, body, label, done) => {
+			panel.on("click", selector, (e) => {
+				const sr = $(e.currentTarget).data("sr");
+				if (!sr) return;
+				frappe.confirm(`<b>${frappe.utils.escape_html(sr)}</b><br>${body}`, () => {
+					frappe.xcall(method, { service_request: sr })
+						.then(() => {
+							frappe.show_alert({ message: done, indicator: "green" });
+							load_board();
+						})
+						.catch((err) => {
+							frappe.msgprint({ title: title,
+								message: err.message || String(err), indicator: "red" });
+						});
+				}, null, { primary_action_label: label });
+			});
+		};
+
+		movement_action(
+			".ch-svc-receive-transfer",
+			"gofix.gofix_services.api.receive_service_transfer",
+			__("Could not receive the device"),
+			__("Confirm the device has physically arrived and is being taken into stock here."),
+			__("Receive"),
+			__("Device received."),
+		);
+		movement_action(
+			".ch-svc-return-transfer",
+			"gofix.gofix_services.api.return_service_transfer",
+			__("Could not start the return"),
+			__("Send the device back to the store that owns the ticket. Any spares still on order will be redirected there too."),
+			__("Return"),
+			__("Return transfer raised."),
+		);
+		movement_action(
+			".ch-svc-confirm-return",
+			"gofix.gofix_services.api.complete_service_transfer_return",
+			__("Could not confirm the return"),
+			__("Confirm the device is back at this store. The ticket can then be billed here."),
+			__("Confirm"),
+			__("Device is back at the store."),
+		);
 
 		// Call back a dispatch that has not been picked up.
 		panel.on("click", ".ch-svc-cancel-transfer", (e) => {
