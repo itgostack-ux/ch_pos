@@ -1596,14 +1596,72 @@
 .ch-svc-card-body {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
   font-size: var(--pos-fs-sm);
   color: var(--pos-text-secondary);
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
+
+/* The customer is who the counter is talking to, so it leads. */
+.ch-svc-customer {
+  font-weight: 700;
+  font-size: var(--pos-fs-md, 14px);
+  color: var(--pos-text);
+}
+
+/* Device, IMEI, fault and location as labelled facts rather than one run-on
+   line — a counter scans for a specific value, it does not read a sentence. */
+.ch-svc-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 6px 18px;
+}
+.ch-svc-fact { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ch-svc-fact-k {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--pos-text-muted);
+}
+.ch-svc-fact-v {
+  color: var(--pos-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-svc-amount {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--pos-success-bg, #e8f5ee);
+  color: var(--pos-success-text, #1b6b45);
+}
+.ch-svc-amount span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  opacity: .8;
+}
+.ch-svc-amount b { font-variant-numeric: tabular-nums; }
+/* An estimate is not money earned; it should not read like a settled figure. */
+.ch-svc-amount-est {
+  background: var(--pos-surface-2, #f1f5f9);
+  color: var(--pos-text-secondary);
+}
+
 .ch-svc-card-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px solid var(--pos-border);
 }
 
 /* ══════════════════════════════════════════

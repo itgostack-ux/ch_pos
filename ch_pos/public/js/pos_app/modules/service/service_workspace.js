@@ -68,8 +68,11 @@ export class ServiceWorkspace {
 
 				<div class="ch-svc-tabs" style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
 					${[
-						["ready", __("Ready to Bill")],
 						["in_progress", __("In Progress")],
+						// A device that has left the store is nobody here's to act on,
+						// and the customer asking after it needs a different answer.
+						["out_for_repair", __("Out for Repair")],
+						["ready", __("Ready to Bill")],
 						["invoiced", __("Invoiced")],
 						["delivered", __("Delivered")],
 						["all", __("All")],
@@ -134,10 +137,29 @@ export class ServiceWorkspace {
 						<span style="font-size:var(--pos-fs-xs);color:var(--pos-text-muted)">${sr.service_date || ""}</span>
 					</div>
 					<div class="ch-svc-card-body">
-						<span style="font-weight:600;color:var(--pos-text)">${frappe.utils.escape_html(sr.customer_name || "")}</span>
-						<span>${frappe.utils.escape_html(sr.device_item_name || "")}${sr.issue_category ? " · " + frappe.utils.escape_html(sr.issue_category) : ""}</span>
-						${sr.final_cost ? `<span style="font-weight:700;color:var(--pos-text-secondary)">${__("Final")}: ₹${format_number(sr.final_cost)}</span>`
-							: (sr.estimated_cost ? `<span style="font-weight:700;color:var(--pos-text-secondary)">Est: ₹${format_number(sr.estimated_cost)}</span>` : "")}
+						<div class="ch-svc-customer">${frappe.utils.escape_html(sr.customer_name || "—")}</div>
+						<div class="ch-svc-facts">
+							${[
+								[__("Device"), sr.device_item_name],
+								[__("IMEI / Serial"), sr.serial_no || sr.actual_imei],
+								[__("Reported"), sr.issue_category],
+								[__("Contact"), sr.contact_number],
+								// Where the handset physically is, which is the
+								// question a counter gets asked most.
+								[__("Location"), sr.transferred_to_store
+									? String(sr.transferred_to_store).split(" - ")[0]
+									: (sr.current_location ? String(sr.current_location).split(" - ")[0] : null)],
+							].filter(([, v]) => v).map(([k, v]) => `
+								<div class="ch-svc-fact">
+									<span class="ch-svc-fact-k">${k}</span>
+									<span class="ch-svc-fact-v">${frappe.utils.escape_html(String(v))}</span>
+								</div>`).join("")}
+						</div>
+						${sr.final_cost
+							? `<div class="ch-svc-amount"><span>${__("Final")}</span><b>₹${format_number(sr.final_cost)}</b></div>`
+							: (sr.estimated_cost
+								? `<div class="ch-svc-amount ch-svc-amount-est"><span>${__("Estimate")}</span><b>₹${format_number(sr.estimated_cost)}</b></div>`
+								: "")}
 					</div>
 					<div class="ch-svc-card-actions">
 						<button class="btn btn-sm btn-outline-primary ch-svc-open-hub" data-sr="${sr.name}"
