@@ -176,6 +176,12 @@ export class ServiceWorkspace {
 							<span class="badge" style="background:#fff7ed;color:#9a3412;padding:4px 9px;border-radius:10px;font-size:11px;font-weight:700">
 								<i class="fa fa-truck"></i> ${frappe.utils.escape_html(sr.transfer_status)}${sr.transferred_to_store ? " → " + frappe.utils.escape_html(String(sr.transferred_to_store).split(" - ")[0]) : ""}
 							</span>` : ""}
+						${sr.transfer_status === "In Transit" ? `
+							<button class="btn btn-sm btn-outline-secondary ch-svc-cancel-transfer" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								title="${__("Call the dispatch back — only while the device has not been picked up")}">
+								<i class="fa fa-times"></i> ${__("Cancel Dispatch")}
+							</button>` : ""}
 						${inv ? `
 							<button class="btn btn-sm btn-outline-secondary ch-svc-view-invoice" data-name="${frappe.utils.escape_html(inv)}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700">
@@ -292,6 +298,34 @@ export class ServiceWorkspace {
 			const sr = $(e.currentTarget).data("sr");
 			if (!sr) return;
 			window.open(`/app/gofix-ops-hub?sr=${encodeURIComponent(sr)}`, "_blank");
+		});
+
+		// Call back a dispatch that has not been picked up.
+		panel.on("click", ".ch-svc-cancel-transfer", (e) => {
+			const sr = $(e.currentTarget).data("sr");
+			if (!sr) return;
+			const d = new frappe.ui.Dialog({
+				title: __("Cancel dispatch of {0}", [sr]),
+				fields: [{ fieldname: "reason", fieldtype: "Small Text", reqd: 1,
+					label: __("Why is it being called back?"),
+					description: __("Only possible while the device has not been picked up.") }],
+				primary_action_label: __("Cancel Dispatch"),
+				primary_action: (v) => {
+					d.get_primary_btn().prop("disabled", true);
+					frappe.xcall("gofix.gofix_services.api.cancel_service_transfer", {
+						service_request: sr, reason: v.reason,
+					}).then(() => {
+						d.hide();
+						frappe.show_alert({ message: __("Dispatch cancelled."), indicator: "green" });
+						load_board();
+					}).catch((err) => {
+						d.get_primary_btn().prop("disabled", false);
+						frappe.msgprint({ title: __("Could not cancel"),
+							message: err.message || String(err), indicator: "red" });
+					});
+				},
+			});
+			d.show();
 		});
 
 		// ── Send the device to a repair hub ──────────────────────────────
