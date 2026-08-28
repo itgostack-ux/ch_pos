@@ -276,14 +276,32 @@ export class ServiceWorkspace {
 		panel.on("click", ".ch-svc-send-hub", (e) => {
 			const sr = $(e.currentTarget).data("sr");
 			if (!sr) return;
+			// Destinations come from the location hierarchy, not the warehouse
+			// tree — a raw Warehouse link offered Damaged bins and Supplier
+			// Returns as places to send a customer's phone.
+			frappe.xcall("gofix.gofix_services.api.get_repair_destinations", {
+				service_request: sr,
+			}).then((dests) => {
+			if (!(dests || []).length) {
+				frappe.msgprint({
+					title: __("Nowhere to send it"),
+					message: __("No other service-enabled store is available in this company."),
+					indicator: "orange",
+				});
+				return;
+			}
+			const options = dests.map((x) => ({
+				value: x.warehouse,
+				label: `${x.label}${x.is_hub ? " — " + __("Hub") : ""}${x.city ? " · " + x.city : ""}`,
+			}));
 			const d = new frappe.ui.Dialog({
 				title: __("Send {0} to a repair hub", [sr]),
 				fields: [
 					{
-						fieldname: "to_store", fieldtype: "Link", options: "Warehouse",
-						label: __("Repair hub"), reqd: 1,
+						fieldname: "to_store", fieldtype: "Select", reqd: 1,
+						label: __("Repair hub"),
+						options: options.map((o) => o.label),
 						description: __("The device is dispatched into transit; the hub confirms receipt on arrival."),
-						get_query: () => ({ filters: { is_group: 0, disabled: 0, company: PosState.active_company || PosState.company } }),
 					},
 					{
 						fieldname: "reason", fieldtype: "Small Text", reqd: 1,
@@ -292,15 +310,18 @@ export class ServiceWorkspace {
 				],
 				primary_action_label: __("Dispatch"),
 				primary_action: (v) => {
+					const picked = options.find((o) => o.label === v.to_store);
+					if (!picked) return;
 					d.get_primary_btn().prop("disabled", true);
 					frappe.xcall("gofix.gofix_services.api.create_service_transfer", {
-						service_request: sr, to_store: v.to_store, reason: v.reason,
+						service_request: sr, to_store: picked.value, reason: v.reason,
 					}).then(() => {
 						d.hide();
 						frappe.show_alert({
 							message: __("{0} dispatched to {1}. Track it in logistics.", [sr, v.to_store]),
 							indicator: "green",
 						});
+
 						load_board();
 					}).catch((err) => {
 						d.get_primary_btn().prop("disabled", false);
@@ -313,6 +334,7 @@ export class ServiceWorkspace {
 				},
 			});
 			d.show();
+			});
 		});
 
 		// ── Add a completed repair to the POS cart ───────────────────────
