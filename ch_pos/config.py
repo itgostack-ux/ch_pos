@@ -40,14 +40,41 @@ def require_privileged_user(action: str | None = None) -> None:
 		title=_("Permission Denied"))
 
 
+_NUMERIC_FIELDTYPES = ("Int", "Float", "Currency", "Percent")
+
+
 def get_control_setting(fieldname: str, default=None):
+	"""Read one POS control setting, treating an untouched numeric as unset.
+
+	A Single stores an Int nobody has ever edited as 0, not NULL, so falling
+	back only on None meant the declared default never arrived. Every caller
+	then clamped that 0 up to its floor: `max(1, min(cint(setting), cap))` is 1
+	when the setting reads 0. Row limits across the app were therefore 1 — which
+	is why the POS company bar offered a single company and the Billed By list
+	came back empty, and why scheduler sweeps handled one record per run.
+
+	So: for a numeric field whose docfield declares a non-zero default, a falsy
+	stored value means "never configured" and the caller's default applies. A
+	field genuinely meant to be zero declares zero, and is returned untouched.
+	"""
 	try:
-		if not frappe.get_meta("CH POS Control Settings").has_field(fieldname):
+		meta = frappe.get_meta("CH POS Control Settings")
+		df = meta.get_field(fieldname)
+		if not df:
 			return default
 		value = frappe.get_cached_value("CH POS Control Settings", None, fieldname)
 	except Exception:
 		return default
-	return default if value is None else value
+	if value is None:
+		return default
+	if (
+		default is not None
+		and not value
+		and df.fieldtype in _NUMERIC_FIELDTYPES
+		and frappe.utils.flt(df.default) != 0
+	):
+		return default
+	return value
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +85,40 @@ def get_configured_roles(fieldname: str, defaults=()) -> set[str]:
 	from ch_erp15.role_settings import get_setting_roles
 
 	return set(get_setting_roles("CH POS Control Settings", fieldname, defaults))
+
+
+# Groups whose items are fitted on a repair rather than sold over the counter.
+# Seeded into CH POS Control Settings by setup; the setting is authoritative
+# from then on, so an operator can add or remove a group without a code change.
+DEFAULT_REPAIR_CONSUMABLE_GROUPS = ("Spares", "Sub Assemblies")
+
+
+def get_repair_consumable_item_groups() -> list[str]:
+	"""Item groups the POS sell catalogue must not offer.
+
+	A spare is stock a technician fits and the customer pays for on the service
+	invoice — never something a counter sells on its own. These groups used to
+	be written into the search SQL (including two that exist as Item Groups on
+	no site here), so the rule could be neither seen nor changed.
+
+	The configured list is authoritative, empty included: emptying it means no
+	group is restricted. The defaults apply only where the setting has not been
+	installed yet.
+	"""
+	try:
+		if not frappe.get_meta("CH POS Control Settings").has_field(
+			"repair_consumable_item_groups"
+		):
+			return list(DEFAULT_REPAIR_CONSUMABLE_GROUPS)
+		rows = frappe.get_all(
+			"CH POS Item Group Link",
+			filters={"parenttype": "CH POS Control Settings",
+			         "parentfield": "repair_consumable_item_groups"},
+			pluck="item_group",
+		)
+	except Exception:
+		return list(DEFAULT_REPAIR_CONSUMABLE_GROUPS)
+	return [g for g in rows if g]
 
 
 def has_app_permission(user: str | None = None) -> bool:

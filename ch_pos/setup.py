@@ -930,6 +930,47 @@ def after_migrate():
     _ensure_default_docperms()
     _ensure_pos_control_defaults()
     _ensure_fifo_override_reasons()
+    _ensure_repair_consumable_groups()
+
+
+def _ensure_repair_consumable_groups():
+    """Put the sell-catalogue exclusion on screen, once, then leave it alone.
+
+    Which item groups are fitted on a repair rather than sold at a counter used
+    to live in the search SQL, where nobody could see it and it named two groups
+    that do not exist. Seed the setting from the defaults on the first migrate
+    that finds it empty; after that it is the operator's list, emptied included.
+    """
+    from ch_pos.config import DEFAULT_REPAIR_CONSUMABLE_GROUPS
+
+    if not frappe.db.exists("DocType", "CH POS Item Group Link"):
+        return
+    meta = frappe.get_meta("CH POS Control Settings")
+    if not meta.has_field("repair_consumable_item_groups"):
+        return
+    if frappe.db.count(
+        "CH POS Item Group Link",
+        {"parenttype": "CH POS Control Settings",
+         "parentfield": "repair_consumable_item_groups"},
+    ):
+        return
+    # Seeding twice would silently overrule a deliberate clearing, so a marker
+    # records that the seed has run rather than inferring it from emptiness.
+    if frappe.db.get_default("ch_pos_repair_consumable_groups_seeded"):
+        return
+
+    groups = [g for g in DEFAULT_REPAIR_CONSUMABLE_GROUPS if frappe.db.exists("Item Group", g)]
+    if groups:
+        settings = frappe.get_single("CH POS Control Settings")
+        for group in groups:
+            settings.append("repair_consumable_item_groups", {"item_group": group})
+        settings.flags.ignore_permissions = True
+        settings.flags.ignore_mandatory = True
+        settings.save()
+    frappe.db.set_default("ch_pos_repair_consumable_groups_seeded", "1")
+    frappe.logger("ch_pos").info(
+        f"POS: repair-consumable item groups seeded with {groups or 'nothing (no matching group)'}"
+    )
 
 
 def _ensure_pos_control_defaults():
