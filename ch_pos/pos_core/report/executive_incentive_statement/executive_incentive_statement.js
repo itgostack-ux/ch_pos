@@ -80,6 +80,10 @@ frappe.query_reports["Executive Incentive Statement"] = {
 			label: __("Store"),
 			fieldtype: "Link",
 			options: "CH Store",
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				return { filters: company ? { company } : {} };
+			},
 		},
 		{
 			fieldname: "to_date",

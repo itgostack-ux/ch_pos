@@ -11,7 +11,11 @@ frappe.query_reports["Drop Analysis Report"] = {
             label: __("Store / POS Profile"),
             fieldtype: "Link",
             options: "POS Profile",
-        },
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				return { filters: company ? { company } : {} };
+			},
+		},
         {
             fieldname: "from_date",
             label: __("From Date"),

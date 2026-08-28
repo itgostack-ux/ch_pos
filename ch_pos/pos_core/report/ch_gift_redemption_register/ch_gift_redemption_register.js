@@ -32,6 +32,10 @@ frappe.query_reports["CH Gift Redemption Register"] = {
 			label: __("Store"),
 			fieldtype: "Link",
 			options: "CH Store",
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				return { filters: company ? { company } : {} };
+			},
 		},
 	],
 };

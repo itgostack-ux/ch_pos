@@ -15,6 +15,10 @@ frappe.query_reports["Device Wise Open Sessions"] = {
 			label: __("Store"),
 			fieldtype: "Link",
 			options: "Warehouse",
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				return { filters: company ? { company } : {} };
+			},
 		}
 	],
 };
