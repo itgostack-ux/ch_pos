@@ -1431,6 +1431,23 @@ export class StockTransferWorkspace {
             });
             return;
         }
+        // The To Warehouse Autocomplete's typed text can be confirmed (Enter,
+        // blur) without ever matching an actual suggestion — awesomplete then
+        // leaves whatever the box currently shows, which may be a stale/
+        // default entry rather than what the user meant to pick. Cross-check
+        // against the fetched candidate list for this source warehouse so a
+        // near-miss like this can't silently save to the wrong destination.
+        const valid_targets = this._target_cache[from_wh];
+        if (valid_targets && !valid_targets.some(r => r.warehouse === to_wh)) {
+            frappe.show_alert({
+                message: __(
+                    "\"{0}\" isn't a valid destination — pick one from the dropdown or a nearby chip.",
+                    [to_wh]
+                ),
+                indicator: "red",
+            });
+            return;
+        }
         if (from_wh === to_wh) {
             frappe.show_alert({
                 message: __(
@@ -1639,6 +1656,20 @@ export class StockTransferWorkspace {
                 args:   { stock_entry: se_name, barcode },
                 callback: (r) => {
                     if (!r.message) return;
+                    if (r.message.success === false) {
+                        dialog.fields_dict.scan_status.$wrapper.html(`
+                            <div class="alert alert-danger"
+                                 style="padding:6px 10px;font-size:12px;
+                                        margin:4px 0">
+                                <i class="fa fa-exclamation-triangle"></i>
+                                ${frappe.utils.escape_html(
+                                    r.message.message || __("Invalid barcode")
+                                )}
+                            </div>
+                        `);
+                        setTimeout(() => bf.$input.focus(), 100);
+                        return;
+                    }
                     (r.message.items || []).forEach(si => {
                         const local = recv_state.find(
                             s => s.item_code === si.item_code
