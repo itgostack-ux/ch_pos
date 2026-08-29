@@ -9841,7 +9841,11 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
                                      (SELECT COUNT(*) FROM `tabStock Entry Detail` sed
                                          WHERE sed.parent = se.name) - 1,
                                      0
-                             ) AS additional_item_count
+                             ) AS additional_item_count,
+                             EXISTS (
+                                     SELECT 1 FROM `tabCH Stock Entry Package` pkg
+                                         WHERE pkg.parent = se.name
+                             ) AS has_packages
         FROM `tabStock Entry` se
                 LEFT JOIN `tabDriver` drv ON drv.name = se.custom_logistics_person
         WHERE se.stock_entry_type = 'Material Transfer'

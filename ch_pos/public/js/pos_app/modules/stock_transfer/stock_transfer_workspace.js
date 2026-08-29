@@ -132,6 +132,51 @@ export class StockTransferWorkspace {
             });
         });
 
+        panel.on("click.chStockTransfer", ".ch-st-packbox-btn", (e) => {
+            this._open_pack_box_dialog(panel, $(e.currentTarget).data("name"));
+        });
+
+        panel.on("click.chStockTransfer", ".ch-st-markpacked-btn", (e) => {
+            const name = $(e.currentTarget).data("name");
+            frappe.call({
+                method: "ch_erp15.ch_erp15.custom.stock_entry.set_custom_status",
+                args:   { StockEntry: name, status: "Packed" },
+                freeze: true,
+                callback: (r) => {
+                    if (!r.message) return;
+                    frappe.show_alert({
+                        message:   __("{0} marked as Packed.", [name]),
+                        indicator: "green",
+                    });
+                    this._load_tab(panel, "outgoing");
+                },
+            });
+        });
+
+        panel.on("click.chStockTransfer", ".ch-st-delivery-challan-btn", (e) => {
+            const name = $(e.currentTarget).data("name");
+            const params = new URLSearchParams({
+                doctype: "Stock Entry",
+                name,
+                format: "CH Delivery Challan",
+                trigger_print: "0",
+                _lang: frappe.boot.lang || "en",
+            });
+            window.open("/printview?" + params.toString(), "_blank");
+        });
+
+        panel.on("click.chStockTransfer", ".ch-st-boxlabel-btn", (e) => {
+            const name = $(e.currentTarget).data("name");
+            const params = new URLSearchParams({
+                doctype: "Stock Entry",
+                name,
+                format: "CH Stock Entry Box Label",
+                trigger_print: "0",
+                _lang: frappe.boot.lang || "en",
+            });
+            window.open("/printview?" + params.toString(), "_blank");
+        });
+
         panel.on("click.chStockTransfer",
             ".ch-st-accept-btn", function () {
                 panel.trigger("st:accept", [$(this).data("name")]);
@@ -251,6 +296,8 @@ export class StockTransferWorkspace {
         const STATUS_COLOR = {
             "Draft":                 "ch-pos-badge-muted",
             "Pending With Goods":    "ch-pos-badge-warning",
+            "Partially Packed":      "ch-pos-badge-warning",
+            "Packed":                "ch-pos-badge-info",
             "Ready For Pickup":      "ch-pos-badge-info",
             "In Transit":            "ch-pos-badge-info",
             "Ready For Receive":     "ch-pos-badge-warning",
@@ -304,7 +351,7 @@ export class StockTransferWorkspace {
             <button class="btn btn-xs btn-warning ch-st-handover-btn"
                     data-name="${esc(se.name)}"
                     style="border-radius:var(--pos-radius-sm)">
-                <i class="fa fa-sign-out"></i> ${__("Handover")}
+                <i class="fa fa-sign-out"></i> ${__("Pending With Goods")}
             </button>` : "";
         const cancel_btn = can_handover ? `
             <button class="btn btn-xs btn-danger ch-st-cancel-btn"
@@ -313,39 +360,55 @@ export class StockTransferWorkspace {
                 <i class="fa fa-times"></i> ${__("Cancel")}
             </button>` : "";
 
-        // Manifest / E-Way Bill buttons hidden on the Incoming tab per
-        // request — kept here commented (unchanged) so they can be restored
-        // by deleting the tab-guarded versions below and uncommenting these.
-        // const manifest_btn = se.custom_transfer_manifest ? `
-        //     <button class="btn btn-xs btn-outline-primary ch-st-manifest-btn"
-        //             data-manifest="${esc(se.custom_transfer_manifest)}"
-        //             style="border-radius:var(--pos-radius-sm)">
-        //         <i class="fa fa-file-text-o"></i>
-        //         ${__("Manifest / E-Way Bill")}
-        //     </button>` : "";
-        // const eway_btn = se.custom_transfer_manifest
-        //     && ["Pending With Goods", "Ready For Pickup"].includes(cs)
-        //     ? `<button class="btn btn-xs btn-outline-success ch-st-eway-btn"
-        //                 data-name="${esc(se.name)}"
-        //                 style="border-radius:var(--pos-radius-sm)">
-        //            <i class="fa fa-road"></i> ${__("Generate E-Way Bill")}
-        //        </button>`
-        //     : "";
-        const manifest_btn = (tab !== "incoming" && se.custom_transfer_manifest) ? `
-            <button class="btn btn-xs btn-outline-primary ch-st-manifest-btn"
-                    data-manifest="${esc(se.custom_transfer_manifest)}"
+        // Pack/status pipeline, mirroring the backend Stock Entry form's own
+        // handle_buttons() exactly (same statuses, same gating) so the
+        // outgoing card walks through Pending With Goods → Pack Box →
+        // Mark as Packed without ever leaving POS.
+        const pack_box_btn = (tab === "outgoing"
+            && ["Pending With Goods", "Partially Packed"].includes(cs)) ? `
+            <button class="btn btn-xs btn-outline-primary ch-st-packbox-btn"
+                    data-name="${esc(se.name)}"
                     style="border-radius:var(--pos-radius-sm)">
-                <i class="fa fa-file-text-o"></i>
-                ${__("Manifest / E-Way Bill")}
+                <i class="fa fa-cube"></i> ${__("Pack Box")}
             </button>` : "";
-        const eway_btn = (tab !== "incoming" && se.custom_transfer_manifest
-            && ["Pending With Goods", "Ready For Pickup"].includes(cs))
-            ? `<button class="btn btn-xs btn-outline-success ch-st-eway-btn"
-                        data-name="${esc(se.name)}"
-                        style="border-radius:var(--pos-radius-sm)">
-                   <i class="fa fa-road"></i> ${__("Generate E-Way Bill")}
-               </button>`
-            : "";
+
+        const terminal_statuses = ["Packed", "Ready For Pickup", "Assigned", "In Transit",
+            "Ready For Receive", "Receive At Transit", "Transferred", "Partially Transferred",
+            "Force Closed", "Rejected"];
+        const mark_packed_btn = (tab === "outgoing"
+            && se.has_packages && !terminal_statuses.includes(cs)) ? `
+            <button class="btn btn-xs btn-primary ch-st-markpacked-btn"
+                    data-name="${esc(se.name)}"
+                    style="border-radius:var(--pos-radius-sm)">
+                <i class="fa fa-check"></i> ${__("Mark as Packed")}
+            </button>` : "";
+
+        const box_label_statuses = ["Partially Packed", "Packed", "Ready For Pickup", "Assigned",
+            "In Transit", "Ready For Receive", "Receive At Transit", "Transferred"];
+        const print_box_label_btn = (tab === "outgoing"
+            && se.has_packages && box_label_statuses.includes(cs)) ? `
+            <button class="btn btn-xs btn-outline-secondary ch-st-boxlabel-btn"
+                    data-name="${esc(se.name)}"
+                    style="border-radius:var(--pos-radius-sm)">
+                <i class="fa fa-tag"></i> ${__("Print Box Label")}
+            </button>` : "";
+
+        // Delivery Challan, unconditional from Draft onward — same as the
+        // backend form's own E-Way Bill / Delivery Challan buttons, which
+        // never gate on custom_status either.
+        const delivery_challan_btn = (tab === "outgoing" && se.docstatus === 0) ? `
+            <button class="btn btn-xs btn-outline-secondary ch-st-delivery-challan-btn"
+                    data-name="${esc(se.name)}"
+                    style="border-radius:var(--pos-radius-sm)">
+                <i class="fa fa-file-text-o"></i> ${__("Delivery Challan")}
+            </button>` : "";
+
+        // "Manifest / E-Way Bill" hidden per explicit request — this store's
+        // outgoing transfers don't go through a logistics manifest, so this
+        // button (and the Generate E-Way Bill one it's paired with) never
+        // actually applied here anyway.
+        const manifest_btn = "";
+        const eway_btn = "";
 
         const LC = {
             "Pending Pickup":   "#fbbf24",
@@ -424,6 +487,10 @@ export class StockTransferWorkspace {
                             ${logistics_badge}
                             ${accept_btn}
                             ${handover_btn}
+                            ${pack_box_btn}
+                            ${mark_packed_btn}
+                            ${delivery_challan_btn}
+                            ${print_box_label_btn}
                             ${cancel_btn}
                             ${manifest_btn}
                             ${eway_btn}
@@ -529,6 +596,174 @@ export class StockTransferWorkspace {
                 dialog.show();
             },
         });
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Pack Box — ported from the backend Stock Entry form's own
+    // show_pack_box_dialog / _open_stock_entry_pack_box_dialog (see
+    // ch_erp15.custom.stock_entry.js) so packing never requires leaving POS.
+    // Same two APIs, same flow: get_stock_entry_pack_items for what's left,
+    // pack_box_stock_entry per box, dialog stays open for the next box until
+    // nothing remains.
+    // ════════════════════════════════════════════════════════════════════════
+
+    _open_pack_box_dialog(panel, se_name) {
+        frappe.call({
+            method: "ch_erp15.ch_erp15.custom.stock_entry.get_stock_entry_pack_items",
+            args:   { stock_entry: se_name },
+            freeze: true,
+            callback: (r) => {
+                const available = (r.message || []).filter(row => row.remaining_qty > 0);
+                if (!available.length) {
+                    frappe.msgprint(__("Every item on this Stock Entry has already been fully packed into a box."));
+                    return;
+                }
+                const remaining_total = available.reduce((s, row) => s + row.remaining_qty, 0);
+                this._render_pack_box_dialog(panel, se_name, remaining_total);
+            },
+        });
+    }
+
+    _render_pack_box_dialog(panel, se_name, remaining_total) {
+        let boxes_this_session = [];
+        const primary_label = () => __("Box Confirmed");
+
+        const render_box_table = () => {
+            const $wrapper = d.fields_dict.box_table.$wrapper;
+            const rows = boxes_this_session.length
+                ? boxes_this_session.map((b, i) => `
+                    <tr>
+                        <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);">${i + 1}</td>
+                        <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);">${frappe.utils.escape_html(b.package_label || "—")}</td>
+                        <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);text-align:right;">${b.packed_qty}</td>
+                    </tr>`).join("")
+                : `<tr>
+                    <td colspan="3" class="text-muted" style="padding:8px;text-align:center;">${__("No boxes added yet this session.")}</td>
+                </tr>`;
+            $wrapper.html(`
+                <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                        <tr>
+                            <th style="padding:4px 8px;text-align:left;">#</th>
+                            <th style="padding:4px 8px;text-align:left;">${__("Box")}</th>
+                            <th style="padding:4px 8px;text-align:right;">${__("Qty")}</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>`);
+        };
+
+        const d = new frappe.ui.Dialog({
+            title: __("Pack Box — {0}", [se_name]),
+            fields: [
+                {
+                    fieldname: "packed_qty", fieldtype: "Int", label: __("Packed Qty"), reqd: 1,
+                    default: remaining_total,
+                    description: __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total]),
+                    onchange() {
+                        const qty = flt(d.get_value("packed_qty"));
+                        const $field = d.get_field("packed_qty");
+                        const over = qty > remaining_total;
+                        $field.set_description(
+                            over
+                                ? `<span style="color:#d1242f;font-weight:600;">${__(
+                                      "Actual quantity is greater than Packed Qty — only {0} remaining.",
+                                      [remaining_total]
+                                  )}</span>`
+                                : __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
+                        );
+                        d.get_primary_btn().prop("disabled", over || !qty || qty <= 0);
+                        d.get_primary_btn().html(primary_label());
+                    },
+                },
+                { fieldname: "weight_kg", fieldtype: "Float", label: __("Weight (kg)") },
+                {
+                    fieldname: "dimensions_cm", fieldtype: "Data", label: __("Dimensions (LxWxH cm)"),
+                    description: __("Optional — used for courier dimensional weight, e.g. 30x20x15")
+                },
+                { fieldname: "col_break", fieldtype: "Column Break" },
+                { fieldname: "seal_number", fieldtype: "Data", label: __("Seal / Tamper Tag") },
+                {
+                    fieldname: "seal_status", fieldtype: "Select", label: __("Seal Status"),
+                    options: "\nSealed\nOpen",
+                },
+                { fieldname: "packing_photo", fieldtype: "Attach Image", label: __("Packing Photo") },
+                { fieldname: "notes", fieldtype: "Small Text", label: __("Notes") },
+                { fieldname: "sec_boxes", fieldtype: "Section Break", label: __("Boxes Packed This Session") },
+                { fieldname: "box_table", fieldtype: "HTML" },
+            ],
+            primary_action_label: primary_label(),
+            primary_action: (values) => {
+                if (!values.packed_qty || values.packed_qty <= 0) {
+                    frappe.msgprint(__("Enter a packed quantity greater than zero."));
+                    return;
+                }
+                if (values.packed_qty > remaining_total) {
+                    frappe.msgprint({
+                        title: __("Overpack Blocked"),
+                        indicator: "red",
+                        message: __("Cannot pack {0} units — only {1} remaining.",
+                            [values.packed_qty, remaining_total]),
+                    });
+                    return;
+                }
+                frappe.call({
+                    method: "ch_erp15.ch_erp15.custom.stock_entry.pack_box_stock_entry",
+                    args: {
+                        stock_entry: se_name,
+                        packed_qty: values.packed_qty,
+                        weight_kg: values.weight_kg,
+                        dimensions_cm: values.dimensions_cm,
+                        seal_number: values.seal_number,
+                        seal_status: values.seal_status,
+                        packing_photo: values.packing_photo,
+                        notes: values.notes,
+                    },
+                    freeze: true,
+                }).then((r) => {
+                    const m = r.message || {};
+                    boxes_this_session.push({ package_label: m.package_label, packed_qty: values.packed_qty });
+                    render_box_table();
+                    remaining_total -= values.packed_qty;
+
+                    frappe.show_alert({
+                        message: __("Box {0} packed ({1} units).", [m.package_label || se_name, values.packed_qty]),
+                        indicator: "green",
+                    }, 4);
+
+                    if (remaining_total <= 0) {
+                        frappe.show_alert({
+                            message: __("{0} fully packed across {1} box(es).",
+                                [se_name, boxes_this_session.length]),
+                            indicator: "green",
+                        }, 6);
+                        d.hide();
+                        this._load_tab(panel, "outgoing");
+                        return;
+                    }
+
+                    d.set_value("packed_qty", remaining_total);
+                    d.set_value("weight_kg", "");
+                    d.set_value("dimensions_cm", "");
+                    d.set_value("seal_number", "");
+                    d.set_value("seal_status", "");
+                    d.set_value("packing_photo", "");
+                    d.set_value("notes", "");
+                    d.get_field("packed_qty").set_description(
+                        __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
+                    );
+                    d.get_primary_btn().html(primary_label());
+                });
+            },
+            on_hide: () => {
+                // A box may have been added even if the dialog is dismissed
+                // instead of finishing every box — refresh either way so the
+                // card's has_packages / status reflects what's actually saved.
+                if (boxes_this_session.length) this._load_tab(panel, "outgoing");
+            },
+        });
+        render_box_table();
+        d.show();
     }
 
     // ════════════════════════════════════════════════════════════════════════
