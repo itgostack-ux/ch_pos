@@ -7,7 +7,7 @@ app_license = "MIT"
 
 boot_session = "ch_pos.boot.boot_session"
 
-required_apps = ["frappe", "erpnext", "ch_item_master", "ch_erp15"]
+required_apps = ["frappe", "erpnext", "ch_item_master"]
 
 # Each item in the list will be shown as an app in the apps page
 # Old apps-screen route lives on in bookmarks/history — redirect it.
