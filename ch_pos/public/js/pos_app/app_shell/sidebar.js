@@ -355,7 +355,6 @@ export class Sidebar {
 				}
 
 				d.hide();
-
 				const log_walkin = (device_model_name) => {
 					frappe.call({
 						method: "ch_pos.api.token_api.log_counter_walkin",
@@ -368,6 +367,9 @@ export class Sidebar {
 							device_brand: values.device_brand || "",
 							device_model: device_model_name || values.device_model || "",
 							item_code: values.item_code || "",
+							// Captured at intake so the token is linked from birth;
+							// the server re-checks it and falls back to the phone.
+							linked_customer: d._linked_customer || "",
 						},
 						callback: (r) => {
 							const res = r.message || {};
@@ -401,6 +403,114 @@ export class Sidebar {
 
 		// Attach live phone validation after the dialog DOM is ready
 		this._attach_phone_live_validation(d, "customer_phone");
+		// ...then identify the customer behind that number.
+		this._attach_walkin_customer_lookup(d);
+	}
+
+	/**
+	 * Recognise a returning customer from the phone number as it is typed.
+	 *
+	 * The counter already has the number in hand; asking the system who it
+	 * belongs to at THAT moment is what lets the token carry `linked_customer`
+	 * from birth. Without it the walk-in is just a name string, and the repair
+	 * / buyback / bill downstream each re-guess the customer -- which is how
+	 * duplicate Customer records get made.
+	 */
+	_attach_walkin_customer_lookup(dialog) {
+		const field = dialog.get_field("customer_phone");
+		if (!field || !field.$input) return;
+
+		const $panel = $(`<div class="ch-walkin-cust" style="
+			margin-top:6px; font-size:12px; line-height:1.5; display:none;
+			padding:6px 8px; border-radius:4px;
+		"></div>`);
+		field.$wrapper.append($panel);
+
+		dialog._linked_customer = null;
+		let last_query = "";
+		let timer = null;
+
+		const clear = () => {
+			dialog._linked_customer = null;
+			$panel.hide().empty();
+		};
+
+		const render = (res) => {
+			const esc = frappe.utils.escape_html;
+			if (!res || !res.found) {
+				dialog._linked_customer = null;
+				$panel.css({ background: "var(--bg-light-gray, #f4f5f6)", color: "var(--text-muted, #8d99a6)" })
+					.text(__("No existing customer with this number — a new one will be created at billing."))
+					.show();
+				return;
+			}
+			if (res.restricted) {
+				// Deliberately no name, no history: the number is known to the
+				// group but this store has never transacted with them.
+				dialog._linked_customer = null;
+				$panel.css({ background: "#fff8e6", color: "#8a6d1f" })
+					.html(`<b>${__("Existing customer at another store.")}</b> ${
+						__("A manager can link it — do not create a duplicate.")}`)
+					.show();
+				return;
+			}
+
+			dialog._linked_customer = res.customer;
+			const bits = [];
+			if (res.visits) {
+				bits.push(res.visits === 1 ? __("1 visit") : __("{0} visits", [res.visits]));
+			}
+			if (res.last_visit) bits.push(__("last {0}", [frappe.datetime.str_to_user(res.last_visit)]));
+			if (res.email_id) bits.push(esc(res.email_id));
+
+			$panel.css({ background: "#eaf5ee", color: "#1f7a3d" }).html(
+				`<b>✓ ${__("Existing customer")}</b> — ${esc(res.customer_name || res.customer)}` +
+				(bits.length ? `<div style="opacity:.85">${bits.join(" · ")}</div>` : "") +
+				`<div style="opacity:.7">${__("This walk-in will be linked to {0}.", [esc(res.customer)])}</div>`
+			).show();
+
+			// Fill the name only if the operator has not typed one — never
+			// overwrite what a human entered.
+			const name_field = dialog.get_field("customer_name");
+			if (name_field && name_field.$input && !(dialog.get_value("customer_name") || "").trim()) {
+				dialog.set_value("customer_name", res.customer_name || "");
+			}
+		};
+
+		const lookup = () => {
+			const digits = (field.$input.val() || "").replace(/\D/g, "").slice(-10);
+			if (!/^[6-9]\d{9}$/.test(digits)) {
+				last_query = "";
+				clear();
+				return;
+			}
+			if (digits === last_query) return;
+			last_query = digits;
+
+			$panel.css({ background: "var(--bg-light-gray, #f4f5f6)", color: "var(--text-muted, #8d99a6)" })
+				.text(__("Checking…")).show();
+
+			frappe.xcall("ch_pos.api.token_api.lookup_walkin_customer", {
+				phone: digits,
+				pos_profile: PosState.pos_profile,
+			}).then((res) => {
+				// The operator may have typed on since this call left.
+				const now = (field.$input.val() || "").replace(/\D/g, "").slice(-10);
+				if (now === digits) render(res);
+			}).catch(() => {
+				// Identification is a convenience; never block logging a walk-in.
+				clear();
+			});
+		};
+
+		const debounced = () => {
+			clearTimeout(timer);
+			timer = setTimeout(lookup, 350);
+		};
+
+		field.$input.on("input", debounced);
+		field.$input.on("blur", lookup);
+		field.$input.on("paste", () => setTimeout(lookup, 0));
 	}
 
 	_attach_phone_live_validation(dialog, fieldname) {

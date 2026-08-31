@@ -199,6 +199,24 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
         {
+            # CH Sale Sub Type is a child table of CH Sale Type, so the value
+            # is stored as plain text, not a Link.
+            "fieldname": "custom_ch_sale_sub_type",
+            "fieldtype": "Data",
+            "label": "Sale Sub Type",
+            "insert_after": "custom_ch_sale_type",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_ch_sale_reference",
+            "fieldtype": "Data",
+            "label": "Sale Reference",
+            "insert_after": "custom_ch_sale_sub_type",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
             "fieldname": "custom_discount_reason",
             "fieldtype": "Link",
             "label": "Discount Reason",
