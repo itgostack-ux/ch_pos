@@ -760,7 +760,7 @@ export class ReportsWorkspace {
 						message: verified
 							? __("All counts match — {0} verified, last-verified updated.", [r.name])
 							: __("Variance of {0} on {1} routed for approval (exception {2}). Reconciliation posts after approval.",
-								[frappe.format(r.total_variance_value, { fieldtype: "Currency" }), r.name, r.variance_exception || "—"]),
+								[format_currency(r.total_variance_value), r.name, r.variance_exception || "—"]),
 					});
 				}).catch((e) => frappe.msgprint(__("Submit failed: {0}", [e.message || e])));
 			},
@@ -827,7 +827,7 @@ export class ReportsWorkspace {
 				return `<tr>
 					<td>${frappe.utils.escape_html(r.item_name || r.item_code)}</td>
 					<td class="text-right">${flt(r.on_hand_qty)}</td>
-					<td class="text-right">${frappe.format(r.stock_value || 0, { fieldtype: "Currency" })}</td>
+					<td class="text-right">${format_currency(r.stock_value || 0)}</td>
 					<td class="text-center">${frappe.utils.escape_html(r.cycle_count_class || "—")}</td>
 					<td>${last}</td>
 					<td class="text-center">${since}</td>
@@ -849,7 +849,7 @@ export class ReportsWorkspace {
 							<div style="font-size:1.2rem;font-weight:600;color:#dc2626">${s.due_for_count || 0}</div>
 							<div class="text-muted">${__("Due for Count")}</div></div>
 						<div style="background:#f0fdf4;border-radius:6px;padding:10px;text-align:center">
-							<div style="font-size:1.2rem;font-weight:600">${frappe.format(s.total_stock_value || 0, { fieldtype: "Currency" })}</div>
+							<div style="font-size:1.2rem;font-weight:600">${format_currency(s.total_stock_value || 0)}</div>
 							<div class="text-muted">${__("Stock Value")}</div></div>
 					</div>
 					<div style="max-height:380px;overflow:auto">
@@ -890,7 +890,7 @@ export class ReportsWorkspace {
 					const cls = flt(p.total) < 0 ? "color:#dc2626" : "";
 					return `<tr>
 						<td>${frappe.utils.escape_html(p.mode)}</td>
-						<td class="text-right" style="${cls}">${frappe.format(p.total, { fieldtype: "Currency" })}</td>
+						<td class="text-right" style="${cls}">${format_currency(p.total)}</td>
 					</tr>`;
 				})
 				.join("");
@@ -906,8 +906,8 @@ export class ReportsWorkspace {
 					<td>${frappe.utils.escape_html(s.user || "")}</td>
 					<td style="${status_cls}">${frappe.utils.escape_html(s.status)}</td>
 					<td class="text-right">${s.total_invoices || 0}</td>
-					<td class="text-right">${frappe.format(s.net_sales || 0, { fieldtype: "Currency" })}</td>
-					<td class="text-right" style="${var_cls}">${frappe.format(variance, { fieldtype: "Currency" })}</td>
+					<td class="text-right">${format_currency(s.net_sales || 0)}</td>
+					<td class="text-right" style="${var_cls}">${format_currency(variance)}</td>
 				</tr>`;
 			}).join("");
 
@@ -926,7 +926,7 @@ export class ReportsWorkspace {
 					<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px">
 						<div style="background:#f0fdf4;border-radius:6px;padding:10px;text-align:center">
 							<div style="font-size:1.2rem;font-weight:700;color:#16a34a">
-								${frappe.format(d.total_net_sales, { fieldtype: "Currency" })}
+								${format_currency(d.total_net_sales)}
 							</div>
 							<div class="text-muted" style="font-size:0.78rem">${__("Net Sales")}</div>
 						</div>
@@ -940,7 +940,7 @@ export class ReportsWorkspace {
 						</div>
 						<div style="background:${flt(d.total_variance) !== 0 ? "#fef2f2" : "#f0fdf4"};border-radius:6px;padding:10px;text-align:center">
 							<div style="font-size:1.2rem;font-weight:700;color:${flt(d.total_variance) !== 0 ? "#dc2626" : "#16a34a"}">
-								${frappe.format(d.total_variance, { fieldtype: "Currency" })}
+								${format_currency(d.total_variance)}
 							</div>
 							<div class="text-muted" style="font-size:0.78rem">${__("Cash Variance")}</div>
 						</div>

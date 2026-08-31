@@ -453,7 +453,15 @@ export class CartPanel {
 				PosState.price_list = info.price_list;
 			}
 			if (info.loyalty) {
-				PosState.loyalty_program = info.loyalty.program;
+				// The server returns this as `loyalty_program`. Reading `.program`
+				// left PosState.loyalty_program undefined, and the payment dialog
+				// gates the whole redeem control on it
+				// (has_loyalty = pts > 0 && PosState.loyalty_program && ...), so a
+				// customer with points was simply never offered them. The points and
+				// the conversion factor came through correctly, which is why the
+				// balance still showed on the badge while redemption had vanished.
+				PosState.loyalty_program =
+					info.loyalty.loyalty_program || info.loyalty.program || null;
 				PosState.loyalty_points = info.loyalty.points;
 				PosState.conversion_factor = info.loyalty.conversion_factor;
 			}

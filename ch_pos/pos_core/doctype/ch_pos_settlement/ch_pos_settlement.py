@@ -299,19 +299,22 @@ class CHPOSSettlement(Document):
                 "cheque_date": self.business_date or frappe.utils.today(),
                 "user_remark": remark,
                 "accounts": [
+                    # No reference_type here. Journal Entry Account.reference_type
+                    # accepts only ERPNext's own billing doctypes, so naming a
+                    # "CH POS Settlement" failed validation and the variance JE was
+                    # never created — a till difference silently never reached the
+                    # ledger. The settlement is still traceable both ways:
+                    # cheque_no carries its name, user_remark explains it, and the
+                    # settlement stores variance_journal_entry pointing back.
                     {
                         "account": debit_account,
                         "debit_in_account_currency": amount,
                         "cost_center": cost_center,
-                        "reference_type": "CH POS Settlement",
-                        "reference_name": self.name,
                     },
                     {
                         "account": credit_account,
                         "credit_in_account_currency": amount,
                         "cost_center": cost_center,
-                        "reference_type": "CH POS Settlement",
-                        "reference_name": self.name,
                     },
                 ],
             })
@@ -323,6 +326,21 @@ class CHPOSSettlement(Document):
             frappe.log_error(
                 frappe.get_traceback(),
                 f"POS Settlement variance JE failed for {self.name}",
+            )
+            # Catching a frappe.throw does NOT clear frappe.message_log, so the
+            # validation text leaked to the cashier as an unexplained popup about
+            # "Reference Type" while the settlement appeared to succeed. Drop the
+            # swallowed message and say what actually happened, in terms the
+            # person closing the till can act on.
+            frappe.clear_messages()
+            frappe.msgprint(
+                frappe._("The cash variance of {0} was recorded on this settlement, "
+                         "but the accounting entry for it could not be created. "
+                         "Finance must post it manually — see the Error Log.").format(
+                    frappe.utils.fmt_money(amount, currency=frappe.get_cached_value(
+                        "Company", self.company, "default_currency"))),
+                title=frappe._("Variance Not Posted To Ledger"),
+                indicator="red",
             )
 
     def _cancel_variance_journal_entry(self):

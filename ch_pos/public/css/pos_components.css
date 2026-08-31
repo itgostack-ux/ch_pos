@@ -1811,6 +1811,28 @@
   font-weight: 800;
   color: var(--pos-text);
 }
+/* Cross-company footnote under the customer stat row. Secondary by design:
+   the company figures above are what this till can act on, and this only says
+   that more history exists elsewhere — counts and totals, never the rows. */
+.ch-c360-crossco {
+  align-items: baseline;
+  border-top: 1px dashed var(--pos-border, #e2e8f0);
+  color: var(--pos-text-muted, #64748b);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--pos-fs-xs, 11px);
+  gap: 5px;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+.ch-c360-crossco b { color: var(--pos-text, #0f172a); }
+.ch-c360-crossco-note {
+  color: var(--pos-text-muted, #94a3b8);
+  flex-basis: 100%;
+  font-size: var(--pos-fs-2xs, 10px);
+  margin-top: 2px;
+}
+
 .ch-c360-stat-label {
   font-size: var(--pos-fs-2xs);
   font-weight: 700;

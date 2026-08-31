@@ -245,8 +245,20 @@ export class SessionControls {
 		frappe.confirm(
 			__("Logout from POS now?"),
 			() => {
-				// Use Frappe's built-in logout endpoint for a clean session end.
-				window.location.href = "/api/method/logout";
+				// `logout` is whitelisted POST-only (deliberately: a logout must
+				// not be triggerable by a link). Navigating the browser to
+				// /api/method/logout is a GET, so Frappe answered
+				// 403 "Not Permitted", the session survived, and a refresh
+				// dropped the operator straight back into the same store.
+				// POST it the way the desk does, then leave.
+				const leave = () => {
+					if (frappe.app && frappe.app.redirect_to_login) {
+						frappe.app.redirect_to_login();
+					} else {
+						window.location.href = "/login";
+					}
+				};
+				frappe.call({ method: "logout" }).then(leave, leave);
 			}
 		);
 	}
@@ -343,7 +355,7 @@ export class SessionControls {
 			session_name: PosState.session_name,
 		}).then((data) => {
 			const payment_rows = (data.payment_modes || [])
-				.map((p) => `<tr><td>${frappe.utils.escape_html(p.mode)}</td><td class="text-right">${frappe.format(p.total, { fieldtype: "Currency" })}</td></tr>`)
+				.map((p) => `<tr><td>${frappe.utils.escape_html(p.mode)}</td><td class="text-right">${format_currency(p.total)}</td></tr>`)
 				.join("");
 
 			frappe.msgprint({
@@ -354,23 +366,23 @@ export class SessionControls {
 						<tr><td>${__("Session")}</td><td><b>${data.session_name}</b></td></tr>
 						<tr><td>${__("Cashier")}</td><td>${frappe.utils.escape_html(data.cashier)}</td></tr>
 						<tr><td>${__("Shift Start")}</td><td>${data.shift_start}</td></tr>
-						<tr><td>${__("Opening Cash")}</td><td>${frappe.format(data.opening_cash, { fieldtype: "Currency" })}</td></tr>
+						<tr><td>${__("Opening Cash")}</td><td>${format_currency(data.opening_cash)}</td></tr>
 					</table>
 					<hr>
 					<table class="table table-sm">
 						<tr><td>${__("Invoices")}</td><td><b>${data.invoices_count}</b></td></tr>
-						<tr><td>${__("Total Sales")}</td><td>${frappe.format(data.total_sales, { fieldtype: "Currency" })}</td></tr>
-						<tr><td>${__("Returns")}</td><td>${data.returns_count} (${frappe.format(data.total_returns, { fieldtype: "Currency" })})</td></tr>
-						<tr><td><b>${__("Net Sales")}</b></td><td><b>${frappe.format(data.net_sales, { fieldtype: "Currency" })}</b></td></tr>
-						<tr><td>${__("Tax Collected")}</td><td>${frappe.format(data.total_tax, { fieldtype: "Currency" })}</td></tr>
+						<tr><td>${__("Total Sales")}</td><td>${format_currency(data.total_sales)}</td></tr>
+						<tr><td>${__("Returns")}</td><td>${data.returns_count} (${format_currency(data.total_returns)})</td></tr>
+						<tr><td><b>${__("Net Sales")}</b></td><td><b>${format_currency(data.net_sales)}</b></td></tr>
+						<tr><td>${__("Tax Collected")}</td><td>${format_currency(data.total_tax)}</td></tr>
 					</table>
 					<hr>
 					<h6>${__("Payment Modes")}</h6>
 					<table class="table table-sm">${payment_rows}</table>
 					<hr>
 					<table class="table table-sm">
-						<tr><td>${__("Cash Drops")}</td><td>${frappe.format(data.total_cash_drops, { fieldtype: "Currency" })}</td></tr>
-						<tr><td><b>${__("Cash in Drawer")}</b></td><td><b>${frappe.format(data.cash_in_drawer, { fieldtype: "Currency" })}</b></td></tr>
+						<tr><td>${__("Cash Drops")}</td><td>${format_currency(data.total_cash_drops)}</td></tr>
+						<tr><td><b>${__("Cash in Drawer")}</b></td><td><b>${format_currency(data.cash_in_drawer)}</b></td></tr>
 					</table>
 				</div>`,
 				wide: true,
@@ -695,7 +707,12 @@ export class SessionControls {
 		const is_current_session = target_session === PosState.session_name;
 		const DENOMS = [2000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
 		const esc = frappe.utils.escape_html;
-		const money = (value) => frappe.format(Number(value || 0), { fieldtype: "Currency" });
+		// frappe.format() for a Currency returns MARKUP — "<div style='text-align:
+		// right'>₹ 0</div>" — not a string. Cells that interpolated it inherited a
+		// block element that broke the amount onto its own line, and the two cells
+		// that escape their content printed the tags to the cashier. format_currency
+		// returns the plain formatted number, which is what a settlement row wants.
+		const money = (value) => format_currency(Number(value || 0));
 		const num = (value) => Number(value || 0);
 		const tender_other = num(x_data.total_sales_wallet) + num(x_data.total_sales_bank);
 		const tender_cards = [
@@ -883,7 +900,7 @@ export class SessionControls {
 					fieldtype: "Password",
 					label: __("Manager PIN"),
 					options: "",
-					description: __("Required for petty cash or variance above threshold"),
+					description: __("Required when you record an expense, or when the cash variance is above the approval threshold."),
 				},
 			],
 			primary_action_label: __("Submit Settlement"),
@@ -894,13 +911,18 @@ export class SessionControls {
 					return;
 				}
 				if (petty.rows.length && !values.manager_pin) {
-					frappe.msgprint({
-						title: __("Manager PIN Required"),
-						message: __("Manager PIN is required to approve petty cash expenses."),
-						indicator: "orange",
-					});
+					// A missing required field does not need a modal to interrupt the
+					// settlement. Point at the field and say why, the way every other
+					// required field on this dialog behaves.
+					const $pin = dlg.fields_dict.manager_pin.$wrapper;
+					$pin.find(".ch-pin-inline-msg").remove();
+					$pin.append(
+						`<div class="ch-pin-inline-msg text-danger small" style="margin-top:4px">`
+						+ `${__("Required: taking cash out of the till needs a manager's approval.")}</div>`);
+					dlg.fields_dict.manager_pin.$input.focus();
 					return;
 				}
+				dlg.fields_dict.manager_pin.$wrapper.find(".ch-pin-inline-msg").remove();
 
 				const denominations = [];
 				dlg.$wrapper.find(".ch-settle-denom").each(function () {
@@ -1025,7 +1047,12 @@ export class SessionControls {
 			}
 			rows.push({ reason, amount, remarks });
 		});
-		return { rows: quiet && error ? [] : rows, error: quiet ? "" : error };
+		// The live "Expected Cash" reads this too. Returning NO rows the moment any
+		// one row was incomplete made the running total silently ignore expenses
+		// the cashier had already typed — the figure they are reconciling against
+		// quietly stopped matching what was on screen. Keep the rows that ARE
+		// complete; only the submit path treats an incomplete row as an error.
+		return { rows, error: quiet ? "" : error };
 	}
 
 	_show_close_session() {

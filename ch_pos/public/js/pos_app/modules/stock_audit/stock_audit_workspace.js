@@ -204,7 +204,7 @@ export class StockAuditWorkspace {
                 { label: __("Items on Hand"), value: s.items || 0,
                   color: "#2563eb", bg: "#dbeafe", icon: "fa-cubes" },
                 { label: __("Stock Value"),
-                  value: frappe.format(s.total_stock_value || 0, { fieldtype: "Currency" }),
+                  value: format_currency(s.total_stock_value || 0),
                   color: "#0d9488", bg: "#ccfbf1", icon: "fa-inr" },
                 { label: __("Due for Count"), value: s.due_for_count || 0,
                   color: s.due_for_count ? "#dc2626" : "#16a34a",
@@ -310,7 +310,7 @@ export class StockAuditWorkspace {
                 return `<tr>
                     <td>${item_cell}</td>
                     <td class="text-right" style="font-weight:500">${flt(r.on_hand_qty)}</td>
-                    <td class="text-right">${frappe.format(r.stock_value || 0, { fieldtype: "Currency" })}</td>
+                    <td class="text-right">${format_currency(r.stock_value || 0)}</td>
                     <td class="text-center">${cls_badge}</td>
                     <td>${last}</td>
                     <td class="text-center">${since}</td>
@@ -500,7 +500,7 @@ export class StockAuditWorkspace {
                     </span></td>
                     <td class="text-right">${flt(r.total_variance_qty)}</td>
                     <td class="text-right">
-                        ${frappe.format(r.total_variance_value || 0, { fieldtype: "Currency" })}
+                        ${format_currency(r.total_variance_value || 0)}
                     </td>
                     <td>${vexc}</td>
                     <td>${sr}</td>
@@ -605,11 +605,11 @@ export class StockAuditWorkspace {
                     <td>${ref}</td>
                     <td>${frappe.utils.escape_html(r.requested_by_name || r.requested_by || "")}</td>
                     <td class="text-right">
-                        ${frappe.format(r.requested_value || 0, { fieldtype: "Currency" })}
+                        ${format_currency(r.requested_value || 0)}
                     </td>
                     <td class="text-right">
                         ${r.resolution_value
-                            ? frappe.format(r.resolution_value, { fieldtype: "Currency" })
+                            ? format_currency(r.resolution_value)
                             : `<span class="text-muted">—</span>`}
                     </td>
                     <td><span class="badge badge-${status_cls}">
@@ -1338,7 +1338,7 @@ export class StockAuditWorkspace {
                 </td>
                 <td style="text-align:right">${flt(r.on_hand_qty)}</td>
                 <td style="text-align:right">
-                    ${frappe.format(r.stock_value || 0, { fieldtype: "Currency" })}
+                    ${format_currency(r.stock_value || 0)}
                 </td>
                 <td style="text-align:center">${frappe.utils.escape_html(r.cycle_count_class || "-")}</td>
                 <td style="text-align:center">${r.due ? "Yes" : "No"}</td>
@@ -1362,7 +1362,7 @@ export class StockAuditWorkspace {
                 <div>
                     <b>${__("Items")}:</b> ${flt(summary.items || rows.length)} ·
                     <b>${__("Stock Value")}:</b>
-                    ${frappe.format(summary.total_stock_value || 0, { fieldtype: "Currency" })}
+                    ${format_currency(summary.total_stock_value || 0)}
                 </div>
             </div>
             <table>
@@ -1380,7 +1380,7 @@ export class StockAuditWorkspace {
             <div class="summary">
                 ${__("Total Items")}: ${summary.items || rows.length} |
                 ${__("Total Value")}:
-                ${frappe.format(summary.total_stock_value || 0, { fieldtype: "Currency" })}
+                ${format_currency(summary.total_stock_value || 0)}
             </div>
             <script>window.print();<\/script>
             </body></html>`;
@@ -1517,7 +1517,7 @@ export class StockAuditWorkspace {
                             : __(
                                 "Variance of {0} on {1} routed for approval (exception {2}). Reconciliation posts after approval.",
                                 [
-                                    frappe.format(r.total_variance_value, { fieldtype: "Currency" }),
+                                    format_currency(r.total_variance_value),
                                     r.name,
                                     r.variance_exception || "—",
                                 ]

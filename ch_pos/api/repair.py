@@ -43,6 +43,48 @@ def resolve_legacy_device_item(device_brand=None, device_model=None):
 	)
 
 
+@frappe.whitelist()
+def describe_device_serial(serial_no: str) -> dict:
+    """Say whether an IMEI is a serial this company already tracks.
+
+    The counter needs to know which of two cases it is in, and NEITHER is an
+    error: a serial we sold (bind to it, warranty may apply) or the customer's
+    own device (accept it as typed). Read-only, so an unknown serial gets an
+    answer rather than an exception.
+    """
+    serial_no = (serial_no or "").strip()
+    if not serial_no:
+        return {"known": False}
+
+    frappe.has_permission("Serial No", "read", throw=True)
+    row = frappe.db.get_value(
+        "Serial No", serial_no,
+        ["name", "item_code", "item_name", "warehouse", "warranty_expiry_date"],
+        as_dict=True,
+    )
+    if not row:
+        return {"known": False, "serial_no": serial_no}
+
+    warranty = ""
+    expiry = row.get("warranty_expiry_date")
+    if expiry:
+        template = (
+            _("In warranty to {0}")
+            if frappe.utils.getdate(expiry) >= frappe.utils.getdate()
+            else _("Warranty expired {0}")
+        )
+        warranty = template.format(frappe.format(expiry, {"fieldtype": "Date"}))
+
+    return {
+        "known": True,
+        "serial_no": row.name,
+        "item_code": row.item_code,
+        "item_name": row.item_name,
+        "warehouse": row.warehouse,
+        "warranty": warranty,
+    }
+
+
 @frappe.whitelist(methods=["POST"])
 def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	"""Create and SUBMIT a GoFix Service Request from the POS Service Intake form.
@@ -85,6 +127,14 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 			sr.set(field, data[field])
 	for line in data.get("issue_lines") or []:
 		sr.append("issue_lines", line)
+
+	# An IMEI the counter typed that is NOT one of our stock serials belongs to
+	# the customer's own device. Record it explicitly as the actual IMEI so the
+	# ticket, and the Sales Order it copies to, carry the device the customer
+	# handed over rather than leaving it looking like an unmatched stock serial.
+	if sr.serial_no and not frappe.db.exists("Serial No", sr.serial_no):
+		if not sr.get("actual_imei"):
+			sr.actual_imei = sr.serial_no
 	sr.decision = "Draft"
 	sr.walkin_source = data.get("walkin_source") or "POS Counter"
 	sr.product_condition_desc = product_condition_desc
@@ -94,6 +144,25 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 
 	sr.insert()
 	sr.submit()
+
+	# Converting a queue token: close it against this ticket. The queue used to
+	# run its own conversion dialog with its own, smaller field list, so a
+	# token-raised ticket could not carry a technician, a promised time or a
+	# serial. One intake form now feeds both, and the token is closed here
+	# rather than by a second endpoint that built a second Service Request.
+	source_token = (data.get("source_token") or "").strip()
+	if source_token:
+		try:
+			from ch_pos.api.token_api import link_token_to_service_request
+
+			link_token_to_service_request(source_token, sr.name)
+		except Exception:
+			# The ticket is the receipt for a device already on the counter.
+			# A token left open is a queue tidy-up, not a reason to fail intake.
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"POS intake: could not close token {source_token} for {sr.name}",
+			)
 
 	# A counter check-in IS the acceptance. The customer has handed the device
 	# over and signed the intake, so parking the ticket in a Draft queue for
@@ -115,12 +184,55 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 			frappe.get_traceback(), f"POS intake: could not open job for {sr.name}"
 		)
 
+	# Record the completion time promised at the counter. Done after the SR
+	# exists so the revision row can reference it, and never fatal: the device
+	# is already taken in, and a missing promise is a gap to fill, not a reason
+	# to void the receipt.
+	promised = (data.get("promised_completion_datetime") or "").strip()
+	if promised:
+		try:
+			from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import (
+				set_promised_completion,
+			)
+
+			set_promised_completion(sr.name, promised,
+				reason=_("Promised to the customer at intake"))
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"POS intake: could not record promised completion for {sr.name}",
+			)
+
+	# Hand the device to a named technician at intake. Analysis is real work and
+	# somebody has to own it — without this the ticket sits in the Analysis
+	# queue with no owner and no clock until the Assign stage, hours later.
+	assigned_to = (data.get("diagnosis_technician") or "").strip()
+	diagnosis_assignment = None
+	if assigned_to:
+		try:
+			from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import (
+				assign_diagnosis_technician,
+			)
+
+			res = assign_diagnosis_technician(sr.name, assigned_to)
+			diagnosis_assignment = res.get("job_assignment")
+		except Exception:
+			# Same rule as opening the job: the device is already at the counter,
+			# so an assignment problem must not void the intake receipt.
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"POS intake: could not assign {assigned_to} to {sr.name}",
+			)
+
 	sr.reload()
 	return {
 		"name": sr.name,
 		"docstatus": sr.docstatus,
 		"status": sr.decision,
 		"job_opened": opened,
+		"diagnosis_assignment": diagnosis_assignment,
+		"diagnosis_technician": assigned_to or None,
+		"promised_completion_datetime": promised or None,
 	}
 
 

@@ -209,15 +209,33 @@ def _device_label(brand: str, model: str) -> str:
     return f"{brand} {model}".strip() if brand else model
 
 
-def _get_store_code(pos_profile_name: str) -> str:
-    """Generate a short store code from the POS Profile name."""
-    # e.g. "QA Velachery POS" → "VELPOS", "T Nagar" → "TNAGAR"
-    parts = pos_profile_name.upper().split()
-    # Drop common noise words
+def _get_store_code(pos_profile_name: str) -> tuple[str, bool]:
+    """Return (code, is_canonical) identifying the store behind a POS Profile.
+
+    Prefers ``CH Store.store_code``, which is the real per-store identifier
+    ("GF-DOVETON", "GF-KELLYS"). Only if no CH Store maps to this profile does
+    it fall back to shortening the profile name.
+
+    The old shortener parsed the profile NAME, and on this bench every profile
+    is called "POS - STO-GSPL-CHENNA-NNNN". Splitting on spaces made the lone
+    "-" a word and then took "STO" from the shared legacy prefix, so every one
+    of the 24 stores produced the same code "-STO" and tokens read
+    "GF--STO-001" — identical at every counter, which is exactly what a store
+    code must not be.
+    """
+    code = frappe.db.get_value(
+        "CH Store", {"pos_profile": pos_profile_name, "disabled": 0}, "store_code"
+    )
+    if code:
+        return code.strip().upper(), True
+
+    # Fallback: shorten the profile name, ignoring fragments that carry no
+    # letters so a separator can never become part of the code.
+    parts = [p for p in pos_profile_name.upper().split() if re.search(r"[A-Z0-9]", p)]
     noise = {"POS", "QA", "THE", "AND", "&"}
     meaningful = [p for p in parts if p not in noise] or parts
-    code = "".join(p[:3] for p in meaningful[:2])
-    return code[:6]
+    joined = "".join(re.sub(r"[^A-Z0-9]", "", p)[:3] for p in meaningful[:2])
+    return (joined[:6] or "STORE"), False
 
 
 def _next_daily_seq(pos_profile: str) -> int:
@@ -233,23 +251,50 @@ def _next_daily_seq(pos_profile: str) -> int:
              AND DATE(creation) = %s
         """,
         (pos_profile, today))[0][0] or 0
+    issued_today = frappe.db.count(
+        "POS Kiosk Token", {"pos_profile": pos_profile, "creation": (">=", today)}
+    )
     profile_digest = hashlib.sha256(pos_profile.encode()).hexdigest()[:24]
     series_key = f"CH-POS-TOKEN-{today}-{profile_digest}"
-    frappe.db.sql(
-        """
-        INSERT INTO `tabSeries` (`name`, `current`)
-        VALUES (%s, %s)
-        ON DUPLICATE KEY UPDATE
-            `current` = GREATEST(`current`, VALUES(`current`))
-        """,
-        (series_key, cint(existing_max)))
+
+    if not issued_today:
+        # No token has actually been issued at this counter today, so anything
+        # sitting in the allocator is burn: the number is consumed when the
+        # display is generated, and a submission that then fails validation
+        # never becomes a token. That is how this counter reached 100 on a day
+        # with a single token. The first customer of the day must be 001, so
+        # reset rather than carry the burn forward.
+        frappe.db.sql(
+            """
+            INSERT INTO `tabSeries` (`name`, `current`) VALUES (%s, 0)
+            ON DUPLICATE KEY UPDATE `current` = 0
+            """,
+            (series_key,))
+    else:
+        # Once real tokens exist the allocator must only ever move forward —
+        # walking it back would re-issue a number a customer is already holding.
+        frappe.db.sql(
+            """
+            INSERT INTO `tabSeries` (`name`, `current`)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE
+                `current` = GREATEST(`current`, VALUES(`current`))
+            """,
+            (series_key, cint(existing_max)))
     return cint(getseries(series_key, 10))
 
 
 def _generate_token_display(pos_profile: str, company_abbr: str) -> str:
-    """Generate human-readable token like  GGR-VEL-001."""
-    store_code = _get_store_code(pos_profile)
+    """Human-readable token, e.g. ``GF-DOVETON-001``.
+
+    The sequence restarts at 001 each day for each store.
+    """
+    store_code, canonical = _get_store_code(pos_profile)
     seq = _next_daily_seq(pos_profile)
+    if canonical:
+        # A CH Store code already carries its company prefix ("GF-DOVETON"),
+        # so prefixing the abbreviation again would read "GF-GF-DOVETON-001".
+        return f"{store_code}-{seq:03d}"
     abbr = (company_abbr or "CH")[:4].upper()
     return f"{abbr}-{store_code}-{seq:03d}"
 
@@ -1332,6 +1377,108 @@ def find_customer_by_phone(phone: str, pos_profile: str = None) -> dict:
     return None
 
 
+@frappe.whitelist()
+@frappe.read_only()
+def lookup_walkin_customer(phone: str, pos_profile: str = None) -> dict:
+    """Identify a returning walk-in from the phone number the counter typed.
+
+    The point is to capture ``linked_customer`` on the token AT INTAKE. Without
+    it every downstream step -- the GoFix conversion, the buyback, the bill --
+    has to re-derive the customer from a phone string, and a second Customer
+    record gets created the moment somebody types the name slightly differently.
+
+    Visibility follows the rule POS already uses for customers
+    (``_assert_customer_pos_access``): this store sees a customer it has
+    actually transacted with; anyone else needs the override role. When a
+    number belongs to a customer this store may not open, the operator is told
+    that the record EXISTS but is shown no details -- enough to stop them
+    creating a duplicate, not enough to read another branch's book.
+    """
+    _ensure_can_view_tokens()
+    frappe.has_permission("Customer", "read", throw=True)
+    if pos_profile:
+        _assert_pos_profile_scope(pos_profile)
+
+    out = {
+        "found": False, "restricted": False, "customer": None,
+        "customer_name": None, "mobile_no": None, "email_id": None,
+        "visits": 0, "last_visit": None, "last_store": None,
+    }
+
+    phone = (phone or "").strip()
+    if not phone:
+        return out
+
+    # Same normalisation/validation the token uses, so a half-typed number
+    # never triggers a lookup and 0000000000 never matches test contacts.
+    normalized = normalize_indian_phone(phone)
+    tail10 = (normalized or "")[-10:]
+    if len(tail10) != 10 or tail10[0] not in "6789":
+        return out
+
+    # Scoped match first -- this is the one the store is entitled to see.
+    customer = find_customer_by_phone(phone, pos_profile=pos_profile)
+
+    if not customer:
+        # Unscoped match: does this number belong to anyone at all?
+        unscoped = find_customer_by_phone(phone, pos_profile=None) \
+            if (pos_profile and is_privileged_user()) else None
+        if not unscoped and pos_profile:
+            unscoped = frappe.db.sql(
+                """
+                SELECT c.name FROM `tabCustomer` c
+                WHERE REPLACE(REPLACE(REPLACE(IFNULL(c.mobile_no,''),' ',''),'-',''),'+','')
+                      LIKE %(tail)s
+                LIMIT 1
+                """,
+                {"tail": f"%{tail10}"},
+            )
+            unscoped = unscoped[0][0] if unscoped else None
+        if not unscoped:
+            return out
+        # Imported lazily: pos_api imports from this module.
+        from ch_pos.api.pos_api import _assert_customer_pos_access
+
+        try:
+            _assert_customer_pos_access(unscoped, pos_profile, action=_("look up"))
+            customer = unscoped
+        except frappe.PermissionError:
+            # Exists, but not this store's to open.
+            return {**out, "found": True, "restricted": True}
+
+    row = frappe.db.get_value(
+        "Customer", customer,
+        ["name", "customer_name", "mobile_no", "email_id", "customer_group", "territory"],
+        as_dict=True,
+    ) or {}
+
+    history = frappe.db.sql(
+        """
+        SELECT COUNT(*) AS visits, MAX(si.posting_date) AS last_visit,
+               SUBSTRING_INDEX(GROUP_CONCAT(si.pos_profile ORDER BY si.posting_date DESC), ',', 1) AS last_store
+        FROM `tabSales Invoice` si
+        WHERE si.customer = %(c)s AND si.docstatus = 1
+        """,
+        {"c": customer},
+        as_dict=True,
+    )
+    hist = history[0] if history else {}
+
+    return {
+        "found": True,
+        "restricted": False,
+        "customer": row.get("name"),
+        "customer_name": row.get("customer_name"),
+        "mobile_no": row.get("mobile_no"),
+        "email_id": row.get("email_id"),
+        "customer_group": row.get("customer_group"),
+        "territory": row.get("territory"),
+        "visits": cint(hist.get("visits")),
+        "last_visit": str(hist.get("last_visit")) if hist.get("last_visit") else None,
+        "last_store": hist.get("last_store"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Counter Walk-in — creates a lightweight token from POS app
 # ---------------------------------------------------------------------------
@@ -1345,7 +1492,8 @@ def log_counter_walkin(
     remarks: str = "",
     device_brand: str = "",
     device_model: str = "",
-    item_code: str = "") -> dict:
+    item_code: str = "",
+    linked_customer: str = None) -> dict:
     """
     Create a minimal POS Kiosk Token for a direct-counter walk-in.
     This replaces the old log_walkin counter-only approach.
@@ -1376,6 +1524,35 @@ def log_counter_walkin(
     if customer_phone and customer_phone.strip():
         customer_phone = validate_indian_phone(customer_phone.strip(), "Phone number")
 
+    # Tie the walk-in to an existing Customer at intake. The client passes the
+    # one the operator confirmed; if it did not, resolve from the phone anyway,
+    # so the link is captured even when the lookup never ran (offline, stale
+    # bundle, a token created by another caller). Never trust the client's
+    # choice blindly -- re-check that this store may use that customer.
+    linked_customer = (linked_customer or "").strip() or None
+    if linked_customer:
+        if not frappe.db.exists("Customer", linked_customer):
+            linked_customer = None
+        else:
+            from ch_pos.api.pos_api import _assert_customer_pos_access
+
+            try:
+                _assert_customer_pos_access(linked_customer, pos_profile, action=_("link"))
+            except frappe.PermissionError:
+                linked_customer = None
+    if not linked_customer and customer_phone:
+        try:
+            # Same resolution the dialog showed the operator, so the promise
+            # "this walk-in will be linked to X" holds even when the token is
+            # created by something other than that dialog. find_customer_by_phone
+            # alone is narrower -- it needs a prior invoice AT this profile --
+            # and would silently drop a customer the UI had just identified.
+            hit = lookup_walkin_customer(customer_phone, pos_profile=pos_profile)
+            linked_customer = hit.get("customer") if hit.get("found") else None
+        except Exception:
+            # Identification is a convenience -- never fail a walk-in over it.
+            linked_customer = None
+
     # Validate item_code if provided — silently drop bad references rather
     # than failing the whole walk-in log (interest capture is best-effort).
     item_code = (item_code or "").strip()
@@ -1394,6 +1571,7 @@ def log_counter_walkin(
         "token_display": token_display,
         "customer_name": customer_name.strip() or "Walk-in",
         "customer_phone": customer_phone.strip() or "",
+        "linked_customer": linked_customer,
         "visit_source": "Counter",
         "visit_purpose": visit_purpose,
         "issue_description": remarks,
@@ -1421,6 +1599,7 @@ def log_counter_walkin(
         "token": token_display,
         "name": doc.name,
         "visit_purpose": visit_purpose,
+        "linked_customer": linked_customer,
     }
 
 
@@ -1744,13 +1923,112 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     return _ensure_result_limit(tokens, result_limit, _("Waiting POS tokens"))
 
 
+def _resolve_token_customer(token, explicit, pos_profile, profile=None):
+    """The ERPNext Customer a converted token belongs to.
+
+    Service Request.customer is mandatory, so this must return something or
+    explain why it cannot. Priority, most specific first:
+
+      1. what the operator picked in the dialog
+      2. the Customer already linked to the token
+      3. a Customer matching the walk-in phone number
+      4. the POS Profile's default (walk-in) Customer
+
+    Mirrors the client-side _resolve_customer() in queue_workspace.js, but
+    server-side so the guarantee does not depend on the client.
+    """
+    if explicit and frappe.db.exists("Customer", explicit):
+        return explicit
+
+    linked = getattr(token, "linked_customer", None)
+    if linked and frappe.db.exists("Customer", linked):
+        return linked
+
+    phone = (token.customer_phone or "").strip()
+    if phone:
+        match = _customer_name_for_phone(phone)
+        if match:
+            return match
+
+    default_customer = None
+    if profile is not None:
+        default_customer = profile.get("customer")
+    if not default_customer and pos_profile:
+        default_customer = frappe.db.get_value("POS Profile", pos_profile, "customer")
+    if default_customer and frappe.db.exists("Customer", default_customer):
+        return default_customer
+
+    frappe.throw(
+        _("No customer could be resolved for token {0}. Pick an ERPNext Customer "
+          "in the dialog, or set a default Customer on POS Profile {1}.").format(
+            frappe.bold(token.token_display or token.name), frappe.bold(pos_profile)
+        ),
+        title=_("Customer Required"),
+    )
+
+
+def _customer_name_for_phone(phone):
+    """Customer whose mobile matches `phone`, by last 10 digits.
+
+    Deliberately does NOT go through find_customer_by_phone(): that is a
+    whitelisted endpoint with its own permission gates, and this runs inside an
+    already-authorised conversion.
+    """
+    tail10 = "".join(ch for ch in str(phone) if ch.isdigit())[-10:]
+    if len(tail10) != 10:
+        return None
+    row = frappe.db.sql(
+        """
+        SELECT name FROM `tabCustomer`
+        WHERE REPLACE(REPLACE(REPLACE(IFNULL(mobile_no, ''), ' ', ''), '-', ''), '+', '')
+              LIKE %(tail)s
+        ORDER BY creation LIMIT 1
+        """,
+        {"tail": f"%{tail10}"},
+    )
+    return row[0][0] if row else None
+
+
+@frappe.whitelist(methods=["POST"])
+def link_token_to_service_request(token_name: str, service_request: str) -> dict:
+    """Close a queue token against the Service Request that was raised from it.
+
+    The Service Request itself is built by the POS intake form
+    (``ch_pos.api.repair.create_service_intake_from_pos``); this only records
+    the outcome on the token. Keeping the two apart is what lets the queue and
+    the counter share ONE intake form instead of each maintaining its own
+    conversion with its own subset of fields — which is how the queue dialog
+    ended up unable to capture a technician, a promised time or a serial.
+    """
+    _ensure_can_operate_token()
+    _assert_token_scope(token_name)
+
+    token = frappe.get_doc("POS Kiosk Token", token_name)
+    if token.status in ("Converted", "Cancelled", "Expired"):
+        frappe.throw(
+            _("Token {0} is already {1}.").format(
+                token.token_display or token_name, _(token.status)),
+            title=_("Token Not Open"))
+    if not frappe.db.exists("Service Request", service_request):
+        frappe.throw(_("Service Request {0} does not exist.").format(service_request))
+
+    frappe.db.set_value("POS Kiosk Token", token_name, {
+        "status": "Converted",
+        "technician": frappe.session.user_fullname or frappe.session.user,
+        "linked_service_request": service_request,
+    })
+    return {"token": token.token_display or token_name, "service_request": service_request}
+
+
 @frappe.whitelist(methods=["POST"])
 def convert_token_to_gofix(token_name: str, pos_profile: str,
                             customer: str = None, device_item: str = None,
                             device_condition: str = "Good",
                             accessories: str = "",
                             warranty_status: str = "Out of Warranty",
-                            data_disclaimer: int = 0) -> dict:
+                            data_disclaimer: int = 0,
+                            issue_category: str = None,
+                            issue_description: str = None) -> dict:
     """
     Convert a POS Kiosk Token into a GoFix Service Request.
     - Pulls all device/issue info from the token
@@ -1774,17 +2052,23 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
     if not profile:
         frappe.throw(_("Invalid POS Profile"), title=_("API Error"))
 
-    # Resolve issue category — must match GoFix Issue Category doctype
+    # Resolve issue category — must match GoFix Issue Category doctype.
+    # The operator's choice in the dialog wins over whatever the kiosk token
+    # captured; the token is a hint, the counter is the record.
     issue_cat = None
-    if token.issue_category:
-        if frappe.db.exists("Issue Category", token.issue_category):
-            issue_cat = token.issue_category
-        else:
-            # Try a case-insensitive match
-            match = frappe.db.get_value(
-                "Issue Category", {"category_name": token.issue_category}, "name"
-            )
+    for candidate in (issue_category, token.issue_category):
+        if not candidate:
+            continue
+        if frappe.db.exists("Issue Category", candidate):
+            issue_cat = candidate
+            break
+        # Try a case-insensitive match
+        match = frappe.db.get_value(
+            "Issue Category", {"category_name": candidate}, "name"
+        )
+        if match:
             issue_cat = match
+            break
 
     from ch_pos.api.repair import build_condition_and_backup
 
@@ -1799,9 +2083,33 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
             or frappe.db.get_value("Walkin Source", {}, "name")
         )
 
+    # Service Request.customer is mandatory. The dialog offered it as
+    # "optional", so a blank field aborted the whole conversion with
+    # "Value missing for Service Request: Customer". Resolve it here instead,
+    # server-side, so the answer cannot depend on what the client sent.
+    customer = _resolve_token_customer(token, customer, pos_profile, profile)
+
+    # Likewise issue_description (labelled "Issue Specified By Customer") is
+    # mandatory. Prefer the operator's text, then the token's, then the issue
+    # category, and only then a plain statement of fact -- never None.
+    description = (
+        (issue_description or "").strip()
+        or (token.issue_description or "").strip()
+        or (issue_cat or "")
+        or (token.issue_category or "")
+        or _("Walk-in device handed in at the counter; issue to be diagnosed.")
+    )
+
+    from gofix.constants.device_condition import (
+        DEFAULT_DEVICE_CONDITION,
+        normalize_device_condition,
+    )
+
+    device_condition = normalize_device_condition(device_condition) or DEFAULT_DEVICE_CONDITION
+
     sr = frappe.get_doc({
         "doctype": "Service Request",
-        "customer": customer or None,
+        "customer": customer,
         "customer_name": token.customer_name,
         "contact_number": token.customer_phone,
         "company": profile.company,
@@ -1817,7 +2125,7 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
         "accessories_received": accessories,
         "warranty_status": warranty_status,
         "issue_category": issue_cat,
-        "issue_description": token.issue_description or token.issue_category,
+        "issue_description": description,
         "data_backup_disclaimer": data_disclaimer,
         "mode_of_service": "Walk-in",
         "priority": "Medium",

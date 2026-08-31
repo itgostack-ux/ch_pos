@@ -9151,7 +9151,7 @@ def customer_360(identifier, company=None, pos_profile=None) -> dict:
         "alternate_phone": cust_doc.get("ch_alternate_phone") or "",
         "whatsapp_number": cust_doc.get("ch_whatsapp_number") or "",
         "previous_phones": cust_doc.get("ch_previous_phones") or "",
-        "pan": cust_doc.get("custom_pan") or cust_doc.get("pan") or "",
+        "pan": cust_doc.get("pan") or "",
     }
 
     # Bill-To and Ship-To addresses via Dynamic Link
@@ -9184,13 +9184,61 @@ def customer_360(identifier, company=None, pos_profile=None) -> dict:
         FROM `tabSales Invoice` pi
         WHERE customer = %(customer)s
           AND company = %(company)s
-          AND pos_profile = %(pos_profile)s
+        -- Scoped to the COMPANY, not to one till. Every history query here
+        -- filtered on pos_profile, so a "Customer 360" showed only what THIS
+        -- counter had sold: a customer with 165 invoices at other branches of
+        -- the same company read as a brand-new walk-in, and the page whose
+        -- whole purpose is history showed none. Company is the real access
+        -- boundary and already matches the permission check above.
           AND docstatus = 1
         ORDER BY posting_date DESC LIMIT 50
     """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
 
-    out["total_invoices"] = len(out["invoices"])
-    out["total_spent"] = sum(flt(i.get("grand_total", 0)) for i in out["invoices"] if i.get("status") != "Return")
+    # Aggregate over the customer's WHOLE history, not the 50 rows the list is
+    # capped at. Counting the page told a counter that a customer who had spent
+    # 7.1 crore had spent 51 lakh — the lifetime figure is what decides how this
+    # customer is treated, so it must not silently mean "the last 50 invoices".
+    _totals = frappe.db.sql("""
+        SELECT COUNT(*) AS n, COALESCE(SUM(grand_total), 0) AS spent
+        FROM `tabSales Invoice`
+        WHERE customer = %(customer)s
+          AND company = %(company)s
+          AND docstatus = 1
+          AND IFNULL(is_return, 0) = 0
+    """, {"customer": customer, "company": company}, as_dict=True)
+    out["total_invoices"] = cint(_totals[0].n) if _totals else 0
+    out["total_spent"] = flt(_totals[0].spent) if _totals else 0.0
+    # What the UI actually lists, so "showing 50 of 165" is expressible.
+    out["invoices_shown"] = len(out["invoices"])
+
+    # ── Across all companies ──────────────────────────────────────────────
+    # Loyalty is deliberately universal on this bench (Congruence Loyalty has
+    # company = NULL), so a customer's points and lifetime spend already span
+    # companies while every list above is company-scoped. For a genuinely
+    # cross-company customer the page then showed 180 rupees spent beside an
+    # 8,440 rupee loyalty lifetime — both correct, together nonsense.
+    #
+    # Only COUNTS and TOTALS cross the boundary, never the rows: a counter
+    # learns that history exists elsewhere without being shown another
+    # company's invoices, which is the boundary the rest of the bench enforces.
+    _all_co = frappe.db.sql("""
+        SELECT COUNT(*) AS n, COALESCE(SUM(grand_total), 0) AS spent,
+               COUNT(DISTINCT company) AS companies
+        FROM `tabSales Invoice`
+        WHERE customer = %(customer)s
+          AND docstatus = 1
+          AND IFNULL(is_return, 0) = 0
+    """, {"customer": customer}, as_dict=True)
+    _row = _all_co[0] if _all_co else None
+    out["cross_company"] = {
+        "invoices": cint(_row.n) if _row else 0,
+        "spent": flt(_row.spent) if _row else 0.0,
+        "companies": cint(_row.companies) if _row else 0,
+        # True only when there is genuinely something the current company's
+        # figures do not already account for — so a single-company customer
+        # shows no confusing second line.
+        "differs": bool(_row and cint(_row.companies) > 1),
+    }
 
     # Service Requests
     out["service_requests"] = frappe.db.sql("""
@@ -9256,27 +9304,25 @@ def customer_360(identifier, company=None, pos_profile=None) -> dict:
         FROM `tabSales Invoice`
         WHERE customer = %(customer)s
           AND company = %(company)s
-          AND pos_profile = %(pos_profile)s
           AND docstatus = 1 AND is_return = 1
         ORDER BY posting_date DESC LIMIT 20
     """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
 
     # Swap / exchange invoices (sale_type driven)
-    # Defensively handled: custom_ch_sale_type column requires bench migrate after
-    # first app install; fall back to empty list if column is not yet present.
-    try:
+    # Columns exist only after the ch_pos custom fields are installed; guard
+    # explicitly instead of swallowing errors so a real failure surfaces.
+    if frappe.db.has_column("Sales Invoice", "custom_ch_sale_sub_type"):
         out["swap_invoices"] = frappe.db.sql("""
             SELECT name, posting_date, grand_total, custom_ch_sale_type,
                    custom_ch_sale_sub_type, custom_exchange_assessment, status
             FROM `tabSales Invoice`
             WHERE customer = %(customer)s
               AND company = %(company)s
-              AND pos_profile = %(pos_profile)s
               AND docstatus = 1
               AND custom_exchange_assessment IS NOT NULL AND custom_exchange_assessment != ''
             ORDER BY posting_date DESC LIMIT 20
         """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
-    except Exception: 
+    else:
         out["swap_invoices"] = []
 
     # Coupon usage (Sales Invoice in ERPNext 15 uses custom_coupon_code, not coupon_code)
@@ -9286,7 +9332,6 @@ def customer_360(identifier, company=None, pos_profile=None) -> dict:
              SELECT name, posting_date, custom_coupon_code AS coupon_code, grand_total FROM `tabSales Invoice`
         WHERE customer = %(customer)s
           AND company = %(company)s
-          AND pos_profile = %(pos_profile)s
           AND docstatus = 1
           AND custom_coupon_code IS NOT NULL AND custom_coupon_code != ''
         ORDER BY posting_date DESC LIMIT 20
@@ -9301,7 +9346,6 @@ def customer_360(identifier, company=None, pos_profile=None) -> dict:
         FROM `tabCH Exception Request`
         WHERE customer = %(customer)s
           AND company = %(company)s
-          AND pos_profile = %(pos_profile)s
         ORDER BY creation DESC LIMIT 20
     """, {"customer": customer, "company": company, "pos_profile": pos_profile}, as_dict=True)
 
@@ -11528,14 +11572,15 @@ def get_customer_pos_info(customer, company=None, pos_profile=None) -> dict:
             price_list = group_pl
 
     # Determine customer type (B2B / B2C)
-    # Priority: custom_gstin on Customer doc → company type → group heuristics
+    # Priority: gstin on Customer doc → company type → group heuristics
     customer_type = "B2C"
     customer_gstin = ""
 
-    # Prefer GSTIN stored directly on Customer master (set by POS quick-create or
-    # desk form).  Falls back to billing address lookup for legacy customers.
-    if cust.custom_gstin:
-        customer_gstin = cust.custom_gstin.strip().upper()
+    # Prefer GSTIN stored directly on Customer master (india_compliance's
+    # canonical field, written by POS quick-create and the desk form).
+    # Falls back to billing address lookup for legacy customers.
+    if cust.get("gstin"):
+        customer_gstin = cust.gstin.strip().upper()
         customer_type = "B2B"
     else:
         # Legacy fallback: check billing address (for customers created before this feature)
@@ -13122,12 +13167,10 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
             changed = True
 
     if pan_number is not None:
-        # `custom_pan` is the CH master-data field (tracked in CH Master Data
-        # Log); `pan` is india_compliance's. The old `ch_pan_number` target does
-        # not exist on Customer, so PAN edits from Customer 360 were discarded.
+        # `pan` is india_compliance's canonical field (the legacy custom_pan
+        # duplicate was retired in the Aug-31 consolidation).
         pan_clean = pan_number.strip().upper()
-        if pan_clean != (cust.get("custom_pan") or ""):
-            cust.custom_pan = pan_clean
+        if pan_clean != (cust.get("pan") or ""):
             cust.pan = pan_clean
             changed = True
 
@@ -13147,7 +13190,7 @@ def update_customer_details(customer, mobile_no=None, email_id=None,
         "alternate_phone": cust.get("ch_alternate_phone") or "",
         "whatsapp_number": cust.get("ch_whatsapp_number") or "",
         "previous_phones": cust.get("ch_previous_phones") or "",
-        "pan": cust.get("custom_pan") or cust.get("pan") or "",
+        "pan": cust.get("pan") or "",
     }
 
 @frappe.whitelist(methods=["POST"])
@@ -13231,22 +13274,16 @@ def update_customer_complete(customer, payload, pos_profile=None):
     if payload.get("alternate_no") is not None:
         _apply("ch_alternate_phone", (payload.get("alternate_no") or "").strip())
 
-    # GSTIN → `custom_gstin`, the CH master-data field. This is what
-    # get_customer_pos_info reads for B2B/B2C detection and what
-    # quick_create_customer writes, so writing india_compliance's `gstin`
-    # instead (as this used to) left the POS showing the old value forever.
-    # `gstin` is deliberately left to india_compliance — assigning it also
-    # rewrites `pan` and forces a gst_category.
+    # GSTIN → india_compliance's canonical `gstin` (the legacy custom_gstin
+    # duplicate was retired in the Aug-31 consolidation). On save,
+    # india_compliance validates the format and auto-sets gst_category, so a
+    # bad GSTIN is rejected at the desk instead of stored silently.
     if payload.get("gstin") is not None:
-        _apply("custom_gstin", (payload.get("gstin") or "").strip().upper())
+        _apply("gstin", (payload.get("gstin") or "").strip().upper())
 
-    # PAN → `custom_pan` (CH master data) + `pan` (india_compliance). The old
-    # code wrote `ch_pan_number`, which no longer exists on Customer, so the
-    # value went nowhere.
+    # PAN → india_compliance's canonical `pan`.
     if payload.get("pan") is not None:
-        pan_clean = (payload.get("pan") or "").strip().upper()
-        _apply("custom_pan", pan_clean)
-        _apply("pan", pan_clean)
+        _apply("pan", (payload.get("pan") or "").strip().upper())
 
     # 3. NOW save Customer (address exists >>>>validation passes)
     if cust_changed:
@@ -13599,13 +13636,12 @@ def quick_create_customer(customer_name, mobile_no="", email_id="",
         cust.ch_alternate_phone = alternate_phone.strip()
     if whatsapp_number:
         cust.ch_whatsapp_number = whatsapp_number.strip()
-    # Store GSTIN + PAN directly on Customer master for instant lookup
+    # Store GSTIN + PAN on india_compliance's canonical fields; it validates
+    # the GSTIN and derives gst_category on insert.
     if gstin:
-        cust.custom_gstin = gstin.strip().upper()
+        cust.gstin = gstin.strip().upper()
     if pan_number:
-        pan_clean = pan_number.strip().upper()
-        cust.pan = pan_clean
-        cust.custom_pan = pan_clean
+        cust.pan = pan_number.strip().upper()
     cust.insert()
 
     # Add contact details if provided
@@ -17202,8 +17238,6 @@ def get_customer_full_details(customer, pos_profile=None, **kwargs):
                 "ch_whatsapp_number",
                 "ch_alternate_phone",
                 "pan",
-                "custom_pan",
-                "custom_gstin",
                 "gstin",
                 "tax_id",
                 "customer_primary_address",
@@ -17223,16 +17257,11 @@ def get_customer_full_details(customer, pos_profile=None, **kwargs):
         "mobile_no": cust_data.mobile_no,
         "whatsapp_no": cust_data.get("ch_whatsapp_number"),
         "alternate_no": cust_data.get("ch_alternate_phone"),
-        # `custom_pan` / `custom_gstin` are the CH master-data fields (tracked in
-        # CH Master Data Log and read by get_customer_pos_info); `pan` / `gstin`
-        # are india_compliance's tax-tab fields. Prefer CH, fall back to standard.
-        "pan": cust_data.get("custom_pan") or cust_data.get("pan") or "",
-        "gstin": (
-            cust_data.get("custom_gstin")
-            or cust_data.get("gstin")
-            or cust_data.get("tax_id")
-            or ""
-        ),
+        # india_compliance's `pan` / `gstin` are the canonical tax-identity
+        # fields (the legacy custom_pan/custom_gstin duplicates were retired
+        # in the Aug-31 consolidation); tax_id remains a last-resort fallback.
+        "pan": cust_data.get("pan") or "",
+        "gstin": cust_data.get("gstin") or cust_data.get("tax_id") or "",
     }
 
     # ── BILLING ADDRESS: Try customer_primary_address first ──

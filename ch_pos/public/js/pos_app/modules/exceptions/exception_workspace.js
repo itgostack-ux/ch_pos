@@ -541,7 +541,7 @@ export class ExceptionWorkspace {
 }
 
 function format_currency(val) {
-	return frappe.format(val, { fieldtype: "Currency" });
+	return format_currency(val);
 }
 
 // Exposed as instance method via prototype assignment so it can use PosState/EventBus.

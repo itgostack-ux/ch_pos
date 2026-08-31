@@ -8,6 +8,18 @@
 import { PosState, EventBus } from "../../state.js";
 import { assert_india_phone } from "../../shared/helpers.js";
 
+// The device-intake vocabulary is owned by GoFix and published on boot. Offering
+// a condition the Service Request DocType does not accept is what made
+// "Minor Scratches" fail on save.
+const FALLBACK_DEVICE_CONDITIONS = [
+	"Good", "Minor Scratches", "Cracked Screen", "Damaged", "Water Damaged", "Broken",
+];
+
+function deviceConditionOptions() {
+	const fromBoot = frappe.boot && frappe.boot.gofix_device_conditions;
+	return (Array.isArray(fromBoot) && fromBoot.length) ? fromBoot : FALLBACK_DEVICE_CONDITIONS;
+}
+
 export class RepairWorkspace {
 	constructor() {
 		EventBus.on("workspace:render", (ctx) => {
@@ -69,11 +81,8 @@ export class RepairWorkspace {
 								<label>${__("Device Condition")} <span style="color:var(--pos-danger)">*</span></label>
 								<select class="form-control ch-rep-condition">
 									<option value="">${__("Select condition")}</option>
-									<option value="Good">${__("Good")}</option>
-									<option value="Minor Scratches">${__("Minor Scratches")}</option>
-									<option value="Cracked Screen">${__("Cracked Screen")}</option>
-									<option value="Damaged">${__("Damaged")}</option>
-									<option value="Water Damage">${__("Water Damage")}</option>
+									${deviceConditionOptions().map(c =>
+										`<option value="${frappe.utils.escape_html(c)}">${__(c)}</option>`).join("")}
 								</select>
 							</div>
 							<div class="ch-pos-field-group">
@@ -86,6 +95,23 @@ export class RepairWorkspace {
 								<input type="checkbox" class="ch-rep-data-disclaimer">
 								${__("Customer acknowledges data may be lost during repair")}
 							</label>
+						</div>
+
+						<!-- Condition evidence. Photographed WITH the customer present,
+						     while the device is still in their sight. -->
+						<div class="ch-pos-field-group" style="margin-top:var(--pos-space-md)">
+							<label style="display:flex;align-items:center;gap:8px">
+								<i class="fa fa-camera"></i> ${__("Intake Photos")}
+								<span class="text-muted" style="font-weight:400;font-size:11px">
+									${__("Photograph the device as received — this is what settles a dispute later")}
+								</span>
+							</label>
+							<input type="file" class="ch-rep-photos" accept="image/*" capture="environment"
+								multiple style="display:none">
+							<button class="btn btn-sm btn-default ch-rep-photo-add" style="border-radius:var(--pos-radius-sm)">
+								<i class="fa fa-camera"></i> ${__("Add Photo")}
+							</button>
+							<div class="ch-rep-photo-strip" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div>
 						</div>
 					</div>
 				</div>
@@ -129,9 +155,17 @@ export class RepairWorkspace {
 								</select>
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Estimated Hours")}</label>
-								<input type="number" class="form-control ch-rep-est-hours" min="0.5" step="0.5" placeholder="${__("e.g. 2")}">
+								<label>${__("Promise Ready By")} <span style="color:var(--pos-danger)">*</span></label>
+								<input type="datetime-local" class="form-control ch-rep-promised">
+								<small class="text-muted">${__("The actual date and time you are telling the customer. A countdown runs against this for the whole repair.")}</small>
 							</div>
+						</div>
+						<div class="ch-pos-field-group" style="margin-top:var(--pos-space-sm)">
+							<label>${__("Assign to Technician")}</label>
+							<select class="form-control ch-rep-technician">
+								<option value="">${__("Unassigned — nobody is recorded as working on it")}</option>
+							</select>
+							<small class="text-muted">${__("Analysis time starts being recorded against whoever you pick.")}</small>
 						</div>
 					</div>
 				</div>
@@ -165,9 +199,62 @@ export class RepairWorkspace {
 		`);
 		this._bind(panel);
 		this._load_pipeline(panel);
+
+		// The Ops Hub sends a completed repair here to be billed, because an invoice
+		// raised there has no pos_profile and no payment rows and so never reaches
+		// the till settlement. Surface which ticket arrived; the counter still adds
+		// it to the cart and takes the tender.
+		let handoff = null;
+		try {
+			handoff = localStorage.getItem("ch_pos_pending_repair_bill");
+			if (handoff) localStorage.removeItem("ch_pos_pending_repair_bill");
+		} catch (e) {
+			handoff = null;
+		}
+		if (handoff) {
+			panel.find(".ch-mode-header").after(`
+				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md);border-left:3px solid var(--pos-primary,#6366f1)">
+					<div class="section-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+						<i class="fa fa-shopping-cart"></i>
+						<b>${frappe.utils.escape_html(handoff)}</b>
+						<span>${__("is ready to bill.")}</span>
+						<span class="text-muted">${__("Find it in the pipeline below and add it to the cart — it can share one invoice with accessories, plans, discounts and vouchers.")}</span>
+					</div>
+				</div>`);
+		}
+	}
+
+	/**
+	 * Fill the intake technician picker.
+	 *
+	 * Company-scoped server-side (get_technicians_for_grade defaults to the
+	 * caller's company), so a counter cannot enumerate another company's staff.
+	 * A failure leaves the select on "Unassigned" rather than blocking intake —
+	 * taking the device in matters more than naming who will look at it.
+	 */
+	_load_technicians(panel) {
+		const $sel = panel.find(".ch-rep-technician");
+		if (!$sel.length) return;
+		frappe.xcall(
+			"gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub.get_technicians_for_grade",
+			{ company: PosState.company || undefined }
+		).then((res) => {
+			const rows = (res && (res.technicians || res.rows)) || (Array.isArray(res) ? res : []);
+			rows.forEach((t) => {
+                const label = t.employee_name || t.name;
+                const load = t.active_jobs ? ` (${__("{0} open", [t.active_jobs])})` : "";
+				$sel.append(
+					$("<option>").attr("value", t.name).text(label + load)
+				);
+			});
+		}).catch(() => {
+			/* leave it on Unassigned */
+		});
 	}
 
 	_bind(panel) {
+		this._load_technicians(panel);
+
 		const cust_field = frappe.ui.form.make_control({
 			df: { fieldname: "customer", fieldtype: "Link", options: "Customer", placeholder: __("Select customer") },
 			parent: panel.find(".ch-repair-customer-link"),
@@ -194,11 +281,74 @@ export class RepairWorkspace {
 			parent: panel.find(".ch-repair-device-link"),
 			render_input: true,
 		});
+		// A customer walks in with THEIR device. Its IMEI is almost never in the
+		// Serial No table — that table holds stock this company sold or bought.
+		// A Link control refuses anything it cannot find, so a first-time
+		// customer's device could not be recorded at all. Free text, with known
+		// serials offered as suggestions: if it exists we bind to it (and pick up
+		// warranty), otherwise it is accepted as the customer's own IMEI.
+		// Deliberately NOT a Link: the "create a new..." sentinel Link controls
+		// append has been saved as a docname on this bench before.
 		const serial_field = frappe.ui.form.make_control({
-			df: { fieldname: "serial_no", fieldtype: "Link", options: "Serial No", placeholder: __("IMEI / Serial") },
+			df: {
+				fieldname: "serial_no",
+				fieldtype: "Data",
+				placeholder: __("IMEI / Serial — type the customer's own if it is not in stock"),
+			},
 			parent: panel.find(".ch-repair-serial-link"),
 			render_input: true,
 		});
+		panel.find(".ch-repair-serial-link").append(
+			`<div class="ch-rep-serial-hint text-muted" style="font-size:11px;margin-top:4px"></div>`);
+
+		const $serialInput = serial_field.$input;
+		const serialHint = panel.find(".ch-rep-serial-hint");
+		const serialAC = new Awesomplete($serialInput[0], {
+			minChars: 3, maxItems: 8, autoFirst: false,
+		});
+
+		let serialTimer = null;
+		const describeSerial = (value) => {
+			const v = (value || "").trim();
+			if (!v) { serialHint.html(""); return; }
+			frappe.xcall("ch_pos.api.repair.describe_device_serial", { serial_no: v })
+				.then((info) => {
+					if ((serial_field.get_value() || "").trim() !== v) return;   // stale
+					if (info && info.known) {
+						serialHint.html(
+							`<i class="fa fa-check-circle text-success"></i> `
+							+ `${frappe.utils.escape_html(info.item_name || info.item_code || "")}`
+							+ (info.warranty ? ` · <b>${frappe.utils.escape_html(info.warranty)}</b>` : ""));
+					} else {
+						serialHint.html(
+							`<i class="fa fa-user"></i> `
+							+ __("Not in stock records — recorded as the customer's own IMEI."));
+					}
+				}).catch(() => serialHint.html(""));
+		};
+
+		$serialInput.on("input", () => {
+			const txt = ($serialInput.val() || "").trim();
+			clearTimeout(serialTimer);
+			serialTimer = setTimeout(() => {
+				describeSerial(txt);
+				if (txt.length < 3) { serialAC.list = []; return; }
+				frappe.call({
+					method: "frappe.desk.search.search_link",
+					args: { doctype: "Serial No", txt: txt, page_length: 8 },
+					callback: (r) => {
+						serialAC.list = (r.message || []).map((x) => x.value);
+					},
+				});
+			}, 250);
+		});
+
+		// ── Arriving from the Service Queue ──────────────────────────────
+		// The queue hands the token over here instead of opening its own dialog.
+		// Consumed once: a refresh must not silently re-apply a stale token.
+		const intakeToken = PosState.repairIntakeToken || null;
+		PosState.repairIntakeToken = null;
+		this._intakeToken = intakeToken;
 
 		// ── Issue Category Multiselect (tag-based) ──
 		const selected_issues = [];
@@ -298,12 +448,24 @@ export class RepairWorkspace {
 					service_date: frappe.datetime.get_today(),
 					priority: priority,
 					walkin_source: "POS Counter",
+					// Starts a Diagnosis Job Assignment so Analysis time is
+					// attributed from the moment the device is taken in.
+					diagnosis_technician: panel.find(".ch-rep-technician").val() || "",
+					// An absolute moment, not a duration: "4 hours" taken in at
+					// 6pm means tomorrow morning to a customer and 10pm to a
+					// spreadsheet. The counter states the actual time instead.
+					promised_completion_datetime: panel.find(".ch-rep-promised").val() || "",
+					// Set only when the counter came from the Service Queue; the
+					// server closes that token against the new request.
+					source_token: this._intakeToken ? this._intakeToken.name : "",
 				},
 			}).then((doc) => {
 				frappe.show_alert({
 					message: `${__("Service Request")} <b>${doc.name}</b> ${__("created")}`,
 					indicator: "green",
 				});
+				this._upload_intake_photos(doc.name, pendingPhotos.splice(0));
+				renderPhotoStrip();
 				panel.find(".ch-rep-result-area").html(`
 					<div class="ch-rep-result">
 						<i class="fa fa-check-circle" style="font-size:18px;color:var(--pos-success)"></i>
@@ -328,14 +490,102 @@ export class RepairWorkspace {
 				issue_cat_field.set_value("");
 				selected_issues.length = 0;
 				_render_issue_tags();
-				// Create walk-in token for this repair intake
-				if (PosState.pos_profile) {
+				// Create a walk-in token for this repair intake — but not when the
+				// ticket came FROM a token, or the queue gains a duplicate entry
+				// for a customer who is already standing at the counter.
+				const cameFromToken = !!this._intakeToken;
+				this._intakeToken = null;
+				if (PosState.pos_profile && !cameFromToken) {
 					frappe.call({
 						method: "ch_pos.api.token_api.log_counter_walkin",
 						args: { pos_profile: PosState.pos_profile, visit_purpose: "Repair" },
 					});
 				}
 			});
+		});
+
+		if (intakeToken) {
+			// Everything the kiosk already asked the customer, carried across so
+			// the counter re-types nothing.
+			panel.find(".ch-rep-phone").val(intakeToken.customer_phone || "");
+			panel.find(".ch-rep-issue").val(intakeToken.issue_description || "");
+			if (intakeToken.device_condition) {
+				panel.find(".ch-rep-condition").val(intakeToken.device_condition);
+			}
+			if (intakeToken.issue_category) {
+				selected_issues.push(intakeToken.issue_category);
+				_render_issue_tags();
+			}
+			// The kiosk records the device as free text ("Apple iphone 12"); the
+			// catalogue item is chosen here if the counter can identify it.
+			const deviceText = [intakeToken.device_brand, intakeToken.device_model]
+				.filter(Boolean).join(" ") || intakeToken.device_type || "";
+			if (intakeToken.customer_phone) {
+				frappe.xcall("ch_pos.api.token_api.lookup_walkin_customer", {
+					phone: intakeToken.customer_phone,
+				}).then((m) => {
+					if (m && m.customer) cust_field.set_value(m.customer);
+				}).catch(() => {});
+			}
+			panel.find(".ch-mode-header").after(`
+				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md);border-left:3px solid var(--pos-primary,#6366f1)">
+					<div class="section-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+						<i class="fa fa-ticket"></i>
+						<b>${frappe.utils.escape_html(intakeToken.token_display || intakeToken.name)}</b>
+						<span>${frappe.utils.escape_html(intakeToken.customer_name || "")}</span>
+						${deviceText ? `<span class="text-muted">${frappe.utils.escape_html(deviceText)}</span>` : ""}
+						<span class="text-muted" style="margin-left:auto">${__("The token closes when this request is created.")}</span>
+					</div>
+				</div>`);
+		}
+
+		// ── Intake photos ────────────────────────────────────────────────
+		// Held in the browser until the ticket exists: there is nothing to
+		// attach them to until the Service Request has a name, and asking the
+		// counter to photograph the device a second time afterwards is how
+		// evidence stops being collected at all.
+		const pendingPhotos = [];
+		this._pendingPhotos = pendingPhotos;
+
+		const renderPhotoStrip = () => {
+			const strip = panel.find(".ch-rep-photo-strip");
+			if (!pendingPhotos.length) { strip.html(""); return; }
+			strip.html(pendingPhotos.map((ph, i) => `
+				<div style="position:relative;width:72px;height:72px;border-radius:var(--pos-radius-sm);overflow:hidden;border:1px solid var(--border-color)">
+					<img src="${ph.dataUrl}" alt="${frappe.utils.escape_html(ph.file.name)}"
+						style="width:100%;height:100%;object-fit:cover">
+					<button class="btn btn-xs ch-rep-photo-drop" data-idx="${i}"
+						title="${__("Remove")}"
+						style="position:absolute;top:2px;right:2px;padding:0 5px;background:rgba(0,0,0,0.6);color:#fff;border:0;border-radius:3px">&times;</button>
+				</div>`).join(""));
+		};
+
+		panel.on("click", ".ch-rep-photo-add", (e) => {
+			e.preventDefault();
+			panel.find(".ch-rep-photos").trigger("click");
+		});
+
+		panel.on("change", ".ch-rep-photos", (e) => {
+			const files = Array.from(e.currentTarget.files || []);
+			e.currentTarget.value = "";                      // allow re-picking the same file
+			files.forEach((file) => {
+				if (!/^image\//.test(file.type)) {
+					frappe.show_alert({ message: __("{0} is not an image", [file.name]), indicator: "orange" });
+					return;
+				}
+				const reader = new FileReader();
+				reader.onload = () => {
+					pendingPhotos.push({ file, dataUrl: reader.result });
+					renderPhotoStrip();
+				};
+				reader.readAsDataURL(file);
+			});
+		});
+
+		panel.on("click", ".ch-rep-photo-drop", (e) => {
+			e.preventDefault();
+			pendingPhotos.splice(parseInt($(e.currentTarget).data("idx"), 10), 1);
+			renderPhotoStrip();
 		});
 
 		panel.on("click", ".ch-rep-open-sr", function () {
@@ -413,6 +663,62 @@ export class RepairWorkspace {
 			issue_cat_field.set_value("");
 			selected_issues.length = 0;
 			_render_issue_tags();
+		});
+	}
+
+	/**
+	 * Upload the photos taken at the counter and attach them to the ticket.
+	 *
+	 * Reported honestly: the ticket is already created and the device is on the
+	 * counter, so a failed upload must not look like a failed intake — but it
+	 * must not pass silently either, or a counter believes it has evidence it
+	 * does not have.
+	 */
+	_upload_intake_photos(sr_name, photos) {
+		if (!photos || !photos.length) return;
+
+		const uploads = photos.map((ph) => new Promise((resolve) => {
+			const fd = new FormData();
+			fd.append("file", ph.file, ph.file.name);
+			fd.append("is_private", 1);
+			fd.append("doctype", "Service Request");
+			fd.append("docname", sr_name);
+			fetch("/api/method/upload_file", {
+				method: "POST",
+				headers: { "X-Frappe-CSRF-Token": frappe.csrf_token },
+				body: fd,
+			})
+				.then((r) => r.json())
+				.then((r) => {
+					const url = r && r.message && r.message.file_url;
+					if (!url) return resolve(false);
+					return frappe.xcall(
+						"gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub.add_device_photo",
+						{ sr_name: sr_name, file_url: url, stage: "Intake" }
+					).then(() => resolve(true)).catch(() => resolve(false));
+				})
+				.catch(() => resolve(false));
+		}));
+
+		Promise.all(uploads).then((results) => {
+			const ok = results.filter(Boolean).length;
+			const failed = results.length - ok;
+			if (ok) {
+				frappe.show_alert({
+					message: __("{0} intake photo(s) attached to {1}", [ok, sr_name]),
+					indicator: "green",
+				});
+			}
+			if (failed) {
+				frappe.msgprint({
+					title: __("Photos Not Attached"),
+					message: __("{0} of {1} intake photo(s) could not be attached to {2}. "
+						+ "The request itself was created. Re-take them from the ticket "
+						+ "before the device leaves the counter.",
+						[failed, results.length, sr_name]),
+					indicator: "orange",
+				});
+			}
 		});
 	}
 

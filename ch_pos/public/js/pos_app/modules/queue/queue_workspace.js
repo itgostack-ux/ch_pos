@@ -30,6 +30,21 @@ const WITHDRAW_REASONS = [
 	"Other",
 ];
 
+// The device-intake vocabulary is owned by GoFix and published on boot, so the
+// POS can never offer a condition the Service Request will reject.
+const FALLBACK_DEVICE_CONDITIONS = [
+	"Good", "Minor Scratches", "Cracked Screen", "Damaged", "Water Damaged", "Broken",
+];
+
+function deviceConditionOptions() {
+	const fromBoot = frappe.boot && frappe.boot.gofix_device_conditions;
+	return (Array.isArray(fromBoot) && fromBoot.length) ? fromBoot : FALLBACK_DEVICE_CONDITIONS;
+}
+
+function defaultDeviceCondition() {
+	return (frappe.boot && frappe.boot.gofix_default_device_condition) || "Good";
+}
+
 export class QueueWorkspace {
 	constructor() {
 		this._panel = null;
@@ -167,7 +182,7 @@ export class QueueWorkspace {
 		list.find(".ch-queue-convert-btn").on("click", (e) => {
 			const name = $(e.currentTarget).data("token");
 			const token = this._tokens.find((t) => t.name === name);
-			if (token) this._showConvertDialog(token);
+			if (token) this._openIntake(token);
 		});
 		list.find(".ch-queue-bill-btn").on("click", (e) => {
 			const name = $(e.currentTarget).data("token");
@@ -455,144 +470,18 @@ export class QueueWorkspace {
 
 	// ── Service: GoFix Request ──────────────────────────────────
 
-	_showConvertDialog(token) {
-		const device_display = [token.device_brand, token.device_model].filter(Boolean).join(" ") || token.device_type || "";
-
-		const d = new frappe.ui.Dialog({
-			title: `${__("Create GoFix Request")} — ${token.token_display || token.name}`,
-			fields: [
-				{
-					label: __("Customer Info"),
-					fieldtype: "Section Break",
-					collapsible: 0,
-				},
-				{
-					label: __("Customer Name"),
-					fieldtype: "Data",
-					fieldname: "customer_name",
-					default: token.customer_name,
-					read_only: 1,
-				},
-				{
-					label: __("Phone"),
-					fieldtype: "Data",
-					fieldname: "customer_phone",
-					default: token.customer_phone,
-					read_only: 1,
-				},
-				{
-					label: __("ERPNext Customer (optional)"),
-					fieldtype: "Link",
-					fieldname: "customer",
-					options: "Customer",
-				},
-				{
-					label: __("Device"),
-					fieldtype: "Section Break",
-				},
-				{
-					label: __("Device"),
-					fieldtype: "Data",
-					fieldname: "device_display",
-					default: device_display,
-					read_only: 1,
-				},
-				{
-					label: __("Device Item (optional)"),
-					fieldtype: "Link",
-					fieldname: "device_item",
-					options: "Item",
-					get_query: () => ({
-						filters: {
-							item_group: ["in", ["Mobiles", "Smartphones", "Tablets", "Laptops", "Devices"]],
-							has_variants: 0,
-						},
-					}),
-				},
-				{
-					label: __("Device Condition"),
-					fieldtype: "Select",
-					fieldname: "device_condition",
-					options: "Good\nMinor Scratches\nCracked Screen\nDamaged\nWater Damage",
-					default: "Good",
-				},
-				{
-					label: __("Accessories Received"),
-					fieldtype: "Data",
-					fieldname: "accessories",
-					placeholder: __("Charger, case, earphones…"),
-				},
-				{
-					label: __("Service Details"),
-					fieldtype: "Section Break",
-				},
-				{
-					label: __("Issue Category"),
-					fieldtype: "Data",
-					fieldname: "issue_category",
-					default: token.issue_category,
-					read_only: 1,
-				},
-				{
-					label: __("Issue Description"),
-					fieldtype: "Small Text",
-					fieldname: "issue_description",
-					default: token.issue_description,
-					read_only: 1,
-				},
-				{
-					label: __("Warranty Status"),
-					fieldtype: "Select",
-					fieldname: "warranty_status",
-					options: "Out of Warranty\nUnder Warranty\nExpired",
-					default: "Out of Warranty",
-				},
-				{
-					label: __("Customer acknowledges data may be lost"),
-					fieldtype: "Check",
-					fieldname: "data_disclaimer",
-					default: 0,
-				},
-			],
-			primary_action_label: `<i class="fa fa-check"></i> ${__("Create GoFix Request")}`,
-			primary_action: (values) => {
-				d.get_primary_btn().prop("disabled", true)
-					.html(`<i class="fa fa-spinner fa-spin"></i> ${__("Creating…")}`);
-
-				frappe.xcall("ch_pos.api.token_api.convert_token_to_gofix", {
-					token_name: token.name,
-					pos_profile: PosState.pos_profile,
-					customer: values.customer || null,
-					device_item: values.device_item || null,
-					device_condition: values.device_condition,
-					accessories: values.accessories || "",
-					warranty_status: values.warranty_status,
-					data_disclaimer: values.data_disclaimer ? 1 : 0,
-				}).then((r) => {
-					d.hide();
-					frappe.show_alert({
-						message: `
-							<b>${__("GoFix Request Created!")}</b><br>
-							${r.service_request}
-							<a href="/desk/service-request/${r.service_request}" target="_blank"
-								style="margin-left:8px;font-size:.85rem">
-								${__("Open")} <i class="fa fa-external-link"></i>
-							</a>
-						`,
-						indicator: "green",
-					}, 8);
-					this._loadTokens();
-				}).catch((err) => {
-					d.get_primary_btn().prop("disabled", false)
-						.html(`<i class="fa fa-check"></i> ${__("Create GoFix Request")}`);
-					frappe.show_alert({
-						message: err.message || __("Failed to create request"),
-						indicator: "red",
-					});
-				});
-			},
-		});
-
-		d.show();
+	/**
+	 * Hand the token to the Service Intake form in the Repair section.
+	 *
+	 * This used to open a modal that rebuilt the intake form from scratch with a
+	 * smaller field list, so a queue-raised ticket could not record a technician,
+	 * a promised completion time or a device serial, and "Device Item (optional)"
+	 * in the modal contradicted a mandatory field on the DocType. One form now
+	 * serves both the counter and the queue.
+	 */
+	_openIntake(token) {
+		PosState.repairIntakeToken = token;
+		EventBus.emit("mode:set", "repair");
+		EventBus.emit("mode:switch", "repair");
 	}
 }

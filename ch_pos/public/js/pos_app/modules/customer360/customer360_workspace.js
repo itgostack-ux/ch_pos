@@ -154,6 +154,16 @@ export class Customer360Workspace {
 							<span style="font-size:var(--pos-fs-2xs);color:#92400e">≈ ₹${format_number(d.loyalty.currency_value || 0)}</span>
 						</div>` : ""}
 					</div>
+					${(d.cross_company && d.cross_company.differs) ? `
+						<div class="ch-c360-crossco">
+							<i class="fa fa-building-o"></i>
+							${__("Across all companies")}:
+							<b>${d.cross_company.invoices}</b> ${__("invoices")}
+							· <b>₹${format_number(d.cross_company.spent)}</b>
+							<span class="ch-c360-crossco-note">
+								${__("The figures above are for this company only. Loyalty points are shared across all {0} companies.", [d.cross_company.companies])}
+							</span>
+						</div>` : ""}
 				</div>
 			</div>`;
 

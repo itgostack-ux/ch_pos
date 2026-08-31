@@ -33,6 +33,7 @@ export class BinManagerWorkspace {
 	constructor() {
 		this._active_bin = "Sellable";
 		this._serial_ctx = null;
+		this._item_ctx = null;
 		this._reasons = [];
 		this._counts = {};
 		EventBus.on("workspace:render", (ctx) => {
@@ -44,6 +45,7 @@ export class BinManagerWorkspace {
 	render(panel) {
 		this.panel = panel;
 		this._serial_ctx = null;
+		this._item_ctx = null;
 
 		const tabs_html = BIN_TYPES.map((bin) => {
 			const meta = BIN_META[bin];
@@ -83,6 +85,7 @@ export class BinManagerWorkspace {
 				.ch-bm-field .form-control{border-radius:6px;}
 				.ch-bm-row{display:grid;gap:10px;}
 				.ch-bm-row.cols-2{grid-template-columns:1fr 1fr;}
+				.ch-bm-row.cols-3{grid-template-columns:1.2fr 0.7fr 1.1fr;}
 				.ch-bm-bin-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:600;}
 				.ch-bm-context{margin-top:12px;padding:10px 12px;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;font-size:12px;display:none;}
 				.ch-bm-context.visible{display:block;}
@@ -130,16 +133,22 @@ export class BinManagerWorkspace {
 						<div class="ch-bm-card-body">
 							<div class="ch-bm-row cols-2">
 								<div class="ch-bm-field">
-									<label>${__("IMEI / Serial")}</label>
+									<label>${__("IMEI / Serial")} <span style="font-weight:400;color:#94a3b8">${__("(serialised stock only)")}</span></label>
 									<input type="text" class="form-control ch-bm-serial" placeholder="${__("Scan or type serial...")}" autocomplete="off">
 								</div>
 								<div class="ch-bm-field ch-bm-item-field"></div>
 							</div>
 
-							<div class="ch-bm-row cols-2" style="margin-top:10px;">
+							<div class="ch-bm-row cols-3" style="margin-top:10px;">
 								<div class="ch-bm-field">
 									<label>${__("From Bin")}</label>
-									<input type="text" class="form-control ch-bm-from-bin" readonly placeholder="${__("Will auto-fill after lookup")}">
+									<select class="form-control ch-bm-from-bin">
+										<option value="">${__("Will auto-fill after lookup")}</option>
+									</select>
+								</div>
+								<div class="ch-bm-field">
+									<label>${__("Qty")}</label>
+									<input type="number" class="form-control ch-bm-qty" min="1" step="any" value="1">
 								</div>
 								<div class="ch-bm-field ch-bm-reason-field"></div>
 							</div>
@@ -172,7 +181,7 @@ export class BinManagerWorkspace {
 							</button>
 						</div>
 						<div class="ch-bm-scope-note" style="padding:8px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#6b7280;">
-							${__("Tab count is total warehouse quantity. Table lists serial-tracked rows.")}
+							${__("Tab count is total warehouse quantity. Serialised rows list one line per serial; other stock lists one line per item with its quantity.")}
 						</div>
 						<div class="ch-bm-list" style="max-height:520px;overflow:auto;"></div>
 					</div>
@@ -195,7 +204,7 @@ export class BinManagerWorkspace {
 		this.panel.find(".ch-bm-scope-note").text(
 			ro
 				? __("Tab count and table both reflect in-transit rows from active manifests.")
-				: __("Tab count is total warehouse quantity. Table lists serial-tracked rows.")
+				: __("Tab count is total warehouse quantity. Serialised rows list one line per serial; other stock lists one line per item with its quantity.")
 		);
 		// List spans full width when the move card is hidden (read-only view).
 		this.panel.find(".ch-bm-grid").css(
@@ -248,11 +257,16 @@ export class BinManagerWorkspace {
 			this._refresh_bin_view();
 		});
 
-		panel.on("click", ".ch-bm-lookup", () => this._lookup_serial());
+		panel.on("click", ".ch-bm-lookup", () => this._lookup());
+		panel.on("input", ".ch-bm-serial", (e) => {
+			if (!$(e.currentTarget).val().trim()) {
+				this.panel.find(".ch-bm-qty").prop("disabled", false);
+			}
+		});
 		panel.on("keypress", ".ch-bm-serial", (e) => {
 			if (e.which === 13) { e.preventDefault(); this._lookup_serial(); }
 		});
-		panel.on("click", ".ch-bm-move", () => this._move_serial());
+		panel.on("click", ".ch-bm-move", () => this._move());
 		panel.on("click", ".ch-bm-refresh", () => { this._load_counts(); this._refresh_bin_view(); });
 
 		// Client-side row filter
@@ -330,6 +344,167 @@ export class BinManagerWorkspace {
 		});
 	}
 
+	_lookup() {
+		// A serial identifies exactly one unit; an item identifies a quantity.
+		// Retail stores write off serialised phones, but a repair spare or an
+		// accessory has no serial to scan, so the item is the only handle.
+		const serial_no = (this.panel.find(".ch-bm-serial").val() || "").trim();
+		if (serial_no) {
+			this._lookup_serial();
+			return;
+		}
+		if (this.item_field && this.item_field.get_value()) {
+			this._lookup_item();
+			return;
+		}
+		frappe.show_alert({
+			message: __("Scan a serial, or choose an item to move by quantity"),
+			indicator: "orange",
+		});
+	}
+
+	_move() {
+		const serial_no = (this.panel.find(".ch-bm-serial").val() || "").trim();
+		if (serial_no) this._move_by_serial();
+		else this._move_by_qty();
+	}
+
+	_set_from_bins(rows, selected) {
+		const sel = this.panel.find(".ch-bm-from-bin");
+		if (!rows || !rows.length) {
+			sel.html(`<option value="">${__("No stock in this store")}</option>`);
+			return;
+		}
+		sel.html(rows.map((r) => {
+			const qty = r.qty === undefined || r.qty === null ? "" : ` (${r.qty})`;
+			const chosen = r.bin_type === selected ? " selected" : "";
+			return `<option value="${frappe.utils.escape_html(r.bin_type)}"${chosen}>`
+				+ `${frappe.utils.escape_html(__(r.bin_type))}${frappe.utils.escape_html(qty)}</option>`;
+		}).join(""));
+	}
+
+	_lookup_item() {
+		const item_code = this.item_field.get_value();
+		frappe.call({
+			method: "ch_item_master.ch_core.bin_transfer.get_item_bin_context",
+			args: { item_code, store: PosState.store || null },
+			callback: (r) => {
+				const d = r.message || {};
+				this._serial_ctx = null;
+				if (!d.item_code || !(d.bins || []).length) {
+					frappe.show_alert({
+						message: __("{0} has no stock in this store's bins", [item_code]),
+						indicator: "red",
+					});
+					this._item_ctx = null;
+					this._set_from_bins([]);
+					this.panel.find(".ch-bm-context").removeClass("visible").empty();
+					return;
+				}
+				this._item_ctx = d;
+				// Never move serialised stock blind: the ledger tracks which unit
+				// moved, so a quantity alone would be a guess.
+				if (d.has_serial_no) {
+					frappe.show_alert({
+						message: __("{0} is serialised — scan the IMEI / serial to move it", [item_code]),
+						indicator: "orange",
+					});
+					this.panel.find(".ch-bm-serial").focus();
+				}
+				const src = (d.bins || []).find((b) => b.bin_type !== this._active_bin) || d.bins[0];
+				this._set_from_bins(d.bins, src && src.bin_type);
+				this.panel.find(".ch-bm-qty").val(1).prop("disabled", !!d.has_serial_no);
+				this.panel.find(".ch-bm-context").addClass("visible").html(`
+					<div class="ctx-row">
+						<span><b>${__("Item")}:</b> ${frappe.utils.escape_html(d.item_code)} — ${frappe.utils.escape_html(d.item_name || "")}</span>
+						<span><b>${__("Tracking")}:</b> ${d.has_serial_no ? __("Serialised") : __("By quantity")}</span>
+					</div>
+					<div class="ctx-row" style="margin-top:6px;">
+						${(d.bins || []).map((b) => {
+							const m = BIN_META[b.bin_type] || BIN_META["Sellable"];
+							return `<span class="ch-bm-bin-pill" style="background:${m.bg};color:${m.color}">`
+								+ `<i class="fa ${m.icon}"></i> ${__(b.bin_type)}: ${b.qty} ${frappe.utils.escape_html(d.stock_uom || "")}</span>`;
+						}).join(" ")}
+					</div>
+				`);
+			},
+		});
+	}
+
+	_move_by_qty() {
+		const reason = this.reason_field.get_value();
+		const item_code = this.item_field ? this.item_field.get_value() : null;
+		const from_bin_type = (this.panel.find(".ch-bm-from-bin").val() || "").trim();
+		const qty = parseFloat(this.panel.find(".ch-bm-qty").val());
+
+		if (!item_code) {
+			frappe.show_alert({ message: __("Choose an item to move"), indicator: "orange" });
+			return;
+		}
+		if (!this._item_ctx || this._item_ctx.item_code !== item_code) {
+			frappe.show_alert({ message: __("Lookup the item before moving"), indicator: "orange" });
+			return;
+		}
+		if (this._item_ctx.has_serial_no) {
+			frappe.show_alert({
+				message: __("{0} is serialised — scan the IMEI / serial to move it", [item_code]),
+				indicator: "red",
+			});
+			return;
+		}
+		if (!from_bin_type) {
+			frappe.show_alert({ message: __("Choose the bin to move from"), indicator: "orange" });
+			return;
+		}
+		if (from_bin_type === this._active_bin) {
+			frappe.show_alert({ message: __("Source and destination bins are same"), indicator: "orange" });
+			return;
+		}
+		if (!reason) {
+			frappe.show_alert({ message: __("Select a reason"), indicator: "orange" });
+			return;
+		}
+		if (!(qty > 0)) {
+			frappe.show_alert({ message: __("Enter a quantity greater than zero"), indicator: "orange" });
+			return;
+		}
+		// Say what is actually available rather than letting the ledger reject it.
+		const src = (this._item_ctx.bins || []).find((b) => b.bin_type === from_bin_type);
+		if (src && qty > src.qty) {
+			frappe.show_alert({
+				message: __("Only {0} in {1}", [src.qty, __(from_bin_type)]),
+				indicator: "red",
+			});
+			return;
+		}
+
+		frappe.call({
+			method: "ch_item_master.ch_core.bin_transfer.pos_bin_transfer",
+			args: {
+				store: PosState.store || null,
+				item_code,
+				qty,
+				from_bin_type,
+				to_bin_type: this._active_bin,
+				reason,
+			},
+			callback: (r) => {
+				const m = r.message || {};
+				if (!m.stock_entry) return;
+				frappe.show_alert({
+					message: __("Moved {0} × {1} to {2}", [qty, item_code, __(this._active_bin)]),
+					indicator: "green",
+				});
+				this._item_ctx = null;
+				this.panel.find(".ch-bm-qty").val(1).prop("disabled", false);
+				this._set_from_bins([]);
+				this.panel.find(".ch-bm-context").removeClass("visible").empty();
+				this._load_counts();
+				this._refresh_bin_view();
+			},
+		});
+	}
+
 	_lookup_serial() {
 		const serial_no = (this.panel.find(".ch-bm-serial").val() || "").trim();
 		if (!serial_no) {
@@ -352,7 +527,10 @@ export class BinManagerWorkspace {
 				if (!this.item_field.get_value()) {
 					this.item_field.set_value(d.item_code || "");
 				}
-				this.panel.find(".ch-bm-from-bin").val(d.bin_type || "");
+				this._item_ctx = null;
+				this._set_from_bins(d.bin_type ? [{ bin_type: d.bin_type }] : [], d.bin_type);
+				// One serial is one unit — quantity is not the operator's to choose.
+				this.panel.find(".ch-bm-qty").val(1).prop("disabled", true);
 				const src = BIN_META[d.bin_type] || BIN_META["Sellable"];
 				const dst = BIN_META[this._active_bin];
 				this.panel.find(".ch-bm-context").addClass("visible").html(`
@@ -377,7 +555,7 @@ export class BinManagerWorkspace {
 		});
 	}
 
-	_move_serial() {
+	_move_by_serial() {
 		const serial_no = (this.panel.find(".ch-bm-serial").val() || "").trim();
 		const reason = this.reason_field.get_value();
 		const item_code = this.item_field.get_value();
@@ -422,7 +600,8 @@ export class BinManagerWorkspace {
 					indicator: "green",
 				});
 				this.panel.find(".ch-bm-serial").val("").focus();
-				this.panel.find(".ch-bm-from-bin").val("");
+				this.panel.find(".ch-bm-qty").val(1).prop("disabled", false);
+				this._set_from_bins([]);
 				this.panel.find(".ch-bm-context").removeClass("visible").empty();
 				this._serial_ctx = null;
 				this._load_counts();
@@ -461,7 +640,7 @@ export class BinManagerWorkspace {
 					list.html(`
 						<div class="ch-bm-empty">
 							<div class="icon"><i class="fa ${m.icon}"></i></div>
-							${readonly ? __("Nothing in transit to this store") : __("No serials in {0} bin yet", [this._active_bin])}
+							${readonly ? __("Nothing in transit to this store") : __("Nothing in {0} bin yet", [this._active_bin])}
 							<div style="font-size:11px;color:#94a3b8;margin-top:6px">${m.hint}</div>
 						</div>
 					`);
@@ -503,7 +682,7 @@ export class BinManagerWorkspace {
 					<table class="ch-bm-list-table">
 						<thead>
 							<tr>
-								<th style="width:34%">${__("Serial")}</th>
+								<th style="width:34%">${__("Serial / Qty")}</th>
 								<th>${__("Item")}</th>
 								<th style="width:110px">${__("Status")}</th>
 							</tr>
@@ -511,12 +690,16 @@ export class BinManagerWorkspace {
 						<tbody>
 							${rows.map((x) => `
 								<tr>
-									<td class="mono">${frappe.utils.escape_html(x.serial_no || "")}</td>
+									<td class="mono">${x.tracking === "quantity"
+										? `<b>${frappe.utils.escape_html(String(x.qty))}</b> <span class="text-muted">${frappe.utils.escape_html(x.uom || "")}</span>`
+										: frappe.utils.escape_html(x.serial_no || "")}</td>
 									<td>
 										<div>${frappe.utils.escape_html(x.item_code || "")}</div>
 										<div class="item-name">${frappe.utils.escape_html(x.item_name || "")}</div>
 									</td>
-									<td><span class="ch-bm-status-badge">${frappe.utils.escape_html(x.status || "—")}</span></td>
+									<td><span class="ch-bm-status-badge">${x.tracking === "quantity"
+										? __("Not serialised")
+										: frappe.utils.escape_html(x.status || "—")}</span></td>
 								</tr>
 							`).join("")}
 						</tbody>

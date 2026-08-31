@@ -93,11 +93,11 @@ export class SessionClosingDashboard {
 
 	_build_summary_html(d) {
 		const payment_rows = (d.payment_modes || [])
-			.map((p) => `<tr><td>${frappe.utils.escape_html(p.mode)}</td><td class="text-right">${frappe.format(p.total, { fieldtype: "Currency" })}</td></tr>`)
+			.map((p) => `<tr><td>${frappe.utils.escape_html(p.mode)}</td><td class="text-right">${format_currency(p.total)}</td></tr>`)
 			.join("");
 
 		const type_rows = (d.sales_by_type || [])
-			.map((s) => `<tr><td>${frappe.utils.escape_html(s.type)}</td><td class="text-right">${s.count}</td><td class="text-right">${frappe.format(s.total, { fieldtype: "Currency" })}</td></tr>`)
+			.map((s) => `<tr><td>${frappe.utils.escape_html(s.type)}</td><td class="text-right">${s.count}</td><td class="text-right">${format_currency(s.total)}</td></tr>`)
 			.join("");
 		const bifurcation_html = (d.sales_by_type && d.sales_by_type.length) ? `
 			<div class="row" style="margin-top:12px">
@@ -118,17 +118,17 @@ export class SessionClosingDashboard {
 					<tr><td class="text-muted">${__("Cashier")}</td><td>${frappe.utils.escape_html(d.cashier)}</td></tr>
 					<tr><td class="text-muted">${__("Shift Start")}</td><td>${d.shift_start}</td></tr>
 					<tr><td class="text-muted">${__("Store")}</td><td>${frappe.utils.escape_html(d.store)}</td></tr>
-					<tr><td class="text-muted">${__("Opening Cash")}</td><td>${frappe.format(d.opening_cash, { fieldtype: "Currency" })}</td></tr>
+					<tr><td class="text-muted">${__("Opening Cash")}</td><td>${format_currency(d.opening_cash)}</td></tr>
 				</table>
 			</div>
 			<div class="col-md-4">
 				<h6 style="font-weight:700;margin-bottom:8px">${__("Sales")}</h6>
 				<table class="table table-sm table-borderless">
 					<tr><td class="text-muted">${__("Invoices")}</td><td><b>${d.invoices_count}</b></td></tr>
-					<tr><td class="text-muted">${__("Total Sales")}</td><td>${frappe.format(d.total_sales, { fieldtype: "Currency" })}</td></tr>
-					<tr><td class="text-muted">${__("Returns")}</td><td>${d.returns_count} (${frappe.format(d.total_returns, { fieldtype: "Currency" })})</td></tr>
-					<tr><td class="text-muted"><b>${__("Net Sales")}</b></td><td><b>${frappe.format(d.net_sales, { fieldtype: "Currency" })}</b></td></tr>
-					<tr><td class="text-muted">${__("Tax")}</td><td>${frappe.format(d.total_tax, { fieldtype: "Currency" })}</td></tr>
+					<tr><td class="text-muted">${__("Total Sales")}</td><td>${format_currency(d.total_sales)}</td></tr>
+					<tr><td class="text-muted">${__("Returns")}</td><td>${d.returns_count} (${format_currency(d.total_returns)})</td></tr>
+					<tr><td class="text-muted"><b>${__("Net Sales")}</b></td><td><b>${format_currency(d.net_sales)}</b></td></tr>
+					<tr><td class="text-muted">${__("Tax")}</td><td>${format_currency(d.total_tax)}</td></tr>
 				</table>
 			</div>
 			<div class="col-md-4">
@@ -138,8 +138,8 @@ export class SessionClosingDashboard {
 				</table>
 				<hr>
 				<table class="table table-sm table-borderless">
-					<tr><td class="text-muted">${__("Cash Drops")}</td><td>${frappe.format(d.total_cash_drops, { fieldtype: "Currency" })}</td></tr>
-					<tr><td class="text-muted"><b>${__("Cash in Drawer")}</b></td><td><b>${frappe.format(d.cash_in_drawer, { fieldtype: "Currency" })}</b></td></tr>
+					<tr><td class="text-muted">${__("Cash Drops")}</td><td>${format_currency(d.total_cash_drops)}</td></tr>
+					<tr><td class="text-muted"><b>${__("Cash in Drawer")}</b></td><td><b>${format_currency(d.cash_in_drawer)}</b></td></tr>
 				</table>
 			</div>
 		</div>
@@ -235,7 +235,7 @@ export class SessionClosingDashboard {
 					const msg = r.message;
 					frappe.show_alert({
 						message: __("Session closed. Net sales: {0}, Variance: ₹{1}", [
-							frappe.format(msg.net_sales, { fieldtype: "Currency" }),
+							format_currency(msg.net_sales),
 							msg.cash_variance,
 						]),
 						indicator: msg.cash_variance == 0 ? "green" : "orange",
