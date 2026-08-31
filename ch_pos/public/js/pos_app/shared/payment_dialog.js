@@ -104,6 +104,20 @@ export class PaymentDialog {
 			this._submitting = false;
 			this._close(false);
 		});
+		// The cart panel has its own sale-type pills (used to pick Direct/Credit/
+		// Finance Sale before or while this dialog is open) that only flip
+		// PosState.sale_type and emit this event — they never touch this
+		// dialog's own payment rows. Without this listener, switching away from
+		// Finance there left the Finance row/amount stranded here even though
+		// every "is this a finance sale" check elsewhere already sees the new
+		// type — that mismatch is TC_032's bug, just reachable from a second
+		// entry point the original guard didn't cover.
+		EventBus.on("sale_type:changed", (payload) => {
+			if (this._suppress_sale_type_event || !this._overlay) return;
+			const type = (payload && typeof payload === "object") ? payload.sale_type : payload;
+			if (!type) return;
+			this._apply_sale_type_change(type, { sync_button: true });
+		});
 	}
 
 	show() {
@@ -1227,95 +1241,7 @@ placeholder="${__("Enter code...")}">
 			const type = btn.data("type");
 			ov.find(".ch-pay-saletype-btn").removeClass("active");
 			btn.addClass("active");
-			PosState.sale_type = type;
-			PosState.sale_sub_type = null;
-			PosState.sale_reference = null;
-			this._update_sale_sub_type(type);
-			EventBus.emit("sale_type:changed", type);
-
-			// Sync checkboxes based on sale type properties
-			const st = this._sale_types.find(t => t.sale_type_name === type);
-			if (st) {
-				// requires_payment may come back as 0 (int) or false (bool)
-				const is_free   = !st.requires_payment;
-				// FS (Finance Sale) is NOT a credit sale — it has its own finance flow
-				const is_credit = !!(st.triggers_credit_sale ||
-					["CS"].includes((st.code || "").toUpperCase())) &&
-					!this._is_finance_sale_type(type);
-
-				// Toggle free sale (only if changed — avoids re-triggering)
-				if (is_free !== this._is_free_sale) {
-					ov.find("#ch-pay-free-chk").prop("checked", is_free).trigger("change");
-				}
-				// Toggle credit sale
-				if (is_credit !== this._is_credit_sale) {
-					ov.find("#ch-pay-credit-chk").prop("checked", is_credit).trigger("change");
-				}
-				// If neither, ensure both are off
-				if (!is_free && !is_credit) {
-					if (this._is_free_sale) ov.find("#ch-pay-free-chk").prop("checked", false).trigger("change");
-					if (this._is_credit_sale) ov.find("#ch-pay-credit-chk").prop("checked", false).trigger("change");
-				}
-			}
-
-			// ── Always reconcile payment rows after type switch ──
-			const is_finance = this._is_finance_sale_type(type);
-			const had_finance = this._payments.some(p => this._mop_type(p.mode) === "finance");
-			if (is_finance) {
-				// Switching TO finance:
-				// Strip any stale is_down_payment flags from previous session
-				this._payments.forEach(p => { delete p.is_down_payment; });
-				// Remove existing finance rows first (to let _sync re-add correctly)
-				this._payments = this._payments.filter(p => this._mop_type(p.mode) !== "finance");
-				// If no rows remain, seed an empty Cash row as the down payment placeholder
-				if (!this._payments.length) {
-					this._payments = [{ mode: "Cash", amount: 0, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0, is_down_payment: true }];
-				} else {
-					// Existing rows become down-payment rows — zero out amounts so Finance carries full
-					this._payments.forEach(p => {
-						p.amount = 0;
-						p.is_down_payment = true;
-					});
-				}
-				this._sync_finance_payments();
-			} else {
-				// Switching AWAY from finance must hard-reset payment state so stale
-				// finance/gateway metadata never keeps fields locked for Direct Sale.
-				if (had_finance) {
-					this._reset_after_finance_exit();
-				} else {
-					// No finance row, but clear any lingering finance selections.
-					PosState.sale_sub_type = null;
-					PosState.finance_tenure = null;
-					PosState.sale_reference = null;
-				}
-				// #3: always hide the finance-only sub-controls + reference when the
-				// sale type is not finance, so finance never visually lingers.
-				ov.find("#ch-pay-sale-fin-tenure").hide().val("");
-				ov.find("#ch-pay-sale-ref-input").hide().val("");
-			}
-			// Always re-render rows and ensure #ch-pay-rows / #ch-pay-mop-section are visible
-			ov.find("#ch-pay-mop-section").show();
-			ov.find("#ch-pay-rows").show();
-			this._render_payments();
-
-			// Show/hide SS advance section
-			const st_code = (this._sale_types.find(t => t.sale_type_name === type)?.code || "").toUpperCase();
-			if (st_code === "SS") {
-				ov.find("#ch-pay-ss-advance-section").show();
-				ov.find("#ch-pay-ss-advance-amt").val("");
-				this._advance_amount = 0;
-			} else {
-				ov.find("#ch-pay-ss-advance-section").hide();
-				if (!this._payments.some(() => true) || st_code !== "SS") {
-					// Reset SS advance when leaving SS type
-					if (!ov.find(".ch-pay-advance-chk:checked").length) {
-						this._advance_amount = 0;
-					}
-				}
-			}
-
-			this._update_totals();
+			this._apply_sale_type_change(type);
 		});
 		ov.on("change", "#ch-pay-sale-sub-select", e => {
 			const val = $(e.currentTarget).val();
@@ -1632,6 +1558,119 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			finance_down_payment: 0,
 			...extra,
 		};
+	}
+
+	/** Reconcile this dialog's own state/UI to a newly selected sale type.
+	 *  Shared by the dialog's own sale-type pills and by the sale_type:changed
+	 *  listener that reacts to the cart panel's separate pills. */
+	_apply_sale_type_change(type) {
+		if (!this._overlay) return;
+		const ov = this._overlay;
+
+		ov.find(".ch-pay-saletype-btn").removeClass("active")
+			.filter((_, el) => $(el).data("type") === type).addClass("active");
+
+		PosState.sale_type = type;
+		PosState.sale_sub_type = null;
+		PosState.sale_reference = null;
+		this._update_sale_sub_type(type);
+		// Suppress our own echo — this._bind_events()'s listener would otherwise
+		// re-run this same reconciliation a second time for the event we just emitted.
+		this._suppress_sale_type_event = true;
+		EventBus.emit("sale_type:changed", type);
+		this._suppress_sale_type_event = false;
+
+		// Sync checkboxes based on sale type properties
+		const st = this._sale_types.find(t => t.sale_type_name === type);
+		if (st) {
+			// requires_payment may come back as 0 (int) or false (bool)
+			const is_free   = !st.requires_payment;
+			// FS (Finance Sale) is NOT a credit sale — it has its own finance flow
+			const is_credit = !!(st.triggers_credit_sale ||
+				["CS"].includes((st.code || "").toUpperCase())) &&
+				!this._is_finance_sale_type(type);
+
+			// Toggle free sale (only if changed — avoids re-triggering)
+			if (is_free !== this._is_free_sale) {
+				ov.find("#ch-pay-free-chk").prop("checked", is_free).trigger("change");
+			}
+			// Toggle credit sale
+			if (is_credit !== this._is_credit_sale) {
+				ov.find("#ch-pay-credit-chk").prop("checked", is_credit).trigger("change");
+			}
+			// If neither, ensure both are off
+			if (!is_free && !is_credit) {
+				if (this._is_free_sale) ov.find("#ch-pay-free-chk").prop("checked", false).trigger("change");
+				if (this._is_credit_sale) ov.find("#ch-pay-credit-chk").prop("checked", false).trigger("change");
+			}
+		}
+
+		// ── Always reconcile payment rows after type switch ──
+		this._reconcile_finance_rows(type);
+		if (!this._is_finance_sale_type(type)) {
+			// #3: always hide the finance-only sub-controls + reference when the
+			// sale type is not finance, so finance never visually lingers.
+			ov.find("#ch-pay-sale-fin-tenure").hide().val("");
+			ov.find("#ch-pay-sale-ref-input").hide().val("");
+		}
+		// Always re-render rows and ensure #ch-pay-rows / #ch-pay-mop-section are visible
+		ov.find("#ch-pay-mop-section").show();
+		ov.find("#ch-pay-rows").show();
+		this._render_payments();
+
+		// Show/hide SS advance section
+		const st_code = (this._sale_types.find(t => t.sale_type_name === type)?.code || "").toUpperCase();
+		if (st_code === "SS") {
+			ov.find("#ch-pay-ss-advance-section").show();
+			ov.find("#ch-pay-ss-advance-amt").val("");
+			this._advance_amount = 0;
+		} else {
+			ov.find("#ch-pay-ss-advance-section").hide();
+			if (!this._payments.some(() => true) || st_code !== "SS") {
+				// Reset SS advance when leaving SS type
+				if (!ov.find(".ch-pay-advance-chk:checked").length) {
+					this._advance_amount = 0;
+				}
+			}
+		}
+
+		this._update_totals();
+	}
+
+	/** Make this._payments agree with whether `type` is a finance sale type.
+	 *  Returns true if it actually changed anything (caller should re-render
+	 *  in that case). No-ops when already consistent, so it's safe to call
+	 *  speculatively on every render pass — not just on a live sale-type
+	 *  switch — without repeatedly zeroing down-payment rows the cashier
+	 *  already typed into. Needed on dialog (re)open too: closing this
+	 *  dialog (Back) while in Finance Sale saves the Finance row into
+	 *  PosState._payment_state, and the sale type can then change via the
+	 *  cart panel's own pills while this dialog is closed — reopening must
+	 *  not restore that stale Finance row into a since-switched Direct/
+	 *  Credit Sale. */
+	_reconcile_finance_rows(type) {
+		const is_finance = this._is_finance_sale_type(type);
+		const had_finance = this._payments.some(p => this._mop_type(p.mode) === "finance");
+		if (is_finance === had_finance) return false;
+
+		if (is_finance) {
+			this._payments.forEach(p => { delete p.is_down_payment; });
+			if (!this._payments.length) {
+				this._payments = [{ mode: "Cash", amount: 0, upi_transaction_id: "", card_reference: "", card_last_four: "", finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0, is_down_payment: true }];
+			} else {
+				// Existing rows become down-payment rows — zero out amounts so Finance carries full
+				this._payments.forEach(p => {
+					p.amount = 0;
+					p.is_down_payment = true;
+				});
+			}
+			this._sync_finance_payments();
+		} else {
+			// Switching AWAY from finance must hard-reset payment state so stale
+			// finance/gateway metadata never keeps fields locked for Direct Sale.
+			this._reset_after_finance_exit();
+		}
+		return true;
 	}
 
 	_reset_after_finance_exit() {
@@ -1986,6 +2025,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				this._overlay.find("#ch-pay-credit-chk").prop("checked", should_credit).trigger("change");
 			}
 		}
+
+		// The Finance row can be stale on (re)open too, not just on a live
+		// in-dialog switch — see _reconcile_finance_rows for why.
+		if (this._reconcile_finance_rows(PosState.sale_type)) {
+			this._render_payments();
+			this._update_totals();
+		}
 	}
 
 	_is_finance_sale_type(type_name) {
@@ -2217,10 +2263,14 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const loyalty    = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
 		const advance    = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
 		const net_due    = Math.max(0, grand - loyalty - advance);
-		// In Finance mode: cash_paid for display = only down payment rows (not Finance row)
-		const is_finance_mode = this._is_finance_sale_type(PosState.sale_type);
+		// In Finance mode: cash_paid for display = only down payment rows (not Finance row).
+		// Keyed off whether a Finance-type row actually exists in _payments, not off
+		// PosState.sale_type — the two can drift (see the TC_032 note above), and once
+		// they do, gating this exclusion on sale_type double-subtracts finance_amount
+		// below (it's excluded here AND subtracted again in balance/change).
+		const has_finance_row = this._payments.some(p => this._mop_type(p.mode) === "finance");
 		const cash_paid  = this._is_free_sale ? 0 : this._payments.reduce((s, p) => {
-			if (is_finance_mode && this._mop_type(p.mode) === "finance") return s;
+			if (has_finance_row && this._mop_type(p.mode) === "finance") return s;
 			return s + flt(p.amount);
 		}, 0);
 		const total_paid = cash_paid + loyalty + advance;
@@ -2235,7 +2285,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		let ready = false;
 		if (this._is_free_sale) {
 			ready = !!(this._free_sale_reason && this._free_sale_approved_by);
-		} else if (this._is_credit_sale || this._is_finance_sale_type(PosState.sale_type)) {
+		} else if (this._is_credit_sale || has_finance_row) {
 			ready = refs_valid && cash_paid >= 0;
 		} else {
 			ready = balance <= 0.005 && refs_valid;
@@ -2261,7 +2311,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Balance label changes for credit sale
 		const $bal = this._overlay.find("#ch-pay-balance-due");
 		const $label = this._overlay.find("#ch-pay-balance-label");
-		if (this._is_finance_sale_type(PosState.sale_type) && finance_amount > 0.005) {
+		if (has_finance_row && finance_amount > 0.005) {
 			$label.text(__("Financed Amount"));
 			$bal.text(`₹${format_number(finance_amount)}`)
 				.removeClass("ch-pay-bal-positive ch-pay-bal-zero")
@@ -2283,7 +2333,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		const $cr = this._overlay.find("#ch-pay-change-row");
 		// Finance sales: don't show "Change to Return" — balance is handled by finance company
-		if (change > 0.005 && !this._is_free_sale && !this._is_finance_sale_type(PosState.sale_type)) {
+		if (change > 0.005 && !this._is_free_sale && !has_finance_row) {
 			$cr.show();
 			this._overlay.find("#ch-pay-change").text(`₹${format_number(change)}`);
 		} else {
@@ -2412,13 +2462,19 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				const prov_valid = !!(p.finance_provider || "").trim();
 				const tenure_valid = !!(p.finance_tenure);
 				const appr_valid = !!(p.finance_approval_id || "").trim();
-				this._overlay?.find(`.ch-pay-row-fin-provider[data-idx="${i}"]`)
+				// Finance details are entered once, at document level, in the
+				// Sale Details strip above the payment rows (Finance Partner /
+				// Tenure / Approval ID) — not per payment row. The selectors
+				// this used to target (.ch-pay-row-fin-*) don't exist in the
+				// rendered row markup, so the invalid/valid highlight was
+				// silently a no-op and Tenure never visibly looked required.
+				this._overlay?.find("#ch-pay-sale-sub-select")
 					.toggleClass("ch-pay-ref-invalid", !prov_valid)
 					.toggleClass("ch-pay-ref-valid", prov_valid);
-				this._overlay?.find(`.ch-pay-row-fin-tenure[data-idx="${i}"]`)
+				this._overlay?.find("#ch-pay-sale-fin-tenure")
 					.toggleClass("ch-pay-ref-invalid", !tenure_valid)
 					.toggleClass("ch-pay-ref-valid", tenure_valid);
-				this._overlay?.find(`.ch-pay-row-fin-approval[data-idx="${i}"]`)
+				this._overlay?.find("#ch-pay-sale-ref-input")
 					.toggleClass("ch-pay-ref-invalid", !appr_valid)
 					.toggleClass("ch-pay-ref-valid", appr_valid);
 				if (!prov_valid || !tenure_valid || !appr_valid) all_valid = false;

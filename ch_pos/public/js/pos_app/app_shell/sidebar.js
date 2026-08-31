@@ -223,6 +223,11 @@ export class Sidebar {
 	}
 
 	_show_walkin_dialog() {
+		// Raw CH Model link value for whatever device_model currently has
+		// selected — kept so the Item search below can filter by it. The
+		// human-readable model_name is resolved once at submit time instead
+		// of being tracked live (see primary_action below).
+		let selected_model_value = "";
 		const d = new frappe.ui.Dialog({
 			title: __("Log Walk-in"),
 			fields: [
@@ -255,15 +260,47 @@ export class Sidebar {
 				{
 					label: __("Brand"),
 					fieldname: "device_brand",
-					fieldtype: "Data",
+					fieldtype: "Link",
+					options: "Brand",
 					placeholder: __("e.g. Apple, Samsung, OnePlus"),
+					// Default Link search doesn't return results inside this
+					// SPA dialog context — same fix as item_code below, an
+					// explicit custom query against a whitelisted function.
+					get_query: () => ({
+						query: "ch_pos.api.item_search.search_brands",
+					}),
+					onchange: () => {
+						// Model is scoped to the chosen brand — clear any
+						// stale pick from a different brand instead of
+						// leaving a mismatched model selected.
+						d.set_value("device_model", "");
+						selected_model_value = "";
+					},
 				},
 				{ fieldtype: "Column Break" },
 				{
 					label: __("Model"),
 					fieldname: "device_model",
-					fieldtype: "Data",
+					// Autocomplete, not Link: CH Model's own name is an internal
+					// compound key, and CH Model has show_title_field_in_link on
+					// so a Link field's own display should have shown model_name
+					// instead — but that native title write races against
+					// selection and left the field blank after picking a model.
+					// Autocomplete keeps {value, label} pairs client-side and
+					// looks the display label up locally on every render, so
+					// there's no async round trip left to race.
+					fieldtype: "Autocomplete",
 					placeholder: __("e.g. iPhone 15, Galaxy S24"),
+					get_query: () => {
+						const brand = d.get_value("device_brand");
+						return {
+							query: "ch_pos.api.item_search.autocomplete_ch_models",
+							params: brand ? { brand } : {},
+						};
+					},
+					onchange: () => {
+						selected_model_value = d.get_value("device_model") || "";
+					},
 				},
 			{
                 label: __("Item / Product Interest"),
@@ -274,6 +311,7 @@ export class Sidebar {
 
                 get_query: () => ({
                     query: "ch_pos.api.item_search.search_items_by_name",
+                    filters: selected_model_value ? { ch_model: selected_model_value } : {},
                 }),
 
                 // After selection: real item_code is stored,
@@ -317,31 +355,46 @@ export class Sidebar {
 				}
 
 				d.hide();
-				frappe.call({
-					method: "ch_pos.api.token_api.log_counter_walkin",
-					args: {
-						pos_profile: PosState.pos_profile,
-						visit_purpose: values.visit_purpose,
-						customer_name: values.customer_name || "",
-						customer_phone: values.customer_phone || "",
-						remarks: values.remarks || "",
-						device_brand: values.device_brand || "",
-						device_model: values.device_model || "",
-						item_code: values.item_code || "",
-					},
-					callback: (r) => {
-						const res = r.message || {};
-						if (res.status === "ok") {
-							frappe.show_alert({
-								message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
-								indicator: "green",
-							});
-							EventBus.emit("walkin:logged", res);
-						} else {
-							frappe.show_alert({ message: __("Could not log walk-in"), indicator: "orange" });
-						}
-					},
-				});
+
+				const log_walkin = (device_model_name) => {
+					frappe.call({
+						method: "ch_pos.api.token_api.log_counter_walkin",
+						args: {
+							pos_profile: PosState.pos_profile,
+							visit_purpose: values.visit_purpose,
+							customer_name: values.customer_name || "",
+							customer_phone: values.customer_phone || "",
+							remarks: values.remarks || "",
+							device_brand: values.device_brand || "",
+							device_model: device_model_name || values.device_model || "",
+							item_code: values.item_code || "",
+						},
+						callback: (r) => {
+							const res = r.message || {};
+							if (res.status === "ok") {
+								frappe.show_alert({
+									message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
+									indicator: "green",
+								});
+								EventBus.emit("walkin:logged", res);
+							} else {
+								frappe.show_alert({ message: __("Could not log walk-in"), indicator: "orange" });
+							}
+						},
+					});
+				};
+
+				// Resolve the readable model_name once, here, instead of
+				// tracking it live through the dialog — CH Model's own name
+				// is the ugly compound key, so values.device_model alone
+				// isn't what should be logged.
+				if (values.device_model) {
+					frappe.db.get_value("CH Model", values.device_model, "model_name", (r) => {
+						log_walkin((r && r.model_name) || values.device_model);
+					});
+				} else {
+					log_walkin("");
+				}
 			},
 		});
 		d.show();
