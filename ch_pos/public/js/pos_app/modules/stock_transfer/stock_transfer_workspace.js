@@ -661,19 +661,7 @@ export class StockTransferWorkspace {
                     default: remaining_total,
                     description: __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total]),
                     onchange() {
-                        const qty = flt(d.get_value("packed_qty"));
-                        const $field = d.get_field("packed_qty");
-                        const over = qty > remaining_total;
-                        $field.set_description(
-                            over
-                                ? `<span style="color:#d1242f;font-weight:600;">${__(
-                                      "Actual quantity is greater than Packed Qty — only {0} remaining.",
-                                      [remaining_total]
-                                  )}</span>`
-                                : __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
-                        );
-                        d.get_primary_btn().prop("disabled", over || !qty || qty <= 0);
-                        d.get_primary_btn().html(primary_label());
+                        check_packed_qty_live();
                     },
                 },
                 { fieldname: "weight_kg", fieldtype: "Float", label: __("Weight (kg)") },
@@ -762,8 +750,30 @@ export class StockTransferWorkspace {
                 if (boxes_this_session.length) this._load_tab(panel, "outgoing");
             },
         });
+
+        // Frappe's own onchange only fires on blur, so typing an over-limit
+        // qty and staying in the field showed no feedback until you clicked
+        // away or hit the button. Binding the raw input event gives a true
+        // live warning on every keystroke instead.
+        function check_packed_qty_live() {
+            const qty = flt(d.get_value("packed_qty"));
+            const $field = d.get_field("packed_qty");
+            const over = qty > remaining_total;
+            $field.set_description(
+                over
+                    ? `<span style="color:#d1242f;font-weight:600;">${__(
+                          "Actual quantity is greater than Packed Qty — only {0} remaining.",
+                          [remaining_total]
+                      )}</span>`
+                    : __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
+            );
+            d.get_primary_btn().prop("disabled", over || !qty || qty <= 0);
+            d.get_primary_btn().html(primary_label());
+        }
+
         render_box_table();
         d.show();
+        d.get_field("packed_qty").$input.on("input", check_packed_qty_live);
     }
 
     // ════════════════════════════════════════════════════════════════════════
