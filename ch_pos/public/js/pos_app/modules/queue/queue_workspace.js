@@ -238,10 +238,21 @@ export class QueueWorkspace {
 		// Action buttons
 		let actions_html = "";
 		if (is_svc) {
+			// Withdraw belongs here too. A service walk-in leaves without
+			// proceeding just as a retail one does -- the customer hears the
+			// quote and declines, or will not wait -- and until now the only
+			// service action was "GoFix Request", so those tokens sat In
+			// Progress forever and never reached the drop analysis the retail
+			// side has had all along. Same endpoint, same mandatory reason and
+			// remarks, so the funnel reads consistently across both companies.
 			actions_html = `
 				<button class="btn btn-sm btn-primary ch-queue-convert-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					<i class="fa fa-plus"></i> ${__("GoFix Request")}
+				</button>
+				<button class="btn btn-sm btn-default ch-queue-drop-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					${__("Withdraw")}
 				</button>`;
 		} else {
 			actions_html = `

@@ -1490,6 +1490,7 @@ def log_counter_walkin(
     customer_name: str = "",
     customer_phone: str = "",
     remarks: str = "",
+    ch_category: str = "",
     device_brand: str = "",
     device_model: str = "",
     item_code: str = "",
@@ -1583,6 +1584,12 @@ def log_counter_walkin(
     }
     if visit_purpose in ("Sales", "Enquiry") and device_brand:
         token_payload["brand_interest"] = device_brand
+
+    # Stored even when brand and model were never narrowed down: "asked about
+    # laptops, we had nothing to show" is a complete and useful record, and the
+    # category is the one thing the counter almost always captures.
+    if ch_category and frappe.db.exists("CH Category", ch_category):
+        token_payload["category_interest"] = ch_category
 
     if item_code:
         token_payload["items"] = [{

@@ -258,6 +258,29 @@ export class Sidebar {
 					collapsible: 0,
 				},
 				{
+					// Category leads the cascade: it is the one thing the
+					// counter always knows ("they asked about laptops") even
+					// when the customer never names a brand or model.
+					label: __("Category"),
+					fieldname: "ch_category",
+					fieldtype: "Link",
+					options: "CH Category",
+					placeholder: __("e.g. Mobile, Laptop, Accessories"),
+					get_query: () => ({
+						query: "ch_pos.api.item_search.search_categories",
+					}),
+					onchange: () => {
+						// Everything downstream is scoped by category, so a
+						// change invalidates the picks made under the old one
+						// rather than leaving a brand that sells nothing here.
+						d.set_value("device_brand", "");
+						d.set_value("device_model", "");
+						d.set_value("item_code", "");
+						selected_model_value = "";
+					},
+				},
+				{ fieldtype: "Column Break" },
+				{
 					label: __("Brand"),
 					fieldname: "device_brand",
 					fieldtype: "Link",
@@ -268,6 +291,9 @@ export class Sidebar {
 					// explicit custom query against a whitelisted function.
 					get_query: () => ({
 						query: "ch_pos.api.item_search.search_brands",
+						filters: d.get_value("ch_category")
+							? { ch_category: d.get_value("ch_category") }
+							: {},
 					}),
 					onchange: () => {
 						// Model is scoped to the chosen brand — clear any
@@ -292,10 +318,14 @@ export class Sidebar {
 					fieldtype: "Autocomplete",
 					placeholder: __("e.g. iPhone 15, Galaxy S24"),
 					get_query: () => {
+						const params = {};
 						const brand = d.get_value("device_brand");
+						const category = d.get_value("ch_category");
+						if (brand) params.brand = brand;
+						if (category) params.ch_category = category;
 						return {
 							query: "ch_pos.api.item_search.autocomplete_ch_models",
-							params: brand ? { brand } : {},
+							params,
 						};
 					},
 					onchange: () => {
@@ -309,10 +339,19 @@ export class Sidebar {
                 options: "Item",
                 placeholder: __("Optional — pick a catalogue item"),
 
-                get_query: () => ({
-                    query: "ch_pos.api.item_search.search_items_by_name",
-                    filters: selected_model_value ? { ch_model: selected_model_value } : {},
-                }),
+                get_query: () => {
+                    // Narrowed by whatever the counter has given us so far.
+                    // Never narrowed by stock: an item we cannot supply is the
+                    // demand this form exists to record.
+                    const filters = {};
+                    if (selected_model_value) filters.ch_model = selected_model_value;
+                    const category = d.get_value("ch_category");
+                    if (category) filters.ch_category = category;
+                    return {
+                        query: "ch_pos.api.item_search.search_items_by_name",
+                        filters,
+                    };
+                },
 
                 // After selection: real item_code is stored,
                 // but we replace the input's visible text with item_name
@@ -364,6 +403,7 @@ export class Sidebar {
 							customer_name: values.customer_name || "",
 							customer_phone: values.customer_phone || "",
 							remarks: values.remarks || "",
+							ch_category: values.ch_category || "",
 							device_brand: values.device_brand || "",
 							device_model: device_model_name || values.device_model || "",
 							item_code: values.item_code || "",

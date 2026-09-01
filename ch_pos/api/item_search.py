@@ -8,8 +8,13 @@ def search_items_by_name(doctype, txt, searchfield, start, page_len, filters):
     Custom Item search for POS walk-in dialog.
     - Returns item_code as the stored value (required by Link field)
     - Returns item_name as the visible label in the dropdown
-    - Optional filters.ch_model narrows to items of that CH Model, once the
-      walk-in dialog's Brand -> Model -> Item cascade has a model selected.
+    - Optional filters.ch_model / filters.ch_category narrow the list as the
+      walk-in dialog's Category -> Brand -> Model -> Item cascade is filled in.
+
+    Deliberately NOT filtered by stock, sellability or lifecycle. A walk-in is
+    a record of what the customer ASKED FOR, and the most valuable rows are the
+    ones we could not sell -- an item filtered out for being out of stock is
+    exactly the demand signal this form exists to capture.
     """
     frappe.has_permission("Item", "read", throw=True)
     filters = frappe.parse_json(filters) or {}
@@ -23,6 +28,10 @@ def search_items_by_name(doctype, txt, searchfield, start, page_len, filters):
     if ch_model:
         conditions.append("ch_model = %(ch_model)s")
         values["ch_model"] = ch_model
+    ch_category = filters.get("ch_category")
+    if ch_category:
+        conditions.append("ch_category = %(ch_category)s")
+        values["ch_category"] = ch_category
 
     items = frappe.db.sql(
         f"""
@@ -52,23 +61,40 @@ def search_brands(doctype, txt, searchfield, start, page_len, filters):
     doesn't have here.
     """
     frappe.has_permission("Brand", "read", throw=True)
+    filters = frappe.parse_json(filters) or {}
     start = max(0, cint(start))
     page_len = max(1, min(cint(page_len) or 20, 100))
+    values = {"txt": f"%{txt or ''}%", "start": start, "page_len": page_len}
+
+    # With a category chosen, offer only brands that actually sell into it.
+    # Brand carries no category of its own, so the link is made through Item --
+    # existence only, with no stock or sellability condition, so a brand we
+    # stock nothing from is still offerable.
+    category_join = ""
+    if filters.get("ch_category"):
+        category_join = """
+          AND EXISTS (
+            SELECT 1 FROM `tabItem` i
+            WHERE i.brand = b.name AND i.disabled = 0
+              AND i.ch_category = %(ch_category)s
+          )"""
+        values["ch_category"] = filters["ch_category"]
+
     rows = frappe.db.sql(
-        """
-        SELECT name
-        FROM `tabBrand`
-        WHERE name LIKE %(txt)s
-        ORDER BY name ASC
+        f"""
+        SELECT b.name
+        FROM `tabBrand` b
+        WHERE b.name LIKE %(txt)s {category_join}
+        ORDER BY b.name ASC
         LIMIT %(start)s, %(page_len)s
         """,
-        {"txt": f"%{txt or ''}%", "start": start, "page_len": page_len},
+        values,
     )
     return [(name, "") for (name,) in rows]
 
 
 @frappe.whitelist()
-def autocomplete_ch_models(txt="", brand=None):
+def autocomplete_ch_models(txt="", brand=None, ch_category=None):
     """CH Model source for the walk-in dialog's Model field, which uses
     fieldtype Autocomplete rather than Link. CH Model's own name is an
     internal compound key, and CH Model has show_title_field_in_link on so
@@ -86,6 +112,17 @@ def autocomplete_ch_models(txt="", brand=None):
     if brand:
         conditions.append("brand = %(brand)s")
         values["brand"] = brand
+    if ch_category:
+        # CH Model has no category column -- only brand and model_name -- so a
+        # model belongs to a category through the items built on it.
+        conditions.append(
+            """EXISTS (
+                SELECT 1 FROM `tabItem` i
+                WHERE i.ch_model = `tabCH Model`.name AND i.disabled = 0
+                  AND i.ch_category = %(ch_category)s
+            )"""
+        )
+        values["ch_category"] = ch_category
 
     rows = frappe.db.sql(
         f"""
@@ -98,3 +135,35 @@ def autocomplete_ch_models(txt="", brand=None):
         values,
     )
     return [{"value": name, "label": model_name} for name, model_name in rows]
+
+
+@frappe.whitelist()
+def search_categories(doctype, txt, searchfield, start, page_len, filters):
+    """CH Category source for the walk-in dialog's Category field.
+
+    Uses an explicit query for the same reason Brand and Item do: the default
+    Link search returns nothing inside this SPA's dialog context.
+
+    Only categories that actually carry items are offered -- an empty category
+    is noise at the counter -- but item stock is deliberately not consulted, so
+    a category we are completely out of still appears. Recording that a
+    customer asked for it is the entire point.
+    """
+    frappe.has_permission("CH Category", "read", throw=True)
+    start = max(0, cint(start))
+    page_len = max(1, min(cint(page_len) or 20, 100))
+    rows = frappe.db.sql(
+        """
+        SELECT c.name
+        FROM `tabCH Category` c
+        WHERE c.name LIKE %(txt)s
+          AND EXISTS (
+            SELECT 1 FROM `tabItem` i
+            WHERE i.ch_category = c.name AND i.disabled = 0
+          )
+        ORDER BY c.name ASC
+        LIMIT %(start)s, %(page_len)s
+        """,
+        {"txt": f"%{txt or ''}%", "start": start, "page_len": page_len},
+    )
+    return [(name, "") for (name,) in rows]

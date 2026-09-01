@@ -119,7 +119,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-    "options": "Waiting\nHold\nEngaged\nIn Progress\nCompleted\nCancelled\nConverted\nDropped\nExpired",
+   "options": "Waiting\nHold\nEngaged\nIn Progress\nCompleted\nCancelled\nConverted\nDropped\nExpired",
    "read_only": 1
   },
   {
@@ -274,9 +274,10 @@
   },
   {
    "fieldname": "category_interest",
-   "fieldtype": "Select",
+   "fieldtype": "Link",
    "label": "Category",
-   "options": "\nMobile\nLaptop\nTablet\nAccessories\nSmart Watch\nAudio\nOther"
+   "options": "CH Category",
+   "description": "What the customer asked about. Linked to the catalogue so brand and model can be scoped to it; not restricted by stock, because unmet demand is the point of recording it."
   },
   {
    "fieldname": "brand_interest",
