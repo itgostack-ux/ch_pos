@@ -4157,6 +4157,17 @@ def create_pos_invoice(
         if abs(flt((totals or {}).get("total_net"))) > 0.005:
             _rewrite_gl_entries(inv.name, totals)
 
+        # ---------- 7b. LEDGER-INTEGRITY BACKSTOP ----------
+        # The 2026-07-20..30 incident: a post-submit GL rewrite deleted the
+        # framework's entries (committed!) and hand-rebuilt only the
+        # Debtors/Income/Tax legs — 26 live invoices booked with SLE but no
+        # payment and no COGS GL. Re-assert the final ledger footprint AFTER
+        # the rewrite so any regression of that class aborts the whole
+        # transaction instead of half-posting silently.
+        from ch_pos.overrides.gl_backstop import assert_pos_ledger_integrity
+
+        assert_pos_ledger_integrity(frappe.get_doc("Sales Invoice", inv.name))
+
         frappe.clear_document_cache("Sales Invoice", inv.name)
 
     except Exception:

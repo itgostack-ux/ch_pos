@@ -93,6 +93,11 @@ doc_events = {
             "ch_pos.overrides.pos_invoice.update_kiosk_token_status",
             "ch_pos.overrides.pos_invoice.increment_coupon_usage",
             "ch_pos.api.gift_redemption.issue_gift_for_invoice_hook",
+            # LAST on purpose: structural GL backstop. After the 2026-07
+            # half-post incident (SLE written, payment + COGS GL legs lost),
+            # any POS submit whose ledger footprint is incomplete must fail
+            # loudly instead of booking a sale with no cash and no cost.
+            "ch_pos.overrides.gl_backstop.assert_pos_ledger_integrity",
         ],
         "on_cancel": [
             "ch_pos.overrides.pos_invoice.reverse_serial_lifecycle",
@@ -101,6 +106,19 @@ doc_events = {
             "ch_pos.overrides.pos_invoice.decrement_coupon_usage",
         ],
     },
+}
+
+# Row-level scope — POS Executive carries store/company assignment (and the
+# executive's discount ceiling), so a scoped user must only see the rows of
+# their own resolved CH User Scope. Follows the ch_erp15.txn_scope precedent:
+# permission_query_conditions gates list views / dashboards, has_permission
+# gates direct .get_doc() by name.
+permission_query_conditions = {
+    "POS Executive": "ch_pos.scope.pos_executive_query",
+}
+
+has_permission = {
+    "POS Executive": "ch_pos.scope.has_pos_executive_permission",
 }
 
 # Scheduler
