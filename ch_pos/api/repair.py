@@ -260,3 +260,69 @@ def create_repair_intake(data, pos_profile=None) -> dict:
 		"docstatus": result["docstatus"],
 		"status": result["status"],
 	}
+
+
+@frappe.whitelist()
+def get_device_coverage(serial_no, company=None) -> dict:
+	"""What cover a device carries, for the intake counter.
+
+	The counter had no way to see this before taking the device in: warranty
+	status was a free choice on the form, so an advisor either guessed or asked
+	the customer to prove it. Three separate things can cover a repair and they
+	are settled by different people, so they are reported separately rather than
+	as one yes/no --
+
+	  vas       a sold VAS plan on the serial, claimed against the policy
+	  repair    our own workmanship warranty from a previous repair, our cost
+	  part      a fitted spare still inside its window, recoverable from supplier
+
+	Read-only and advisory. The Service Request runs the same lookup itself when
+	it saves, so nothing here is trusted as the authority.
+	"""
+	serial_no = (serial_no or "").strip()
+	if not serial_no:
+		return {"has_cover": False, "cover": [], "warranty_status": "No Warranty"}
+
+	frappe.has_permission("Service Request", "create", throw=True)
+
+	try:
+		from ch_item_master.ch_item_master.warranty_api import check_warranty
+	except ImportError:
+		return {"has_cover": False, "cover": [], "warranty_status": "No Warranty"}
+
+	try:
+		result = check_warranty(serial_no=serial_no, company=company) or {}
+	except frappe.PermissionError:
+		# The VAS scope guard fails closed for a serial it cannot place. For a
+		# walk-in device that is the expected answer, not a fault.
+		return {"has_cover": False, "cover": [], "warranty_status": "No Warranty"}
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"POS coverage lookup failed for {serial_no}")
+		return {"has_cover": False, "cover": [], "warranty_status": "No Warranty"}
+
+	cover = []
+	plan = result.get("covering_plan") or {}
+	if plan:
+		cover.append({
+			"kind": "vas",
+			"label": plan.get("plan_title") or plan.get("warranty_plan") or _("VAS plan"),
+			"expires_on": plan.get("end_date"),
+			"deductible": plan.get("deductible_amount"),
+			"active_plan": plan.get("name"),
+			"claim_against": _("VAS policy"),
+		})
+	for row in result.get("repair_coverage") or []:
+		cover.append({
+			"kind": row.get("coverage_type") or "repair",
+			"label": row.get("covers"),
+			"expires_on": row.get("expires_on"),
+			"days_left": row.get("days_left"),
+			"service_request": row.get("service_request"),
+			"claim_against": row.get("claim_against"),
+		})
+
+	return {
+		"has_cover": bool(result.get("warranty_covered")),
+		"warranty_status": "Under Warranty" if result.get("warranty_covered") else "No Warranty",
+		"cover": cover,
+	}

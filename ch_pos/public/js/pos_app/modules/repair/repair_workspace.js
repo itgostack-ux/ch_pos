@@ -385,7 +385,8 @@ export class RepairWorkspace {
 			render_input: true,
 		});
 		panel.find(".ch-repair-serial-link").append(
-			`<div class="ch-rep-serial-hint text-muted" style="font-size:11px;margin-top:4px"></div>`);
+			`<div class="ch-rep-serial-hint text-muted" style="font-size:11px;margin-top:4px"></div>`
+			+ `<div class="ch-rep-cover" style="margin-top:6px"></div>`);
 
 		const $serialInput = serial_field.$input;
 		const serialHint = panel.find(".ch-rep-serial-hint");
@@ -393,10 +394,54 @@ export class RepairWorkspace {
 			minChars: 3, maxItems: 8, autoFirst: false,
 		});
 
+		const coverBox = panel.find(".ch-rep-cover");
+
+		// What cover the device carries, shown before it is taken in. The
+		// counter previously had to guess warranty status or take the customer's
+		// word for it -- and the server refuses "Under Warranty" with nothing
+		// behind it, so guessing wrong blocked the intake. Three different
+		// things can cover a repair and different people settle each, so they
+		// are listed rather than collapsed into a yes/no.
+		const describeCover = (value) => {
+			const v = (value || "").trim();
+			if (!v) { coverBox.html(""); return; }
+			frappe.xcall("ch_pos.api.repair.get_device_coverage", {
+				serial_no: v, company: PosState.company || "",
+			}).then((res) => {
+				if ((serial_field.get_value() || "").trim() !== v) return;   // stale
+				const rows = (res && res.cover) || [];
+				if (!rows.length) {
+					coverBox.html(`<div class="text-muted" style="font-size:11px">`
+						+ `<i class="fa fa-info-circle"></i> `
+						+ __("No live cover found — this is a paid repair.") + `</div>`);
+					const $w = panel.find(".ch-rep-warranty");
+					if ($w.val() === "Under Warranty") $w.val("No Warranty");
+					return;
+				}
+				const chip = (r) => {
+					const kind = r.kind === "vas" ? __("VAS Claim")
+						: r.kind === "spare_warranty" ? __("Part Warranty")
+						: __("Repair Warranty");
+					const bits = [frappe.utils.escape_html(r.label || "")];
+					if (r.expires_on) bits.push(__("until {0}", [frappe.datetime.str_to_user(r.expires_on)]));
+					if (r.claim_against) bits.push(__("settled by: {0}", [frappe.utils.escape_html(r.claim_against)]));
+					return `<div style="font-size:11px;padding:4px 8px;border-radius:6px;`
+						+ `background:var(--pos-success-light,#e8f5e9);margin-bottom:4px">`
+						+ `<b>${kind}</b> — ${bits.join(" · ")}</div>`;
+				};
+				coverBox.html(rows.map(chip).join(""));
+				// Cover exists, so the honest default is Under Warranty. The
+				// Service Request re-runs this lookup on save; this only spares
+				// the advisor a choice the record has already made.
+				panel.find(".ch-rep-warranty").val("Under Warranty");
+			});
+		};
+
 		let serialTimer = null;
 		const describeSerial = (value) => {
 			const v = (value || "").trim();
-			if (!v) { serialHint.html(""); return; }
+			if (!v) { serialHint.html(""); coverBox.html(""); return; }
+			describeCover(v);
 			frappe.xcall("ch_pos.api.repair.describe_device_serial", { serial_no: v })
 				.then((info) => {
 					if ((serial_field.get_value() || "").trim() !== v) return;   // stale
