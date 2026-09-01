@@ -167,9 +167,14 @@ export class RepairWorkspace {
 								</select>
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Promise Ready By")} <span style="color:var(--pos-danger)">*</span></label>
+								<label>${__("Coupon / Voucher")}</label>
+								<div class="ch-repair-coupon-link"></div>
+								<small class="text-muted">${__("Take it now. Validity is judged on today's intake, so the customer keeps it even if billing happens after it expires.")}</small>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Estimated Delivery Date & Time")}</label>
 								<input type="datetime-local" class="form-control ch-rep-promised">
-								<small class="text-muted">${__("The actual date and time you are telling the customer. A countdown runs against this for the whole repair.")}</small>
+								<small class="text-muted">${__("The date and time you are giving the customer. A countdown runs against this for the whole repair.")}</small>
 							</div>
 						</div>
 						<div class="ch-pos-field-group" style="margin-top:var(--pos-space-sm)">
@@ -359,6 +364,17 @@ export class RepairWorkspace {
 		// warranty), otherwise it is accepted as the customer's own IMEI.
 		// Deliberately NOT a Link: the "create a new..." sentinel Link controls
 		// append has been saved as a docname on this bench before.
+		// Captured at the counter on purpose: a repair is invoiced days or weeks
+		// after the device is handed over, and a coupon judged on the invoice
+		// date would deny a customer who presented a valid one and then waited
+		// for us. The server stamps the capture and tests validity against the
+		// intake date.
+		const coupon_field = frappe.ui.form.make_control({
+			df: { fieldname: "coupon_code", fieldtype: "Link", options: "Coupon Code",
+				placeholder: __("Coupon code, if the customer has one") },
+			parent: panel.find(".ch-repair-coupon-link"),
+			render_input: true,
+		});
 		const serial_field = frappe.ui.form.make_control({
 			df: {
 				fieldname: "serial_no",
@@ -525,6 +541,7 @@ export class RepairWorkspace {
 					// 6pm means tomorrow morning to a customer and 10pm to a
 					// spreadsheet. The counter states the actual time instead.
 					promised_completion_datetime: panel.find(".ch-rep-promised").val() || "",
+					coupon_code: coupon_field.get_value() || "",
 					// Set only when the counter came from the Service Queue; the
 					// server closes that token against the new request.
 					source_token: this._intakeToken ? this._intakeToken.name : "",
@@ -557,6 +574,7 @@ export class RepairWorkspace {
 				cust_field.set_value("");
 				device_field.set_value("");
 				serial_field.set_value("");
+				coupon_field.set_value("");
 				issue_cat_field.set_value("");
 				selected_issues.length = 0;
 				_render_issue_tags();

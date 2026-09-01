@@ -122,6 +122,9 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		"warranty_status", "device_condition", "accessories_received",
 		"data_backup_disclaimer", "mode_of_service",
 		"company", "source_warehouse", "service_date", "priority",
+		# Presented at the counter; the Service Request tests its validity
+		# against the intake date so a later invoice still honours it.
+		"coupon_code",
 	):
 		if data.get(field):
 			sr.set(field, data[field])
