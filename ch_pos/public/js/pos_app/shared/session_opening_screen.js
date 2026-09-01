@@ -170,8 +170,19 @@ export class SessionOpeningScreen {
 				method: "ch_pos.api.isolation_api.get_pos_context",
 				callback: (r) => {
 					const ctx = r.message || {};
+					// Consume the one-shot store request before branching. It used
+					// to be read only inside the select_store branch, which a user
+					// with an open session never reaches -- they are auto-resumed
+					// below -- so "Switch Store" reloaded straight back into the
+					// store they were trying to leave. An explicit request has to
+					// outrank auto-resume, or it is not a switch at all. Scope is
+					// still enforced server-side by get_pos_context_for_store.
+					const resumeStore = this._consume_store_resume();
+					if (resumeStore && resumeStore !== ctx.store) {
+						this._continue_with_store(resumeStore, _done);
+						return;
+					}
 					if (ctx.status === "select_store") {
-						const resumeStore = this._consume_store_resume();
 						const stores = ctx.stores || [];
 						if (resumeStore && stores.some((s) => s.name === resumeStore)) {
 							this._continue_with_store(resumeStore, _done);

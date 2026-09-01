@@ -141,6 +141,10 @@ export class SessionControls {
 								<i class="fa fa-building-o"></i>
 								<span>${__("Switch Company")}</span>
 							</button>
+							<button class="ch-session-menu-item ch-btn-switch-store">
+								<i class="fa fa-map-marker"></i>
+								<span>${__("Switch Store")}</span>
+							</button>
 							<button class="ch-session-menu-item ch-btn-switch-user" ${(has_session && !is_locked) ? "" : "disabled"}>
 								<i class="fa fa-user"></i>
 								<span>${__("Switch Cashier")}</span>
@@ -211,6 +215,11 @@ export class SessionControls {
 			container.find(".ch-session-profile-shell").removeClass("open");
 			this._show_petty_cash();
 		});
+		container.find(".ch-btn-switch-store").on("click", () => {
+			container.find(".ch-session-profile-shell").removeClass("open");
+			this._show_switch_store();
+		});
+
 		container.find(".ch-btn-switch-company").on("click", () => {
 			container.find(".ch-session-profile-shell").removeClass("open");
 			this._show_switch_company();
@@ -261,6 +270,129 @@ export class SessionControls {
 				frappe.call({ method: "logout" }).then(leave, leave);
 			}
 		);
+	}
+
+	_reconcile_store_for_company(company) {
+		// Only acts when the active store belongs to a different company. One
+		// candidate store is switched to directly; several means the user has to
+		// choose, so hand off to the normal Switch Store dialog rather than
+		// guessing which till they meant.
+		frappe.xcall("ch_pos.api.isolation_api.get_switchable_stores").then((stores) => {
+			const list = stores || [];
+			const current = list.find((s) => s.name === PosState.store);
+			if (current && current.company === company) return;
+
+			const candidates = list.filter((s) => s.company === company);
+			if (!candidates.length) {
+				frappe.show_alert({
+					message: __("No store assigned to {0}. The till is still on {1}.", [
+						company,
+						PosState.store || __("its previous store"),
+					]),
+					indicator: "orange",
+				});
+				return;
+			}
+
+			if (candidates.length === 1) {
+				const only = candidates[0];
+				frappe.show_alert({
+					message: __("Switching to {0}…", [only.store_name || only.name]),
+					indicator: "blue",
+				});
+				try {
+					window.sessionStorage?.setItem("ch_pos_resume_store_once", only.name);
+					window.sessionStorage?.setItem("ch_pos_selected_store", only.name);
+				} catch (e) {
+					// Restricted storage: the reload re-resolves the default store.
+				}
+				setTimeout(() => window.location.reload(), 600);
+				return;
+			}
+
+			this._show_switch_store();
+		});
+	}
+
+	_show_switch_store() {
+		// Changing store is a real session change, not a cosmetic relabel: the
+		// store decides warehouse, price list, payment modes, business date and
+		// which tokens the queue shows. The switch is handed to the opening
+		// screen through its own one-shot resume channel and the page reloaded,
+		// because every workspace caches store-derived data at boot -- quietly
+		// swapping PosState underneath them is how a cart ends up priced for one
+		// store and stocked from another.
+		frappe.xcall("ch_pos.api.isolation_api.get_switchable_stores").then((stores) => {
+			const list = stores || [];
+			if (list.length < 2) {
+				frappe.show_alert({
+					message: list.length
+						? __("You are only assigned to {0}", [list[0].store_name || list[0].name])
+						: __("No stores available for your access"),
+					indicator: "orange",
+				});
+				return;
+			}
+
+			// Offer this company's stores first, but never hide the others: an
+			// area manager legitimately moves between companies, and showing the
+			// company against each name makes the choice unambiguous.
+			const company = PosState.active_company || PosState.company || "";
+			const sorted = [...list].sort((a, b) => {
+				const am = a.company === company ? 0 : 1;
+				const bm = b.company === company ? 0 : 1;
+				return am - bm || String(a.store_name || a.name).localeCompare(String(b.store_name || b.name));
+			});
+			const label = (s) => `${s.store_name || s.name} (${s.company})`;
+			const by_label = new Map(sorted.map((s) => [label(s), s]));
+			const current = sorted.find((s) => s.name === PosState.store);
+
+			const d = new frappe.ui.Dialog({
+				title: __("Switch Store"),
+				fields: [
+					{
+						fieldname: "store",
+						fieldtype: "Select",
+						label: __("Store"),
+						options: sorted.map(label).join("\n"),
+						default: current ? label(current) : label(sorted[0]),
+						reqd: 1,
+					},
+					{
+						fieldname: "note",
+						fieldtype: "HTML",
+						options: `<div class="text-muted small">${__(
+							"The POS will reload into the selected store. Your current session stays open and can be resumed by switching back."
+						)}</div>`,
+					},
+				],
+				primary_action_label: __("Switch"),
+				primary_action: (values) => {
+					const picked = by_label.get(values.store);
+					if (!picked || picked.name === PosState.store) {
+						d.hide();
+						return;
+					}
+					d.hide();
+					frappe.show_alert({
+						message: __("Switching to {0}…", [picked.store_name || picked.name]),
+						indicator: "blue",
+					});
+					// The opening screen consumes this on the next boot and
+					// re-resolves the whole context server-side, which re-checks
+					// scope. Nothing here is trusted as an entitlement.
+					try {
+						window.sessionStorage?.setItem("ch_pos_resume_store_once", picked.name);
+						window.sessionStorage?.setItem("ch_pos_selected_store", picked.name);
+					} catch (e) {
+						// Private mode / restricted storage: the reload just lands
+						// on the default store, same as before this button existed.
+					}
+					setTimeout(() => window.location.reload(), 600);
+				},
+			});
+			d.show();
+		});
 	}
 
 	_show_switch_company() {
@@ -344,6 +476,14 @@ export class SessionControls {
 					message: __("Switched to {0}", [short]),
 					indicator: "green",
 				});
+
+				// Company and store are not independent. Switching company here
+				// only ever relabelled the header, leaving the till pointed at the
+				// previous company's store -- a GoFix store showing under Bestbuy,
+				// still selling from the old warehouse and price list. Follow the
+				// company through to the store rather than leaving the two out of
+				// step.
+				this._reconcile_store_for_company(values.company);
 			},
 		});
 		d.show();

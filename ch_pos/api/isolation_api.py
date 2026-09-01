@@ -380,6 +380,45 @@ def _get_all_active_stores(company=None):
         )
     return stores
 
+@frappe.whitelist()
+def get_switchable_stores() -> list:
+    """Active stores the current user may switch the POS to.
+
+    This is the *entitlement* list, which is not what ``get_pos_context``
+    returns: that one only fills ``stores`` on the privileged ``select_store``
+    branch, and any user with an open session is auto-resumed and never reaches
+    it. POS Executive is the till-access source of truth and a user may
+    legitimately hold one row per store, so read every active row rather than
+    the single ``get_value`` lookup that resolves the *default* store.
+
+    Switching stays enforced server-side -- ``get_pos_context_for_store`` calls
+    ``assert_store_scope`` -- so this list is a convenience, not the gate.
+    """
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    user = frappe.session.user
+
+    if is_privileged_user(user):
+        return _get_all_active_stores()
+
+    entitled = sorted({
+        s for s in frappe.get_all(
+            "POS Executive",
+            filters={"user": user, "is_active": 1},
+            pluck="store",
+        ) if s
+    })
+    if not entitled:
+        return []
+
+    return frappe.get_all(
+        "CH Store",
+        filters={"name": ("in", entitled), "disabled": 0},
+        fields=["name", "store_name", "store_code", "company", "warehouse"],
+        order_by="store_name asc",
+    )
+
+
+
 # ── Lock / Unlock ────────────────────────────────────────────────────────────
 
 
