@@ -444,13 +444,19 @@ export class MaterialRequestWorkspace {
 			callback: (r) => {
 				submit_btn.prop("disabled", false);
 				if (r.message) {
-					const mr_name = r.message;
-					// Show prominent success banner
+					// A sales company returns just the request name and the request
+					// waits for a manager. A service company's request is accepted
+					// and routed on the spot, and comes back as an object saying
+					// where each line is coming from — say so, rather than telling
+					// the store to wait for an approval that already happened.
+					const res = r.message;
+					const auto = (res && typeof res === "object") ? res : null;
+					const mr_name = auto ? auto.name : res;
 					const banner = panel.find(".ch-mr-success-banner");
-					banner.html(`<i class="fa fa-check-circle"></i> ${__("Request {0} created — pending manager approval", [mr_name])}`)
+					banner.html(`<i class="fa fa-check-circle"></i> ${this._request_outcome_text(auto, mr_name)}`)
 						.css({display:"flex",alignItems:"center",gap:"8px",padding:"12px 16px",background:"#dcfce7",color:"#166534",borderRadius:"var(--pos-radius-sm)",fontWeight:600,fontSize:"var(--pos-fs-sm)",marginBottom:"12px"})
 						.show();
-					setTimeout(() => banner.fadeOut(400), 5000);
+					setTimeout(() => banner.fadeOut(auto ? 9000 : 5000), 5000);
 
 					this.request_items = [];
 					panel.find(".ch-mr-notes").val("");
@@ -471,6 +477,31 @@ export class MaterialRequestWorkspace {
 				submit_btn.prop("disabled", false);
 			},
 		});
+	}
+
+	/**
+	 * What to tell the store about the request they just made.
+	 *
+	 * Three outcomes, and the difference matters to them: it is waiting on a
+	 * person, it is on its way from a named store, or it has to be bought and
+	 * will take a supplier lead time.
+	 */
+	_request_outcome_text(auto, mr_name) {
+		if (!auto || !auto.auto_sourced) {
+			return __("Request {0} created — pending manager approval", [mr_name]);
+		}
+		if (auto.converted_to_purchase) {
+			return __("Request {0} accepted — not available anywhere in the network, released for purchase", [mr_name]);
+		}
+		const from = [...new Set((auto.transferred || []).map((t) => t.source_warehouse))];
+		const moving = from.length
+			? __("Request {0} accepted — transferring from {1}", [mr_name, from.join(", ")])
+			: __("Request {0} accepted", [mr_name]);
+		const short = (auto.purchased || []).length;
+		if (short && auto.purchase_request) {
+			return `${moving}. ${__("{0} item(s) not in the network — purchase request {1} raised", [short, auto.purchase_request])}`;
+		}
+		return moving;
 	}
 
 	// ── Draft request management ──────────────────────────────────
