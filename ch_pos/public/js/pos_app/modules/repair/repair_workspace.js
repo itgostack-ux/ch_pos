@@ -61,6 +61,18 @@ export class RepairWorkspace {
 								<input type="text" class="form-control ch-rep-phone" placeholder="${__("Phone number")}">
 							</div>
 							<div class="ch-pos-field-group">
+								<label>${__("Category")}</label>
+								<div class="ch-repair-category-link"></div>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Brand")}</label>
+								<div class="ch-repair-brand-link"></div>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Model")}</label>
+								<div class="ch-repair-model-link"></div>
+							</div>
+							<div class="ch-pos-field-group">
 								<label>${__("Device")} <span style="color:var(--pos-danger)">*</span></label>
 								<div class="ch-repair-device-link"></div>
 							</div>
@@ -275,9 +287,67 @@ export class RepairWorkspace {
 				}, 100);
 			});
 		}
-		const device_field = frappe.ui.form.make_control({
+		// A customer arriving with a dead handset cannot read out its full item
+		// name, and the advisor cannot type one they have never seen. These three
+		// narrow the device list down from what is actually visible on the
+		// counter: category, then brand, then model. All three are optional --
+		// an advisor who knows the item can still type it straight into Device.
+		// Predeclared: each handler clears the fields below it, which are defined
+		// after it. const would put those in the temporal dead zone and turn an
+		// early onchange into a ReferenceError rather than a no-op.
+		let brand_field, model_field, device_field;
+		const category_field = frappe.ui.form.make_control({
+			df: { fieldname: "ch_category", fieldtype: "Link", options: "CH Category",
+				placeholder: __("Category"),
+				get_query: () => ({ query: "ch_pos.api.item_search.search_categories" }),
+				onchange: () => {
+					// A narrower choice cannot outlive a wider one changing, or the
+					// device list silently filters to nothing and reads as missing data.
+					brand_field?.set_value("");
+					model_field?.set_value("");
+					device_field?.set_value("");
+				} },
+			parent: panel.find(".ch-repair-category-link"),
+			render_input: true,
+		});
+		brand_field = frappe.ui.form.make_control({
+			df: { fieldname: "device_brand", fieldtype: "Link", options: "Brand",
+				placeholder: __("Brand"),
+				get_query: () => ({
+					query: "ch_pos.api.item_search.search_brands",
+					filters: category_field.get_value() ? { ch_category: category_field.get_value() } : {},
+				}),
+				onchange: () => {
+					model_field?.set_value("");
+					device_field?.set_value("");
+				} },
+			parent: panel.find(".ch-repair-brand-link"),
+			render_input: true,
+		});
+		model_field = frappe.ui.form.make_control({
+			df: { fieldname: "device_model", fieldtype: "Link", options: "CH Model",
+				placeholder: __("Model"),
+				get_query: () => {
+					const filters = {};
+					if (category_field.get_value()) filters.ch_category = category_field.get_value();
+					if (brand_field.get_value()) filters.brand = brand_field.get_value();
+					return { query: "ch_pos.api.item_search.search_ch_models", filters };
+				},
+				onchange: () => device_field?.set_value("") },
+			parent: panel.find(".ch-repair-model-link"),
+			render_input: true,
+		});
+		device_field = frappe.ui.form.make_control({
 			df: { fieldname: "device_item", fieldtype: "Link", options: "Item", placeholder: __("Device model"),
-			get_query: () => ({ filters: { has_variants: 0 } }) },
+			get_query: () => {
+				// Stock is deliberately not consulted: intake records the device a
+				// customer walked in with, which the branch may well not sell.
+				const filters = { has_variants: 0 };
+				if (category_field.get_value()) filters.ch_category = category_field.get_value();
+				if (brand_field.get_value()) filters.brand = brand_field.get_value();
+				if (model_field.get_value()) filters.ch_model = model_field.get_value();
+				return { filters };
+			} },
 			parent: panel.find(".ch-repair-device-link"),
 			render_input: true,
 		});

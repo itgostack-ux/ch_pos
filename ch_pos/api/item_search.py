@@ -138,6 +138,52 @@ def autocomplete_ch_models(txt="", brand=None, ch_category=None):
 
 
 @frappe.whitelist()
+def search_ch_models(doctype, txt, searchfield, start, page_len, filters):
+    """CH Model as a Link-field query, for Desk forms.
+
+    autocomplete_ch_models above answers the POS walk-in dialog, whose Model
+    field is an Autocomplete and so takes {value, label} pairs. A Desk Link
+    field calls its query with Frappe's positional search signature and expects
+    rows, so the two cannot share one function. The filtering is the same, and
+    the second column is model_name so the dropdown shows the readable name
+    rather than CH Model's internal compound key.
+    """
+    frappe.has_permission("CH Model", "read", throw=True)
+    filters = filters or {}
+    conditions = ["disabled = 0", "(model_name LIKE %(txt)s OR name LIKE %(txt)s)"]
+    values = {
+        "txt": f"%{txt or ''}%",
+        "start": int(start or 0),
+        "page_len": int(page_len or 20),
+    }
+    if filters.get("brand"):
+        conditions.append("brand = %(brand)s")
+        values["brand"] = filters["brand"]
+    if filters.get("ch_category"):
+        # CH Model has no category column, so a model belongs to a category
+        # through the items built on it -- same reasoning as above.
+        conditions.append(
+            """EXISTS (
+                SELECT 1 FROM `tabItem` i
+                WHERE i.ch_model = `tabCH Model`.name AND i.disabled = 0
+                  AND i.ch_category = %(ch_category)s
+            )"""
+        )
+        values["ch_category"] = filters["ch_category"]
+
+    return frappe.db.sql(
+        f"""
+        SELECT name, model_name
+        FROM `tabCH Model`
+        WHERE {' AND '.join(conditions)}
+        ORDER BY model_name ASC
+        LIMIT %(page_len)s OFFSET %(start)s
+        """,
+        values,
+    )
+
+
+@frappe.whitelist()
 def search_categories(doctype, txt, searchfield, start, page_len, filters):
     """CH Category source for the walk-in dialog's Category field.
 
