@@ -109,9 +109,17 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	if data.get("contact_number"):
 		data["contact_number"] = validate_indian_phone(data["contact_number"], "Contact Phone")
 
+	# Accessories arrive as master names from the counter's multi-select. The
+	# condition blurb still wants prose, so it is rendered from the same list
+	# rather than kept as a second, separately-typed source of truth.
+	accessory_rows = data.get("accessories_list") or []
+	if isinstance(accessory_rows, str):
+		accessory_rows = [a.strip() for a in accessory_rows.split(",") if a.strip()]
+	accessories_text = data.get("accessories_received") or ", ".join(accessory_rows)
+
 	product_condition_desc, backup_info = build_condition_and_backup(
 		data.get("device_condition"),
-		data.get("accessories_received"),
+		accessories_text,
 		data.get("data_backup_disclaimer"),
 	)
 
@@ -122,6 +130,13 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		"warranty_status", "device_condition", "accessories_received",
 		"data_backup_disclaimer", "mode_of_service",
 		"company", "source_warehouse", "service_date", "priority",
+		# Mandatory on the Service Request. The device Item is not: a customer
+		# can bring something we have never sold, and the taxonomy is what makes
+		# such a ticket reportable at all.
+		"device_category", "device_brand", "device_model",
+		# Needed to test the repair; the technician cannot verify a fix on a
+		# locked handset.
+		"device_unlock_type", "device_unlock_code",
 		# Presented at the counter; the Service Request tests its validity
 		# against the intake date so a later invoice still honours it.
 		"coupon_code",
@@ -130,6 +145,11 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 			sr.set(field, data[field])
 	for line in data.get("issue_lines") or []:
 		sr.append("issue_lines", line)
+	for accessory in accessory_rows:
+		if frappe.db.exists("GoFix Accessory", accessory):
+			sr.append("accessories_list", {"accessory": accessory})
+	if accessories_text:
+		sr.accessories_received = accessories_text
 
 	# An IMEI the counter typed that is NOT one of our stock serials belongs to
 	# the customer's own device. Record it explicitly as the actual IMEI so the

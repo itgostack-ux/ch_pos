@@ -132,6 +132,7 @@ export class ServiceWorkspace {
 						<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
 							<span class="ch-svc-card-id">${sr.name}</span>
 							<span class="ch-pos-badge badge-${badge}">${sr.status || sr.decision}</span>
+							${sr.job_assignment ? `<span class="ch-pos-badge badge-info" title="${__("Repair job")}"><i class="fa fa-cog"></i> ${sr.job_status || __("Job open")}</span>` : ""}
 							${loc_chip}
 						</div>
 						<span style="font-size:var(--pos-fs-xs);color:var(--pos-text-muted)">${sr.service_date || ""}</span>
@@ -232,6 +233,13 @@ export class ServiceWorkspace {
 								<button class="btn btn-sm btn-success ch-svc-add-to-bill" data-name="${sr.name}"
 									style="border-radius:var(--pos-radius-sm);font-weight:700">
 									<i class="fa fa-cart-plus"></i> ${__("Add to Bill")}
+								</button>
+							` : ""}
+							${!sr.job_assignment && sr.status !== "Completed" ? `
+								<button class="btn btn-sm btn-outline-primary ch-svc-create-job" data-name="${sr.name}"
+									style="border-radius:var(--pos-radius-sm);font-weight:700"
+									title="${__("Open the repair job so a technician can start work")}">
+									<i class="fa fa-cog"></i> ${__("Create Job")}
 								</button>
 							` : ""}
 							<button class="btn btn-sm btn-outline-warning ch-svc-raise-exception" data-sr="${sr_payload}"
@@ -824,6 +832,26 @@ export class ServiceWorkspace {
 			});
 			d.show();
 		};
+
+		// Ported from the counter's separate pending list, which is being retired:
+		// opening the job was the one action that list had and this board did not.
+		panel.on("click", ".ch-svc-create-job", (e) => {
+			const $btn = $(e.currentTarget).prop("disabled", true);
+			const name = $btn.data("name");
+			frappe.call({
+				method: "ch_pos.api.pos_api.create_repair_job_from_pos",
+				args: { service_request: name },
+				callback: (r) => {
+					const job = r && r.message && (r.message.job_assignment || r.message.name);
+					frappe.show_alert({
+						message: job ? __("Job {0} created", [job]) : __("Repair job created"),
+						indicator: "green",
+					});
+					load_board();
+				},
+				error: () => $btn.prop("disabled", false),
+			});
+		});
 
 		panel.on("click", ".ch-svc-add-to-bill", function () {
 			const sr_name = $(this).data("name");

@@ -8507,15 +8507,20 @@ def create_buyback_assessment_with_grading(
 
     doc.insert()
 
-    # Auto-submit so the assessment is immediately usable at POS checkout
-    try:
-        doc.submit_assessment()
-    except Exception:
-        # If submit fails (e.g. no diagnostics), assessment stays Draft — still usable
-        pass
+    # Auto-submit so the assessment is immediately usable at POS checkout.
+    # The condition checks arrive here as free text in `remarks`, not as
+    # question/diagnostic rows, so submit_assessment()'s "at least one
+    # diagnostic or response" gate would always reject this path — submit
+    # directly instead. before_submit() sets status to Submitted.
+    # This used to be a try/except that swallowed every failure, which is
+    # why POS-graded assessments stayed at docstatus 0 ("Draft") with no
+    # error shown to the counter.
+    doc.submit()
 
     return {
         "name": doc.name,
+        "status": doc.status,
+        "docstatus": doc.docstatus,
         "grade": valuation["grade"],
         "estimated_price": valuation["final_price"],
         "base_price": valuation["base_price"],

@@ -61,20 +61,21 @@ export class RepairWorkspace {
 								<input type="text" class="form-control ch-rep-phone" placeholder="${__("Phone number")}">
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Category")}</label>
+								<label>${__("Category")} <span style="color:var(--pos-danger)">*</span></label>
 								<div class="ch-repair-category-link"></div>
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Brand")}</label>
+								<label>${__("Brand")} <span style="color:var(--pos-danger)">*</span></label>
 								<div class="ch-repair-brand-link"></div>
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Model")}</label>
+								<label>${__("Model")} <span style="color:var(--pos-danger)">*</span></label>
 								<div class="ch-repair-model-link"></div>
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Device")} <span style="color:var(--pos-danger)">*</span></label>
+								<label>${__("Device")}</label>
 								<div class="ch-repair-device-link"></div>
+								<small class="text-muted">${__("Optional — a customer can bring something we have never sold. Picking one fills the three above.")}</small>
 							</div>
 							<div class="ch-pos-field-group">
 								<label>${__("Serial / IMEI")}</label>
@@ -99,13 +100,35 @@ export class RepairWorkspace {
 							</div>
 							<div class="ch-pos-field-group">
 								<label>${__("Accessories Received")}</label>
-								<input type="text" class="form-control ch-rep-accessories" placeholder="${__("Charger, case, earphones...")}">
+								<div class="ch-repair-accessories-link"></div>
+							</div>
+							<div class="ch-pos-field-group">
+								<label>${__("Screen Lock")}</label>
+								<select class="form-control ch-rep-lock-type">
+									<option value="">${__("Not stated")}</option>
+									<option value="None">${__("None")}</option>
+									<option value="PIN">${__("PIN")}</option>
+									<option value="Pattern">${__("Pattern")}</option>
+									<option value="Password">${__("Password")}</option>
+									<option value="Biometric Only">${__("Biometric Only")}</option>
+								</select>
+							</div>
+							<div class="ch-pos-field-group ch-rep-lock-code-wrap" style="display:none">
+								<label>${__("Unlock PIN / Pattern / Password")}</label>
+								<input type="text" class="form-control ch-rep-lock-code" placeholder="${__("e.g. 1-2-3-6-9 for a pattern")}">
+								<small class="text-muted">${__("The technician cannot test the repair without it.")}</small>
 							</div>
 						</div>
-						<div class="ch-pos-field-group" style="margin-top:var(--pos-space-sm)">
-							<label style="display:flex;align-items:center;gap:6px;font-weight:normal">
+						<!-- Consent, not a preference: the customer is handing over a device
+						     whose contents may not survive. It is called out rather than
+						     sitting among the ordinary fields so it cannot be ticked past. -->
+						<div class="ch-pos-field-group ch-rep-disclaimer-box" style="margin-top:var(--pos-space-sm);
+							background:#fff4e5;border:1px solid #f0a202;border-left:4px solid #f0a202;
+							border-radius:var(--pos-radius-sm);padding:10px 12px">
+							<label style="display:flex;align-items:center;gap:8px;font-weight:600;color:#8a4b00;margin:0">
 								<input type="checkbox" class="ch-rep-data-disclaimer">
-								${__("Customer acknowledges data may be lost during repair")}
+								<span><i class="fa fa-exclamation-triangle"></i>
+								${__("Customer acknowledges data may be lost during repair")} <span style="color:var(--pos-danger)">*</span></span>
 							</label>
 						</div>
 
@@ -190,18 +213,10 @@ export class RepairWorkspace {
 				<!-- Success result (injected after creation) -->
 				<div class="ch-rep-result-area"></div>
 
-				<!-- Pending Repairs Pipeline -->
-				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
-					<div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
-						<span><i class="fa fa-clock-o"></i> ${__("Pending Store Repairs")}</span>
-						<button class="btn btn-xs btn-default ch-rep-refresh-pipeline" style="border-radius:var(--pos-radius-sm)">
-							<i class="fa fa-refresh"></i>
-						</button>
-					</div>
-					<div class="section-body ch-rep-pipeline">
-						<div class="text-muted text-center" style="padding:16px">${__("Loading...")}</div>
-					</div>
-				</div>
+				<!-- The pending list that used to sit here duplicated the Service
+				     section's board, which shows the same tickets with more of
+				     their story (location, transfers, billing). Opening the repair
+				     job -- the one action only this list had -- moved there with it. -->
 
 				<!-- Actions -->
 				<div class="ch-mode-actions">
@@ -371,10 +386,34 @@ export class RepairWorkspace {
 		// intake date.
 		const coupon_field = frappe.ui.form.make_control({
 			df: { fieldname: "coupon_code", fieldtype: "Link", options: "Coupon Code",
-				placeholder: __("Coupon code, if the customer has one") },
+				placeholder: __("Coupon code, if the customer has one"),
+				// A counter redeems coupons; it does not issue them. Without this
+				// the Link control offers "Create a new Coupon Code", which is an
+				// invitation to mint a discount at the till.
+				only_select: 1 },
 			parent: panel.find(".ch-repair-coupon-link"),
 			render_input: true,
 		});
+		// MultiSelectPills over the GoFix Accessory master. The old free-text box
+		// meant what the counter took custody of could not be reported on and was
+		// spelled differently by every advisor.
+		const accessories_field = frappe.ui.form.make_control({
+			df: {
+				fieldname: "accessories_list",
+				fieldtype: "MultiSelectPills",
+				placeholder: __("Charger, case, earphones..."),
+				get_data: (txt) => frappe.db.get_link_options("GoFix Accessory", txt, { is_active: 1 }),
+			},
+			parent: panel.find(".ch-repair-accessories-link"),
+			render_input: true,
+		});
+
+		panel.on("change", ".ch-rep-lock-type", function () {
+			const needsCode = ["PIN", "Pattern", "Password"].includes($(this).val());
+			panel.find(".ch-rep-lock-code-wrap").toggle(needsCode);
+			if (!needsCode) panel.find(".ch-rep-lock-code").val("");
+		});
+
 		const serial_field = frappe.ui.form.make_control({
 			df: {
 				fieldname: "serial_no",
@@ -539,11 +578,29 @@ export class RepairWorkspace {
 			const issue_desc = panel.find(".ch-rep-issue").val().trim();
 			const priority = panel.find(".ch-rep-priority").val() || "Medium";
 			const device_condition = panel.find(".ch-rep-condition").val() || "";
-			const accessories = panel.find(".ch-rep-accessories").val().trim();
+			// MultiSelectPills hands back an array of master names.
+			const accessories = accessories_field.get_values() || [];
+			const lock_type = panel.find(".ch-rep-lock-type").val() || "";
+			const lock_code = panel.find(".ch-rep-lock-code").val().trim();
 			const data_disclaimer = panel.find(".ch-rep-data-disclaimer").is(":checked") ? 1 : 0;
 
-			if (!customer || !phone || !device_item || !issue_desc) {
-				frappe.show_alert({ message: __("Customer, phone, device, and issue description are required"), indicator: "orange" });
+			const ch_category = category_field.get_value();
+			const device_brand = brand_field.get_value();
+			const device_model = model_field.get_value();
+			if (!data_disclaimer) {
+				// Flagged on its own: it is a consent the customer gives, and
+				// burying it in the generic "fields are required" line is how it
+				// gets ticked without being read.
+				panel.find(".ch-rep-disclaimer-box").css("box-shadow", "0 0 0 3px rgba(240,162,2,.35)");
+				setTimeout(() => panel.find(".ch-rep-disclaimer-box").css("box-shadow", ""), 2000);
+				frappe.show_alert({
+					message: __("The customer must acknowledge that data may be lost during repair."),
+					indicator: "orange",
+				});
+				return;
+			}
+			if (!customer || !phone || !ch_category || !device_brand || !device_model || !issue_desc) {
+				frappe.show_alert({ message: __("Customer, phone, category, brand, model and issue description are required"), indicator: "orange" });
 				return;
 			}
 			if (!assert_india_phone(panel.find(".ch-rep-phone")[0], phone)) return;
@@ -565,13 +622,18 @@ export class RepairWorkspace {
 					customer: customer,
 					contact_number: phone,
 					device_item: device_item,
+					device_category: ch_category,
+					device_brand: device_brand,
+					device_model: device_model,
 					serial_no: serial_field.get_value() || "",
 					issue_category: primary_issue,
 					issue_lines: issue_lines,
 					issue_description: issue_desc,
 					warranty_status: panel.find(".ch-rep-warranty").val() || "",
 					device_condition: device_condition,
-					accessories_received: accessories,
+					accessories_list: accessories,
+					device_unlock_type: lock_type,
+					device_unlock_code: lock_code,
 					data_backup_disclaimer: data_disclaimer,
 					mode_of_service: "Walk-in",
 					company: PosState.company || "",
@@ -620,6 +682,11 @@ export class RepairWorkspace {
 				device_field.set_value("");
 				serial_field.set_value("");
 				coupon_field.set_value("");
+				accessories_field.set_value([]);
+				panel.find(".ch-rep-lock-code-wrap").hide();
+				category_field.set_value("");
+				brand_field.set_value("");
+				model_field.set_value("");
 				issue_cat_field.set_value("");
 				selected_issues.length = 0;
 				_render_issue_tags();
@@ -763,7 +830,6 @@ export class RepairWorkspace {
 		});
 
 		// Refresh pipeline
-		panel.on("click", ".ch-rep-refresh-pipeline", () => this._load_pipeline(panel));
 
 		// Repair Closure Wizard
 		panel.on("click", ".ch-rep-collect-payment", (e) => {
@@ -857,6 +923,10 @@ export class RepairWorkspace {
 
 	_load_pipeline(panel) {
 		const el = panel.find(".ch-rep-pipeline");
+		// The pending list moved to the Service section. The loader is kept
+		// because the intake flow still calls it after creating a ticket, but
+		// with no container to fill it must not go on querying the server.
+		if (!el.length) return;
 		if (!PosState.pos_profile) {
 			el.html(`<div class="text-muted text-center" style="padding:16px">${__("No POS profile loaded")}</div>`);
 			return;
