@@ -1053,8 +1053,20 @@ export class CartService {
 			return null;
 		}
 
-		const price_list_rate = flt(item_data.price_list_rate || item_data.mrp || item_data.selling_price || 0);
-		const selling_rate = flt(item_data.selling_price || price_list_rate || 0);
+		// A zero-rate-allowed item's explicit ₹0 selling price is a real price
+		// (free gift), not "unset" — falling through || would bill it at MRP
+		// and count MRP as an unauthorized discount downstream.
+		const allow_zero_rate = cint(item_data.ch_allow_zero_rate) === 1;
+		const has_explicit_zero_price = allow_zero_rate
+			&& item_data.selling_price != null
+			&& item_data.selling_price !== ""
+			&& flt(item_data.selling_price) === 0;
+		const price_list_rate = has_explicit_zero_price
+			? 0
+			: flt(item_data.price_list_rate || item_data.mrp || item_data.selling_price || 0);
+		const selling_rate = has_explicit_zero_price
+			? 0
+			: flt(item_data.selling_price || price_list_rate || 0);
 		const commercial_discount_amount = Math.max(0, price_list_rate - selling_rate);
 		const commercial_discount_percentage = price_list_rate > 0 && commercial_discount_amount > 0
 			? flt(commercial_discount_amount / price_list_rate * 100)
@@ -1183,6 +1195,12 @@ export class CartService {
 							if (added) {
 								added.qty = 1;
 								added.rate = 0;
+								// Free means free end to end: leaving price_list_rate
+								// at MRP made the ₹0 read as an unauthorized discount
+								// (spurious manager approvals, consumed caps).
+								added.price_list_rate = 0;
+								added.discount_amount = 0;
+								added.discount_percentage = 0;
 								added.is_free_bundle_item = true;
 								added.bundle_parent = item_data.item_code;
 							}
@@ -1594,7 +1612,18 @@ export class CartService {
 		}
 
 		const original_rate = flt(data.original_value || cart_item.price_list_rate || cart_item.mrp || cart_item.rate || 0);
-		const resolved_rate = flt(data.resolution_value || data.requested_value || cart_item.rate || 0);
+		// On an approved request resolution_value is authoritative — approve()
+		// always writes it, and an explicit ₹0 is a granted full waiver. On a
+		// pending request a 0 is just the Currency default and must not price
+		// the line; the cashier's requested value applies provisionally.
+		const exc_status = String(data.status || "");
+		const exc_approved = exc_status === "Approved" || exc_status === "Auto-Approved";
+		const has_authoritative_resolution = data.resolution_value != null
+			&& data.resolution_value !== ""
+			&& (exc_approved || flt(data.resolution_value) !== 0);
+		const resolved_rate = has_authoritative_resolution
+			? flt(data.resolution_value)
+			: flt(data.requested_value || cart_item.rate || 0);
 		if (original_rate <= 0 || resolved_rate < 0) return { applied: false, reason: "bad_values" };
 		if (cart_item.pre_exception_rate == null) {
 			cart_item.pre_exception_rate = flt(cart_item.rate || 0);

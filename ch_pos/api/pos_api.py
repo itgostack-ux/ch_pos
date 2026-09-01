@@ -3386,8 +3386,15 @@ def create_pos_invoice(
                     frappe.PermissionError)
             if not _row_exc_doc.customer or _row_exc_doc.customer == customer:
                 item_exception_original = flt(_row_exc_doc.original_value or item_exception_original)
-                item_exception_final = flt(
-                    _row_exc_doc.resolution_value or _row_exc_doc.requested_value or item_exception_final)
+                # The exception here is always Approved (is_valid() gated), and
+                # approve() always writes resolution_value — so an explicit 0 is
+                # a granted full waiver, not "unset". Only a NULL (legacy row)
+                # falls back to the requested value.
+                _resolved_value = _row_exc_doc.resolution_value
+                if _resolved_value is None:
+                    _resolved_value = _row_exc_doc.requested_value
+                if _resolved_value is not None:
+                    item_exception_final = flt(_resolved_value)
 
         effective_rate = item_exception_final
         if uploaded_amount and item_qty:
