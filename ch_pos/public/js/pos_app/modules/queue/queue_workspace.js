@@ -491,8 +491,39 @@ export class QueueWorkspace {
 	 * serves both the counter and the queue.
 	 */
 	_openIntake(token) {
-		PosState.repairIntakeToken = token;
-		EventBus.emit("mode:set", "repair");
-		EventBus.emit("mode:switch", "repair");
+		// Hand the token to the repair intake — but a walk-in from a NEW customer
+		// gets the customer created FIRST, exactly like the retail Start-Billing
+		// flow above, so the repair ticket is linked to a real Customer instead
+		// of a bare name string (which is how duplicate Customers get made).
+		const proceed = (customer) => {
+			// Carry the resolved/created customer across so the intake sets it
+			// directly instead of re-guessing from the phone.
+			token._resolved_customer = customer || "";
+			PosState.repairIntakeToken = token;
+			EventBus.emit("mode:set", "repair");
+			EventBus.emit("mode:switch", "repair");
+		};
+
+		this._resolve_customer(token).then((customer) => {
+			if (customer) {
+				proceed(customer);
+				return;
+			}
+			// New customer: open the creation form first, pre-filled with the
+			// name and phone the walk-in already captured. Only after the
+			// customer exists do we move to the repair page.
+			if (token.customer_phone && window.ch_open_new_customer_dialog) {
+				window.ch_open_new_customer_dialog({
+					company: PosState.company,
+					prefill_name: token.customer_name || "",
+					prefill_mobile: token.customer_phone || "",
+					on_success: (name) => proceed(name),
+					on_use_existing: (existing) => proceed(existing),
+				});
+				return;
+			}
+			// No phone to identify or create against — open intake as-is.
+			proceed(null);
+		}).catch(() => proceed(null));
 	}
 }

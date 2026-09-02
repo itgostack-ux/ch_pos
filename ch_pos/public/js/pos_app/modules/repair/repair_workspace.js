@@ -728,12 +728,51 @@ export class RepairWorkspace {
 			// catalogue item is chosen here if the counter can identify it.
 			const deviceText = [intakeToken.device_brand, intakeToken.device_model]
 				.filter(Boolean).join(" ") || intakeToken.device_type || "";
-			if (intakeToken.customer_phone) {
+			// Customer: the queue already resolved (or just created) it, so use
+			// that directly instead of re-guessing. Fall back to the phone
+			// lookup only when the queue handed us nothing.
+			if (intakeToken._resolved_customer) {
+				cust_field.set_value(intakeToken._resolved_customer);
+			} else if (intakeToken.customer_phone) {
 				frappe.xcall("ch_pos.api.token_api.lookup_walkin_customer", {
 					phone: intakeToken.customer_phone,
 				}).then((m) => {
 					if (m && m.customer) cust_field.set_value(m.customer);
 				}).catch(() => {});
+			}
+
+			// Device: carry Category / Brand / Model chosen on the Log Walk-in
+			// screen. category_interest and device_brand are already master
+			// links; device_model is the readable name and is resolved to its
+			// CH Model. Set them in order — each field's onchange clears the
+			// ones below it, so category first, then brand, then model, with a
+			// short gap so each cascade-clear settles before the next set.
+			const _tkCat = intakeToken.category_interest;
+			const _tkBrand = intakeToken.device_brand;
+			const _tkModelName = intakeToken.device_model;
+			const _setTokenModel = () => {
+				if (!_tkModelName) return;
+				frappe.xcall("ch_pos.api.item_search.resolve_ch_model_by_name", {
+					model_name: _tkModelName,
+					brand: _tkBrand || null,
+					ch_category: _tkCat || null,
+				}).then((chModel) => {
+					if (chModel) model_field.set_value(chModel);
+				}).catch(() => {});
+			};
+			const _setTokenBrand = () => {
+				if (_tkBrand) {
+					brand_field.set_value(_tkBrand);
+					setTimeout(_setTokenModel, 150);
+				} else {
+					_setTokenModel();
+				}
+			};
+			if (_tkCat) {
+				category_field.set_value(_tkCat);
+				setTimeout(_setTokenBrand, 150);
+			} else {
+				_setTokenBrand();
 			}
 			panel.find(".ch-mode-header").after(`
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md);border-left:3px solid var(--pos-primary,#6366f1)">

@@ -1918,6 +1918,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                   device_type, device_brand, device_model,
                   issue_category, issue_description, status,
                   visit_purpose, category_interest, brand_interest,
+                  linked_customer,
                   budget_range, sales_executive, engaged_at,
                   technician, creation
            FROM `tabPOS Kiosk Token`

@@ -213,3 +213,38 @@ def search_categories(doctype, txt, searchfield, start, page_len, filters):
         {"txt": f"%{txt or ''}%", "start": start, "page_len": page_len},
     )
     return [(name, "") for (name,) in rows]
+
+
+@frappe.whitelist()
+def resolve_ch_model_by_name(model_name: str, brand: str = None, ch_category: str = None) -> str:
+	"""Best-effort map a readable model name to its CH Model docname.
+
+	The Log Walk-in screen stores the model as its readable ``model_name``
+	("iPhone 12 Pro Max"), not the CH Model compound key, so a repair intake
+	opened from that walk-in cannot set its CH Model Link field directly. This
+	resolves the name back to a docname so the field can be pre-filled; it
+	returns "" (never raises) when there is no confident single match, leaving
+	the counter to pick manually rather than guessing wrong.
+	"""
+	model_name = (model_name or "").strip()
+	if not model_name:
+		return ""
+	frappe.has_permission("CH Model", "read", throw=True)
+
+	# An exact model_name match is the only one trusted for an automatic pick;
+	# narrow by brand first (two brands can share a model name), then category.
+	def _match(extra_filters):
+		filters = {"model_name": model_name, "disabled": 0}
+		filters.update(extra_filters)
+		rows = frappe.get_all("CH Model", filters=filters, pluck="name",
+		                      limit_page_length=2)
+		return rows[0] if len(rows) == 1 else ""
+
+	if brand:
+		hit = _match({"brand": brand})
+		if hit:
+			return hit
+	# The direct model name itself may already be the docname on some sites.
+	if frappe.db.exists("CH Model", {"name": model_name, "disabled": 0}):
+		return model_name
+	return _match({})  # unique name across all brands, else ""
