@@ -7,6 +7,7 @@ import hashlib
 import re
 
 import frappe
+from ch_erp15.warranty import normalize as _normalize_warranty
 from frappe import _
 from frappe.model.naming import getseries
 from frappe.rate_limiter import rate_limit
@@ -2130,7 +2131,7 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
         "brand": token.device_brand,
         "device_condition": device_condition,
         "accessories_received": accessories,
-        "warranty_status": warranty_status,
+        "warranty_status": _normalize_warranty(warranty_status),
         "issue_category": issue_cat,
         "issue_description": description,
         "data_backup_disclaimer": data_disclaimer,

@@ -150,6 +150,12 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	):
 		if data.get(field):
 			sr.set(field, data[field])
+	# Warranty status can arrive from any client vocabulary; coerce it to the
+	# repair/sales master so the Service Request Select never rejects a value a
+	# buyback/customer-device screen might send.
+	if sr.get("warranty_status"):
+		from ch_erp15.warranty import normalize as _normalize_warranty
+		sr.warranty_status = _normalize_warranty(sr.warranty_status)
 	for line in data.get("issue_lines") or []:
 		sr.append("issue_lines", line)
 	for accessory in accessory_rows:
@@ -348,8 +354,16 @@ def get_device_coverage(serial_no, company=None) -> dict:
 			"claim_against": row.get("claim_against"),
 		})
 
+	# has_cover surfaces the advisory panel whenever ANY cover exists — a VAS
+	# plan, or our own prior repair / fitted part still in window — so the
+	# counter can see a returning device might qualify for rework. It is NOT a
+	# warranty grant: warranty_status stays "Under Warranty" only for a VAS /
+	# device warranty the API actually confirmed, and the Service Request re-runs
+	# the lookup as the authority. Prior-repair cover alone no longer flips the
+	# device to Under Warranty (that over-granted free repairs for unrelated
+	# faults) — a same-part rework is confirmed later, at estimate time.
 	return {
-		"has_cover": bool(result.get("warranty_covered")),
+		"has_cover": bool(result.get("warranty_covered") or cover),
 		"warranty_status": "Under Warranty" if result.get("warranty_covered") else "No Warranty",
 		"cover": cover,
 	}

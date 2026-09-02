@@ -122,10 +122,25 @@ def get_repair_consumable_item_groups() -> list[str]:
 
 
 def has_app_permission(user: str | None = None) -> bool:
-	user = user or frappe.session.user
-	if not user or user == "Guest":
+	# This is a Workspace ``has_permission`` hook — it runs for every user during
+	# desk boot (load_desktop_data). If it RAISES, boot fails with
+	# SessionBootFailed and the user cannot log in at all; only Administrator /
+	# System Manager escape, because has_configured_roles short-circuits them
+	# before any role lookup. So it must fail CLOSED, never loud: any internal
+	# error hides the workspace (safe) instead of bricking login (catastrophic).
+	# The classic trigger was a roles field that changed from free text to a
+	# Table MultiSelect — old code parsed the resulting list as a string.
+	try:
+		user = user or frappe.session.user
+		if not user or user == "Guest":
+			return False
+		return has_configured_roles("app_access_roles", user=user)
+	except Exception:
+		frappe.log_error(
+			title="ch_pos has_app_permission failed — denying, not crashing boot",
+			message=frappe.get_traceback(),
+		)
 		return False
-	return has_configured_roles("app_access_roles", user=user)
 
 
 def has_configured_roles(fieldname: str, defaults=(), user: str | None = None) -> bool:

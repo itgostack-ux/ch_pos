@@ -8292,6 +8292,11 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     inv.custom_gofix_service_request = service_request
     if sr.service_order:
         inv.custom_gofix_service_order = sr.service_order
+    # Carry the ticket's coupon onto the invoice so increment_coupon_usage
+    # (on_submit) records the redemption — otherwise a single-use voucher used
+    # on a repair billed at the POS is never counted and can be reused.
+    if sr.get("coupon_code") and inv.meta.get_field("custom_coupon_code"):
+        inv.custom_coupon_code = sr.coupon_code
 
     if service_charge > 0:
         inv.append("items", {
@@ -12269,7 +12274,8 @@ def create_quick_job_card(customer, contact_number, device_item,
     sr.serial_no = serial_no or ""
     sr.issue_category = issue_category or ""
     sr.issue_description = issue_description
-    sr.warranty_status = warranty_status or ""
+    from ch_erp15.warranty import normalize as _normalize_warranty
+    sr.warranty_status = _normalize_warranty(warranty_status)
     sr.device_condition = device_condition or ""
     sr.accessories_received = accessories_received or ""
     sr.data_backup_disclaimer = cint(data_backup_disclaimer)

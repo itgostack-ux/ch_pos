@@ -164,12 +164,13 @@ export class RepairWorkspace {
 								</div>
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Warranty Status")}</label>
-								<select class="form-control ch-rep-warranty">
-									<option value="">${__("Select warranty status")}</option>
+								<label>${__("Warranty Status")} <span class="text-muted" style="font-weight:400;font-size:10px">(${__("auto-detected")})</span></label>
+								<select class="form-control ch-rep-warranty" disabled
+									title="${__("Determined from the IMEI — the Service Request confirms cover on save. VAS plans are settled through the claims flow, not on this repair.")}"
+									style="background:var(--pos-bg-muted,#f5f5f5);cursor:not-allowed">
 									<option value="Under Warranty">${__("Under Warranty")}</option>
 									<option value="Out of Warranty">${__("Out of Warranty")}</option>
-									<option value="No Warranty">${__("No Warranty")}</option>
+									<option value="No Warranty" selected>${__("No Warranty")}</option>
 								</select>
 							</div>
 						</div>
@@ -453,8 +454,7 @@ export class RepairWorkspace {
 					coverBox.html(`<div class="text-muted" style="font-size:11px">`
 						+ `<i class="fa fa-info-circle"></i> `
 						+ __("No live cover found — this is a paid repair.") + `</div>`);
-					const $w = panel.find(".ch-rep-warranty");
-					if ($w.val() === "Under Warranty") $w.val("No Warranty");
+					panel.find(".ch-rep-warranty").val(res.warranty_status || "No Warranty");
 					return;
 				}
 				const chip = (r) => {
@@ -469,10 +469,18 @@ export class RepairWorkspace {
 						+ `<b>${kind}</b> — ${bits.join(" · ")}</div>`;
 				};
 				coverBox.html(rows.map(chip).join(""));
-				// Cover exists, so the honest default is Under Warranty. The
-				// Service Request re-runs this lookup on save; this only spares
-				// the advisor a choice the record has already made.
-				panel.find(".ch-rep-warranty").val("Under Warranty");
+				// The chips above are ADVISORY — they show every cover found (a
+				// VAS plan, our prior workmanship, a fitted part still in window)
+				// so the counter can see a returning device might qualify for
+				// rework. But the warranty status itself reflects only what the
+				// API actually grants now: "Under Warranty" for a live VAS /
+				// device warranty, otherwise "No Warranty". Prior-repair cover no
+				// longer blanket-flips the device to Under Warranty (that quoted
+				// unrelated faults free); a same-part rework is confirmed later,
+				// at estimate time, and zeroed then. VAS is settled via the
+				// claims flow, not on this repair. The Service Request re-runs
+				// this lookup on save and is the authority.
+				panel.find(".ch-rep-warranty").val(res.warranty_status || "No Warranty");
 			});
 		};
 
