@@ -8316,10 +8316,52 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     if getattr(profile, "taxes_and_charges", None):
         inv.taxes_and_charges = profile.taxes_and_charges
 
+    # The POS-direct-submit workflow transition fires only when the invoice
+    # carries the live POS session (condition: doc.custom_ch_pos_session) --
+    # stamp it exactly as the sale and payment-collection paths do.
+    if hasattr(inv, "custom_ch_pos_session"):
+        from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+        _active = get_active_session(pos_profile) or {}
+        if _active.get("name"):
+            inv.custom_ch_pos_session = _active.get("name")
+
+    # Stamp the billing store. Beyond being correct data, a BLANK set_warehouse
+    # is fatal under strict user permissions: every scoped cashier carries
+    # Warehouse User Permissions, and frappe denies a doc whose UP-controlled
+    # link is empty -- so repair closure worked for Administrator and nobody else.
+    inv.set_warehouse = profile.warehouse
+    # Same strict-mode rule applies to each ITEM row's warehouse: frappe's user
+    # permission check walks child tables too, and a blank child link denies
+    # the whole document. Stock moves via the submitted SPU, so stamping the
+    # billing store here changes no stock behaviour (update_stock is off).
+    for row in inv.items:
+        if not row.warehouse:
+            row.warehouse = profile.warehouse
+
     inv.insert()
-    # BRD POS exception: POS invoices bypass Maker-Checker (BRD Section 3.1)
+
+    # The customer pays the CONFIRMED ESTIMATE. A company-default GST template
+    # is auto-applied tax-EXCLUSIVE, silently inflating the quoted total by the
+    # GST rate -- and the payment rows (which equal the quote) then fail the
+    # partial-payment guard, so closure was impossible for any GoFix till. On a
+    # B2C repair bill the GST is carved out of the quoted price, not stacked on
+    # top of it: flip the auto-applied rows to inclusive so grand total equals
+    # the quote and the GST splits out inside it.
+    if inv.taxes and abs(flt(inv.grand_total) - payment_total) > 0.01:
+        for _tax in inv.taxes:
+            _tax.included_in_print_rate = 1
+        inv.calculate_taxes_and_totals()
+        inv.save()
+
+    # BRD POS exception (Section 3.1): POS invoices bypass Maker-Checker. The
+    # main POS sale path does exactly this -- state stamped and validate
+    # skipped -- otherwise the workflow engine reads the stamp as an
+    # unauthorised Draft->Approved transition by the cashier.
     inv.workflow_state = "Approved"
-    inv.custom_si_approval_state = "Approved"
+    if hasattr(inv, "custom_si_approval_state"):
+        inv.custom_si_approval_state = "Approved"
+    inv.flags.ignore_validate = True
+    inv.flags.ignore_validate_update_after_submit = True
     inv.submit()
 
     # 5 — Stock authority is the submitted Spare Parts Usage record.
@@ -8332,7 +8374,10 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
 
     # 6 — Mark SR closed
     sr_updates = {"service_invoice": inv.name, "decision": "Invoiced"}
-    if int(delivery_ack):
+    if int(delivery_ack) and frappe.get_meta("Service Request").has_field("delivery_mode"):
+        # Service Request never had this field -- writing it unconditionally
+        # crashed EVERY closure with a delivery acknowledgement ("Unknown
+        # column 'delivery_mode'"), i.e. every real handover.
         sr_updates["delivery_mode"] = "Walk-in"
     if delivery_note:
         sr_updates["customer_remarks"] = delivery_note
