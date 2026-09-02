@@ -78,3 +78,79 @@ def ensure_scope_store_grant(user: str, store: str) -> None:
 
     doc.flags.ignore_permissions = True
     doc.save(ignore_permissions=True)
+
+
+@frappe.whitelist(methods=["POST"])
+def provision_cashier(user, stores, role="Executive", employee=None, company=None):
+    """Onboard a cashier to one or more stores in a single manager action.
+
+    POS Executive is the till-authority master (SAP cashier-store assignment),
+    deliberately separate from CH User Scope's org visibility — so cashier
+    stores are designated explicitly here, never inferred from a company-wide
+    back-office scope. This just removes the friction of adding the rows one by
+    one: idempotent, it creates the row where missing and re-activates a
+    dormant one, and reports exactly what it touched. Whoever runs it must
+    themselves hold POS Executive write.
+
+    ``stores``: a store name, a JSON array, or a comma/newline separated list.
+    """
+    frappe.has_permission("POS Executive", "create", throw=True)
+
+    if isinstance(stores, str):
+        try:
+            parsed = frappe.parse_json(stores)
+            store_list = parsed if isinstance(parsed, list) else [parsed]
+        except Exception:
+            store_list = [s.strip() for s in stores.replace("\n", ",").split(",")]
+    else:
+        store_list = list(stores or [])
+    store_list = [s for s in (str(x).strip() for x in store_list) if s]
+    if not store_list:
+        frappe.throw(frappe._("Name at least one store."))
+
+    if not frappe.db.get_value("User", user, "enabled"):
+        frappe.throw(frappe._("User {0} is disabled — enable the account before assigning tills.").format(user))
+
+    executive_name = frappe.db.get_value("User", user, "full_name") or user
+    created, reactivated, existing, skipped = [], [], [], []
+
+    for store in store_list:
+        if not frappe.db.exists("CH Store", store):
+            skipped.append({"store": store, "reason": "no such CH Store"})
+            continue
+        store_company = company or frappe.db.get_value("CH Store", store, "company")
+        row = frappe.db.get_value(
+            "POS Executive",
+            {"user": user, "store": store, "company": store_company},
+            ["name", "is_active"],
+            as_dict=True,
+        )
+        if row:
+            if row.is_active:
+                existing.append(row.name)
+            else:
+                frappe.db.set_value("POS Executive", row.name, "is_active", 1)
+                reactivated.append(row.name)
+            continue
+        doc = frappe.new_doc("POS Executive")
+        doc.update({
+            "executive_name": executive_name,
+            "user": user,
+            "store": store,
+            "company": store_company,
+            "role": role,
+            "is_active": 1,
+        })
+        if employee:
+            doc.employee = employee
+        doc.flags.ignore_permissions = True
+        doc.insert(ignore_permissions=True)
+        created.append(doc.name)
+
+    return {
+        "user": user,
+        "created": created,
+        "reactivated": reactivated,
+        "already_active": existing,
+        "skipped": skipped,
+    }

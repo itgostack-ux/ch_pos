@@ -275,9 +275,12 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
             ["name", "pos_profile", "user"],
             as_dict=True)
         if unclosed:
+            same_cashier = unclosed.user == frappe.session.user
             frappe.throw(
-                _("Session {0} (Profile: {1}, Cashier: {2}) is still active. Close it before opening a new one.").format(
-                    unclosed.name, unclosed.pos_profile, unclosed.user
+                _("Session {0} (Profile: {1}, Cashier: {2}) is still active. Settle and close it before opening a new one{3}.").format(
+                    unclosed.name, unclosed.pos_profile, unclosed.user,
+                    _(" — a supervisor can release a dangling assignment with release_cashier_assignment")
+                    if same_cashier else "",
                 )
             )
 
@@ -872,6 +875,73 @@ def override_business_date(store, new_date, reason, manager_pin) -> dict:
     return {
         "business_date": str(result.get("business_date")),
         "set_by": pin_result["name"],
+    }
+
+
+@frappe.whitelist(methods=["POST"])
+def release_cashier_assignment(user, manager_pin, store=None) -> dict:
+    """Free a cashier who is still assigned to a till they never closed.
+
+    Oracle Xstore / SAP POS parity: a cashier runs one till at a time, and a
+    supervisor — not the system — resolves a conflict. When a shift ends
+    abnormally (a crash, a walk-off) the prior POS Opening Entry stays open and
+    the core POS gate refuses the cashier's next till with "assigned to another
+    POS". This is the supervisor override: a manager PIN closes the dangling
+    assignment so the cashier can start fresh. It is explicit, audited, and it
+    NEVER disables the person's account — till access is governed by the POS
+    Executive master, not by the login. A disabled account is surfaced as a
+    clear instruction, not silently worked around.
+
+    Deliberately narrow: it closes the *assignment* (POS Opening Entry) so the
+    core cashier gate clears. It does NOT force-close a submitted CH POS
+    Session with unsettled cash — that still routes through settlement, so no
+    day's takings are skipped.
+    """
+    frappe.has_permission("Sales Invoice", "create", throw=True)
+
+    pin_store = store or frappe.db.get_value(
+        "POS Executive", {"user": user, "is_active": 1}, "store"
+    )
+    if not pin_store:
+        frappe.throw(_("No active POS Executive store for {0} to authorise against.").format(user))
+    assert_store_scope(store=pin_store, company=frappe.db.get_value("CH Store", pin_store, "company"))
+
+    pin_result = verify_manager_pin(
+        manager_pin, store=pin_store, permission="can_force_close_session"
+    )
+    if not pin_result.get("valid"):
+        frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+
+    if not frappe.db.get_value("User", user, "enabled"):
+        # SAP behaviour: the person is never SILENTLY locked out. Make the
+        # disabled account visible and actionable rather than pretending the
+        # release worked.
+        frappe.throw(
+            _("Cashier account {0} is disabled. A system administrator must re-enable "
+              "the account; releasing the till will not restore login.").format(user),
+            title=_("Account Disabled"),
+        )
+
+    released = []
+    for poe in frappe.get_all(
+        "POS Opening Entry",
+        filters={"user": user, "status": "Open", "docstatus": 1},
+        fields=["name"],
+    ):
+        doc = frappe.get_doc("POS Opening Entry", poe.name)
+        doc.db_set("status", "Closed", update_modified=True)
+        doc.add_comment(
+            "Info",
+            _("Assignment released by {0} (supervisor override) so the cashier can open a new till.").format(
+                pin_result.get("name") or pin_result.get("user")
+            ),
+        )
+        released.append(poe.name)
+
+    return {
+        "user": user,
+        "released_assignments": released,
+        "released_by": pin_result.get("name"),
     }
 
 
