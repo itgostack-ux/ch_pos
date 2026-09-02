@@ -8251,14 +8251,27 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
             else:
                 frappe.throw(frappe._("Spare part item '{0}' not found. Please use a valid item code or name.").format(code))
 
-    repair_item = frappe.db.get_value("Item", {"item_name": "Repair Service", "disabled": 0}, "name")
+    # Bill the repair AS the repair. The old fallback chain ended at "any
+    # non-stock item in the Services group", which once billed a VAS plan item
+    # as the repair line -- wrong item, wrong HSN/SAC and wrong income line on
+    # the customer's invoice. Prefer what the Service Order actually sold (the
+    # solution's own service item), then the company's bound default.
+    repair_item = None
+    if sr.service_order:
+        so_item = frappe.db.get_value(
+            "Sales Order Item", {"parent": sr.service_order}, "item_code")
+        if so_item and not frappe.db.get_value("Item", so_item, "disabled"):
+            repair_item = so_item
+    if not repair_item and frappe.db.has_column("Company", "gofix_default_service_item"):
+        default_item = frappe.get_cached_value(
+            "Company", profile.company, "gofix_default_service_item")
+        if default_item and not frappe.db.get_value("Item", default_item, "disabled"):
+            repair_item = default_item
     if not repair_item:
-        # Try "Repair Services" item group (actual group in this system)
+        repair_item = frappe.db.get_value("Item", {"item_name": "Repair Service", "disabled": 0}, "name")
+    if not repair_item:
         repair_item = frappe.db.get_value("Item",
             {"item_group": "Repair Services", "disabled": 0, "is_stock_item": 0}, "name")
-    if not repair_item:
-        repair_item = frappe.db.get_value("Item",
-            {"item_group": "Services", "disabled": 0, "is_stock_item": 0}, "name")
     if not repair_item:
         frappe.throw(frappe._("No service item found. Create a non-stock item in the 'Repair Services' group."))
 

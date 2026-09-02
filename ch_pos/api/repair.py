@@ -140,6 +140,13 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		# Presented at the counter; the Service Request tests its validity
 		# against the intake date so a later invoice still honours it.
 		"coupon_code",
+		# Every one of these was silently DROPPED before -- the columns exist on
+		# the Service Request, the counter filled them, and the row stayed NULL.
+		# advance_amount is customer money: losing it silently is not a display
+		# bug, it is an unrecorded liability.
+		"email", "alternate_contact", "password", "pattern",
+		"customer_remarks", "internal_remarks", "referral_code",
+		"advance_amount", "estimated_cost",
 	):
 		if data.get(field):
 			sr.set(field, data[field])
