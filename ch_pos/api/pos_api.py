@@ -12333,6 +12333,8 @@ def get_central_warehouses(company=None) -> dict:
             "company": company,
             "disabled": 0,
             "is_group": 0,
+            # GoFix custody bins are internal-only, never a stock source.
+            "name": ("not like", "%-CustomerDevice%"),
         },
         fields=["name", "warehouse_name"],
         order_by="warehouse_name")
