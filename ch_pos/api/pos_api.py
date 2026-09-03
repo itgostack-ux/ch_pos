@@ -3397,7 +3397,11 @@ def create_pos_invoice(
                     item_exception_final = flt(_resolved_value)
 
         effective_rate = item_exception_final
-        if uploaded_amount and item_qty:
+        # An approved exception is the server-authorized price for this line.
+        # Never let a cart's stale/tampered amount overwrite it: doing so left
+        # the request visibly Approved in POS while the invoice retained the
+        # pre-approval amount.
+        if uploaded_amount and item_qty and not _row_exc_doc:
             effective_rate = flt(uploaded_amount / item_qty)
 
         is_free_bundle_row = cint(item.get("is_free_bundle_item"))
@@ -3416,7 +3420,8 @@ def create_pos_invoice(
             remaining_qty = flt(validated_contract.qty) - flt(validated_contract.delivered_qty)
             if item_qty <= 0 or item_qty > remaining_qty + 0.005:
                 frappe.throw(_("Pre-booking quantity exceeds the remaining Sales Order quantity."))
-            effective_rate = flt(validated_contract.rate)
+            if not _row_exc_doc:
+                effective_rate = flt(validated_contract.rate)
 
         row = {
             "item_code": item.get("item_code"),

@@ -538,6 +538,7 @@ export class CartService {
 		}
 		let changed = false;
 		let just_approved = false;
+		let approved_but_unmatched = false;
 
 		PosState.cart.forEach((item) => {
 			if ((item.exception_request || "") !== exception_name) return;
@@ -552,10 +553,24 @@ export class CartService {
 
 			if ((status === "Approved" || status === "Auto-Approved") && data.valid) {
 				item.exception_request_data = data;
-				this._apply_exception_pricing_to_item(item, data);
-				changed = true;
+				const applied = this._apply_exception_pricing_to_item(item, data);
+				if (applied.applied) {
+					changed = true;
+				} else {
+					approved_but_unmatched = true;
+				}
 			}
 		});
+
+		if (approved_but_unmatched) {
+			// An approval must identify this exact cart line. Leaving the badge
+			// as Approved while retaining the original amount misleads the
+			// cashier and lets an incorrectly-entered IMEI look consumable.
+			this._invalidate_exception_link(exception_name, {
+				status: "Not applicable to this cart line",
+			});
+			return;
+		}
 
 		if (status === "Approved" || status === "Auto-Approved") {
 			PosState.exception_request = exception_name;
