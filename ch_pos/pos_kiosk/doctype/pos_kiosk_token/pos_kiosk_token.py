@@ -1,6 +1,7 @@
 import hashlib
 
 import frappe
+from frappe import _
 from frappe.model.document import Document
 from frappe.utils import (
     add_to_date,
@@ -15,6 +16,26 @@ from frappe.utils import (
 
 from buyback.utils import validate_indian_phone
 from ch_pos.config import get_control_setting
+
+# Statuses after which a token can no longer move. Shared by the API layer,
+# the tablet queue position and the quick-intake job-card handoff.
+TERMINAL_STATUSES = ("Completed", "Cancelled", "Converted", "Dropped", "Expired")
+
+
+def _gofix_int_setting(fieldname: str, default: int) -> int:
+    """Read a GoFix Settings integer when gofix is installed, else the default.
+
+    The self check-in rules (max symptoms per token) are GoFix's business rule,
+    so they stay in GoFix Settings even though the token itself lives here.
+    """
+    try:
+        from gofix.config import get_int_setting
+    except ImportError:
+        return default
+    try:
+        return get_int_setting(fieldname, default)
+    except Exception:
+        return default
 
 
 class POSKioskToken(Document):
@@ -35,24 +56,26 @@ class POSKioskToken(Document):
             row.amount = flt(row.qty or 0) * flt(row.rate or 0)
         self._calculate_total()
         self._calculate_handling_duration()
+        self._validate_symptom_rules()
 
     def before_submit(self):
         if not self.expires_at:
             self.expires_at = add_to_date(now_datetime(), minutes=30)
 
     def on_cancel(self):
-        """Handle token cancellation — expire the token."""
-        if self.status == "Active":
-            self.db_set("status", "Expired")
+        """Desk-cancel of a submitted token closes it as Cancelled."""
+        before = self.status
+        if self.status not in TERMINAL_STATUSES:
+            self.db_set("status", "Cancelled")
 
         try:
             from ch_pos.audit import log_business_event
             log_business_event(
-                event_type="Token Expiry",
+                event_type="Token Cancelled",
                 ref_doctype="POS Kiosk Token", ref_name=self.name,
-                before="Active",
-                after="Expired",
-                remarks=f"Token cancelled for customer {self.get('customer', '')}",
+                before=before,
+                after="Cancelled",
+                remarks=f"Token cancelled for customer {self.get('customer_name', '')}",
                 company=self.get("company", ""),
             )
         except Exception:
@@ -67,6 +90,19 @@ class POSKioskToken(Document):
         end = get_datetime(self.exit_at) if self.exit_at else None
         if end and start:
             self.handling_duration = max(0, cint(time_diff_in_seconds(end, start) / 60))
+
+    def _validate_symptom_rules(self):
+        """Self check-in rules: bounded symptom count; expert-check is exclusive."""
+        rows = list(self.get("symptoms") or [])
+        if not rows:
+            return
+        max_issues = _gofix_int_setting("max_selected_issues", 3)
+        if len(rows) > max_issues:
+            frappe.throw(
+                _("At most {0} symptoms can be selected. Please remove extras.").format(max_issues)
+            )
+        if any(r.is_expert_check for r in rows) and len(rows) > 1:
+            frappe.throw(_("\"Not sure / expert check\" cannot be combined with other symptoms."))
 
 
 def expire_old_tokens():

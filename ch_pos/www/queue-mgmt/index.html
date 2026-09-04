@@ -137,36 +137,6 @@ button { cursor: pointer; font-family: inherit; }
 
 .live-label { font-size: 0.78rem; color: var(--success); font-weight: 600; display: flex; align-items: center; gap: 6px; }
 
-/* ── System toggle (POS Kiosk / GoFix) ──────────────────────────────── */
-.sys-toggle {
-  display: none;
-  align-items: center;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--surface);
-}
-.sys-toggle button {
-  background: transparent;
-  border: 0;
-  color: var(--muted);
-  padding: 6px 12px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  transition: var(--trans);
-}
-.sys-toggle button.active {
-  background: var(--accent);
-  color: #fff;
-}
-.sys-toggle button:not(.active):hover {
-  background: rgba(255,255,255,0.04);
-  color: var(--text);
-}
-
 .content { padding: 24px 28px; flex: 1; }
 
 /* ── Store Selector Bar ─────────────────────────────────────────────── */
@@ -463,10 +433,6 @@ button { cursor: pointer; font-family: inherit; }
     <div class="topbar">
       <div class="topbar-title" id="topbar-title">Dashboard</div>
       <div class="topbar-actions">
-        <div class="sys-toggle" id="sys-toggle" role="tablist" aria-label="Backend system">
-          <button type="button" data-sys="pos"   onclick="switchSystem('pos')"   id="sys-btn-pos">POS Kiosk</button>
-          <button type="button" data-sys="gofix" onclick="switchSystem('gofix')" id="sys-btn-gofix">GoFix</button>
-        </div>
         <div class="live-label"><div class="live-dot"></div> Live</div>
         <a href="/queue" target="_blank" id="open-kiosk-link" style="background:rgba(233,30,140,0.12);border:1px solid rgba(233,30,140,0.3);color:var(--accent2);padding:6px 14px;border-radius:8px;font-size:0.8rem;font-weight:600;">
           Open Kiosk ↗
@@ -669,8 +635,6 @@ const mgmt = {
   queueStatus: 'All',
   refreshTimer: null,
   technicians: [], // cached
-  system: 'pos', // 'pos' | 'gofix' — chosen by ?system= URL param, then auto
-  availableSystems: { pos: false, gofix: false },
 };
 
 // ── Boot ───────────────────────────────────────────────────────────────────
@@ -679,108 +643,57 @@ window.addEventListener('DOMContentLoaded', () => {
   const params = new URLSearchParams(window.location.search);
   mgmt.posProfile = params.get('store') || '';
 
-  // Detect which systems the caller can operate; render the topbar toggle
-  // whenever the caller has access to more than one so switching stays
-  // a single click.
-  detectSystems().then(() => {
-    loadStoreDropdown().then(() => {
-      if (mgmt.posProfile) {
-        document.getElementById('store-selector').value = mgmt.posProfile;
-      }
-      fetchAndRenderStats();
-      fetchAndRenderQueue();
-      fetchAndRenderMyTokens();
-      fetchAndRenderReports();
-    });
+  loadStoreDropdown().then(() => {
+    if (mgmt.posProfile) {
+      document.getElementById('store-selector').value = mgmt.posProfile;
+    }
+    fetchAndRenderStats();
+    fetchAndRenderQueue();
+    fetchAndRenderMyTokens();
+    fetchAndRenderReports();
   });
 
   // Auto-refresh every 30s
   mgmt.refreshTimer = setInterval(refreshAll, 30000);
 });
 
-// ── System detection & toggle ─────────────────────────────────────────────
-function detectSystems() {
-  const params = new URLSearchParams(window.location.search);
-  const urlSys = (params.get('system') || '').toLowerCase();
-
-  // Try both backends in parallel. A 404/permission error just means the
-  // caller has no access to that system — treat as "not available".
-  return Promise.all([
-    _rawApi('ch_pos.api.token_api',  'get_pos_profiles').catch(() => []),
-    _rawApi('gofix.api.token_api',   'get_pos_profiles').catch(() => []),
-  ]).then(([posRows, gofixRows]) => {
-    mgmt.availableSystems.pos   = Array.isArray(posRows)   && posRows.length   > 0;
-    mgmt.availableSystems.gofix = Array.isArray(gofixRows) && gofixRows.length > 0;
-
-    // A ?store= that only one backend recognises decides the system —
-    // opening /queue-mgmt?store=GF-KOLATHUR must land on the GoFix
-    // backend even for users who also operate POS Kiosk stores,
-    // otherwise the dashboard shows zeros for a store with tokens.
-    const wanted = (params.get('store') || '').trim();
-    const owns = (rows) => Array.isArray(rows) && rows.some(
-      (r) => r && (r.name === wanted || r.warehouse === wanted)
-    );
-
-    if (urlSys === 'pos' || urlSys === 'gofix') {
-      mgmt.system = urlSys;
-    } else if (wanted && owns(gofixRows) && !owns(posRows)) {
-      mgmt.system = 'gofix';
-    } else if (wanted && owns(posRows) && !owns(gofixRows)) {
-      mgmt.system = 'pos';
-    } else if (mgmt.availableSystems.gofix && !mgmt.availableSystems.pos) {
-      mgmt.system = 'gofix';
-    } else {
-      mgmt.system = 'pos';
-    }
-    renderSystemToggle();
-  });
+// ── Check-in link + GoFix job-card handoff ───────────────────────────────
+// One token doctype serves every store. GoFix-enabled companies check
+// customers in on the self-service tablet (/gofix-token); other stores use
+// the CH Queue kiosk (/queue). ``get_pos_profiles`` says which is which.
+function isGofixStore(posProfile) {
+  const rows = mgmt._allProfiles || [];
+  if (posProfile) {
+    const match = rows.find(p => p.name === posProfile);
+    return !!(match && match.gofix_enabled);
+  }
+  return rows.length > 0 && rows.every(p => p.gofix_enabled);
 }
 
-function renderSystemToggle() {
-  const el = document.getElementById('sys-toggle');
-  const hasBoth = mgmt.availableSystems.pos && mgmt.availableSystems.gofix;
-  el.style.display = hasBoth ? 'flex' : 'none';
-  document.getElementById('sys-btn-pos').classList.toggle('active', mgmt.system === 'pos');
-  document.getElementById('sys-btn-gofix').classList.toggle('active', mgmt.system === 'gofix');
-  // Point the "Open Kiosk" shortcut at the right tablet URL.
+function renderKioskLink() {
   const kiosk = document.getElementById('open-kiosk-link');
-  if (kiosk) {
-    if (mgmt.system === 'gofix' && mgmt.posProfile) {
-      kiosk.href = '/gofix-token?store=' + encodeURIComponent(mgmt.posProfile);
-      kiosk.textContent = 'Open Tablet ↗';
-    } else if (mgmt.system === 'gofix') {
-      kiosk.href = '/gofix-token';
-      kiosk.textContent = 'Open Tablet ↗';
-    } else {
-      kiosk.href = '/queue';
-      kiosk.textContent = 'Open Kiosk ↗';
-    }
+  if (!kiosk) return;
+  const store = mgmt.posProfile ? '?store=' + encodeURIComponent(mgmt.posProfile) : '';
+  if (isGofixStore(mgmt.posProfile)) {
+    kiosk.href = '/gofix-token' + store;
+    kiosk.textContent = 'Open Tablet ↗';
+  } else {
+    kiosk.href = '/queue' + store;
+    kiosk.textContent = 'Open Kiosk ↗';
   }
 }
 
-function switchSystem(next) {
-  if (next !== 'pos' && next !== 'gofix') return;
-  if (mgmt.system === next) return;
-  mgmt.system = next;
-  // Clear the store filter — a store from the other backend won't resolve.
-  mgmt.posProfile = '';
-  const url = new URL(window.location);
-  if (next === 'gofix') url.searchParams.set('system', 'gofix');
-  else url.searchParams.delete('system');
-  url.searchParams.delete('store');
-  window.history.replaceState({}, '', url);
-  renderSystemToggle();
-  loadStoreDropdown().then(() => refreshAll());
+// Hands the token to the Desk quick-intake page, which prefills the job card
+// from the token's symptoms and links the Service Request back on submit.
+function openJobCard(tokenName) {
+  try {
+    localStorage.setItem('gofix_token_prefill', JSON.stringify({ token_name: tokenName, at: Date.now() }));
+  } catch (e) { /* storage blocked — the intake page simply opens blank */ }
+  window.open('/app/quick-intake', '_blank');
 }
 
 // ── API ────────────────────────────────────────────────────────────────────
-// Backend module is chosen at boot by ``detectSystems()`` — the caller can
-// override with ``?system=gofix`` (or ``?system=pos``); if the URL is silent
-// we auto-pick GoFix when the user only has GoFix stores, else POS Kiosk.
-// Both backends expose the same method names, so the UI is polymorphic.
-function _apiBase() {
-  return mgmt.system === 'gofix' ? 'gofix.api.token_api' : 'ch_pos.api.token_api';
-}
+const API_BASE = 'ch_pos.api.token_api';
 
 function _rawApi(module, method, args) {
   // Low-level helper used by system detection so we can hit either backend
@@ -796,11 +709,11 @@ function _rawApi(module, method, args) {
 }
 
 function api(method, args) {
-  return _rawApi(_apiBase(), method, args);
+  return _rawApi(API_BASE, method, args);
 }
 
 function apiPost(method, body) {
-  return fetch('/api/method/' + _apiBase() + '.' + method, {
+  return fetch('/api/method/' + API_BASE + '.' + method, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -854,6 +767,7 @@ function loadStoreDropdown() {
       document.getElementById('sb-store').textContent = company ? company + ' — All Stores' : 'All Stores';
       document.getElementById('sb-company').textContent = company || '';
     }
+    renderKioskLink();
   });
 }
 
@@ -870,6 +784,7 @@ function onStoreChange() {
     url.searchParams.delete('store');
   }
   window.history.replaceState({}, '', url);
+  renderKioskLink();
   refreshAll();
 }
 
@@ -1018,11 +933,15 @@ function fetchAndRenderQueue() {
 
 function buildQueueActions(t) {
   let html = '';
+  const jobCard = (isGofixStore(t.pos_profile) && !t.linked_service_request)
+    ? `<button class="action-btn primary" onclick="openJobCard('${esc(t.name)}')">Job Card</button>` : '';
   if (t.status === 'Waiting') {
+    html += jobCard;
     html += `<button class="action-btn primary" onclick="openAssign('${esc(t.name)}')">Assign</button>`;
     html += `<button class="action-btn" onclick="doStart('${esc(t.name)}')">Start</button>`;
     html += `<button class="action-btn danger" onclick="doCancel('${esc(t.name)}')">Cancel</button>`;
   } else if (t.status === 'In Progress') {
+    html += jobCard;
     html += `<button class="action-btn primary" onclick="doComplete('${esc(t.name)}')">Complete ✓</button>`;
     html += `<button class="action-btn" onclick="openAssign('${esc(t.name)}')">Re‑Assign</button>`;
     html += `<button class="action-btn warn" onclick="doDrop('${esc(t.name)}')">Drop</button>`;

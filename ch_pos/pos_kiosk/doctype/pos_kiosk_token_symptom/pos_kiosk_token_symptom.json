@@ -1,0 +1,58 @@
+{
+ "actions": [],
+ "creation": "2026-09-04 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "symptom_name",
+  "device_type",
+  "is_expert_check",
+  "is_other",
+  "symptom_ref"
+ ],
+ "fields": [
+  {
+   "fieldname": "symptom_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Symptom",
+   "reqd": 1
+  },
+  {
+   "fieldname": "device_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Device Type"
+  },
+  {
+   "fieldname": "is_expert_check",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Not Sure / Expert Check"
+  },
+  {
+   "fieldname": "is_other",
+   "fieldtype": "Check",
+   "label": "Other"
+  },
+  {
+   "fieldname": "symptom_ref",
+   "fieldtype": "Link",
+   "label": "Symptom Master",
+   "options": "GoFix Symptom"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-09-04 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Kiosk",
+ "name": "POS Kiosk Token Symptom",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

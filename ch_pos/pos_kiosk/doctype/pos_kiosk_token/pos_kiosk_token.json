@@ -28,6 +28,12 @@
   "issue_section",
   "issue_category",
   "issue_description",
+  "checkin_section",
+  "visit_reason",
+  "customer_language",
+  "column_break_checkin",
+  "other_device_hint",
+  "symptoms",
   "service_section",
   "technician",
   "assigned_at",
@@ -60,7 +66,13 @@
   "linked_service_request",
   "column_break_links",
   "converted_invoice",
-  "linked_buyback"
+  "linked_buyback",
+  "whatsapp_section",
+  "whatsapp_status",
+  "whatsapp_sent_at",
+  "column_break_whatsapp",
+  "whatsapp_message_id",
+  "whatsapp_last_error"
  ],
  "fields": [
   {
@@ -171,9 +183,9 @@
   },
   {
    "fieldname": "device_type",
-   "fieldtype": "Select",
+   "fieldtype": "Data",
    "label": "Device Type",
-   "options": "\nMobile\nTablet\nLaptop\nSmart Watch\nOther"
+   "description": "Mobile / Tablet / Laptop / Smartwatch / Other (the self check-in tablet sends the GoFix Device Type master value)"
   },
   {
    "fieldname": "device_brand",
@@ -199,6 +211,39 @@
    "fieldname": "issue_description",
    "fieldtype": "Text",
    "label": "Issue Description"
+  },
+  {
+   "fieldname": "checkin_section",
+   "fieldtype": "Section Break",
+   "label": "Self Check-In (Tablet)",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "visit_reason",
+   "fieldtype": "Link",
+   "label": "Visit Reason",
+   "options": "GoFix Visit Reason"
+  },
+  {
+   "fieldname": "customer_language",
+   "fieldtype": "Select",
+   "label": "Customer Language",
+   "options": "\nEnglish\nHindi"
+  },
+  {
+   "fieldname": "column_break_checkin",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "other_device_hint",
+   "fieldtype": "Data",
+   "label": "Other Device (customer's words)"
+  },
+  {
+   "fieldname": "symptoms",
+   "fieldtype": "Table",
+   "label": "Symptoms Selected",
+   "options": "POS Kiosk Token Symptom"
   },
   {
    "fieldname": "service_section",
@@ -398,11 +443,47 @@
    "fieldtype": "Link",
    "label": "Buyback Assessment",
    "options": "Buyback Assessment"
+  },
+  {
+   "fieldname": "whatsapp_section",
+   "fieldtype": "Section Break",
+   "label": "WhatsApp Confirmation",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "whatsapp_status",
+   "fieldtype": "Select",
+   "label": "WhatsApp Status",
+   "options": "Not Sent\nQueued\nSent\nDelivered\nRead\nFailed",
+   "default": "Not Sent",
+   "read_only": 1
+  },
+  {
+   "fieldname": "whatsapp_sent_at",
+   "fieldtype": "Datetime",
+   "label": "WhatsApp Sent At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_whatsapp",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "whatsapp_message_id",
+   "fieldtype": "Data",
+   "label": "WhatsApp Message ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "whatsapp_last_error",
+   "fieldtype": "Small Text",
+   "label": "WhatsApp Last Error",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-03-28 10:00:00.000000",
+ "modified": "2026-09-04 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Kiosk",
  "name": "POS Kiosk Token",
@@ -448,6 +529,51 @@
   {
    "role": "Technician",
    "read": 1
+  },
+  {
+   "role": "Store Executive",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "email": 1,
+   "print": 1,
+   "report": 1,
+   "share": 1
+  },
+  {
+   "role": "Service Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "email": 1,
+   "print": 1,
+   "report": 1,
+   "share": 1
+  },
+  {
+   "role": "Service Engineer",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "email": 1,
+   "print": 1,
+   "report": 1,
+   "share": 1
+  },
+  {
+   "role": "GoFix Floor Manager",
+   "read": 1,
+   "report": 1,
+   "print": 1,
+   "email": 1
+  },
+  {
+   "role": "Service Viewer",
+   "read": 1,
+   "report": 1
   }
  ],
  "sort_field": "creation",

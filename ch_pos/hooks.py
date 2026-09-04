@@ -182,7 +182,7 @@ fixtures = [
                 "CH Cash Drop", "CH Cycle Count", "CH Free Sale Approval",
                 "CH Payment Machine", "CH Exception Request", "CH Attach Rule",
                 "CH Sale Type", "CH POS Settlement", "CH Business Date",
-                "Warehouse", "Serial No", "GoFix Token",
+                "Warehouse", "Serial No",
                 "Spare Parts Usage", "POS Incentive Ledger",
                 "CH Exception Type", "CH Item Price", "Item Price",
                 "Material Request", "Stock Entry", "Stock Entry Type",

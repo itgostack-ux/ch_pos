@@ -331,6 +331,7 @@ def _resolve_pos_profile(identifier: str) -> dict | None:
                 ["store_name", "=", identifier],
                 ["store_name", "like", f"%{identifier}%"],
                 ["pos_profile", "=", identifier],
+                ["warehouse", "=", identifier],
             ],
             fields=["pos_profile"],
             limit_page_length=5)
@@ -608,6 +609,363 @@ def create_token(
 
 
 # ---------------------------------------------------------------------------
+# Guest API — GoFix self check-in tablet (/gofix-token)
+#
+# The tablet used to write its own ``GoFix Token`` doctype, so a customer who
+# checked in on the tablet and then walked to the counter became two tokens
+# in two doctypes that never met. It now writes the same POS Kiosk Token the
+# counter logs, so one queue carries the customer end to end. The GoFix
+# masters (visit reasons, device types, symptoms) stay in gofix; only the
+# token moved.
+# ---------------------------------------------------------------------------
+
+def _company_is_gofix_enabled(company: str | None) -> bool:
+    """True only when the Company is explicitly flagged for GoFix self check-in."""
+    if not company or not frappe.db.has_column("Company", "gofix_enabled"):
+        return False
+    return bool(frappe.db.get_value("Company", company, "gofix_enabled"))
+
+
+def _gofix_int_setting(fieldname: str, default: int) -> int:
+    """GoFix Settings integer when gofix is installed, else the default."""
+    try:
+        from gofix.config import get_int_setting
+    except ImportError:
+        return default
+    try:
+        return get_int_setting(fieldname, default)
+    except Exception:
+        return default
+
+
+def _annotate_gofix_enabled(profiles: list) -> list:
+    """Stamp ``gofix_enabled`` on profile rows so callers can pick the check-in URL."""
+    if not profiles or not frappe.db.has_column("Company", "gofix_enabled"):
+        for row in profiles or []:
+            row["gofix_enabled"] = 0
+        return profiles
+    companies = sorted({row.get("company") for row in profiles if row.get("company")})
+    enabled = set(
+        frappe.get_all(
+            "Company",
+            filters={"name": ("in", companies), "gofix_enabled": 1},
+            pluck="name",
+            limit_page_length=len(companies) + 1,
+        )
+    ) if companies else set()
+    for row in profiles:
+        row["gofix_enabled"] = 1 if row.get("company") in enabled else 0
+    return profiles
+
+
+def _store_identity(profile) -> tuple[str, str]:
+    """Return ``(store_code, store_name)`` for a resolved POS Profile row."""
+    row = None
+    if frappe.db.table_exists("CH Store"):
+        row = frappe.db.get_value(
+            "CH Store",
+            {"pos_profile": profile.name, "disabled": 0},
+            ["store_code", "store_name"],
+            as_dict=True)
+    code = ((row and row.get("store_code")) or "").strip().upper()
+    name = (row and row.get("store_name")) or ""
+    if not code:
+        code, _canonical = _get_store_code(profile.name)
+    if not name and profile.get("warehouse"):
+        name = frappe.db.get_value("Warehouse", profile.warehouse, "warehouse_name") or profile.warehouse
+    return code, name or profile.name
+
+
+def _resolve_tablet_store(store: str):
+    """Resolve the tablet's ``?store=`` to a POS Profile of a GoFix-enabled company."""
+    store = _bounded_public_text(store, _("Store"), 140, required=True)
+    profile = _resolve_pos_profile(store)
+    if not profile or not _company_is_gofix_enabled(profile.company):
+        # One message either way: never reveal whether the store exists on a
+        # non-GoFix company.
+        frappe.throw(_("Store {0} is not configured for GoFix self check-in.").format(store))
+    return profile
+
+
+@frappe.whitelist(allow_guest=True)
+@rate_limit(limit=120, seconds=300, ip_based=True)
+def get_tablet_config(store: str) -> dict:
+    """Everything the self check-in tablet needs to render its wizard."""
+    profile = _resolve_tablet_store(store)
+    for master in ("GoFix Device Type", "GoFix Visit Reason", "GoFix Brand Option", "GoFix Symptom"):
+        if not frappe.db.table_exists(master):
+            frappe.throw(_("GoFix intake masters are not installed on this site."))
+    _check_rate_limit(f"tablet_config_{_client_ip()}_{profile.name}")
+    limit = min(_gofix_int_setting("token_queue_limit", 200), 2000)
+
+    device_types = frappe.get_all(
+        "GoFix Device Type",
+        filters={"disabled": 0},
+        fields=["device_type", "icon", "display_order"],
+        order_by="display_order asc, device_type asc",
+        limit_page_length=limit)
+    visit_reasons = frappe.get_all(
+        "GoFix Visit Reason",
+        filters={"disabled": 0},
+        fields=["reason_name", "is_repair", "display_order"],
+        order_by="display_order asc, reason_name asc",
+        limit_page_length=limit)
+    brand_rows = frappe.get_all(
+        "GoFix Brand Option",
+        filters={"disabled": 0},
+        fields=["device_type", "brand_name", "display_order"],
+        order_by="device_type asc, display_order asc, brand_name asc",
+        limit_page_length=limit)
+    symptom_rows = frappe.get_all(
+        "GoFix Symptom",
+        filters={"disabled": 0},
+        fields=["device_type", "symptom_name", "is_expert_check", "is_other", "display_order"],
+        order_by="device_type asc, display_order asc, symptom_name asc",
+        limit_page_length=limit)
+
+    brands_by_device: dict = {}
+    for r in brand_rows:
+        brands_by_device.setdefault(r["device_type"], []).append(
+            {"name": r["brand_name"], "display_order": r["display_order"]})
+    symptoms_by_device: dict = {}
+    for r in symptom_rows:
+        symptoms_by_device.setdefault(r["device_type"], []).append({
+            "name": r["symptom_name"],
+            "is_expert_check": bool(r["is_expert_check"]),
+            "is_other": bool(r["is_other"]),
+            "display_order": r["display_order"],
+        })
+
+    store_code, store_name = _store_identity(profile)
+    return {
+        "store": {
+            "code": store_code,
+            "name": store_name,
+            "company": profile.company,
+            "warehouse": profile.warehouse,
+            "pos_profile": profile.name,
+        },
+        "device_types": [
+            {"name": d["device_type"], "icon": d.get("icon") or "", "display_order": d["display_order"]}
+            for d in device_types
+        ],
+        "visit_reasons": [
+            {"name": v["reason_name"], "is_repair": bool(v["is_repair"]), "display_order": v["display_order"]}
+            for v in visit_reasons
+        ],
+        "brands_by_device": brands_by_device,
+        "symptoms_by_device": symptoms_by_device,
+        "rules": {
+            "max_issues": _gofix_int_setting("max_selected_issues", 3),
+            "expert_check_exclusive": True,
+            "other_notes_required": False,
+            "phone_country_code": "+91",
+            "phone_digits": 10,
+        },
+    }
+
+
+def _client_ip() -> str:
+    request = getattr(frappe.local, "request", None)
+    return getattr(request, "remote_addr", None) or "unknown"
+
+
+def _parse_symptoms(payload, resolved: dict) -> list[dict]:
+    """Normalise the tablet's symptom payload into child rows.
+
+    Accepts a JSON string or a list; items are plain names or dicts with
+    ``name`` plus optional flag overrides. Unknown names are kept so ops can
+    add symptoms on the tablet before the master catches up.
+    """
+    if not payload:
+        return []
+    if isinstance(payload, str):
+        try:
+            import json
+
+            payload = json.loads(payload)
+        except (ValueError, TypeError):
+            payload = [s.strip() for s in payload.split(",") if s.strip()]
+    rows: list[dict] = []
+    for item in payload:
+        if isinstance(item, dict):
+            name = (item.get("name") or item.get("symptom_name") or "").strip()
+            overrides = item
+        else:
+            name = str(item).strip()
+            overrides = {}
+        if not name:
+            continue
+        match = resolved.get(name)
+        rows.append({
+            "symptom_name": name[:140],
+            "device_type": (match and match.get("device_type")) or overrides.get("device_type"),
+            "is_expert_check": 1 if (overrides.get("is_expert_check") or (match and match.get("is_expert_check"))) else 0,
+            "is_other": 1 if (overrides.get("is_other") or (match and match.get("is_other"))) else 0,
+            "symptom_ref": match.get("name") if match else None,
+        })
+    return rows
+
+
+def _first_backend_category(symptom_rows: list[dict]) -> str:
+    """Issue Category behind the first mapped symptom, for the job-card handoff."""
+    if not frappe.db.has_column("GoFix Symptom", "backend_category"):
+        return ""
+    for row in symptom_rows:
+        if row.get("symptom_ref"):
+            category = frappe.db.get_value("GoFix Symptom", row["symptom_ref"], "backend_category")
+            if category:
+                return category
+    return ""
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@rate_limit(limit=20, seconds=300, methods=["POST"], ip_based=True)
+def create_tablet_token(
+    store: str,
+    customer_name: str,
+    customer_phone: str,
+    visit_reason: str,
+    device_type: str = "",
+    device_brand: str = "",
+    device_model: str = "",
+    other_device_hint: str = "",
+    selected_issues=None,
+    additional_notes: str = "",
+    customer_language: str = "") -> dict:
+    """Create the walk-in token from the self check-in tablet.
+
+    Same POS Kiosk Token the counter logs, so the customer keeps one token
+    from tablet to counter to job card.
+    """
+    profile = _resolve_tablet_store(store)
+    customer_name = _bounded_public_text(customer_name, _("Customer Name"), 140, required=True)
+    customer_phone = _bounded_public_text(customer_phone, _("Customer Phone"), 20, required=True)
+    visit_reason = _bounded_public_text(visit_reason, _("Visit Reason"), 140, required=True)
+    device_type = _bounded_public_text(device_type, _("Device Type"), 140)
+    device_brand = _bounded_public_text(device_brand, _("Device Brand"), 140)
+    device_model = _bounded_public_text(device_model, _("Device Model"), 140)
+    other_device_hint = _bounded_public_text(other_device_hint, _("Other Device"), 140)
+    additional_notes = _bounded_public_text(additional_notes, _("Notes"), 1000)
+    customer_language = _bounded_public_text(customer_language, _("Language"), 40) or "English"
+
+    _check_rate_limit(f"tablet_{_client_ip()}_{profile.name}")
+    customer_phone = _validate_indian_phone(customer_phone)
+
+    visit_row = frappe.db.get_value(
+        "GoFix Visit Reason", visit_reason, ["name", "is_repair", "disabled"], as_dict=True)
+    if not visit_row or visit_row.get("disabled"):
+        frappe.throw(_("Visit reason {0} is not available.").format(visit_reason))
+    is_repair = bool(visit_row.get("is_repair"))
+
+    symptom_lookup: dict = {}
+    if is_repair and device_type:
+        for r in frappe.get_all(
+            "GoFix Symptom",
+            filters={"device_type": device_type, "disabled": 0},
+            fields=["name", "symptom_name", "device_type", "is_expert_check", "is_other"],
+            limit_page_length=500,
+        ):
+            symptom_lookup[r["symptom_name"]] = r
+    symptoms = _parse_symptoms(selected_issues, symptom_lookup) if is_repair else []
+    if is_repair and not device_type:
+        frappe.throw(_("Device type is required for a repair visit."))
+    if is_repair and not symptoms:
+        frappe.throw(_("Select at least one symptom for a repair visit."))
+
+    company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
+    token_display = _generate_token_display(profile.name, company_abbr)
+    doc = frappe.get_doc({
+        "doctype": "POS Kiosk Token",
+        "pos_profile": profile.name,
+        "company": profile.company,
+        "store": profile.warehouse,
+        "status": "Waiting",
+        "token_display": token_display,
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "customer_language": customer_language if customer_language in ("English", "Hindi") else "English",
+        "visit_source": "Kiosk",
+        "visit_purpose": "Repair" if is_repair else "Enquiry",
+        "visit_reason": visit_reason,
+        "device_type": device_type if is_repair else "",
+        "device_brand": device_brand if is_repair else "",
+        "device_model": device_model if is_repair else "",
+        "other_device_hint": other_device_hint if is_repair else "",
+        "issue_category": _first_backend_category(symptoms) if is_repair else "",
+        "issue_description": additional_notes,
+        "symptoms": symptoms,
+        "whatsapp_status": "Not Sent",
+        "expires_at": frappe.utils.add_days(now_datetime(), 1),
+    })
+    doc.flags.ignore_permissions = True
+    doc.insert()
+    doc.submit()
+
+    # WhatsApp confirmation is fire-and-forget; never block the token on it.
+    if "gofix" in frappe.get_installed_apps():
+        try:
+            frappe.enqueue(
+                "gofix.gofix_services.whatsapp_notifications.send_token_confirmation",
+                queue="short",
+                token_name=doc.name,
+                enqueue_after_commit=True)
+        except Exception:
+            frappe.log_error(title="tablet token: whatsapp enqueue failed", message=frappe.get_traceback())
+
+    store_code, store_name = _store_identity(profile)
+    return {
+        "name": doc.name,
+        "token_number": token_display,
+        "queue_position": _queue_position(doc.name, profile.name),
+        "status": doc.status,
+        "whatsapp_status": doc.whatsapp_status,
+        "store_code": store_code,
+        "store_name": store_name,
+        "business_date": frappe.utils.today(),
+    }
+
+
+def _queue_position(token_name: str, pos_profile: str) -> int:
+    """1-based place among today's Waiting tokens at this counter; 0 once called."""
+    status = frappe.db.get_value("POS Kiosk Token", token_name, "status")
+    if status != "Waiting":
+        return 0
+    ahead = frappe.db.sql(
+        """
+        SELECT COUNT(*) FROM `tabPOS Kiosk Token`
+        WHERE pos_profile = %s AND status = 'Waiting' AND docstatus < 2
+          AND DATE(creation) = %s
+          AND creation < (SELECT creation FROM `tabPOS Kiosk Token` WHERE name = %s)
+        """,
+        (pos_profile, frappe.utils.today(), token_name))[0][0]
+    return int(ahead or 0) + 1
+
+
+@frappe.whitelist(allow_guest=True)
+@rate_limit(limit=120, seconds=300, ip_based=True)
+def get_queue_position(token_number: str, store: str) -> dict:
+    """Polled by the tablet's confirmation screen."""
+    profile = _resolve_tablet_store(store)
+    token_number = _bounded_public_text(token_number, _("Token"), 40, required=True)
+    _check_rate_limit(f"tablet_position_{_client_ip()}_{profile.name}")
+    row = frappe.db.get_value(
+        "POS Kiosk Token",
+        {"token_display": token_number, "pos_profile": profile.name,
+         "creation": (">=", frappe.utils.today() + " 00:00:00"), "docstatus": ("<", 2)},
+        ["name", "status", "whatsapp_status"],
+        as_dict=True)
+    if not row:
+        frappe.throw(_("Token {0} not found for today.").format(token_number))
+    return {
+        "token_number": token_number,
+        "status": row["status"],
+        "queue_position": _queue_position(row["name"], profile.name),
+        "whatsapp_status": row["whatsapp_status"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Authenticated API — Management Dashboard
 # ---------------------------------------------------------------------------
 
@@ -653,7 +1011,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
             "device_type", "device_brand", "device_model",
             "issue_category", "issue_description",
             "technician", "assigned_at", "started_at", "completed_at",
-            "pos_profile", "company",
+            "pos_profile", "company", "linked_service_request",
         ],
         order_by="creation desc",
         limit_page_length=result_limit + 1)
@@ -1840,8 +2198,8 @@ def get_pos_profiles() -> list:
          kiosks running the queue page anonymously must switch to a
          service-account session (SAP dedicated dialog user pattern).
 
-    Result: a list of ``{name, company, warehouse}`` dicts, ordered by
-    ``name asc``, filtered to the entitled subset. Never raises when the
+    Result: a list of ``{name, company, warehouse, gofix_enabled}`` dicts,
+    ordered by ``name asc``, filtered to the entitled subset. Never raises when the
     user has no scope; simply returns an empty list (fail-closed).
     """
     if frappe.session.user == "Guest":
@@ -1857,7 +2215,8 @@ def get_pos_profiles() -> list:
             fields=["name", "company", "warehouse"],
             order_by="name asc",
             limit_page_length=result_limit + 1)
-        return _ensure_result_limit(all_profiles, result_limit, _("POS profiles"))
+        return _annotate_gofix_enabled(
+            _ensure_result_limit(all_profiles, result_limit, _("POS profiles")))
 
     try:
         from ch_erp15.ch_erp15.scope import get_user_scope
@@ -1872,7 +2231,8 @@ def get_pos_profiles() -> list:
             fields=["name", "company", "warehouse"],
             order_by="name asc",
             limit_page_length=result_limit + 1)
-        return _ensure_result_limit(all_profiles, result_limit, _("POS profiles"))
+        return _annotate_gofix_enabled(
+            _ensure_result_limit(all_profiles, result_limit, _("POS profiles")))
 
     stores = scope.get("stores") or set()
     if not stores:
@@ -1896,7 +2256,8 @@ def get_pos_profiles() -> list:
         fields=["name", "company", "warehouse"],
         order_by="name asc",
         limit_page_length=result_limit + 1)
-    return _ensure_result_limit(profiles, result_limit, _("Scoped POS profiles"))
+    return _annotate_gofix_enabled(
+        _ensure_result_limit(profiles, result_limit, _("Scoped POS profiles")))
 
 
 # ---------------------------------------------------------------------------
