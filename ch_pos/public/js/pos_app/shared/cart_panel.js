@@ -442,7 +442,18 @@ export class CartPanel {
 		if (this.customer_field && this.customer_field.get_value() !== val) {
 			this.customer_field.set_value(val);
 		}
-		// Fetch customer POS info — price list, credit, loyalty, type
+		// Fetch customer POS info — price list, credit, loyalty, type. Skipped
+		// if the POS session hasn't finished opening yet (e.g. a cart restored
+		// from localStorage on page load, before PosState.pos_profile is set) —
+		// the server call throws "POS Profile is required" and surfaces it as
+		// an unwanted popup. The "profile:loaded" listener below retries this
+		// once the profile is actually ready.
+		if (PosState.pos_profile) {
+			this._fetch_customer_pos_info(val);
+		}
+	}
+
+	_fetch_customer_pos_info(val) {
 		frappe.xcall("ch_pos.api.pos_api.get_customer_pos_info", {
 			customer: val,
 			company: PosState.company,
@@ -1096,6 +1107,14 @@ export class CartPanel {
 				this._commit_customer(cust);   // explicit — don't rely on change callback
 			}
 		});
+		// A customer restored (from localStorage) before the POS session finished
+		// opening skips the info fetch in _commit_customer/_fetch_customer_pos_info
+		// since pos_profile isn't set yet. Retry it now that it is.
+		EventBus.on("profile:loaded", () => {
+			if (PosState.customer && !PosState.customer_info) {
+				this._fetch_customer_pos_info(PosState.customer);
+			}
+		});
 		EventBus.on("state:transaction_reset", () => {
 			this.refresh();
 			// Reset customer field
@@ -1450,14 +1469,19 @@ export class CartPanel {
 			const implicit_disc = Math.max(0, line_base - line_final);
 
 			total_qty += qty;
-			subtotal += line_base;
+			// Sum the actual rate being charged (line_final), not the pre-exception
+			// base rate. An approved exception can raise a line's rate above its
+			// price_list_rate (e.g. a Buyback Price Override); summing base_rate and
+			// only ever subtracting non-negative "discounts" silently drops that
+			// increase back to the old, lower amount.
+			subtotal += line_final;
 			disc_total += Math.max(explicit_disc, implicit_disc);
 		});
 
 		// Expose for payment dialog discount cap checks
-		PosState._cart_total_for_disc = subtotal - disc_total;
+		PosState._cart_total_for_disc = subtotal;
 
-		const net             = subtotal - disc_total;
+		const net             = subtotal;
 		const exchange_credit = flt(PosState.exchange_amount);
 		const pe_credit       = flt(PosState.product_exchange_credit);
 		const so_advance      = PosState.sales_order_reference ? flt(PosState.sales_order_advance) : 0;

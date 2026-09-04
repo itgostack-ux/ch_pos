@@ -540,10 +540,6 @@ export class ExceptionWorkspace {
 	}
 }
 
-function format_currency(val) {
-	return format_currency(val);
-}
-
 // Exposed as instance method via prototype assignment so it can use PosState/EventBus.
 ExceptionWorkspace.prototype._is_appliable = function (r) {
 	// Only fully-approved, not-yet-consumed exceptions can be applied to a cart.
