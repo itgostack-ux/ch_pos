@@ -724,9 +724,10 @@ export class RepairWorkspace {
 				selected_issues.push(intakeToken.issue_category);
 				_render_issue_tags();
 			}
-			// The kiosk records the device as free text ("Apple iphone 12"); the
-			// catalogue item is chosen here if the counter can identify it.
-			const deviceText = [intakeToken.device_brand, intakeToken.device_model]
+			// The token carries item-master links (Brand, CH Model); show the
+			// readable model name, or whatever the customer typed for a device
+			// that is not in the master.
+			const deviceText = [intakeToken.device_brand, intakeToken.device_model_name || intakeToken.other_device_hint]
 				.filter(Boolean).join(" ") || intakeToken.device_type || "";
 			// Customer: the queue already resolved (or just created) it, so use
 			// that directly instead of re-guessing. Fall back to the phone

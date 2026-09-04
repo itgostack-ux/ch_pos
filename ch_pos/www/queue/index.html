@@ -710,13 +710,11 @@ const STEPS = [
   { id: 5, label: 'Done' },
 ];
 
-const DEVICE_TYPES = [
-  { key: 'Mobile',  icon: '📱' },
-  { key: 'Tablet',  icon: '⬜' },
-  { key: 'Laptop',  icon: '💻' },
-  { key: 'Smart Watch', icon: '⌚' },
-  { key: 'Other',   icon: '🔧' },
-];
+// Device categories, brands and models all come from the item master via
+// get_store_config / get_brand_models (CH Category, Brand, CH Model).
+let DEVICE_TYPES = [];
+let BRANDS_BY_CATEGORY = {};
+let MODEL_BY_LABEL = {};
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -823,8 +821,10 @@ function loadStoreConfig(profile) {
     document.getElementById('store-name-pill').textContent = config.store_name;
     document.getElementById('wizard-ui').style.display = 'block';
     buildProgressTrack();
+    DEVICE_TYPES = config.device_types || [];
+    BRANDS_BY_CATEGORY = config.brands_by_category || {};
     buildDeviceTiles();
-    buildBrandSelect(config.brands);
+    buildBrandSelect([]);
     buildIssueGrid(config.issues);
     showStep(1);
   }).catch(err => {
@@ -892,7 +892,8 @@ function validateStep(s) {
     if (!state.form.device_type) { showErr(2, 'Please select a device type.'); return false; }
     if (!brand) { showErr(2, 'Please select a brand.'); return false; }
     state.form.device_brand = brand;
-    state.form.device_model = model;
+    state.form.device_model = MODEL_BY_LABEL[model] || model;
+    state.form.device_model_label = model;
   }
   if (s === 3) {
     if (!state.form.issue_categories.length) { showErr(3, 'Please select at least one issue type.'); return false; }
@@ -919,9 +920,9 @@ function slug(str) { return str.replace(/[^a-z0-9]/gi, '_').toLowerCase(); }
 function buildDeviceTiles() {
   const container = document.getElementById('device-tiles');
   container.innerHTML = DEVICE_TYPES.map(d => `
-    <div class="device-tile" id="tile-${slug(d.key)}" onclick="selectDeviceType('${d.key}')">
-      <span class="tile-icon">${d.icon}</span>
-      <div class="tile-label">${d.key}</div>
+    <div class="device-tile" id="tile-${slug(d.name)}" onclick="selectDeviceType('${esc(d.name)}')">
+      <span class="tile-icon">${d.icon || '🔧'}</span>
+      <div class="tile-label">${esc(d.name)}</div>
     </div>`).join('');
 }
 
@@ -929,18 +930,25 @@ function selectDeviceType(type) {
   state.form.device_type = type;
   document.querySelectorAll('.device-tile').forEach(t => t.classList.remove('selected'));
   document.getElementById('tile-' + slug(type))?.classList.add('selected');
+  // Brands are scoped to the chosen category (brands with a CH Model in it).
+  buildBrandSelect(BRANDS_BY_CATEGORY[type] || (state.storeConfig && state.storeConfig.brands) || []);
+  loadModelSuggestions('');
 }
 
 // ── Brand Select ───────────────────────────────────────────────────────────
 function buildBrandSelect(brands) {
   const sel = document.getElementById('inp-brand');
+  while (sel.options.length > 1) sel.remove(1);
   brands.forEach(b => {
     const opt = document.createElement('option');
     opt.value = b;
     opt.textContent = b;
     sel.appendChild(opt);
   });
-  sel.addEventListener('change', () => loadModelSuggestions(sel.value));
+  if (!sel._bound) {
+    sel.addEventListener('change', () => loadModelSuggestions(sel.value));
+    sel._bound = true;
+  }
 }
 
 function loadModelSuggestions(brand) {
@@ -951,15 +959,18 @@ function loadModelSuggestions(brand) {
   inp.value = '';
   if (!brand || brand === 'Other') return;
   loading.style.display = 'block';
-  apiCall('get_brand_models', { brand })
+  MODEL_BY_LABEL = {};
+  apiCall('get_brand_models', { brand, ch_category: state.form.device_type || '' })
     .then(models => {
       loading.style.display = 'none';
       models.forEach(m => {
         const opt = document.createElement('option');
-        opt.value = m;
+        opt.value = m.label;
         dl.appendChild(opt);
+        MODEL_BY_LABEL[m.label] = m.value;
       });
-      // Always allow typing anything not in the list
+      // Typing something not in the list is allowed; the server keeps it as
+      // "other device" text instead of a master link.
     })
     .catch(() => { loading.style.display = 'none'; });
 }
@@ -1006,7 +1017,7 @@ function buildReview() {
       </div>
       <div class="review-row"><span class="label">Type</span><span class="value">${esc(f.device_type)}</span></div>
       <div class="review-row"><span class="label">Brand</span><span class="value">${esc(f.device_brand)}</span></div>
-      <div class="review-row"><span class="label">Model</span><span class="value">${esc(f.device_model || '—')}</span></div>
+      <div class="review-row"><span class="label">Model</span><span class="value">${esc(f.device_model_label || f.device_model || '—')}</span></div>
     </div>
     <div class="review-block">
       <div class="review-block-header">

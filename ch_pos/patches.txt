@@ -1,3 +1,4 @@
+[pre_model_sync]
 ch_pos.patches.v1_0.add_payment_type_custom_fields
 ch_pos.patches.v1_0.migrate_pos_invoice_to_sales_invoice
 ch_pos.patches.v1_0.add_coupon_discount_amount_field
@@ -9,3 +10,6 @@ ch_pos.patches.v1_0.backfill_standard_pos_invoice_closings
 ch_pos.patches.v1_0.retire_pos_repair_intake
 ch_pos.patches.v1_0.drop_pos_repair_intake_workspace_refs
 ch_pos.patches.v1_0.drop_pos_repair_intake_sidebar_refs
+
+[post_model_sync]
+ch_pos.patches.v2_0.walkin_token_device_taxonomy # 2026-09-04 - token device category/brand/model are item-master links; normalise rows, re-key symptoms

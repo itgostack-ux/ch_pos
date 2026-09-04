@@ -25,6 +25,7 @@
   "device_type",
   "device_brand",
   "device_model",
+  "device_model_name",
   "issue_section",
   "issue_category",
   "issue_description",
@@ -183,19 +184,30 @@
   },
   {
    "fieldname": "device_type",
-   "fieldtype": "Data",
-   "label": "Device Type",
-   "description": "Mobile / Tablet / Laptop / Smartwatch / Other (the self check-in tablet sends the GoFix Device Type master value)"
+   "fieldtype": "Link",
+   "label": "Device Category",
+   "options": "CH Category",
+   "description": "Item-master category of the device brought in (CH Category). Blank with a note in Other Device when it is not a catalogue category."
   },
   {
    "fieldname": "device_brand",
-   "fieldtype": "Data",
-   "label": "Brand"
+   "fieldtype": "Link",
+   "label": "Brand",
+   "options": "Brand"
   },
   {
    "fieldname": "device_model",
+   "fieldtype": "Link",
+   "label": "Model",
+   "options": "CH Model"
+  },
+  {
+   "fieldname": "device_model_name",
    "fieldtype": "Data",
-   "label": "Model"
+   "label": "Model Name",
+   "fetch_from": "device_model.model_name",
+   "read_only": 1,
+   "in_list_view": 1
   },
   {
    "fieldname": "issue_section",
@@ -237,7 +249,7 @@
   {
    "fieldname": "other_device_hint",
    "fieldtype": "Data",
-   "label": "Other Device (customer's words)"
+   "label": "Other Device / Model (customer's words)"
   },
   {
    "fieldname": "symptoms",
@@ -483,7 +495,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-04 12:00:00.000000",
+ "modified": "2026-09-04 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Kiosk",
  "name": "POS Kiosk Token",

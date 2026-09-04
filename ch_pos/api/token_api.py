@@ -472,55 +472,29 @@ def get_store_config(pos_profile: str) -> dict:
         {"key": "Other", "icon": "🛠️"},
     ]
 
+    device_types = _device_choices()
     return {
         "store_name": profile.name,
         "company": profile.company,
         "company_abbr": company.abbr if company else "CH",
         "brands": brands,
+        "device_types": device_types,
+        "brands_by_category": {d["name"]: _brands_for_category(d["name"]) for d in device_types},
         "issues": issues,
     }
 
 
 @frappe.whitelist(allow_guest=True)
 @rate_limit(limit=120, seconds=60, ip_based=True)
-def get_brand_models(brand: str) -> dict:
-    """
-    Return distinct device model names for a given brand from Item Master.
-    Uses Brand doctype as single source of truth:
-    - Includes items tagged with the brand itself
-    - Includes items tagged with sub-brands (where ch_parent_brand = brand)
+def get_brand_models(brand: str, ch_category: str = "") -> list:
+    """Models for a brand from the CH Model master, as ``[{value, label}]``.
+
+    Used by the kiosk's model picker. Optionally narrowed to a device
+    category so a Samsung phone customer is not offered Samsung laptops.
     """
     brand = _bounded_public_text(brand, _("Brand"), 140, required=True)
-    # Single source of truth: query Brand doctype for the brand + all sub-brands.
-    # Some environments may not yet have ch_parent_brand custom field.
-    if frappe.db.has_column("Brand", "ch_parent_brand"):
-        brand_rows = frappe.db.sql(
-            "SELECT name FROM `tabBrand` WHERE name = %s OR ch_parent_brand = %s",
-            (brand, brand),
-            as_dict=True)
-    else:
-        brand_rows = frappe.db.sql(
-            "SELECT name FROM `tabBrand` WHERE name = %s",
-            (brand),
-            as_dict=True)
-    db_brands = [r.name for r in brand_rows] or [brand]
-
-    rows = frappe.get_all(
-        "Item",
-        filters={"brand": ("in", db_brands), "disabled": 0},
-        fields=["item_name"],
-        order_by="item_name asc",
-        limit_page_length=200)
-
-    seen = set()
-    models = []
-    for r in rows:
-        name = r.item_name.strip()
-        if name not in seen:
-            seen.add(name)
-            models.append(name)
-
-    return models
+    ch_category = _bounded_public_text(ch_category, _("Device Category"), 140)
+    return _models_for(brand, ch_category)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -571,6 +545,7 @@ def create_token(
         frappe.throw(_("Invalid POS Profile"), title=_("API Error"))
 
     company_abbr = frappe.db.get_value("Company", profile.company, "abbr") or "CH"
+    device = _normalise_device(device_type, device_brand, device_model)
 
     token_display = _generate_token_display(pos_profile, company_abbr)
     doc = frappe.get_doc(
@@ -583,9 +558,10 @@ def create_token(
             "token_display": token_display,
             "customer_name": customer_name,
             "customer_phone": customer_phone,
-            "device_type": device_type,
-            "device_brand": device_brand,
-            "device_model": device_model,
+            "device_type": device["device_type"],
+            "device_brand": device["device_brand"],
+            "device_model": device["device_model"],
+            "other_device_hint": device["other_device_hint"],
             "issue_category": issue_category,
             "issue_description": issue_description,
             "visit_source": "Kiosk",
@@ -658,6 +634,162 @@ def _annotate_gofix_enabled(profiles: list) -> list:
     return profiles
 
 
+# ---------------------------------------------------------------------------
+# Device taxonomy — the item master is the only source
+#
+# Device category = CH Category flagged "Repairable Device Category", brand =
+# Brand, model = CH Model. Anything the customer types that is not in the
+# master lands in ``other_device_hint`` instead of polluting a Link field.
+# ---------------------------------------------------------------------------
+
+OTHER_DEVICE = "Other"
+
+# Labels the retired GoFix Device Type master (and the old kiosk tiles) used.
+_LEGACY_DEVICE_TYPE_TO_CATEGORY = {
+    "Mobile": "Smart Phones",
+    "Tablet": "Tablets",
+    "Laptop": "Laptops",
+    "Smartwatch": "Watches",
+    "Smart Watch": "Watches",
+}
+
+
+def _repairable_categories() -> list[dict]:
+    """CH Categories flagged for repair intake, in kiosk order."""
+    if not frappe.db.has_column("CH Category", "is_repairable_device"):
+        return []
+    rows = frappe.get_all(
+        "CH Category",
+        filters={"is_repairable_device": 1, "disabled": 0},
+        fields=["name", "device_icon", "kiosk_display_order"],
+        order_by="kiosk_display_order asc, name asc",
+        limit_page_length=50)
+    return [
+        {"name": r.name, "icon": r.device_icon or "\U0001f527", "display_order": r.kiosk_display_order or 0}
+        for r in rows
+    ]
+
+
+def _device_choices() -> list[dict]:
+    """Repairable categories plus the one pseudo-choice, Other."""
+    return _repairable_categories() + [
+        {"name": OTHER_DEVICE, "icon": "\U0001f527", "display_order": 999, "is_other": True}
+    ]
+
+
+def _brands_for_category(category: str, limit: int = 60) -> list[str]:
+    """Brands that have an active CH Model in the category, busiest first, then Other."""
+    if not category or category == OTHER_DEVICE:
+        return [OTHER_DEVICE]
+    rows = frappe.db.sql(
+        """
+        SELECT m.brand, COUNT(*) AS n
+        FROM `tabCH Model` m
+        JOIN `tabCH Sub Category` sc ON sc.name = m.sub_category
+        WHERE m.disabled = 0 AND m.brand IS NOT NULL AND m.brand <> ''
+          AND sc.category = %s
+        GROUP BY m.brand
+        ORDER BY n DESC, m.brand ASC
+        LIMIT %s
+        """,
+        (category, limit))
+    return [r[0] for r in rows] + [OTHER_DEVICE]
+
+
+def _models_for(brand: str, category: str = "", txt: str = "", limit: int = 100) -> list[dict]:
+    """CH Models for a brand (optionally within a category) as {value, label}."""
+    if not brand or brand == OTHER_DEVICE:
+        return []
+    conditions = ["m.disabled = 0", "m.brand = %(brand)s"]
+    values = {"brand": brand, "limit": limit}
+    if txt:
+        conditions.append("m.model_name LIKE %(txt)s")
+        values["txt"] = f"%{txt}%"
+    if category and category != OTHER_DEVICE:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM `tabCH Sub Category` sc WHERE sc.name = m.sub_category AND sc.category = %(category)s)")
+        values["category"] = category
+    rows = frappe.db.sql(
+        f"""
+        SELECT m.name, m.model_name FROM `tabCH Model` m
+        WHERE {' AND '.join(conditions)}
+        ORDER BY m.model_name ASC
+        LIMIT %(limit)s
+        """,
+        values)
+    return [{"value": name, "label": model_name} for name, model_name in rows]
+
+
+def _resolve_model(model: str, brand: str = "", category: str = "") -> str:
+    """CH Model docname for a docname or a readable model_name; "" when not confident.
+
+    Permission-free on purpose: the kiosk and the tablet run as Guest.
+    """
+    model = (model or "").strip()
+    if not model:
+        return ""
+    canonical = frappe.db.get_value("CH Model", {"name": model, "disabled": 0}, "name")
+    if canonical:
+        return canonical
+
+    def _unique(filters):
+        rows = frappe.get_all("CH Model", filters=filters, pluck="name", limit_page_length=2)
+        return rows[0] if len(rows) == 1 else ""
+
+    if brand:
+        hit = _unique({"model_name": model, "brand": brand, "disabled": 0})
+        if hit:
+            return hit
+    return _unique({"model_name": model, "disabled": 0})
+
+
+def _normalise_device(device_type: str, device_brand: str, device_model: str, hint: str = "") -> dict:
+    """Map device input onto item-master links; whatever does not match goes to the hint."""
+    leftovers = []
+    # get_value returns the master's own spelling, so "samsung" is stored as
+    # "Samsung" rather than however the customer typed it.
+    category = (device_type or "").strip()
+    if category in ("", OTHER_DEVICE):
+        category = ""
+    else:
+        canonical = frappe.db.get_value("CH Category", category, "name")
+        if not canonical:
+            mapped = _LEGACY_DEVICE_TYPE_TO_CATEGORY.get(category)
+            canonical = frappe.db.get_value("CH Category", mapped, "name") if mapped else None
+        if canonical:
+            category = canonical
+        else:
+            leftovers.append(category)
+            category = ""
+
+    brand = (device_brand or "").strip()
+    if brand in ("", OTHER_DEVICE):
+        brand = ""
+    else:
+        canonical = frappe.db.get_value("Brand", brand, "name")
+        if canonical:
+            brand = canonical
+        else:
+            leftovers.append(brand)
+            brand = ""
+
+    model_text = (device_model or "").strip()
+    model = _resolve_model(model_text, brand, category) if model_text else ""
+    if model_text and not model:
+        leftovers.append(model_text)
+
+    hint = (hint or "").strip()
+    extra = " ".join(x for x in leftovers if x)
+    if extra:
+        hint = f"{hint} ({extra})" if hint else extra
+    return {
+        "device_type": category,
+        "device_brand": brand,
+        "device_model": model,
+        "other_device_hint": hint[:140],
+    }
+
+
 def _store_identity(profile) -> tuple[str, str]:
     """Return ``(store_code, store_name)`` for a resolved POS Profile row."""
     row = None
@@ -692,44 +824,34 @@ def _resolve_tablet_store(store: str):
 def get_tablet_config(store: str) -> dict:
     """Everything the self check-in tablet needs to render its wizard."""
     profile = _resolve_tablet_store(store)
-    for master in ("GoFix Device Type", "GoFix Visit Reason", "GoFix Brand Option", "GoFix Symptom"):
+    for master in ("GoFix Visit Reason", "GoFix Symptom"):
         if not frappe.db.table_exists(master):
             frappe.throw(_("GoFix intake masters are not installed on this site."))
     _check_rate_limit(f"tablet_config_{_client_ip()}_{profile.name}")
     limit = min(_gofix_int_setting("token_queue_limit", 200), 2000)
 
-    device_types = frappe.get_all(
-        "GoFix Device Type",
-        filters={"disabled": 0},
-        fields=["device_type", "icon", "display_order"],
-        order_by="display_order asc, device_type asc",
-        limit_page_length=limit)
+    device_types = _device_choices()
     visit_reasons = frappe.get_all(
         "GoFix Visit Reason",
         filters={"disabled": 0},
         fields=["reason_name", "is_repair", "display_order"],
         order_by="display_order asc, reason_name asc",
         limit_page_length=limit)
-    brand_rows = frappe.get_all(
-        "GoFix Brand Option",
-        filters={"disabled": 0},
-        fields=["device_type", "brand_name", "display_order"],
-        order_by="device_type asc, display_order asc, brand_name asc",
-        limit_page_length=limit)
     symptom_rows = frappe.get_all(
         "GoFix Symptom",
         filters={"disabled": 0},
-        fields=["device_type", "symptom_name", "is_expert_check", "is_other", "display_order"],
-        order_by="device_type asc, display_order asc, symptom_name asc",
+        fields=["device_category", "symptom_name", "is_expert_check", "is_other", "display_order"],
+        order_by="device_category asc, display_order asc, symptom_name asc",
         limit_page_length=limit)
 
     brands_by_device: dict = {}
-    for r in brand_rows:
-        brands_by_device.setdefault(r["device_type"], []).append(
-            {"name": r["brand_name"], "display_order": r["display_order"]})
+    for d in device_types:
+        brands_by_device[d["name"]] = [
+            {"name": b, "display_order": i * 10} for i, b in enumerate(_brands_for_category(d["name"]), start=1)
+        ]
     symptoms_by_device: dict = {}
     for r in symptom_rows:
-        symptoms_by_device.setdefault(r["device_type"], []).append({
+        symptoms_by_device.setdefault(r["device_category"] or OTHER_DEVICE, []).append({
             "name": r["symptom_name"],
             "is_expert_check": bool(r["is_expert_check"]),
             "is_other": bool(r["is_other"]),
@@ -745,10 +867,7 @@ def get_tablet_config(store: str) -> dict:
             "warehouse": profile.warehouse,
             "pos_profile": profile.name,
         },
-        "device_types": [
-            {"name": d["device_type"], "icon": d.get("icon") or "", "display_order": d["display_order"]}
-            for d in device_types
-        ],
+        "device_types": device_types,
         "visit_reasons": [
             {"name": v["reason_name"], "is_repair": bool(v["is_repair"]), "display_order": v["display_order"]}
             for v in visit_reasons
@@ -799,7 +918,7 @@ def _parse_symptoms(payload, resolved: dict) -> list[dict]:
         match = resolved.get(name)
         rows.append({
             "symptom_name": name[:140],
-            "device_type": (match and match.get("device_type")) or overrides.get("device_type"),
+            "device_category": (match and match.get("device_category")) or overrides.get("device_category") or None,
             "is_expert_check": 1 if (overrides.get("is_expert_check") or (match and match.get("is_expert_check"))) else 0,
             "is_other": 1 if (overrides.get("is_other") or (match and match.get("is_other"))) else 0,
             "symptom_ref": match.get("name") if match else None,
@@ -858,18 +977,26 @@ def create_tablet_token(
         frappe.throw(_("Visit reason {0} is not available.").format(visit_reason))
     is_repair = bool(visit_row.get("is_repair"))
 
+    device = _normalise_device(device_type, device_brand, device_model, other_device_hint) if is_repair else {
+        "device_type": "", "device_brand": "", "device_model": "", "other_device_hint": ""}
+    if is_repair and not device["device_type"] and not device["other_device_hint"]:
+        frappe.throw(_("Pick a device type, or describe your device."))
+
     symptom_lookup: dict = {}
-    if is_repair and device_type:
+    if is_repair:
+        symptom_filters = {"disabled": 0}
+        if device["device_type"]:
+            symptom_filters["device_category"] = device["device_type"]
+        else:
+            symptom_filters["device_category"] = ("is", "not set")
         for r in frappe.get_all(
             "GoFix Symptom",
-            filters={"device_type": device_type, "disabled": 0},
-            fields=["name", "symptom_name", "device_type", "is_expert_check", "is_other"],
+            filters=symptom_filters,
+            fields=["name", "symptom_name", "device_category", "is_expert_check", "is_other"],
             limit_page_length=500,
         ):
             symptom_lookup[r["symptom_name"]] = r
     symptoms = _parse_symptoms(selected_issues, symptom_lookup) if is_repair else []
-    if is_repair and not device_type:
-        frappe.throw(_("Device type is required for a repair visit."))
     if is_repair and not symptoms:
         frappe.throw(_("Select at least one symptom for a repair visit."))
 
@@ -888,10 +1015,10 @@ def create_tablet_token(
         "visit_source": "Kiosk",
         "visit_purpose": "Repair" if is_repair else "Enquiry",
         "visit_reason": visit_reason,
-        "device_type": device_type if is_repair else "",
-        "device_brand": device_brand if is_repair else "",
-        "device_model": device_model if is_repair else "",
-        "other_device_hint": other_device_hint if is_repair else "",
+        "device_type": device["device_type"],
+        "device_brand": device["device_brand"],
+        "device_model": device["device_model"],
+        "other_device_hint": device["other_device_hint"],
         "issue_category": _first_backend_category(symptoms) if is_repair else "",
         "issue_description": additional_notes,
         "symptoms": symptoms,
@@ -965,6 +1092,18 @@ def get_queue_position(token_number: str, store: str) -> dict:
     }
 
 
+@frappe.whitelist(allow_guest=True)
+@rate_limit(limit=240, seconds=300, ip_based=True)
+def get_tablet_models(store: str, brand: str, category: str = "", txt: str = "") -> list[dict]:
+    """CH Models for the tablet's model picker: ``[{value, label}]``."""
+    profile = _resolve_tablet_store(store)
+    brand = _bounded_public_text(brand, _("Brand"), 140, required=True)
+    category = _bounded_public_text(category, _("Device Category"), 140)
+    txt = _bounded_public_text(txt, _("Search"), 80)
+    _check_rate_limit(f"tablet_models_{_client_ip()}_{profile.name}")
+    return _models_for(brand, category, txt)
+
+
 # ---------------------------------------------------------------------------
 # Authenticated API — Management Dashboard
 # ---------------------------------------------------------------------------
@@ -1008,7 +1147,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
         fields=[
             "name", "token_display", "creation", "status",
             "customer_name", "customer_phone",
-            "device_type", "device_brand", "device_model",
+            "device_type", "device_brand", "device_model", "device_model_name", "other_device_hint",
             "issue_category", "issue_description",
             "technician", "assigned_at", "started_at", "completed_at",
             "pos_profile", "company", "linked_service_request",
@@ -1029,7 +1168,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
         technician_names = {row.name: row.full_name or row.name for row in user_rows}
 
     for t in tokens:
-        t["device"] = _device_label(t.get('device_brand', ''), t.get('device_model', ''))
+        t["device"] = _device_label(t.get('device_brand', ''), t.get('device_model_name') or t.get('other_device_hint') or '')
         # Compute wait time in minutes
         created = get_datetime(t["creation"])
         end_time = get_datetime(t["completed_at"]) if t.get("completed_at") else now
@@ -1922,6 +2061,9 @@ def log_counter_walkin(
     token_display = _generate_token_display(pos_profile, company_abbr)
     device_brand = (device_brand or "").strip()
     device_model = (device_model or "").strip()
+    # The dialog sends a Brand name and either a CH Model docname or its
+    # readable model_name; both land as item-master links here.
+    device = _normalise_device(ch_category if frappe.db.exists("CH Category", ch_category or "") else "", device_brand, device_model)
     token_payload = {
         "doctype": "POS Kiosk Token",
         "pos_profile": pos_profile,
@@ -1935,8 +2077,10 @@ def log_counter_walkin(
         "visit_source": "Counter",
         "visit_purpose": visit_purpose,
         "issue_description": remarks,
-        "device_brand": device_brand,
-        "device_model": device_model,
+        "device_type": device["device_type"],
+        "device_brand": device["device_brand"],
+        "device_model": device["device_model"],
+        "other_device_hint": device["other_device_hint"],
         "started_at": now_datetime(),
         "technician": frappe.session.user,
         "expires_at": frappe.utils.add_days(now_datetime(), 1),
@@ -2069,7 +2213,7 @@ def get_technician_tokens(technician: str = None) -> dict:
         fields=[
             "name", "token_display", "creation", "status",
             "customer_name", "customer_phone",
-            "device_type", "device_brand", "device_model",
+            "device_type", "device_brand", "device_model", "device_model_name", "other_device_hint",
             "issue_category", "assigned_at", "started_at", "completed_at",
             "pos_profile",
         ],
@@ -2078,7 +2222,7 @@ def get_technician_tokens(technician: str = None) -> dict:
     _ensure_result_limit(tokens, result_limit, _("Technician tokens"))
 
     for t in tokens:
-        t["device"] = _device_label(t.get('device_brand', ''), t.get('device_model', ''))
+        t["device"] = _device_label(t.get('device_brand', ''), t.get('device_model_name') or t.get('other_device_hint') or '')
 
     return tokens
 
@@ -2489,8 +2633,12 @@ def convert_token_to_gofix(token_name: str, pos_profile: str,
         "backup_info": backup_info,
         "decision": "Accepted",        # Customer is present — accepting the device
         "device_item": device_item or None,
-        "device_item_name": _device_label(token.device_brand, token.device_model) if not device_item else None,
+        "device_item_name": _device_label(token.device_brand, token.device_model_name or token.other_device_hint) if not device_item else None,
         "brand": token.device_brand,
+        # Item-master taxonomy travels with the customer from token to job card.
+        "device_category": token.device_type,
+        "device_brand": token.device_brand,
+        "device_model": token.device_model,
         "device_condition": device_condition,
         "accessories_received": accessories,
         "warranty_status": _normalize_warranty(warranty_status),
