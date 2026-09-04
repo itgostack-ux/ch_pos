@@ -250,7 +250,14 @@ export class CartService {
 					}, 10);
 				}
 			}
-			if (data.customer) PosState.customer = data.customer;
+			// Emit rather than assign PosState.customer directly: cart_panel's
+			// "customer:set" handler is what actually syncs the Link control's
+			// displayed value and re-fetches customer info (loyalty, price list,
+			// etc.) via _commit_customer. Assigning PosState.customer here first
+			// would make that handler's own "unchanged" guard skip all of that,
+			// leaving the search box showing its empty placeholder even though
+			// PosState.customer was technically restored.
+			if (data.customer) EventBus.emit("customer:set", data.customer);
 			if (data.additional_discount_pct) PosState.additional_discount_pct = data.additional_discount_pct;
 			if (data.additional_discount_amt) PosState.additional_discount_amt = data.additional_discount_amt;
 			if (data.coupon_code) PosState.coupon_code = data.coupon_code;

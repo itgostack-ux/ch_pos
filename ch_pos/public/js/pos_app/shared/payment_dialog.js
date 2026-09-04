@@ -816,10 +816,12 @@ placeholder="${__("Enter code...")}">
 			const qty = flt(c.qty);
 			const explicit_disc = flt(c.discount_amount || 0);
 			const implicit_disc = Math.max(0, base_rate - final_rate);
-			subtotal += qty * base_rate;
+			// Sum the actual rate being charged, not the pre-exception base rate —
+			// see the matching comment in cart_panel.js _update_summary().
+			subtotal += qty * final_rate;
 			disc_total += qty * Math.max(explicit_disc, implicit_disc);
 		});
-		const net = subtotal - disc_total;
+		const net = subtotal;
 		let add_disc = 0;
 		if (PosState.additional_discount_pct) add_disc = net * PosState.additional_discount_pct / 100;
 		else if (PosState.additional_discount_amt) add_disc = flt(PosState.additional_discount_amt);
@@ -3365,10 +3367,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			const qty = flt(c.qty);
 			const explicit_disc = flt(c.discount_amount || 0);
 			const implicit_disc = Math.max(0, base_rate - final_rate);
-			subtotal += qty * base_rate;
+			// Sum the actual rate being charged, not the pre-exception base rate —
+			// see the matching comment in cart_panel.js _update_summary().
+			subtotal += qty * final_rate;
 			disc_total += qty * Math.max(explicit_disc, implicit_disc);
 		});
-		let net = subtotal - disc_total;
+		let net = subtotal;
 		if (PosState.additional_discount_pct) net -= net * PosState.additional_discount_pct / 100;
 		else if (PosState.additional_discount_amt) net -= flt(PosState.additional_discount_amt);
 		net -= flt(PosState.coupon_discount);
