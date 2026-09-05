@@ -188,7 +188,19 @@ export class SessionOpeningScreen {
 							this._continue_with_store(resumeStore, _done);
 							return;
 						}
-						this._show_store_picker(stores, _done, this._get_saved_store() || ctx.default_store, ctx);
+						// Unlike resumeStore (one-shot, cleared the instant it's read),
+						// the saved store persists for the whole browser tab session —
+						// so a user who already picked a store once should not have to
+						// pick it again on every subsequent refresh before their
+						// session is actually created. Only used as a dropdown default
+						// until now; auto-resuming it here is what actually skips the
+						// picker.
+						const savedStore = this._get_saved_store();
+						if (savedStore && stores.some((s) => s.name === savedStore)) {
+							this._continue_with_store(savedStore, _done);
+							return;
+						}
+						this._show_store_picker(stores, _done, savedStore || ctx.default_store, ctx);
 					} else if (ctx.day_closed) {
 						// Day closed — no access until date is advanced (market standard)
 						this._show_day_closed_message({ store: ctx.store, business_date: ctx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [ctx.business_date]) });
@@ -250,7 +262,12 @@ export class SessionOpeningScreen {
 						this._continue_with_store(resumeStore, resolve);
 						return;
 					}
-					this._show_store_picker(stores, resolve, this._get_saved_store() || freshCtx.default_store, freshCtx);
+					const savedStore = this._get_saved_store();
+					if (savedStore && stores.some((s) => s.name === savedStore)) {
+						this._continue_with_store(savedStore, resolve);
+						return;
+					}
+					this._show_store_picker(stores, resolve, savedStore || freshCtx.default_store, freshCtx);
 				} else if (freshCtx.day_closed) {
 					this._show_day_closed_message({ store: freshCtx.store, business_date: freshCtx.business_date, message: __("Store day is already closed for {0}. Advance business date before opening a new session.", [freshCtx.business_date]) });
 				} else {
