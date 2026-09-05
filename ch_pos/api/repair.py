@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import get_datetime, now_datetime
 from frappe import _
 from buyback.utils import validate_indian_phone
 
@@ -123,6 +124,18 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		data.get("data_backup_disclaimer"),
 	)
 
+	# The promise is checked before anything is written: a time already in the
+	# past is a typo, and catching it after the ticket exists would leave a
+	# receipt with no deadline behind it (that failure used to be logged and
+	# swallowed, so the counter never knew the countdown was missing).
+	promised = (data.get("promised_completion_datetime") or "").strip()
+	if promised and get_datetime(promised) < now_datetime():
+		frappe.throw(
+			_("The promised completion time {0} is already in the past. Give the customer a time that is still ahead.").format(
+				frappe.format(get_datetime(promised), {"fieldtype": "Datetime"})),
+			title=_("Validation Error"),
+		)
+
 	sr = frappe.new_doc("Service Request")
 	for field in (
 		"customer", "contact_number", "device_item", "serial_no",
@@ -224,7 +237,7 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	# exists so the revision row can reference it, and never fatal: the device
 	# is already taken in, and a missing promise is a gap to fill, not a reason
 	# to void the receipt.
-	promised = (data.get("promised_completion_datetime") or "").strip()
+	promise_error = None
 	if promised:
 		try:
 			from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import (
@@ -233,7 +246,9 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 
 			set_promised_completion(sr.name, promised,
 				reason=_("Promised to the customer at intake"))
-		except Exception:
+		except Exception as exc:
+			# Never fatal, but never silent either: the counter is told.
+			promise_error = str(exc)
 			frappe.log_error(
 				frappe.get_traceback(),
 				f"POS intake: could not record promised completion for {sr.name}",
@@ -268,7 +283,8 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		"job_opened": opened,
 		"diagnosis_assignment": diagnosis_assignment,
 		"diagnosis_technician": assigned_to or None,
-		"promised_completion_datetime": promised or None,
+		"promised_completion_datetime": promised if promised and not promise_error else None,
+		"promise_error": promise_error,
 	}
 
 

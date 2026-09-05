@@ -196,8 +196,8 @@ export class RepairWorkspace {
 								<small class="text-muted">${__("Take it now. Validity is judged on today's intake, so the customer keeps it even if billing happens after it expires.")}</small>
 							</div>
 							<div class="ch-pos-field-group">
-								<label>${__("Estimated Delivery Date & Time")}</label>
-								<input type="datetime-local" class="form-control ch-rep-promised">
+								<label>${__("Estimated Delivery Date & Time")} *</label>
+								<input type="datetime-local" class="form-control ch-rep-promised" required>
 								<small class="text-muted">${__("The date and time you are giving the customer. A countdown runs against this for the whole repair.")}</small>
 							</div>
 						</div>
@@ -266,6 +266,12 @@ export class RepairWorkspace {
 	 * taking the device in matters more than naming who will look at it.
 	 */
 	_load_technicians(panel) {
+		// A promise in the past is a typo; keep the picker from offering one and
+		// refresh the floor on focus, because the POS stays open all day.
+		const $promised = panel.find(".ch-rep-promised");
+		const local_now = () => frappe.datetime.now_datetime().slice(0, 16).replace(" ", "T");
+		$promised.attr("min", local_now()).on("focus", () => $promised.attr("min", local_now()));
+
 		const $sel = panel.find(".ch-rep-technician");
 		if (!$sel.length) return;
 		frappe.xcall(
@@ -595,6 +601,19 @@ export class RepairWorkspace {
 			const ch_category = category_field.get_value();
 			const device_brand = brand_field.get_value();
 			const device_model = model_field.get_value();
+			const promised = panel.find(".ch-rep-promised").val();
+			if (!promised) {
+				// The countdown the whole repair is measured against starts here;
+				// a ticket without it is a receipt with no deadline.
+				panel.find(".ch-rep-promised").focus();
+				frappe.show_alert({ message: __("Give the customer an estimated delivery date and time"), indicator: "orange" });
+				return;
+			}
+			if (new Date(promised) <= new Date()) {
+				panel.find(".ch-rep-promised").focus();
+				frappe.show_alert({ message: __("The estimated delivery time is already in the past"), indicator: "orange" });
+				return;
+			}
 			if (!data_disclaimer) {
 				// Flagged on its own: it is a consent the customer gives, and
 				// burying it in the generic "fields are required" line is how it
@@ -655,7 +674,7 @@ export class RepairWorkspace {
 					// An absolute moment, not a duration: "4 hours" taken in at
 					// 6pm means tomorrow morning to a customer and 10pm to a
 					// spreadsheet. The counter states the actual time instead.
-					promised_completion_datetime: panel.find(".ch-rep-promised").val() || "",
+					promised_completion_datetime: promised,
 					coupon_code: coupon_field.get_value() || "",
 					// Set only when the counter came from the Service Queue; the
 					// server closes that token against the new request.
@@ -666,6 +685,13 @@ export class RepairWorkspace {
 					message: `${__("Service Request")} <b>${doc.name}</b> ${__("created")}`,
 					indicator: "green",
 				});
+				if (doc.promise_error) {
+					frappe.msgprint({
+						title: __("Promise not recorded"),
+						indicator: "orange",
+						message: __("{0} was created, but the promised time could not be saved: {1}. Set it from the Ops Hub.", [doc.name, doc.promise_error]),
+					});
+				}
 				this._upload_intake_photos(doc.name, pendingPhotos.splice(0));
 				renderPhotoStrip();
 				panel.find(".ch-rep-result-area").html(`
