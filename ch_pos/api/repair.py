@@ -253,6 +253,22 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 				f"POS intake: could not close token {source_token} for {sr.name}",
 			)
 
+	# The customer may have reached us before they reached the counter -- a web
+	# form, the app, WhatsApp, a call somebody logged. Closing that request
+	# against the ticket is what stops the same person being chased twice.
+	source_inbox = (data.get("source_inbox") or "").strip()
+	if source_inbox:
+		try:
+			from gofix.gofix_services.inbox import link_to_service_request
+
+			link_to_service_request(source_inbox, sr.name)
+		except Exception:
+			# Same reasoning as the token: the device is already on the counter.
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"POS intake: could not link inbox request {source_inbox} to {sr.name}",
+			)
+
 	# A counter check-in IS the acceptance. The customer has handed the device
 	# over and signed the intake, so parking the ticket in a Draft queue for
 	# someone to press "Accept" is a wait with no decision behind it — the

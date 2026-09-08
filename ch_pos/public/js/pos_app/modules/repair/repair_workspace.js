@@ -764,6 +764,11 @@ export class RepairWorkspace {
 					}
 				);
 			}).catch(() => { /* a queue lookup must never block an intake */ });
+
+			// The customer may have written in before walking in -- website
+			// form, the app, WhatsApp, or a call somebody logged. Offer what
+			// they already told us instead of asking them to say it twice.
+			this._offerInboxRequest(panel, cust_field, phone);
 		});
 
 		panel.on("click", ".ch-rep-create", () => {
@@ -860,6 +865,7 @@ export class RepairWorkspace {
 					// Set only when the counter came from the Service Queue; the
 					// server closes that token against the new request.
 					source_token: this._intakeToken ? this._intakeToken.name : "",
+					source_inbox: this._inboxRequest || "",
 				},
 			}).then((doc) => {
 				frappe.show_alert({
@@ -1654,4 +1660,49 @@ export class RepairWorkspace {
 			ch_pos_show_error(err, __("Repair Closure Failed"));
 		});
 	}
+	// ── Recognising a customer who already wrote in ─────────────
+
+	// Looks the number up in the service inbox and, if this person has an open
+	// request, offers to carry it into the intake form rather than starting
+	// from blank. Adopting it links the two, so the enquiry is not left
+	// hanging once the device is actually booked in.
+	_offerInboxRequest(panel, cust_field, phone) {
+		frappe.xcall("gofix.gofix_services.inbox.lookup_by_phone", {
+			phone: phone,
+			company: PosState.company || "",
+		}).then((found) => {
+			const open = (found && found.requests) || [];
+			if (!open.length) return;
+
+			const req = open[0];
+			const bits = [req.channel, req.device_brand, req.device_model,
+				req.issue_category].filter(Boolean).join(" · ");
+			const said = req.issue_description
+				? `<br><span class="text-muted">"${frappe.utils.escape_html(req.issue_description)}"</span>`
+				: "";
+
+			frappe.confirm(
+				__("{0} already contacted us on {1}.{2}{3}<br><br>Use what they told us?",
+					[frappe.utils.escape_html(req.customer_name || __("This customer")),
+					 `<b>${frappe.utils.escape_html(req.channel)}</b>`,
+					 bits ? `<br><span class="text-muted">${frappe.utils.escape_html(bits)}</span>` : "",
+					 said]),
+				() => {
+					this._inboxRequest = req.name;
+					const set = (sel, value) => {
+						if (value && !panel.find(sel).val()) panel.find(sel).val(value);
+					};
+					set(".ch-rep-issue", req.issue_description);
+					if (found.customer && !cust_field.get_value()) {
+						cust_field.set_value(found.customer.name);
+					}
+					frappe.show_alert({
+						message: __("Using request {0} — it will close when the ticket is created", [req.name]),
+						indicator: "green",
+					});
+				}
+			);
+		}).catch(() => { /* the inbox is a convenience, never a blocker */ });
+	}
+
 }

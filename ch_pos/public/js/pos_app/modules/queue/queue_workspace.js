@@ -210,11 +210,15 @@ export class QueueWorkspace {
 
 	// Drives the delivery gates that already existed in gofix and had no caller
 	// anywhere: readiness, OTP to the customer's registered number, verify,
-	// then complete. complete_delivery re-checks every gate server-side, so
+	// then complete. complete_handover re-checks every gate server-side, so
 	// this dialog guides the executive rather than being the control itself.
+	//
+	// Keyed on the Service Request. It used to key on the Sales Order, which
+	// meant a repair raised under the single-document model -- where no order
+	// exists -- could never be handed over from this screen at all.
 	_openHandover(token, repair) {
-		const so = repair.service_order;
-		const api = "gofix.gofix_services.api.";
+		const sr = repair.service_request;
+		const api = "gofix.gofix_services.handover.";
 		const d = new frappe.ui.Dialog({
 			title: __("Hand Over Device — {0}", [repair.service_request]),
 			size: "large",
@@ -241,14 +245,14 @@ export class QueueWorkspace {
 					${(repair.outstanding) ? ` — <b>${format_currency(repair.outstanding)} ${__("due")}</b>` : ` — ${__("settled")}`}</p>`
 				: "";
 			d.fields_dict.gates.$wrapper.html(
-				`<div><b>${__("Service Order")}:</b> ${frappe.utils.escape_html(so)}
+				`<div><b>${__("Repair")}:</b> ${frappe.utils.escape_html(sr)}
 					${repair.device ? ` · ${frappe.utils.escape_html(repair.device)}` : ""}
 				 <ul style="margin:8px 0 0;padding-left:18px">${rows}</ul>${inv}</div>`
 			);
 			d.set_primary_action(
 				ok ? __("Complete Handover") : __("Complete Handover (blocked)"),
 				ok ? () => {
-					frappe.xcall(api + "complete_delivery", { service_order: so })
+					frappe.xcall(api + "complete_handover", { service_request: sr })
 						.then(() => {
 							frappe.show_alert({ message: __("Device handed over"), indicator: "green" });
 							d.hide();
@@ -259,12 +263,12 @@ export class QueueWorkspace {
 			);
 		};
 
-		const refresh = () => frappe.xcall(api + "validate_delivery_readiness", { service_order: so })
+		const refresh = () => frappe.xcall(api + "handover_readiness", { service_request: sr })
 			.then(paint)
 			.catch(() => paint({ ready: false, blockers: [__("Could not read delivery readiness.")] }));
 
 		d.fields_dict.send_otp.$input.on("click", () => {
-			frappe.xcall(api + "generate_delivery_otp", { service_order: so })
+			frappe.xcall(api + "generate_handover_otp", { service_request: sr })
 				.then((r) => frappe.show_alert({
 					message: (r && r.message) || __("OTP sent to customer"), indicator: "blue" }))
 				.catch(() => { /* server message already shown */ });
@@ -272,7 +276,7 @@ export class QueueWorkspace {
 		d.fields_dict.verify_otp.$input.on("click", () => {
 			const otp = d.get_value("otp");
 			if (!otp) { frappe.show_alert({ message: __("Enter the OTP"), indicator: "orange" }); return; }
-			frappe.xcall(api + "verify_delivery_otp", { service_order: so, otp_input: otp })
+			frappe.xcall(api + "verify_handover_otp", { service_request: sr, otp_input: otp })
 				.then((r) => {
 					frappe.show_alert({
 						message: (r && r.message) || "",
@@ -377,7 +381,9 @@ export class QueueWorkspace {
 			// accessories returned -- and complete_delivery refuses on any of
 			// them. Routing to the invoice skipped all four, which is why the
 			// OTP machinery had never once run.
-			const handover = repairs.find((r) => r.service_order);
+			// Any repair that reached billing can be collected. Requiring a
+			// Sales Order here hid the button for every single-document repair.
+			const handover = repairs.find((r) => r.service_request);
 			if (collecting && handover) {
 				d.set_primary_action(__("Hand Over Device"), () => {
 					d.hide();
