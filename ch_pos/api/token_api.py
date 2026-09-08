@@ -2316,10 +2316,15 @@ def log_counter_walkin(
     device_model: str = "",
     item_code: str = "",
     linked_customer: str = None,
-    referral_source: str = "") -> dict:
+    referral_source: str = "",
+    visit_source: str = "Counter") -> dict:
     """
-    Create a minimal POS Kiosk Token for a direct-counter walk-in.
-    This replaces the old log_walkin counter-only approach.
+    Create a minimal POS Kiosk Token for a visit logged at the desk.
+
+    ``visit_source`` says how the customer reached us. It defaults to Counter,
+    which is the common case -- somebody standing there -- but the same call
+    records a phone call or a message somebody is transcribing, so there is one
+    way to log a visit rather than one per channel.
 
     ``device_brand`` / ``device_model`` capture what the customer asked
     for (used by repair-intake follow-up and the Walkin Conversion Report).
@@ -2393,12 +2398,17 @@ def log_counter_walkin(
         "pos_profile": pos_profile,
         "company": profile.company,
         "store": profile.warehouse,
-        "status": "In Progress",
+        # Somebody at the counter is being served now; a call or a message
+        # somebody transcribed is waiting on a reply, not in progress.
+        "status": "In Progress" if (visit_source or "Counter") in ("Counter", "Kiosk")
+                  else "Waiting",
         "token_display": token_display,
         "customer_name": customer_name.strip() or "Walk-in",
         "customer_phone": customer_phone.strip() or "",
         "linked_customer": linked_customer,
-        "visit_source": "Counter",
+        # Counter unless the desk says otherwise: the same
+        # endpoint logs a call or a transcribed message.
+        "visit_source": visit_source or "Counter",
         "referral_source": _valid_referral_source(referral_source),
         "visit_purpose": visit_purpose,
         "issue_description": remarks,

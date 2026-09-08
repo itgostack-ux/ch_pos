@@ -96,13 +96,42 @@ export class QueueWorkspace {
 					<span class="ch-mode-hint">${hint}</span>
 				</div>
 
+				<div class="ch-queue-filters">
+					<select class="ch-q-filter" data-f="status">
+						<option value="">${__("All open")}</option>
+						<option value="Waiting">${__("Waiting")}</option>
+						<option value="Hold">${__("Hold")}</option>
+						<option value="Engaged">${__("Engaged")}</option>
+						<option value="In Progress">${__("In Progress")}</option>
+					</select>
+					<select class="ch-q-filter" data-f="channel">
+						<option value="">${__("All channels")}</option>
+						<option value="__in_person">${__("In the shop")}</option>
+						<option value="__remote">${__("Wrote in")}</option>
+						<option value="Counter">${__("Counter")}</option>
+						<option value="Kiosk">${__("Kiosk")}</option>
+						<option value="WhatsApp">${__("WhatsApp")}</option>
+						<option value="Web">${__("Website")}</option>
+						<option value="Mobile App">${__("Mobile App")}</option>
+						<option value="Phone Call">${__("Phone Call")}</option>
+						<option value="Email">${__("Email")}</option>
+						<option value="Appointment">${__("Appointment")}</option>
+					</select>
+					<select class="ch-q-filter" data-f="purpose">
+						<option value="">${__("Any purpose")}</option>
+						<option value="Repair">${__("Repair")}</option>
+						<option value="Sales">${__("Sales")}</option>
+						<option value="Buyback">${__("Buyback")}</option>
+						<option value="Enquiry">${__("Enquiry")}</option>
+					</select>
+					<input type="search" class="ch-q-search" placeholder="${__("Phone or name")}">
+					<button class="btn btn-xs btn-default ch-q-clear">${__("Clear")}</button>
+				</div>
+
 				<div class="ch-queue-toolbar">
 					<div class="ch-queue-stats">
 						<span class="ch-queue-count"></span>
 					</div>
-					<button class="btn btn-xs btn-default ch-queue-log-btn">
-						<i class="fa fa-plus"></i> ${__("Log A Request")}
-					</button>
 					<button class="btn btn-xs btn-default ch-queue-refresh-btn">
 						<i class="fa fa-refresh"></i> ${__("Refresh")}
 					</button>
@@ -118,7 +147,24 @@ export class QueueWorkspace {
 		`);
 
 		panel.find(".ch-queue-refresh-btn").on("click", () => this._loadTokens());
-		panel.find(".ch-queue-log-btn").on("click", () => this._logRequest());
+
+		// Filtering the loaded list rather than re-querying: the desk is a
+		// small set and the counter wants it to respond as they type.
+		this._filters = { status: "", channel: "", purpose: "", search: "" };
+		panel.on("change", ".ch-q-filter", (e) => {
+			this._filters[$(e.currentTarget).data("f")] = e.currentTarget.value;
+			this._renderTokenList(this._tokens);
+		});
+		panel.on("input", ".ch-q-search", frappe.utils.debounce((e) => {
+			this._filters.search = (e.target.value || "").trim();
+			this._renderTokenList(this._tokens);
+		}, 200));
+		panel.on("click", ".ch-q-clear", () => {
+			this._filters = { status: "", channel: "", purpose: "", search: "" };
+			panel.find(".ch-q-filter").val("");
+			panel.find(".ch-q-search").val("");
+			this._renderTokenList(this._tokens);
+		});
 		this._loadTokens();
 	}
 
@@ -153,8 +199,29 @@ export class QueueWorkspace {
 			});
 	}
 
-	_renderTokenList(tokens) {
+	_applyFilters(tokens) {
+		const f = this._filters || {};
+		const digits = (f.search || "").replace(/\D/g, "");
+		return (tokens || []).filter((t) => {
+			if (f.status && t.status !== f.status) return false;
+			if (f.purpose && (t.visit_purpose || "") !== f.purpose) return false;
+			if (f.channel === "__remote" && t.channel_group !== "remote") return false;
+			if (f.channel === "__in_person" && t.channel_group === "remote") return false;
+			if (f.channel && !f.channel.startsWith("__")
+				&& (t.visit_source || "") !== f.channel) return false;
+			if (f.search) {
+				const hay = `${t.customer_name || ""} ${t.customer_phone || ""} ${
+					t.token_display || ""} ${t.name}`.toLowerCase();
+				const needle = digits.length >= 3 ? digits : f.search.toLowerCase();
+				if (!hay.includes(needle)) return false;
+			}
+			return true;
+		});
+	}
+
+	_renderTokenList(all_tokens) {
 		if (!this._panel) return;
+		const tokens = this._applyFilters(all_tokens);
 		const list = this._panel.find(".ch-queue-token-list");
 
 		// Update stats bar
@@ -170,8 +237,13 @@ export class QueueWorkspace {
 					<div class="ch-queue-empty-icon">
 						<i class="fa fa-check-circle"></i>
 					</div>
-					<span class="ch-queue-empty-title">${__("All clear!")}</span>
-					<span class="ch-queue-empty-hint">${__("No waiting or in-progress tokens right now")}</span>
+					<span class="ch-queue-empty-title">${
+						(all_tokens || []).length ? __("Nothing matches") : __("All clear!")}</span>
+					<span class="ch-queue-empty-hint">${
+						(all_tokens || []).length
+							? __("Clear the filters to see the other {0} waiting",
+								[(all_tokens || []).length])
+							: __("Nobody is waiting on this store right now")}</span>
 				</div>
 			`);
 			return;
@@ -213,6 +285,12 @@ export class QueueWorkspace {
 		);
 
 		// Bind action buttons
+		list.find(".ch-queue-reply-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._replyDialog(token);
+		});
+
 		list.find(".ch-queue-convert-btn").on("click", (e) => {
 			const name = $(e.currentTarget).data("token");
 			const token = this._tokens.find((t) => t.name === name);
@@ -469,6 +547,17 @@ export class QueueWorkspace {
 		const st = statusMap[t.status] || { cls: "default", icon: "fa-circle", label: t.status };
 		const timeAgo = frappe.datetime.comment_when(t.creation);
 
+		// The channel was invisible on the card, so a WhatsApp message and a
+		// person standing at the counter looked identical.
+		const channel = t.visit_source || (t.channel_group === "remote" ? "Other" : "Counter");
+		const chan_pill = `<span class="ch-q-chan" data-c="${frappe.utils.escape_html(channel)}">${
+			frappe.utils.escape_html(channel)}</span>`;
+		// Nobody has replied yet, and it is not a person standing here.
+		const unanswered = t.channel_group === "remote" && t.awaiting_response
+			? `<span class="ch-q-unanswered" title="${
+				__("Nobody has replied to this yet")}">${__("unanswered")}</span>`
+			: "";
+
 		// Customer display
 		const cust_name  = frappe.utils.escape_html(t.customer_name || __("Walk-in"));
 		const cust_phone = t.customer_phone ? frappe.utils.escape_html(t.customer_phone) : "";
@@ -481,7 +570,30 @@ export class QueueWorkspace {
 		const esc = (v) => frappe.utils.escape_html(String(v));
 		const tag = (icon, v) => v ? `<span class="ch-q-tag"><i class="fa ${icon}"></i> ${esc(v)}</span>` : "";
 		let detail_html = "";
-		if (is_svc) {
+		if (t.channel_group === "remote") {
+			// What a remote customer gave us is a different set from what a
+			// tablet collects, so the card shows that set rather than leaving
+			// four empty chips where a walk-in would have them.
+			const device = [t.device_brand, t.device_model_name || t.device_model]
+				.filter(Boolean)
+				.filter((v, i, arr) => arr.indexOf(v) === i)
+				.join(" · ") || t.other_device_hint || "";
+			detail_html = `
+				<div class="ch-q-tags">
+					${tag("fa-flag", t.visit_purpose)}
+					${tag("fa-mobile", device)}
+					${tag("fa-wrench", t.issue_category)}
+					${tag("fa-clock-o", t.preferred_datetime
+						? __("Wants {0}", [frappe.datetime.str_to_user(t.preferred_datetime)]) : "")}
+					${tag("fa-envelope-o", t.email)}
+					${tag("fa-bullhorn", t.referral_source)}
+					${tag("fa-user-o", t.assigned_to)}
+				</div>
+				${t.issue_description ? `<p class="ch-q-note">${
+					esc(t.issue_description.substring(0, 220))}${
+					t.issue_description.length > 220 ? "…" : ""}</p>` : ""}
+				${this._linkLine(t)}`;
+		} else if (is_svc) {
 			// Device reads type → brand → model, each only when it adds
 			// something, so "Smart Phones · Oneplus" does not become
 			// "Smart Phones Smart Phones".
@@ -551,6 +663,23 @@ export class QueueWorkspace {
 				${__("Withdraw")}
 			</button>`);
 			actions_html = buttons.join("\n");
+		} else if (t.channel_group === "remote") {
+			// Nobody is at the till, so Bill is meaningless. What a written
+			// request needs is a reply and, once the customer turns up with the
+			// device, the same conversion every walk-in gets.
+			actions_html = `
+				<button class="btn btn-sm btn-default ch-queue-reply-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-comment-o"></i> ${__("Reply")}
+				</button>
+				${is_svc ? `<button class="btn btn-sm btn-primary ch-queue-convert-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-plus"></i> ${__("Book Device In")}
+				</button>` : ""}
+				<button class="btn btn-sm btn-default ch-queue-drop-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					${__("Close")}
+				</button>`;
 		} else if (is_svc) {
 			// Withdraw belongs here too. A service walk-in leaves without
 			// proceeding just as a retail one does -- the customer hears the
@@ -586,6 +715,8 @@ export class QueueWorkspace {
 				<div class="ch-q-content">
 					<div class="ch-q-row-top">
 						<span class="ch-q-token-id">${frappe.utils.escape_html(t.token_display || t.name)}</span>
+						${chan_pill}
+						${unanswered}
 						<span class="ch-q-status ch-q-status--${st.cls}">
 							<span class="ch-q-status-dot"></span> ${st.label}
 						</span>
@@ -840,40 +971,29 @@ export class QueueWorkspace {
 			proceed(null);
 		}).catch(() => proceed(null));
 	}
-	// Somebody rings the shop, or a message needs recording by hand. It lands
-	// in the same queue as everything else, with the channel saying how it got
-	// here -- there is no second inbox to keep in step.
-	_logRequest() {
-		const channels = ["Phone Call", "WhatsApp", "Web", "Mobile App", "Email",
-						  "Social", "Marketplace", "Partner", "Appointment", "Other"];
+
+	// Recording what was said is what moves a request off Waiting -- whether
+	// anyone has replied is the one thing this desk must never be wrong about.
+	_replyDialog(t) {
 		const d = new frappe.ui.Dialog({
-			title: __("Log A Request"),
+			title: __("Reply to {0}", [t.customer_name || t.customer_phone || t.name]),
 			fields: [
-				{ fieldname: "channel", fieldtype: "Select", label: __("How did they reach us?"),
-				  options: channels.join("\n"), default: "Phone Call", reqd: 1 },
-				{ fieldname: "contact_number", fieldtype: "Data", reqd: 1,
-				  label: __("Contact Number"),
-				  description: __("The number is how we recognise them when they walk in.") },
-				{ fieldname: "customer_name", fieldtype: "Data", label: __("Name") },
-				{ fieldtype: "Column Break" },
-				{ fieldname: "visit_purpose", fieldtype: "Select", label: __("What do they want?"),
-				  options: "Enquiry\nRepair\nSales\nBuyback\nOther", default: "Enquiry" },
-				{ fieldname: "device_brand", fieldtype: "Link", options: "Brand", label: __("Brand") },
-				{ fieldname: "preferred_datetime", fieldtype: "Datetime",
-				  label: __("Preferred Slot") },
-				{ fieldtype: "Section Break" },
-				{ fieldname: "issue_description", fieldtype: "Small Text",
-				  label: __("What did they say?") },
+				{ fieldtype: "HTML", options: t.issue_description
+					? `<p class="text-muted">"${frappe.utils.escape_html(t.issue_description)}"</p>`
+					: "" },
+				{ fieldname: "note", fieldtype: "Small Text", reqd: 1,
+				  label: __("What did you tell them?") },
+				{ fieldname: "channel", fieldtype: "Select", label: __("Via"),
+				  options: ("Phone Call\nWhatsApp\nEmail\nWeb\nMobile App\nSMS\nOther"),
+				  default: t.visit_source },
 			],
-			primary_action_label: __("Log It"),
+			primary_action_label: __("Save"),
 			primary_action: (v) => {
-				frappe.xcall("gofix.gofix_services.inbox.push_request", {
-					...v,
-					company: PosState.active_company || "",
-					pos_profile: PosState.pos_profile || "",
-				}).then((r) => {
+                frappe.xcall("gofix.gofix_services.inbox.add_note", {
+					inbox: t.name, note: v.note, channel: v.channel,
+				}).then(() => {
 					d.hide();
-					frappe.show_alert({ message: r.message, indicator: "green" });
+					frappe.show_alert({ message: __("Reply recorded"), indicator: "green" });
 					this._loadTokens();
 				});
 			},

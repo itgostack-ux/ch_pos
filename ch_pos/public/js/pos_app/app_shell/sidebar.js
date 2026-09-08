@@ -229,8 +229,21 @@ export class Sidebar {
 		// of being tracked live (see primary_action below).
 		let selected_model_value = "";
 		const d = new frappe.ui.Dialog({
-			title: __("Log Walk-in"),
+			title: __("Log Visit"),
 			fields: [
+				{
+					// One way to log a visit, not one per channel. Counter is
+					// the common case -- somebody standing here -- but the same
+					// form records a call or a message being transcribed, so
+					// the front desk never needs a second button.
+					label: __("How did they reach us?"),
+					fieldname: "visit_source",
+					fieldtype: "Select",
+					options: ("Counter\nPhone Call\nWhatsApp\nWeb\nMobile App\n"
+							  + "Email\nAppointment\nSocial\nMarketplace\nPartner\nOther"),
+					default: "Counter",
+					reqd: 1,
+				},
 				{
 					label: __("Purpose"),
 					fieldname: "visit_purpose",
@@ -422,12 +435,13 @@ export class Sidebar {
 							// the server re-checks it and falls back to the phone.
 							linked_customer: d._linked_customer || "",
 							referral_source: values.referral_source || "",
+							visit_source: values.visit_source || "Counter",
 						},
 						callback: (r) => {
 							const res = r.message || {};
 							if (res.status === "ok") {
 								frappe.show_alert({
-									message: __("Walk-in logged: {0} ({1})", [res.token, res.visit_purpose]),
+									message: __("Logged: {0} ({1})", [res.token, res.visit_purpose]),
 									indicator: "green",
 								});
 								EventBus.emit("walkin:logged", res);

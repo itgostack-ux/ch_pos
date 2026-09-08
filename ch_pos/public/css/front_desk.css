@@ -406,3 +406,70 @@
   color: var(--pos-text-muted);
 }
 .ch-queue-section-label:first-child { margin-top: 0; }
+
+/* ── Front desk filters ───────────────────────────────────────────────
+   Narrowing happens on the loaded list, so these respond as you type. */
+.ch-queue-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pos-space-sm);
+  align-items: center;
+  margin-bottom: var(--pos-space-md);
+}
+.ch-queue-filters select.ch-q-filter,
+.ch-queue-filters input.ch-q-search {
+  height: 34px;
+  min-width: 138px;
+  padding: 0 var(--pos-space-md);
+  border: 1px solid var(--pos-border);
+  border-radius: var(--pos-radius-sm);
+  background: var(--pos-surface);
+  color: var(--pos-text);
+  font-family: var(--pos-font);
+  font-size: var(--pos-fs-base);
+  font-weight: var(--pos-fw-medium);
+  box-shadow: var(--pos-shadow-xs);
+}
+.ch-queue-filters input.ch-q-search { width: 190px; font-weight: var(--pos-fw-normal); }
+.ch-queue-filters select.ch-q-filter:focus,
+.ch-queue-filters input.ch-q-search:focus {
+  outline: none;
+  border-color: var(--pos-border-focus);
+  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.12);
+}
+
+/* ── How the customer reached us ──────────────────────────────────────
+   Colour-coded so a message and a person at the counter are told apart
+   at a glance rather than by reading. */
+.ch-q-chan {
+  font-size: var(--pos-fs-2xs);
+  font-weight: var(--pos-fw-bold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--pos-radius-pill);
+  background: var(--pos-surface-sunken);
+  color: var(--pos-text-secondary);
+  white-space: nowrap;
+}
+.ch-q-chan[data-c="Counter"],
+.ch-q-chan[data-c="Kiosk"]       { background: var(--pos-primary-light); color: var(--pos-primary-text); }
+.ch-q-chan[data-c="WhatsApp"]    { background: var(--pos-success-light); color: var(--pos-success-dark); }
+.ch-q-chan[data-c="Web"]         { background: var(--pos-info-light);    color: #1e40af; }
+.ch-q-chan[data-c="Mobile App"]  { background: #f3ebfd;                  color: #6b31c9; }
+.ch-q-chan[data-c="Phone Call"]  { background: var(--pos-warning-light); color: #92400e; }
+.ch-q-chan[data-c="Email"]       { background: #e8eef5;                  color: #33506e; }
+.ch-q-chan[data-c="Appointment"] { background: #e7f7ec;                  color: #1a7f43; }
+
+/* Nobody has replied, and no one is standing here to be served. */
+.ch-q-unanswered {
+  font-size: var(--pos-fs-2xs);
+  font-weight: var(--pos-fw-bold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--pos-radius-pill);
+  background: var(--pos-danger-light);
+  color: #991b1b;
+  white-space: nowrap;
+}
