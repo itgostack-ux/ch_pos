@@ -1,9 +1,23 @@
 """
 Walkin Conversion Report  (ch_pos — any company)
 -------------------------------------------------
-Source: POS Kiosk Token — works for ALL companies (Gogizmo, SARF, Congruence, etc.)
+The single walk-in report. Three used to exist and disagree:
 
-Rows: one per date × POS profile (store)
+  * this one            — POS Kiosk Token, per store per day
+  * Zone Walk-in Conversion (ch_mg_reports) — the same token data grouped by
+    zone, i.e. this report with one filter set differently
+  * Walk-in Conversion Report (gofix)       — Service Request instead of token
+
+The first two were the same question asked twice, so the zone view is now a
+Group By on this report. The third counted something else entirely and its
+numbers could never agree: a walk-in *is* a token, and on this site 54 of 60
+Service Requests carried no token at all, so an SR-sourced "walk-in" count both
+missed real footfall and counted remote/courier jobs that never walked in.
+Counting tokens is the definition that matches the word.
+
+Source: POS Kiosk Token — works for ALL companies (Gogizmo, SARF, Congruence).
+
+Rows: one per date × the chosen Group By (store, zone, city, or date alone)
 Scope: Store Managers see only their assigned CH Store(s); System Manager sees all.
 Join chain: POS Kiosk Token.store → tabCH Store → cs.zone / cs.city
 """
@@ -15,11 +29,22 @@ from frappe.utils import flt, today
 from ch_erp15.ch_erp15.report_scope import scope_where_clause
 
 
+# Group By → (SQL expression, column fieldname, label, fieldtype, link target).
+# One place decides how the report is cut, so the columns, the GROUP BY and the
+# ORDER BY can never drift apart.
+_GROUPINGS = {
+    "Store": ("t.pos_profile", "pos_profile", "Store (POS Profile)", "Link", "POS Profile"),
+    "Zone": ("cs.zone", "zone", "Zone", "Link", "CH Store Zone"),
+    "City": ("cs.city", "city", "City", "Link", "CH City"),
+    "Date": (None, None, None, None, None),
+}
+
+
 def execute(filters=None):
     filters = filters or {}
     _apply_defaults(filters)
     scope_sql = _get_scope_sql()
-    columns = get_columns()
+    columns = get_columns(filters)
     data = get_data(filters, scope_sql)
     chart = get_chart(data)
     summary = get_summary(data)
@@ -35,6 +60,8 @@ def _apply_defaults(filters):
         filters["from_date"] = frappe.utils.add_days(today(), -30)
     if not filters.get("to_date"):
         filters["to_date"] = today()
+    if filters.get("group_by") not in _GROUPINGS:
+        filters["group_by"] = "Store"
 
 
 # ---------------------------------------------------------------------------
@@ -61,24 +88,47 @@ def _get_scope_sql():
 # columns
 # ---------------------------------------------------------------------------
 
-def get_columns():
-    return [
-        {"fieldname": "date",             "label": _("Date"),               "fieldtype": "Date",     "width": 110},
-        {"fieldname": "pos_profile",      "label": _("Store (POS Profile)"), "fieldtype": "Link",     "options": "POS Profile", "width": 170},
-        {"fieldname": "zone",             "label": _("Zone"),                "fieldtype": "Link",     "options": "CH Store Zone", "width": 135},
-        {"fieldname": "city",             "label": _("City"),                "fieldtype": "Link",     "options": "CH City", "width": 115},
-        {"fieldname": "total_footfall",   "label": _("Footfall"),            "fieldtype": "Int",      "width": 90},
-        {"fieldname": "kiosk",            "label": _("Kiosk"),               "fieldtype": "Int",      "width": 72},
-        {"fieldname": "counter",          "label": _("Counter"),             "fieldtype": "Int",      "width": 78},
-        {"fieldname": "engaged",          "label": _("Engaged"),             "fieldtype": "Int",      "width": 78},
-        {"fieldname": "converted",        "label": _("Converted"),           "fieldtype": "Int",      "width": 88},
-        {"fieldname": "dropped",          "label": _("Dropped"),             "fieldtype": "Int",      "width": 78},
-        {"fieldname": "expired",          "label": _("No Show"),             "fieldtype": "Int",      "width": 82},
-        {"fieldname": "conversion_rate",  "label": _("Conversion %"),        "fieldtype": "Percent",  "width": 108},
-        {"fieldname": "engagement_rate",  "label": _("Engagement %"),        "fieldtype": "Percent",  "width": 108},
-        {"fieldname": "avg_handling_mins","label": _("Avg Handling (mins)"), "fieldtype": "Float",    "precision": 1, "width": 130},
-        {"fieldname": "revenue",          "label": _("Revenue"),             "fieldtype": "Currency", "width": 120},
+def get_columns(filters=None):
+    filters = filters or {}
+    group_by = filters.get("group_by") or "Store"
+    _expr, fieldname, label, fieldtype, options = _GROUPINGS.get(group_by, _GROUPINGS["Store"])
+
+    cols = [
+        {"fieldname": "date", "label": _("Date"), "fieldtype": "Date", "width": 110},
     ]
+    if fieldname:
+        col = {"fieldname": fieldname, "label": _(label), "fieldtype": fieldtype, "width": 170}
+        if options:
+            col["options"] = options
+        cols.append(col)
+    # Zone and city stay visible when cutting by store, because "which zone is
+    # this store in" is the first question anyone asks of a store row.
+    if group_by == "Store":
+        cols += [
+            {"fieldname": "zone", "label": _("Zone"), "fieldtype": "Link", "options": "CH Store Zone", "width": 135},
+            {"fieldname": "city", "label": _("City"), "fieldtype": "Link", "options": "CH City", "width": 115},
+        ]
+    elif group_by == "Zone":
+        cols.append({"fieldname": "city", "label": _("City"), "fieldtype": "Link", "options": "CH City", "width": 115})
+
+    cols += [
+        {"fieldname": "stores", "label": _("Stores"), "fieldtype": "Int", "width": 78},
+        {"fieldname": "total_footfall", "label": _("Footfall"), "fieldtype": "Int", "width": 90},
+        {"fieldname": "kiosk", "label": _("Kiosk"), "fieldtype": "Int", "width": 72},
+        {"fieldname": "counter", "label": _("Counter"), "fieldtype": "Int", "width": 78},
+        {"fieldname": "engaged", "label": _("Engaged"), "fieldtype": "Int", "width": 78},
+        {"fieldname": "converted", "label": _("Converted"), "fieldtype": "Int", "width": 88},
+        {"fieldname": "dropped", "label": _("Dropped"), "fieldtype": "Int", "width": 78},
+        {"fieldname": "expired", "label": _("No Show"), "fieldtype": "Int", "width": 82},
+        {"fieldname": "conversion_rate", "label": _("Conversion %"), "fieldtype": "Percent", "width": 108},
+        {"fieldname": "engagement_rate", "label": _("Engagement %"), "fieldtype": "Percent", "width": 108},
+        # Carried over from the gofix report this replaces, where it was the
+        # headline metric under the name "Withdrawn %".
+        {"fieldname": "drop_rate", "label": _("Dropped %"), "fieldtype": "Percent", "width": 100},
+        {"fieldname": "avg_handling_mins", "label": _("Avg Handling (mins)"), "fieldtype": "Float", "precision": 1, "width": 130},
+        {"fieldname": "revenue", "label": _("Revenue"), "fieldtype": "Currency", "width": 120},
+    ]
+    return cols
 
 
 # ---------------------------------------------------------------------------
@@ -101,22 +151,63 @@ def get_data(filters, scope_sql=""):
     if filters.get("pos_profile"):
         conditions.append("t.pos_profile = %(pos_profile)s")
         params["pos_profile"] = filters["pos_profile"]
+    if filters.get("store"):
+        conditions.append("t.store = %(store)s")
+        params["store"] = filters["store"]
     if filters.get("zone"):
         conditions.append("cs.zone = %(zone)s")
         params["zone"] = filters["zone"]
     if filters.get("city"):
         conditions.append("cs.city = %(city)s")
         params["city"] = filters["city"]
+    # Dimensions the tablet and the counter capture. They were on the token all
+    # along and no report could cut by them.
+    if filters.get("visit_purpose"):
+        conditions.append("t.visit_purpose = %(visit_purpose)s")
+        params["visit_purpose"] = filters["visit_purpose"]
+    if filters.get("visit_source"):
+        conditions.append("t.visit_source = %(visit_source)s")
+        params["visit_source"] = filters["visit_source"]
+    if filters.get("visit_reason"):
+        conditions.append("t.visit_reason = %(visit_reason)s")
+        params["visit_reason"] = filters["visit_reason"]
+    if filters.get("referral_source"):
+        conditions.append("t.referral_source = %(referral_source)s")
+        params["referral_source"] = filters["referral_source"]
+    if filters.get("status"):
+        conditions.append("t.status = %(status)s")
+        params["status"] = filters["status"]
 
     where_base = ("WHERE " + " AND ".join(conditions)) if conditions else "WHERE 1=1"
     where = where_base + scope_sql
 
+    group_by = filters.get("group_by") or "Store"
+    expr, fieldname, _label, _ft, _opt = _GROUPINGS.get(group_by, _GROUPINGS["Store"])
+
+    # Only the grouped dimension is selected raw; the others are aggregated so
+    # a zone row does not silently show one arbitrary store's city.
+    if group_by == "Store":
+        dim_select = "t.pos_profile AS pos_profile, IFNULL(cs.zone,'') AS zone, IFNULL(cs.city,'') AS city,"
+        group_sql = "DATE(t.creation), t.pos_profile"
+        order_sql = "DATE(t.creation) DESC, t.pos_profile"
+    elif group_by == "Zone":
+        dim_select = "IFNULL(cs.zone,'') AS zone, MIN(IFNULL(cs.city,'')) AS city,"
+        group_sql = "DATE(t.creation), cs.zone"
+        order_sql = "DATE(t.creation) DESC, cs.zone"
+    elif group_by == "City":
+        dim_select = "IFNULL(cs.city,'') AS city,"
+        group_sql = "DATE(t.creation), cs.city"
+        order_sql = "DATE(t.creation) DESC, cs.city"
+    else:  # Date
+        dim_select = ""
+        group_sql = "DATE(t.creation)"
+        order_sql = "DATE(t.creation) DESC"
+
     rows = frappe.db.sql("""
         SELECT
             DATE(t.creation)                                                              AS date,
-            t.pos_profile,
-            IFNULL(cs.zone,  '')                                                          AS zone,
-            IFNULL(cs.city,  '')                                                          AS city,
+            {dim_select}
+            COUNT(DISTINCT t.pos_profile)                                                  AS stores,
             COUNT(*)                                                                       AS total_footfall,
             SUM(CASE WHEN t.visit_source = 'Kiosk'   THEN 1 ELSE 0 END)                  AS kiosk,
             SUM(CASE WHEN t.visit_source = 'Counter' THEN 1 ELSE 0 END)                  AS counter,
@@ -131,13 +222,16 @@ def get_data(filters, scope_sql=""):
         LEFT JOIN `tabCH Store`      cs ON cs.name = t.store
         LEFT JOIN `tabSales Invoice` si ON si.name = t.converted_invoice AND si.docstatus = 1
         {where}
-        GROUP BY DATE(t.creation), t.pos_profile
-        ORDER BY DATE(t.creation) DESC, t.pos_profile
-    """.format(where=where), params, as_dict=True)  # noqa: UP032
+        GROUP BY {group_sql}
+        ORDER BY {order_sql}
+    """.format(dim_select=dim_select, where=where, group_sql=group_sql, order_sql=order_sql),
+        params, as_dict=True)  # noqa: UP032
 
     for r in rows:
-        r["conversion_rate"]   = flt(r["converted"]    / r["total_footfall"] * 100, 1) if r["total_footfall"] else 0
-        r["engagement_rate"]   = flt(r["engaged"]      / r["total_footfall"] * 100, 1) if r["total_footfall"] else 0
+        ff = r["total_footfall"]
+        r["conversion_rate"] = flt(r["converted"] / ff * 100, 1) if ff else 0
+        r["engagement_rate"] = flt(r["engaged"] / ff * 100, 1) if ff else 0
+        r["drop_rate"] = flt(r["dropped"] / ff * 100, 1) if ff else 0
         r["avg_handling_mins"] = flt(r["avg_handling_mins"], 1)
 
     return rows
@@ -183,10 +277,12 @@ def get_summary(data):
     total_dropped = sum(r["dropped"]        for r in data)
     total_revenue = sum(r["revenue"]        for r in data)
     conv_pct      = flt(total_conv / total_ff * 100, 1) if total_ff else 0
+    drop_pct      = flt(total_dropped / total_ff * 100, 1) if total_ff else 0
     return [
         {"value": total_ff,      "label": _("Total Footfall"),  "datatype": "Int",      "color": "blue"},
         {"value": conv_pct,      "label": _("Conversion %"),    "datatype": "Percent",  "color": "green" if conv_pct >= 35 else "orange"},
         {"value": total_conv,    "label": _("Converted"),       "datatype": "Int",      "color": "green"},
         {"value": total_dropped, "label": _("Dropped"),         "datatype": "Int",      "color": "red"},
+        {"value": drop_pct,      "label": _("Dropped %"),       "datatype": "Percent",  "color": "red"},
         {"value": total_revenue, "label": _("Revenue"),         "datatype": "Currency", "color": "green"},
     ]
