@@ -2776,6 +2776,11 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
            FROM `tabPOS Kiosk Token`
            WHERE pos_profile = %s
                          AND status IN ('Waiting', 'Hold', 'Engaged', 'In Progress')
+             -- People who came into the shop. Written requests are fetched
+             -- separately below; without this a request that arrived today AND
+             -- carries a store matches both queries and appears twice in the
+             -- same list.
+             AND visit_source IN ('Kiosk', 'Counter')
              AND DATE(creation) = %s
                      ORDER BY FIELD(status, 'In Progress', 'Hold', 'Waiting', 'Engaged'), creation ASC
                      LIMIT %s""",
@@ -2791,6 +2796,12 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     # They are deliberately NOT bound to today. A walk-in is a queue position
     # and expires with the day; a message sent last night is still owed an
     # answer this morning.
+    #
+    # They ARE bound to a store. Matching on "this store or none" put every
+    # unrouted request on every desk in the company, so four people saw the
+    # same customer and any of them might have rung. A request without a store
+    # belongs to nobody until it is routed, and shows only in the manager's
+    # unassigned list.
     company = frappe.db.get_value("POS Profile", pos_profile, "company")
     remote = frappe.db.sql(
         """SELECT name, token_display, customer_name, customer_phone,
@@ -2810,7 +2821,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
            WHERE company = %s
              AND visit_source NOT IN ('Kiosk', 'Counter')
              AND status IN ('Waiting', 'Hold', 'Engaged', 'In Progress')
-             AND COALESCE(pos_profile, '') IN ('', %s)
+             AND pos_profile = %s
            ORDER BY creation DESC
            LIMIT %s""",
         (company, pos_profile, result_limit + 1),

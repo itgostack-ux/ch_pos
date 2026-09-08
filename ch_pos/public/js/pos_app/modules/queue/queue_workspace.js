@@ -134,18 +134,29 @@ export class QueueWorkspace {
 		// small set and the counter wants it to respond as they type.
 		this._filters = { status: "", channel: "", purpose: "", due: "", search: "" };
 		panel.on("change", ".ch-q-filter", (e) => {
-			this._filters[$(e.currentTarget).data("f")] = e.currentTarget.value;
-			this._renderTokenList(this._tokens);
+			const key = $(e.currentTarget).data("f");
+			const was = this._filters[key];
+			this._filters[key] = e.currentTarget.value;
+			// The routing pool is a different query, not a narrower view of the
+			// same one, so moving into or out of it has to re-fetch. Filtering
+			// the loaded list instead showed this store's own walk-ins under a
+			// heading that said they were unrouted.
+			const pool = key === "channel"
+				&& (was === "__unassigned" || e.currentTarget.value === "__unassigned");
+			if (pool) this._loadTokens();
+			else this._renderTokenList(this._tokens);
 		});
 		panel.on("input", ".ch-q-search", frappe.utils.debounce((e) => {
 			this._filters.search = (e.target.value || "").trim();
 			this._renderTokenList(this._tokens);
 		}, 200));
 		panel.on("click", ".ch-q-clear", () => {
+			const was_pool = this._filters.channel === "__unassigned";
 			this._filters = { status: "", channel: "", purpose: "", due: "", search: "" };
 			panel.find(".ch-q-filter").val("");
 			panel.find(".ch-q-search").val("");
-			this._renderTokenList(this._tokens);
+			if (was_pool) this._loadTokens();
+			else this._renderTokenList(this._tokens);
 		});
 		this._loadTokens();
 	}
@@ -153,6 +164,14 @@ export class QueueWorkspace {
 	_loadTokens() {
 		const pos_profile = PosState.pos_profile;
 		if (!pos_profile) return;
+
+		// The routing pool is a separate, deliberate view. It is company-wide
+		// by nature, so it is never mixed into a store's own queue -- that is
+		// exactly what put one customer on four desks.
+		if ((this._filters || {}).channel === "__unassigned") {
+			this._loadUnassigned();
+			return;
+		}
 
 		if (this._panel) {
 			this._panel.find(".ch-queue-token-list").html(
@@ -263,7 +282,9 @@ export class QueueWorkspace {
 			   <div class="ch-queue-cards">${rows.map((t) => this._tokenCard(t)).join("")}</div>`
 			: "";
 		list.html(
-			(here.length && wrote.length)
+			this._filters && this._filters.channel === "__unassigned"
+				? section(__("Not yet routed to any store"), tokens)
+				: (here.length && wrote.length)
 				? section(__("In the shop"), here) + section(__("Waiting on a reply"), wrote)
 				: `<div class="ch-queue-cards">${
 					tokens.map((t) => this._tokenCard(t)).join("")}</div>`
@@ -274,6 +295,12 @@ export class QueueWorkspace {
 			if ($(e.target).closest("button, a").length) return;   // let actions act
 			const name = $(e.currentTarget).data("token");
 			if (name) this._openDetail(name);
+		});
+
+		list.find(".ch-queue-claim-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._claimHere(token);
 		});
 
 		list.find(".ch-queue-extend-btn").on("click", (e) => {
@@ -650,7 +677,18 @@ export class QueueWorkspace {
 		const action = t.counter_action || (is_svc ? "Create Request" : "Bill");
 		const allow_create = !!t.allow_create_request;
 		let actions_html = "";
-		if (t.channel_group === "remote") {
+		if (t.unassigned) {
+			// Nobody owns this yet, so the only useful action is to take it.
+			actions_html = `
+				<button class="btn btn-sm btn-primary ch-queue-claim-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-hand-paper-o"></i> ${__("Take At This Store")}
+				</button>
+				<button class="btn btn-sm btn-default ch-queue-note-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-comment-o"></i> ${__("Note")}
+				</button>`;
+		} else if (t.channel_group === "remote") {
 			// Checked FIRST: counter_action comes from the visit reason, which
 			// only a walk-in has. A written request has none, so it defaulted to
 			// "None" and the card offered nothing but Withdraw.
@@ -1195,6 +1233,7 @@ export class QueueWorkspace {
 				${opt("", __("All channels"))}
 				${opt("__in_person", __("In the shop"))}
 				${opt("__remote", __("Wrote in"))}
+				${opt("__unassigned", __("Not yet routed (all stores)"))}
 				${(o.channels || []).map((x) => opt(x, __(x))).join("")}
 			</select>
 			<select class="ch-q-filter" data-f="purpose" aria-label="${__("Filter by purpose")}">
@@ -1251,6 +1290,43 @@ export class QueueWorkspace {
 			secondary_action: () => { d.hide(); this._showDropDialog(t); },
 		});
 		d.show();
+	}
+
+	_loadUnassigned() {
+		this._panel.find(".ch-queue-token-list").html(
+			`<div class="ch-queue-empty-state ch-queue-loading-state">
+				<i class="fa fa-spinner fa-spin fa-2x"></i>
+				<span>${__("Loading unrouted requests…")}</span></div>`);
+
+		frappe.xcall("gofix.gofix_services.inbox.unassigned_requests", {
+			company: PosState.active_company || "",
+		}).then((rows) => {
+			this._tokens = (rows || []).map((r) => Object.assign({}, r, {
+				channel_group: "remote", unassigned: 1,
+			}));
+			this._renderTokenList(this._tokens);
+		}).catch(() => {
+			this._panel.find(".ch-queue-token-list").html(
+				`<div class="ch-queue-empty-state">
+					<span>${__("Could not load unrouted requests")}</span></div>`);
+		});
+	}
+
+	// Claiming an unrouted request for this store. One click, because the
+	// alternative is a request sitting in the pool while everyone assumes
+	// somebody else has it.
+	_claimHere(t) {
+		frappe.confirm(
+			__("Take {0} at this store?", [
+				frappe.utils.escape_html(t.customer_name || t.customer_phone || t.name)]),
+			() => {
+				frappe.xcall("gofix.gofix_services.inbox.assign_store", {
+					inbox: t.name, pos_profile: PosState.pos_profile,
+				}).then(() => {
+					frappe.show_alert({ message: __("Routed to this store"), indicator: "green" });
+					this._loadTokens();
+				});
+			});
 	}
 
 }

@@ -61,15 +61,45 @@ export class RepairWorkspace {
 			const d = new frappe.ui.Dialog({
 				title: __("Pick a Waiting Walk-in"),
 				size: "large",
-				fields: [{
-					fieldtype: "HTML", fieldname: "list",
-					options: `<table class="table table-hover" style="margin:0">
-						<thead><tr>
-							<th>${__("Token")}</th><th>${__("Customer")}</th><th>${__("Phone")}</th>
-							<th>${__("Reason / Device")}</th><th>${__("Status")}</th>
-						</tr></thead><tbody>${rows}</tbody></table>`,
-				}],
+				fields: [
+					{
+						// A busy store has a screenful of tokens and the
+						// customer is standing there saying their number.
+						fieldtype: "Data", fieldname: "find",
+						label: __("Find by phone or name"),
+						placeholder: __("Start typing…"),
+					},
+					{
+						fieldtype: "HTML", fieldname: "list",
+						options: `<table class="table table-hover" style="margin:0">
+							<thead><tr>
+								<th>${__("Token")}</th><th>${__("Customer")}</th><th>${__("Phone")}</th>
+								<th>${__("Reason / Device")}</th><th>${__("Status")}</th>
+							</tr></thead><tbody class="ch-pick-body">${rows}</tbody>
+							<tbody class="ch-pick-none" style="display:none">
+								<tr><td colspan="5" class="text-muted">${
+									__("Nobody waiting matches that.")}</td></tr>
+							</tbody></table>`,
+					},
+				],
 			});
+
+			// Filter the rows already on screen: the list is small and the
+			// counter wants it to respond while the customer is still talking.
+			const $find = d.get_field("find").$input;
+			$find.on("input", () => {
+				const q = ($find.val() || "").trim().toLowerCase();
+				const digits = q.replace(/\D/g, "");
+				let shown = 0;
+				d.$wrapper.find(".ch-pick-row").each(function () {
+					const hay = $(this).text().toLowerCase();
+					const hit = !q || hay.includes(digits.length >= 3 ? digits : q);
+					$(this).toggle(hit);
+					if (hit) shown += 1;
+				});
+				d.$wrapper.find(".ch-pick-none").toggle(shown === 0);
+			});
+			setTimeout(() => $find.focus(), 150);
 			d.$wrapper.on("click", ".ch-pick-row", (e) => {
 				const name = $(e.currentTarget).data("token");
 				const token = open.find((t) => t.name === name);
