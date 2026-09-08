@@ -246,6 +246,13 @@ export class Sidebar {
 					placeholder: __("Optional"),
 				},
 				{
+					label: __("Phone"),
+					fieldname: "customer_phone",
+					fieldtype: "Data",
+					placeholder: __("Optional — 10 digits starting with 6-9"),
+					description: __("Indian mobile number (optional)"),
+				},
+				{
 					// Same attribution question the tablet asks, so counter-
 					// logged and self-service walk-ins land in one funnel
 					// instead of two. Options come from the GoFix Referral
@@ -255,13 +262,6 @@ export class Sidebar {
 					fieldtype: "Select",
 					options: [""],
 					description: __("Optional"),
-				},
-				{
-					label: __("Phone"),
-					fieldname: "customer_phone",
-					fieldtype: "Data",
-					placeholder: __("Optional — 10 digits starting with 6-9"),
-					description: __("Indian mobile number (optional)"),
 				},
 				{
 					fieldtype: "Section Break",

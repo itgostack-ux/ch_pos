@@ -1277,6 +1277,83 @@ def get_tablet_models(store: str, brand: str, category: str = "", txt: str = "")
 # Authenticated API — Management Dashboard
 # ---------------------------------------------------------------------------
 
+def _enrich_tokens(tokens: list, result_limit: int = 200) -> list:
+    """Attach everything the counter needs to act on a walk-in.
+
+    Both queue endpoints need this. get_queue is the manager dashboard and
+    get_pos_waiting_tokens is the POS panel the store executive actually looks
+    at, and enriching only one of them is exactly how the panel kept offering
+    Create Request to every token while the dashboard knew better.
+
+    Adds the chosen symptoms (one query for the page, not one per token), the
+    linked Service Request's status and invoice, and the counter_action the
+    token's visit reason calls for.
+    """
+    if not tokens:
+        return tokens
+
+    token_names = [t["name"] for t in tokens]
+
+    symptoms_by_token: dict = {}
+    for row in frappe.get_all(
+        "POS Kiosk Token Symptom",
+        filters={"parent": ("in", token_names)},
+        fields=["parent", "symptom_name", "is_expert_check", "is_other"],
+        order_by="parent asc, idx asc",
+        limit_page_length=result_limit * 5 + 1,
+    ):
+        if row.get("symptom_name"):
+            symptoms_by_token.setdefault(row["parent"], []).append(row["symptom_name"])
+    for t in tokens:
+        t["symptom_labels"] = symptoms_by_token.get(t["name"], [])
+
+    # What the counter should offer for each token's reason. Resolved here so
+    # the queue never has to hardcode reason names in JavaScript.
+    reason_names = sorted({t["visit_reason"] for t in tokens if t.get("visit_reason")})
+    reason_actions: dict = {}
+    if reason_names and frappe.db.table_exists("GoFix Visit Reason"):
+        fields = ["name", "is_repair"]
+        for extra in ("counter_action", "allow_create_request"):
+            if frappe.db.has_column("GoFix Visit Reason", extra):
+                fields.append(extra)
+        for row in frappe.get_all(
+            "GoFix Visit Reason", filters={"name": ("in", reason_names)},
+            fields=fields, limit_page_length=len(reason_names) + 1,
+        ):
+            reason_actions[row["name"]] = row
+    for t in tokens:
+        cfg = reason_actions.get(t.get("visit_reason")) or {}
+        # A site that has not taken the counter_action migration yet falls back
+        # to the old behaviour for repairs and to Withdraw-only otherwise,
+        # rather than showing Create Request to everyone as before.
+        t["counter_action"] = cfg.get("counter_action") or (
+            "Create Request" if cfg.get("is_repair") else "None")
+        t["allow_create_request"] = int(
+            cfg.get("allow_create_request") if cfg.get("allow_create_request") is not None
+            else cfg.get("is_repair") or 0)
+
+    # Repair status for the reason-aware counter view. A "check status" or
+    # "collect my device" visitor needs the answer read off the queue, not
+    # found by hand in another screen.
+    sr_names = [t["linked_service_request"] for t in tokens if t.get("linked_service_request")]
+    sr_info: dict = {}
+    if sr_names and frappe.db.table_exists("Service Request"):
+        sr_fields = ["name"]
+        for extra in ("service_invoice", "total_estimated_cost", "transfer_status"):
+            if frappe.db.has_column("Service Request", extra):
+                sr_fields.append(extra)
+        for row in frappe.get_all(
+            "Service Request", filters={"name": ("in", sr_names)},
+            fields=sr_fields, limit_page_length=result_limit + 1,
+        ):
+            row["status"] = row.get("transfer_status") or ""
+            sr_info[row["name"]] = row
+    for t in tokens:
+        t["service_request_info"] = sr_info.get(t.get("linked_service_request")) or {}
+
+    return tokens
+
+
 @frappe.whitelist()
 def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "today") -> dict:
     """
@@ -1335,68 +1412,7 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
         limit_page_length=result_limit + 1)
     _ensure_result_limit(tokens, result_limit, _("Queue tokens"))
 
-    # Symptoms live in a child table, so they need their own pass. One query
-    # for the whole page rather than one per token.
-    token_names = [t["name"] for t in tokens]
-    symptoms_by_token: dict = {}
-    if token_names:
-        for row in frappe.get_all(
-            "POS Kiosk Token Symptom",
-            filters={"parent": ("in", token_names)},
-            fields=["parent", "symptom_name", "is_expert_check", "is_other"],
-            order_by="parent asc, idx asc",
-            limit_page_length=result_limit * 5 + 1,
-        ):
-            label = row.get("symptom_name")
-            if label:
-                symptoms_by_token.setdefault(row["parent"], []).append(label)
-    for t in tokens:
-        t["symptom_labels"] = symptoms_by_token.get(t["name"], [])
-
-    # What the counter should offer for each token's reason. Resolved here so
-    # the queue never has to hardcode reason names in JavaScript.
-    reason_names = sorted({t["visit_reason"] for t in tokens if t.get("visit_reason")})
-    reason_actions: dict = {}
-    if reason_names and frappe.db.table_exists("GoFix Visit Reason"):
-        fields = ["name", "is_repair"]
-        for extra in ("counter_action", "allow_create_request"):
-            if frappe.db.has_column("GoFix Visit Reason", extra):
-                fields.append(extra)
-        for row in frappe.get_all(
-            "GoFix Visit Reason", filters={"name": ("in", reason_names)},
-            fields=fields, limit_page_length=len(reason_names) + 1,
-        ):
-            reason_actions[row["name"]] = row
-    for t in tokens:
-        cfg = reason_actions.get(t.get("visit_reason")) or {}
-        # A site that has not taken the counter_action migration yet falls back
-        # to the old behaviour for repairs and to Withdraw-only otherwise,
-        # rather than showing Create Request to everyone as before.
-        t["counter_action"] = cfg.get("counter_action") or (
-            "Create Request" if cfg.get("is_repair") else "None")
-        t["allow_create_request"] = int(
-            cfg.get("allow_create_request") if cfg.get("allow_create_request") is not None
-            else cfg.get("is_repair") or 0)
-
-    # Repair status for the reason-aware counter view. A "check status" or
-    # "collect my device" visitor needs the answer read off the queue, not
-    # found by hand in another screen.
-    sr_names = [t["linked_service_request"] for t in tokens if t.get("linked_service_request")]
-    sr_info: dict = {}
-    if sr_names and frappe.db.table_exists("Service Request"):
-        sr_fields = ["name", "status"]
-        for extra in ("service_invoice", "total_estimated_cost"):
-            if frappe.db.has_column("Service Request", extra):
-                sr_fields.append(extra)
-        for row in frappe.get_all(
-            "Service Request",
-            filters={"name": ("in", sr_names)},
-            fields=sr_fields,
-            limit_page_length=result_limit + 1,
-        ):
-            sr_info[row["name"]] = row
-    for t in tokens:
-        t["service_request_info"] = sr_info.get(t.get("linked_service_request")) or {}
+    _enrich_tokens(tokens, result_limit)
 
     technician_ids = sorted({t.technician for t in tokens if t.get("technician")})
     technician_names = {}
@@ -2664,12 +2680,20 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     result_limit = _configured_limit("token_queue_result_limit", 200, 2000)
     tokens = frappe.db.sql(
         """SELECT name, token_display, customer_name, customer_phone,
-                  device_type, device_brand, device_model,
+                  device_type, device_brand, device_model, device_model_name,
+                  other_device_hint,
                   issue_category, issue_description, status,
                   visit_purpose, category_interest, brand_interest,
                   linked_customer,
                   budget_range, sales_executive, engaged_at,
-                  technician, creation
+                  technician, creation,
+                  -- Everything the customer filled in on the tablet. The panel
+                  -- rendered brand and issue category only, so the reason they
+                  -- came was captured and then thrown away and every token got
+                  -- the same Create Request button.
+                  visit_reason, visit_source, referral_source, customer_language,
+                  linked_service_request, converted_invoice, linked_buyback,
+                  total_estimate
            FROM `tabPOS Kiosk Token`
            WHERE pos_profile = %s
                          AND status IN ('Waiting', 'Hold', 'Engaged', 'In Progress')
@@ -2678,7 +2702,8 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                      LIMIT %s""",
         (pos_profile, today, result_limit + 1),
         as_dict=True)
-    return _ensure_result_limit(tokens, result_limit, _("Waiting POS tokens"))
+    tokens = _ensure_result_limit(tokens, result_limit, _("Waiting POS tokens"))
+    return _enrich_tokens(tokens, result_limit)
 
 
 def _resolve_token_customer(token, explicit, pos_profile, profile=None):
