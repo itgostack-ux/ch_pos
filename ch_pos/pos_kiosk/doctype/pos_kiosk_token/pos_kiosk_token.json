@@ -74,7 +74,26 @@
   "whatsapp_sent_at",
   "column_break_whatsapp",
   "whatsapp_message_id",
-  "whatsapp_last_error"
+  "whatsapp_last_error",
+  "remote_section",
+  "external_ref",
+  "email",
+  "alternate_number",
+  "city",
+  "preferred_datetime",
+  "column_break_remote",
+  "assigned_to",
+  "first_response_at",
+  "closed_reason",
+  "duplicate_of",
+  "attachment",
+  "device_detail_section",
+  "device_category",
+  "device_item",
+  "column_break_device_detail",
+  "serial_no",
+  "conversation_section",
+  "notes"
  ],
  "fields": [
   {
@@ -168,7 +187,8 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Source",
-   "options": "Kiosk\nCounter\nAppointment\nWeb\nWhatsApp\nOther"
+   "options": "Kiosk\nCounter\nAppointment\nWeb\nMobile App\nWhatsApp\nPhone Call\nEmail\nSocial\nMarketplace\nPartner\nOther",
+   "description": "How the customer reached us. Kiosk and Counter are in person; everything else arrived before they did."
   },
   {
    "default": "Repair",
@@ -499,6 +519,116 @@
    "fieldtype": "Small Text",
    "label": "WhatsApp Last Error",
    "read_only": 1
+  },
+  {
+   "fieldname": "remote_section",
+   "fieldtype": "Section Break",
+   "label": "Contact & Follow-up",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "external_ref",
+   "fieldtype": "Data",
+   "label": "Channel Reference",
+   "description": "The sender's own id \u2014 a WhatsApp message id, a web form submission. Used to refuse the same request twice."
+  },
+  {
+   "fieldname": "email",
+   "fieldtype": "Data",
+   "options": "Email",
+   "label": "Email"
+  },
+  {
+   "fieldname": "alternate_number",
+   "fieldtype": "Data",
+   "options": "Phone",
+   "label": "Alternate Number"
+  },
+  {
+   "fieldname": "city",
+   "fieldtype": "Link",
+   "options": "CH City",
+   "label": "City"
+  },
+  {
+   "fieldname": "preferred_datetime",
+   "fieldtype": "Datetime",
+   "label": "Preferred Slot",
+   "description": "When a remote customer asked to be seen."
+  },
+  {
+   "fieldname": "column_break_remote",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "assigned_to",
+   "fieldtype": "Link",
+   "options": "User",
+   "label": "Owner"
+  },
+  {
+   "fieldname": "first_response_at",
+   "fieldtype": "Datetime",
+   "label": "First Response",
+   "read_only": 1,
+   "description": "Set the first time anyone records having replied."
+  },
+  {
+   "fieldname": "closed_reason",
+   "fieldtype": "Small Text",
+   "label": "Closed Reason"
+  },
+  {
+   "fieldname": "duplicate_of",
+   "fieldtype": "Link",
+   "options": "POS Kiosk Token",
+   "label": "Duplicate Of",
+   "read_only": 1
+  },
+  {
+   "fieldname": "attachment",
+   "fieldtype": "Attach",
+   "label": "Attachment",
+   "description": "A photo or voice note the customer sent."
+  },
+  {
+   "fieldname": "device_detail_section",
+   "fieldtype": "Section Break",
+   "label": "Device Detail",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "device_category",
+   "fieldtype": "Link",
+   "options": "CH Category",
+   "label": "Category"
+  },
+  {
+   "fieldname": "device_item",
+   "fieldtype": "Link",
+   "options": "Item",
+   "label": "Device Item"
+  },
+  {
+   "fieldname": "column_break_device_detail",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "serial_no",
+   "fieldtype": "Data",
+   "label": "IMEI / Serial"
+  },
+  {
+   "fieldname": "conversation_section",
+   "fieldtype": "Section Break",
+   "label": "Conversation",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Table",
+   "options": "CH Front Desk Note",
+   "label": "Notes"
   }
  ],
  "index_web_pages_for_search": 0,

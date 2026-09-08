@@ -393,3 +393,16 @@
   .ch-si-body { grid-template-columns: 1fr; }
   .ch-si-list { max-height: 320px; }
 }
+
+/* ── Front desk sections ──────────────────────────────────────────────
+   People physically in the shop, then those waiting on a reply. Same
+   record either way; the label is ordering, not separation. */
+.ch-queue-section-label {
+  margin: var(--pos-space-lg) 0 var(--pos-space-sm);
+  font-size: var(--pos-fs-2xs);
+  font-weight: var(--pos-fw-bold);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--pos-text-muted);
+}
+.ch-queue-section-label:first-child { margin-top: 0; }

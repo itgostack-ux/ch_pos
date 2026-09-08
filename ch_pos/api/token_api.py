@@ -2736,8 +2736,12 @@ def get_pos_profiles() -> list:
 @frappe.whitelist()
 def get_pos_waiting_tokens(pos_profile: str) -> dict:
     """
-    Returns waiting/in-progress tokens for the given POS store.
-    Called by the POS Queue panel on load and after each action.
+    Everyone currently waiting on this store, however they reached us.
+
+    Two groups in one list: people physically in the shop today (the queue
+    proper, which expires with the day) and open requests that arrived
+    remotely and are not date-bound. Called by the POS Queue panel on load
+    and after each action.
     """
     _ensure_can_view_tokens()
     _assert_pos_profile_scope(pos_profile)
@@ -2768,7 +2772,47 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
         (pos_profile, today, result_limit + 1),
         as_dict=True)
     tokens = _ensure_result_limit(tokens, result_limit, _("Waiting POS tokens"))
-    return _enrich_tokens(tokens, result_limit)
+
+    # Requests that arrived before the customer did -- web form, app, WhatsApp,
+    # a logged call. Same record, different channel, so they belong in the same
+    # queue: two lists would mean two places to look someone up and two chances
+    # to chase them twice.
+    #
+    # They are deliberately NOT bound to today. A walk-in is a queue position
+    # and expires with the day; a message sent last night is still owed an
+    # answer this morning.
+    company = frappe.db.get_value("POS Profile", pos_profile, "company")
+    remote = frappe.db.sql(
+        """SELECT name, token_display, customer_name, customer_phone,
+                  device_type, device_brand, device_model, device_model_name,
+                  other_device_hint,
+                  issue_category, issue_description, status,
+                  visit_purpose, category_interest, brand_interest,
+                  linked_customer,
+                  budget_range, sales_executive, engaged_at,
+                  technician, creation,
+                  visit_reason, visit_source, referral_source, customer_language,
+                  linked_service_request, converted_invoice, linked_buyback,
+                  total_estimate,
+                  preferred_datetime, first_response_at, assigned_to, email
+           FROM `tabPOS Kiosk Token`
+           WHERE company = %s
+             AND visit_source NOT IN ('Kiosk', 'Counter')
+             AND status IN ('Waiting', 'Hold', 'Engaged', 'In Progress')
+             AND COALESCE(pos_profile, '') IN ('', %s)
+           ORDER BY creation DESC
+           LIMIT %s""",
+        (company, pos_profile, result_limit + 1),
+        as_dict=True)
+    remote = _ensure_result_limit(remote, result_limit, _("Open remote requests"))
+
+    for row in tokens:
+        row["channel_group"] = "in_person"
+    for row in remote:
+        row["channel_group"] = "remote"
+        row["awaiting_response"] = not row.get("first_response_at")
+
+    return _enrich_tokens(tokens + remote, result_limit * 2)
 
 
 def _resolve_token_customer(token, explicit, pos_profile, profile=None):

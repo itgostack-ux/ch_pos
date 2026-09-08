@@ -16,7 +16,7 @@ const MODE_SECTIONS = [
 		label: __("Sales"),
 		modes: [
 			{ key: "sell",    icon: "fa-shopping-bag", label: __("Sell") },
-			{ key: "queue",   icon: "fa-ticket",       label: __("Queue") },
+			{ key: "queue",   icon: "fa-ticket",       label: __("Front Desk") },
 			{ key: "returns", icon: "fa-undo",         label: __("Returns") },
 			{ key: "prebook", icon: "fa-bookmark",     label: __("Pre-Book / Proforma") },
 			{ key: "pickup",  icon: "fa-cube",         label: __("Pickup / Bill") },
@@ -28,10 +28,6 @@ const MODE_SECTIONS = [
 			{ key: "buyback", icon: "fa-exchange",  label: __("Buyback") },
 			{ key: "repair",  icon: "fa-wrench",    label: __("SO Create") },
 			{ key: "service", icon: "fa-cogs",      label: __("Service") },
-			// Requests that arrived before the customer did -- website form,
-			// app, WhatsApp, a logged call. Opens in the till like every other
-			// mode, so booking one in never leaves the POS session.
-			{ key: "service_inbox", icon: "fa-inbox", label: __("Service Inbox") },
 			{ key: "claims",  icon: "fa-shield",    label: __("Claims") },
 			{ key: "exceptions", icon: "fa-exclamation-triangle", label: __("Bill Exceptions") },
 		],
@@ -762,7 +758,7 @@ export class Sidebar {
 		return ["sell", "returns", "buyback", "repair", "service"];
 	}
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["imei", "customer360", "reports", "material_request", "inbound_receive", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue", "service_inbox"];
+		return ["imei", "customer360", "reports", "material_request", "inbound_receive", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
 	}
 
 	static get ALL_MODE_KEYS() {

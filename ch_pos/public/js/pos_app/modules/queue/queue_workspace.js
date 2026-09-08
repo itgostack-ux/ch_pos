@@ -75,10 +75,14 @@ export class QueueWorkspace {
 
 	_render(panel) {
 		const is_svc = _is_service();
-		const title = is_svc ? __("Service Queue") : __("Store Queue");
+		// One desk, one list. Walk-ins and the requests that arrived before the
+		// customer did are the same record with a different channel, so they are
+		// worked from the same place rather than two screens that each show half
+		// of who is waiting.
+		const title = is_svc ? __("Service Front Desk") : __("Store Front Desk");
 		const hint = is_svc
-			? __("Waiting tokens from the kiosk — accept or convert to service requests")
-			: __("Manage walk-in customers — start billing or close out tokens");
+			? __("Everyone waiting on this store — in the shop, or who messaged, called or booked ahead")
+			: __("Everyone waiting on this store — walk-ins, and enquiries that came in before they did");
 
 		panel.html(`
 			<div class="ch-pos-mode-panel">
@@ -96,6 +100,9 @@ export class QueueWorkspace {
 					<div class="ch-queue-stats">
 						<span class="ch-queue-count"></span>
 					</div>
+					<button class="btn btn-xs btn-default ch-queue-log-btn">
+						<i class="fa fa-plus"></i> ${__("Log A Request")}
+					</button>
 					<button class="btn btn-xs btn-default ch-queue-refresh-btn">
 						<i class="fa fa-refresh"></i> ${__("Refresh")}
 					</button>
@@ -111,6 +118,7 @@ export class QueueWorkspace {
 		`);
 
 		panel.find(".ch-queue-refresh-btn").on("click", () => this._loadTokens());
+		panel.find(".ch-queue-log-btn").on("click", () => this._logRequest());
 		this._loadTokens();
 	}
 
@@ -169,14 +177,40 @@ export class QueueWorkspace {
 			return;
 		}
 
-		let stats_html = `<span class="ch-queue-count-text">${tokens.length} ${__("token(s)")}</span>`;
+		const remote_count = (tokens || []).filter((t) => t.channel_group === "remote").length;
+		const unanswered = (tokens || []).filter(
+			(t) => t.channel_group === "remote" && t.awaiting_response).length;
+
+		let stats_html = `<span class="ch-queue-count-text">${
+			tokens.length - remote_count} ${__("in store")}</span>`;
+		if (remote_count > 0) {
+			stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${
+				remote_count} ${__("wrote in")}</span>`;
+		}
+		if (unanswered > 0) {
+			stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${
+				unanswered} ${__("unanswered")}</span>`;
+		}
 		if (hold > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${hold} ${__("on hold")}</span>`;
 		if (waiting > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${waiting} ${__("waiting")}</span>`;
 		if (engaged > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--active">${engaged} ${__("active")}</span>`;
 		stats.html(stats_html);
 
-		const cards = tokens.map((t) => this._tokenCard(t)).join("");
-		list.html(`<div class="ch-queue-cards">${cards}</div>`);
+		// People physically here come first: they are standing in the shop while
+		// a message can wait a few minutes. Both are the same record, so this is
+		// ordering, not separation.
+		const here = tokens.filter((t) => t.channel_group !== "remote");
+		const wrote = tokens.filter((t) => t.channel_group === "remote");
+		const section = (label, rows) => rows.length
+			? `<div class="ch-queue-section-label">${label} · ${rows.length}</div>
+			   <div class="ch-queue-cards">${rows.map((t) => this._tokenCard(t)).join("")}</div>`
+			: "";
+		list.html(
+			(here.length && wrote.length)
+				? section(__("In the shop"), here) + section(__("Waiting on a reply"), wrote)
+				: `<div class="ch-queue-cards">${
+					tokens.map((t) => this._tokenCard(t)).join("")}</div>`
+		);
 
 		// Bind action buttons
 		list.find(".ch-queue-convert-btn").on("click", (e) => {
@@ -806,4 +840,45 @@ export class QueueWorkspace {
 			proceed(null);
 		}).catch(() => proceed(null));
 	}
+	// Somebody rings the shop, or a message needs recording by hand. It lands
+	// in the same queue as everything else, with the channel saying how it got
+	// here -- there is no second inbox to keep in step.
+	_logRequest() {
+		const channels = ["Phone Call", "WhatsApp", "Web", "Mobile App", "Email",
+						  "Social", "Marketplace", "Partner", "Appointment", "Other"];
+		const d = new frappe.ui.Dialog({
+			title: __("Log A Request"),
+			fields: [
+				{ fieldname: "channel", fieldtype: "Select", label: __("How did they reach us?"),
+				  options: channels.join("\n"), default: "Phone Call", reqd: 1 },
+				{ fieldname: "contact_number", fieldtype: "Data", reqd: 1,
+				  label: __("Contact Number"),
+				  description: __("The number is how we recognise them when they walk in.") },
+				{ fieldname: "customer_name", fieldtype: "Data", label: __("Name") },
+				{ fieldtype: "Column Break" },
+				{ fieldname: "visit_purpose", fieldtype: "Select", label: __("What do they want?"),
+				  options: "Enquiry\nRepair\nSales\nBuyback\nOther", default: "Enquiry" },
+				{ fieldname: "device_brand", fieldtype: "Link", options: "Brand", label: __("Brand") },
+				{ fieldname: "preferred_datetime", fieldtype: "Datetime",
+				  label: __("Preferred Slot") },
+				{ fieldtype: "Section Break" },
+				{ fieldname: "issue_description", fieldtype: "Small Text",
+				  label: __("What did they say?") },
+			],
+			primary_action_label: __("Log It"),
+			primary_action: (v) => {
+				frappe.xcall("gofix.gofix_services.inbox.push_request", {
+					...v,
+					company: PosState.active_company || "",
+					pos_profile: PosState.pos_profile || "",
+				}).then((r) => {
+					d.hide();
+					frappe.show_alert({ message: r.message, indicator: "green" });
+					this._loadTokens();
+				});
+			},
+		});
+		d.show();
+	}
+
 }
