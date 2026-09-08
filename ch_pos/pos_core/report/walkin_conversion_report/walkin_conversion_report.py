@@ -19,7 +19,9 @@ Source: POS Kiosk Token — works for ALL companies (Gogizmo, SARF, Congruence).
 
 Rows: one per date × the chosen Group By (store, zone, city, or date alone)
 Scope: Store Managers see only their assigned CH Store(s); System Manager sees all.
-Join chain: POS Kiosk Token.store → tabCH Store → cs.zone / cs.city
+Join chain: POS Kiosk Token.pos_profile → CH Store.pos_profile → zone / city.
+NOT via token.store — that column holds a Warehouse, so joining it to CH Store
+matched nothing and left Zone and City permanently blank.
 """
 
 import frappe
@@ -33,10 +35,15 @@ from ch_erp15.ch_erp15.report_scope import scope_where_clause
 # One place decides how the report is cut, so the columns, the GROUP BY and the
 # ORDER BY can never drift apart.
 _GROUPINGS = {
-    "Store": ("t.pos_profile", "pos_profile", "Store (POS Profile)", "Link", "POS Profile"),
+    "Store": ("cs.name", "store", "Store", "Link", "CH Store"),
     "Zone": ("cs.zone", "zone", "Zone", "Link", "CH Store Zone"),
     "City": ("cs.city", "city", "City", "Link", "CH City"),
     "Date": (None, None, None, None, None),
+    # Not an aggregation: one row per walk-in, showing everything the customer
+    # actually entered. The aggregated views answer "how many"; this answers
+    # "who came in and what did they say", which previously meant opening
+    # tokens one at a time.
+    "Walk-in (detail)": (None, None, None, None, None),
 }
 
 
@@ -88,9 +95,38 @@ def _get_scope_sql():
 # columns
 # ---------------------------------------------------------------------------
 
+def _detail_columns():
+    return [
+        {"fieldname": "token_display", "label": _("Token"), "fieldtype": "Link", "options": "POS Kiosk Token", "width": 150},
+        {"fieldname": "creation", "label": _("Checked In"), "fieldtype": "Datetime", "width": 160},
+        {"fieldname": "store", "label": _("Store"), "fieldtype": "Link", "options": "CH Store", "width": 150},
+        {"fieldname": "store_name", "label": _("Store Name"), "fieldtype": "Data", "width": 130},
+        {"fieldname": "customer_name", "label": _("Customer"), "fieldtype": "Data", "width": 140},
+        {"fieldname": "customer_phone", "label": _("Phone"), "fieldtype": "Data", "width": 120},
+        {"fieldname": "visit_reason", "label": _("Visit Reason"), "fieldtype": "Link", "options": "GoFix Visit Reason", "width": 170},
+        {"fieldname": "visit_purpose", "label": _("Purpose"), "fieldtype": "Data", "width": 90},
+        {"fieldname": "visit_source", "label": _("Checked In At"), "fieldtype": "Data", "width": 110},
+        {"fieldname": "referral_source", "label": _("Heard About Us Via"), "fieldtype": "Link", "options": "GoFix Referral Source", "width": 150},
+        {"fieldname": "device_type", "label": _("Device Type"), "fieldtype": "Link", "options": "CH Category", "width": 130},
+        {"fieldname": "device_brand", "label": _("Brand"), "fieldtype": "Link", "options": "Brand", "width": 110},
+        {"fieldname": "device_model_name", "label": _("Model"), "fieldtype": "Data", "width": 150},
+        {"fieldname": "symptoms", "label": _("Symptoms"), "fieldtype": "Data", "width": 260},
+        {"fieldname": "issue_category", "label": _("Issue Category"), "fieldtype": "Data", "width": 140},
+        {"fieldname": "issue_description", "label": _("Notes"), "fieldtype": "Data", "width": 220},
+        {"fieldname": "customer_language", "label": _("Language"), "fieldtype": "Data", "width": 90},
+        {"fieldname": "status", "label": _("Status"), "fieldtype": "Data", "width": 110},
+        {"fieldname": "linked_service_request", "label": _("Service Request"), "fieldtype": "Link", "options": "Service Request", "width": 170},
+        {"fieldname": "converted_invoice", "label": _("Invoice"), "fieldtype": "Link", "options": "Sales Invoice", "width": 150},
+        {"fieldname": "linked_customer", "label": _("Customer Record"), "fieldtype": "Link", "options": "Customer", "width": 150},
+        {"fieldname": "handling_duration", "label": _("Handling (mins)"), "fieldtype": "Int", "width": 120},
+    ]
+
+
 def get_columns(filters=None):
     filters = filters or {}
     group_by = filters.get("group_by") or "Store"
+    if group_by == "Walk-in (detail)":
+        return _detail_columns()
     _expr, fieldname, label, fieldtype, options = _GROUPINGS.get(group_by, _GROUPINGS["Store"])
 
     cols = [
@@ -105,6 +141,7 @@ def get_columns(filters=None):
     # this store in" is the first question anyone asks of a store row.
     if group_by == "Store":
         cols += [
+            {"fieldname": "store_name", "label": _("Store Name"), "fieldtype": "Data", "width": 150},
             {"fieldname": "zone", "label": _("Zone"), "fieldtype": "Link", "options": "CH Store Zone", "width": 135},
             {"fieldname": "city", "label": _("City"), "fieldtype": "Link", "options": "CH City", "width": 115},
         ]
@@ -152,7 +189,8 @@ def get_data(filters, scope_sql=""):
         conditions.append("t.pos_profile = %(pos_profile)s")
         params["pos_profile"] = filters["pos_profile"]
     if filters.get("store"):
-        conditions.append("t.store = %(store)s")
+        # CH Store, not the token's warehouse column.
+        conditions.append("cs.name = %(store)s")
         params["store"] = filters["store"]
     if filters.get("zone"):
         conditions.append("cs.zone = %(zone)s")
@@ -182,14 +220,58 @@ def get_data(filters, scope_sql=""):
     where = where_base + scope_sql
 
     group_by = filters.get("group_by") or "Store"
+
+    if group_by == "Walk-in (detail)":
+        rows = frappe.db.sql("""
+            SELECT
+                t.name, t.token_display, t.creation, t.customer_name, t.customer_phone,
+                t.visit_reason, t.visit_purpose, t.visit_source, t.referral_source,
+                t.device_type, t.device_brand,
+                COALESCE(NULLIF(t.device_model_name,''), t.other_device_hint) AS device_model_name,
+                t.issue_category, t.issue_description, t.customer_language, t.status,
+                t.linked_service_request, t.converted_invoice, t.linked_customer,
+                t.handling_duration,
+                IFNULL(cs.name, t.pos_profile) AS store,
+                IFNULL(cs.store_name, '')      AS store_name
+            FROM `tabPOS Kiosk Token` t
+            LEFT JOIN `tabCH Store` cs ON cs.pos_profile = t.pos_profile
+            {where}
+            ORDER BY t.creation DESC
+            LIMIT 2000
+        """.format(where=where), params, as_dict=True)  # noqa: UP032
+
+        # Symptoms are a child table: one query for the page, not one per row.
+        names = [r["name"] for r in rows]
+        by_token = {}
+        if names:
+            for row in frappe.get_all(
+                "POS Kiosk Token Symptom",
+                filters={"parent": ("in", names)},
+                fields=["parent", "symptom_name"],
+                order_by="parent asc, idx asc",
+                limit_page_length=0,
+            ):
+                if row.get("symptom_name"):
+                    by_token.setdefault(row["parent"], []).append(row["symptom_name"])
+        for r in rows:
+            r["symptoms"] = ", ".join(by_token.get(r["name"], []))
+            # token_display is what a person recognises; the Link needs the
+            # docname, so the column points at name and shows the display text.
+            r["token_display"] = r.get("token_display") or r["name"]
+        return rows
     expr, fieldname, _label, _ft, _opt = _GROUPINGS.get(group_by, _GROUPINGS["Store"])
 
     # Only the grouped dimension is selected raw; the others are aggregated so
     # a zone row does not silently show one arbitrary store's city.
     if group_by == "Store":
-        dim_select = "t.pos_profile AS pos_profile, IFNULL(cs.zone,'') AS zone, IFNULL(cs.city,'') AS city,"
-        group_sql = "DATE(t.creation), t.pos_profile"
-        order_sql = "DATE(t.creation) DESC, t.pos_profile"
+        # Group on the CH Store, not the POS Profile. "POS - STO-GSPL-CHENNA-0008"
+        # tells nobody anything; "GF-KELLYS / Kellys" does.
+        dim_select = ("IFNULL(cs.name, t.pos_profile) AS store, "
+                      "IFNULL(cs.store_name,'') AS store_name, "
+                      "t.pos_profile AS pos_profile, "
+                      "IFNULL(cs.zone,'') AS zone, IFNULL(cs.city,'') AS city,")
+        group_sql = "DATE(t.creation), IFNULL(cs.name, t.pos_profile)"
+        order_sql = "DATE(t.creation) DESC, IFNULL(cs.name, t.pos_profile)"
     elif group_by == "Zone":
         dim_select = "IFNULL(cs.zone,'') AS zone, MIN(IFNULL(cs.city,'')) AS city,"
         group_sql = "DATE(t.creation), cs.zone"
@@ -219,7 +301,13 @@ def get_data(filters, scope_sql=""):
             AVG(CASE WHEN t.handling_duration > 0 THEN t.handling_duration ELSE NULL END) AS avg_handling_mins,
             COALESCE(SUM(si.grand_total), 0)                                              AS revenue
         FROM `tabPOS Kiosk Token` t
-        LEFT JOIN `tabCH Store`      cs ON cs.name = t.store
+        -- cs.name = t.store was the join here and it matched 0 of 109 tokens:
+        -- POS Kiosk Token.store is a WAREHOUSE ("GF-KELLYS-Sellable - GF"),
+        -- while CH Store autonames on the store code ("GF-KELLYS"). Zone and
+        -- City were therefore always blank and the zone/city filters always
+        -- returned nothing. pos_profile is the link that actually holds:
+        -- one CH Store per POS Profile, matching all 109.
+        LEFT JOIN `tabCH Store`      cs ON cs.pos_profile = t.pos_profile
         LEFT JOIN `tabSales Invoice` si ON si.name = t.converted_invoice AND si.docstatus = 1
         {where}
         GROUP BY {group_sql}
@@ -242,8 +330,8 @@ def get_data(filters, scope_sql=""):
 # ---------------------------------------------------------------------------
 
 def get_chart(data):
-    if not data:
-        return None
+    if not data or "total_footfall" not in (data[0] or {}):
+        return None   # detail mode has no aggregates to plot
     dates = sorted({r["date"] for r in data})[-14:]
     ff_map   = {}
     conv_map = {}
@@ -270,8 +358,9 @@ def get_chart(data):
 # ---------------------------------------------------------------------------
 
 def get_summary(data):
-    if not data:
-        return []
+    if not data or "total_footfall" not in (data[0] or {}):
+        # Detail mode: one row per walk-in, so the count is the headline.
+        return [{"value": len(data or []), "label": _("Walk-ins"), "datatype": "Int", "color": "blue"}] if data else []
     total_ff      = sum(r["total_footfall"] for r in data)
     total_conv    = sum(r["converted"]      for r in data)
     total_dropped = sum(r["dropped"]        for r in data)

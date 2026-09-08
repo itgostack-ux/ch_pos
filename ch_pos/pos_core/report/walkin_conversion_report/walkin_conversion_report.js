@@ -26,7 +26,7 @@ frappe.query_reports["Walkin Conversion Report"] = {
             fieldname: "group_by",
             label: __("Group By"),
             fieldtype: "Select",
-            options: "Store\nZone\nCity\nDate",
+            options: "Store\nZone\nCity\nDate\nWalk-in (detail)",
             default: "Store",
         },
         {
