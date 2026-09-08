@@ -6361,3 +6361,23 @@ body > .desk-alert-container,
 .ch-bb-inspection-to-desk {
   display: none !important;
 }
+
+/* Reason-aware queue context — status / collection detail resolved on load,
+   so the executive answers the customer without opening the token. */
+.ch-q-context-box {
+	margin-top: 6px;
+	border-left: 2px solid var(--border-color, #d1d8dd);
+	padding-left: 8px;
+}
+.ch-q-context-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	font-size: 12px;
+	line-height: 1.9;
+}
+.ch-q-context-device { color: var(--text-muted, #8d99a6); }
+.ch-q-context-due { font-weight: 600; }
+.ch-q-context-empty { color: var(--text-muted, #8d99a6); font-size: 12px; }
+.ch-q-links a { margin-right: 10px; }

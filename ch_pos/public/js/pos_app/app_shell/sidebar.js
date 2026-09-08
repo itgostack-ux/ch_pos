@@ -246,6 +246,17 @@ export class Sidebar {
 					placeholder: __("Optional"),
 				},
 				{
+					// Same attribution question the tablet asks, so counter-
+					// logged and self-service walk-ins land in one funnel
+					// instead of two. Options come from the GoFix Referral
+					// Source master; ops adds a campaign without a code change.
+					label: __("How did you hear about us?"),
+					fieldname: "referral_source",
+					fieldtype: "Select",
+					options: [""],
+					description: __("Optional"),
+				},
+				{
 					label: __("Phone"),
 					fieldname: "customer_phone",
 					fieldtype: "Data",
@@ -410,6 +421,7 @@ export class Sidebar {
 							// Captured at intake so the token is linked from birth;
 							// the server re-checks it and falls back to the phone.
 							linked_customer: d._linked_customer || "",
+							referral_source: values.referral_source || "",
 						},
 						callback: (r) => {
 							const res = r.message || {};
@@ -439,6 +451,19 @@ export class Sidebar {
 				}
 			},
 		});
+		// Fill the attribution list from the master. Failure is silent and the
+		// control simply stays empty -- logging the walk-in matters more than
+		// knowing where they heard about us.
+		frappe.xcall("ch_pos.api.token_api.get_referral_sources")
+			.then((sources) => {
+				if (!sources || !sources.length) {
+					d.set_df_property("referral_source", "hidden", 1);
+					return;
+				}
+				d.set_df_property("referral_source", "options", [""].concat(sources));
+			})
+			.catch(() => d.set_df_property("referral_source", "hidden", 1));
+
 		d.show();
 
 		// Attach live phone validation after the dialog DOM is ready

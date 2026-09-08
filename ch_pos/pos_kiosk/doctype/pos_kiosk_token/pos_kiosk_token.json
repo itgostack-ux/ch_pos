@@ -32,6 +32,7 @@
   "checkin_section",
   "visit_reason",
   "customer_language",
+  "referral_source",
   "column_break_checkin",
   "other_device_hint",
   "symptoms",
@@ -241,6 +242,13 @@
    "fieldtype": "Select",
    "label": "Customer Language",
    "options": "\nEnglish\nHindi"
+  },
+  {
+   "fieldname": "referral_source",
+   "fieldtype": "Link",
+   "label": "Heard About Us Via",
+   "options": "GoFix Referral Source",
+   "description": "How the walk-in heard about the store. Attribution only, never mandatory -- a marketing question must not block a queue token."
   },
   {
    "fieldname": "column_break_checkin",
@@ -495,7 +503,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-04 14:00:00.000000",
+ "modified": "2026-09-08 09:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Kiosk",
  "name": "POS Kiosk Token",

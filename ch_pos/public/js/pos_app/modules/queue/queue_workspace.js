@@ -194,9 +194,146 @@ export class QueueWorkspace {
 			const token = this._tokens.find((t) => t.name === name);
 			if (token) this._showDropDialog(token);
 		});
+		list.find(".ch-queue-status-btn, .ch-queue-collect-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._openWalkinContext(token);
+		});
+
+		// Resolve status and collection detail on load, not on click, so the
+		// executive reads the answer off the card and can tell the customer
+		// without opening anything.
+		this._resolveContexts(list, tokens);
+	}
+
+	// ── Reason-aware context ────────────────────────────────────
+
+	_resolveContexts(list, tokens) {
+		const needs = tokens.filter(
+			(t) => t.counter_action === "Show Repair Status" || t.counter_action === "Collect Device"
+		);
+		needs.forEach((t) => {
+			frappe.xcall("ch_pos.api.token_api.get_walkin_context", { token: t.name })
+				.then((ctx) => {
+					this._context_cache = this._context_cache || {};
+					this._context_cache[t.name] = ctx;
+					const slot = list.find(`[data-context-for="${t.name}"]`);
+					if (!slot.length) return;
+					slot.html(this._contextHtml(t, ctx));
+				})
+				.catch(() => { /* a lookup failure must never blank the queue */ });
+		});
+	}
+
+	_contextHtml(t, ctx) {
+		const esc = (v) => frappe.utils.escape_html(String(v));
+		const repairs = (ctx && ctx.repairs) || [];
+		if (!repairs.length) {
+			return `<p class="ch-q-note ch-q-context-empty">
+				<i class="fa fa-info-circle"></i>
+				${__("No open repair found for this number.")}
+			</p>`;
+		}
+		const collecting = t.counter_action === "Collect Device";
+		// Collection is about what is payable; a status question is about
+		// where the job has reached.
+		const rows = repairs.slice(0, 3).map((r) => {
+			const money = (r.outstanding !== null && r.outstanding !== undefined)
+				? `<b>${format_currency(r.outstanding)}</b> ${__("due")}`
+				: (r.estimate ? `${__("est.")} ${format_currency(r.estimate)}` : "");
+			return `<div class="ch-q-context-row">
+				<a href="/app/service-request/${encodeURIComponent(r.service_request)}" target="_blank">
+					${esc(r.service_request)}</a>
+				${r.status ? `<span class="ch-q-tag">${esc(r.status)}</span>` : ""}
+				${r.device ? `<span class="ch-q-context-device">${esc(r.device)}</span>` : ""}
+				${collecting && r.invoice ? `<a href="/app/sales-invoice/${encodeURIComponent(r.invoice)}" target="_blank">${esc(r.invoice)}</a>` : ""}
+				${collecting && money ? `<span class="ch-q-context-due">${money}</span>` : ""}
+			</div>`;
+		}).join("");
+		return `<div class="ch-q-context-box">${rows}</div>`;
+	}
+
+	// Full detail, for when the counter wants more than the card shows.
+	_openWalkinContext(token) {
+		const cached = (this._context_cache || {})[token.name];
+		const render = (ctx) => {
+			const repairs = (ctx && ctx.repairs) || [];
+			const collecting = token.counter_action === "Collect Device";
+			if (!repairs.length) {
+				frappe.msgprint({
+					title: __("No open repair"),
+					message: __("Nothing is open for {0}. Raise a new request if they have brought a device in.",
+						[token.customer_phone || token.customer_name || __("this customer")]),
+					indicator: "orange",
+				});
+				return;
+			}
+			const body = repairs.map((r) => `
+				<tr>
+					<td><a href="/app/service-request/${encodeURIComponent(r.service_request)}" target="_blank">${frappe.utils.escape_html(r.service_request)}</a></td>
+					<td>${frappe.utils.escape_html(r.status || "—")}</td>
+					<td>${frappe.utils.escape_html(r.device || "—")}</td>
+					<td>${r.invoice ? `<a href="/app/sales-invoice/${encodeURIComponent(r.invoice)}" target="_blank">${frappe.utils.escape_html(r.invoice)}</a>` : "—"}</td>
+					<td style="text-align:right">${(r.outstanding !== null && r.outstanding !== undefined) ? format_currency(r.outstanding) : "—"}</td>
+				</tr>`).join("");
+			const d = new frappe.ui.Dialog({
+				title: collecting ? __("Hand Over Device") : __("Repair Status"),
+				size: "large",
+				fields: [{
+					fieldtype: "HTML",
+					fieldname: "body",
+					options: `<table class="table table-bordered" style="margin:0">
+						<thead><tr>
+							<th>${__("Request")}</th><th>${__("Status")}</th><th>${__("Device")}</th>
+							<th>${__("Invoice")}</th><th style="text-align:right">${__("Due")}</th>
+						</tr></thead>
+						<tbody>${body}</tbody>
+					</table>`,
+				}],
+			});
+			// Collection ends in payment, so offer the cart directly rather
+			// than making the executive re-find the invoice.
+			const payable = repairs.find((r) => r.invoice && r.outstanding);
+			if (collecting && payable) {
+				d.set_primary_action(__("Collect Payment"), () => {
+					d.hide();
+					PosState.kiosk_token = token.name;
+					frappe.set_route("Form", "Sales Invoice", payable.invoice);
+				});
+			}
+			d.show();
+		};
+		if (cached) return render(cached);
+		frappe.xcall("ch_pos.api.token_api.get_walkin_context", { token: token.name })
+			.then(render)
+			.catch(() => frappe.show_alert({ message: __("Could not load repair status"), indicator: "orange" }));
 	}
 
 	// ── Token Card ──────────────────────────────────────────────
+
+	// Whatever this token already turned into. These links were on the token
+	// all along and never rendered, so the counter had no way from the queue
+	// to the repair job or the invoice it produced.
+	_linkLine(t) {
+		const bits = [];
+		const sr = t.service_request_info || {};
+		if (t.linked_service_request) {
+			const status = sr.status ? ` · ${frappe.utils.escape_html(sr.status)}` : "";
+			bits.push(`<a href="/app/service-request/${encodeURIComponent(t.linked_service_request)}" target="_blank">
+				<i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.linked_service_request)}${status}</a>`);
+		}
+		const invoice = sr.service_invoice || t.converted_invoice;
+		if (invoice) {
+			bits.push(`<a href="/app/sales-invoice/${encodeURIComponent(invoice)}" target="_blank">
+				<i class="fa fa-file-text-o"></i> ${frappe.utils.escape_html(invoice)}</a>`);
+		}
+		if (t.linked_customer) {
+			bits.push(`<a href="/app/customer/${encodeURIComponent(t.linked_customer)}" target="_blank">
+				<i class="fa fa-user"></i> ${frappe.utils.escape_html(t.linked_customer)}</a>`);
+		}
+		if (!bits.length) return "";
+		return `<p class="ch-q-note ch-q-links">${bits.join(" &nbsp; ")}</p>`;
+	}
 
 	_tokenCard(t) {
 		const is_svc = _is_service();
@@ -213,31 +350,85 @@ export class QueueWorkspace {
 		const cust_name  = frappe.utils.escape_html(t.customer_name || __("Walk-in"));
 		const cust_phone = t.customer_phone ? frappe.utils.escape_html(t.customer_phone) : "";
 
-		// Detail — purpose / device based on company type
+		// Detail — everything the customer actually filled in on the tablet.
+		// The card used to show brand and issue category only, so a device type,
+		// model, the chosen symptoms and the visit reason itself were all
+		// captured and then thrown away. The counter had to open the token to
+		// learn why the person was standing there.
+		const esc = (v) => frappe.utils.escape_html(String(v));
+		const tag = (icon, v) => v ? `<span class="ch-q-tag"><i class="fa ${icon}"></i> ${esc(v)}</span>` : "";
 		let detail_html = "";
 		if (is_svc) {
-			const device = [t.device_brand, t.device_model].filter(Boolean).join(" ") || t.device_type || "";
+			// Device reads type → brand → model, each only when it adds
+			// something, so "Smart Phones · Oneplus" does not become
+			// "Smart Phones Smart Phones".
+			const device = [t.device_type, t.device_brand, t.device_model_name || t.device_model]
+				.filter(Boolean)
+				.filter((v, i, arr) => arr.indexOf(v) === i)
+				.join(" · ") || t.other_device_hint || "";
+			const symptoms = (t.symptom_labels || []).join(", ");
 			detail_html = `
 				<div class="ch-q-tags">
-					${device ? `<span class="ch-q-tag"><i class="fa fa-mobile"></i> ${frappe.utils.escape_html(device)}</span>` : ""}
-					${t.issue_category ? `<span class="ch-q-tag"><i class="fa fa-wrench"></i> ${frappe.utils.escape_html(t.issue_category)}</span>` : ""}
+					${tag("fa-question-circle", t.visit_reason)}
+					${tag("fa-mobile", device)}
+					${tag("fa-wrench", t.issue_category)}
+					${tag("fa-bullhorn", t.referral_source)}
+					${tag("fa-language", t.customer_language && t.customer_language !== "English" ? t.customer_language : "")}
 				</div>
-				${t.issue_description ? `<p class="ch-q-note">${frappe.utils.escape_html(t.issue_description.substring(0, 80))}${t.issue_description.length > 80 ? "…" : ""}</p>` : ""}`;
+				${symptoms ? `<p class="ch-q-note"><b>${__("Symptoms")}:</b> ${esc(symptoms)}</p>` : ""}
+				${t.issue_description ? `<p class="ch-q-note">${esc(t.issue_description.substring(0, 160))}${t.issue_description.length > 160 ? "…" : ""}</p>` : ""}
+				${this._linkLine(t)}
+				<div class="ch-q-context" data-context-for="${frappe.utils.escape_html(t.name)}"></div>`;
 		} else {
 			const purpose = t.visit_purpose || "Sales";
 			const purposeClsMap = { Sales: "ch-q-purpose--sales", Repair: "ch-q-purpose--repair", Buyback: "ch-q-purpose--buyback" };
 			const purposeCls = purposeClsMap[purpose] || "ch-q-purpose--other";
-			const tags = [t.category_interest, t.brand_interest, t.budget_range].filter(Boolean);
+			const tags = [t.visit_reason, t.category_interest, t.brand_interest, t.budget_range, t.referral_source].filter(Boolean);
 			detail_html = `
 				<div class="ch-q-tags">
 					<span class="ch-q-purpose ${purposeCls}">${frappe.utils.escape_html(purpose)}</span>
-					${tags.map(tag => `<span class="ch-q-tag">${frappe.utils.escape_html(tag)}</span>`).join("")}
-				</div>`;
+					${tags.map(x => `<span class="ch-q-tag">${frappe.utils.escape_html(x)}</span>`).join("")}
+				</div>
+				${this._linkLine(t)}`;
 		}
 
-		// Action buttons
+		// Action buttons — driven by the visit reason, not by the company.
+		// The previous build branched on whether the company name contained
+		// "gofix", so every service token was offered Create GoFix Request:
+		// a customer who came only to collect a repaired phone got the same
+		// button as a water-damage intake. The reason was on the token all
+		// along. counter_action comes from the GoFix Visit Reason master so
+		// ops can add a reason and say what it means here without a code change.
+		const action = t.counter_action || (is_svc ? "Create Request" : "Bill");
+		const allow_create = !!t.allow_create_request;
 		let actions_html = "";
-		if (is_svc) {
+		if (is_svc && action !== "Create Request") {
+			const buttons = [];
+			if (action === "Show Repair Status") {
+				buttons.push(`<button class="btn btn-sm btn-primary ch-queue-status-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-search"></i> ${__("Repair Status")}
+				</button>`);
+			} else if (action === "Collect Device") {
+				buttons.push(`<button class="btn btn-sm btn-primary ch-queue-collect-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-handshake-o"></i> ${__("Hand Over")}
+				</button>`);
+			}
+			// Warranty visits genuinely split — usually a status question,
+			// sometimes a new job — so that reason carries both.
+			if (allow_create) {
+				buttons.push(`<button class="btn btn-sm btn-default ch-queue-convert-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-plus"></i> ${__("GoFix Request")}
+				</button>`);
+			}
+			buttons.push(`<button class="btn btn-sm btn-default ch-queue-drop-btn"
+				data-token="${frappe.utils.escape_html(t.name)}">
+				${__("Withdraw")}
+			</button>`);
+			actions_html = buttons.join("\n");
+		} else if (is_svc) {
 			// Withdraw belongs here too. A service walk-in leaves without
 			// proceeding just as a retail one does -- the customer hears the
 			// quote and declines, or will not wait -- and until now the only

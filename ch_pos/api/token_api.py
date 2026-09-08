@@ -837,6 +837,18 @@ def get_tablet_config(store: str) -> dict:
         fields=["reason_name", "is_repair", "display_order"],
         order_by="display_order asc, reason_name asc",
         limit_page_length=limit)
+    # Referral sources are optional attribution. A site that has not installed
+    # or seeded the master simply gets an empty list and the tablet hides the
+    # question -- it must never be the reason check-in fails.
+    referral_sources = []
+    if frappe.db.table_exists("GoFix Referral Source"):
+        referral_sources = frappe.get_all(
+            "GoFix Referral Source",
+            filters={"disabled": 0},
+            fields=["source_name", "display_order"],
+            order_by="display_order asc, source_name asc",
+            limit_page_length=limit)
+
     symptom_rows = frappe.get_all(
         "GoFix Symptom",
         filters={"disabled": 0},
@@ -871,6 +883,10 @@ def get_tablet_config(store: str) -> dict:
         "visit_reasons": [
             {"name": v["reason_name"], "is_repair": bool(v["is_repair"]), "display_order": v["display_order"]}
             for v in visit_reasons
+        ],
+        "referral_sources": [
+            {"name": r["source_name"], "display_order": r["display_order"]}
+            for r in referral_sources
         ],
         "brands_by_device": brands_by_device,
         "symptoms_by_device": symptoms_by_device,
@@ -938,6 +954,151 @@ def _first_backend_category(symptom_rows: list[dict]) -> str:
     return ""
 
 
+def _valid_referral_source(value: str) -> str:
+    """Return the source if it is live, else "".
+
+    Attribution never blocks a walk-in. An unknown or retired source is
+    dropped silently rather than thrown, so neither a stale tablet cache nor a
+    source ops disabled mid-shift can stop a customer getting a token.
+    """
+    value = (value or "").strip()
+    if not value or not frappe.db.table_exists("GoFix Referral Source"):
+        return ""
+    row = frappe.db.get_value(
+        "GoFix Referral Source", value, ["name", "disabled"], as_dict=True)
+    return "" if (not row or row.get("disabled")) else row["name"]
+
+
+@frappe.whitelist()
+def get_walkin_context(token: str) -> dict:
+    """Resolve what the counter needs to act on this walk-in, keyed on reason.
+
+    The queue offered one action -- Create GoFix Request -- to every service
+    token regardless of why the customer came, so someone collecting a repaired
+    phone and someone reporting water damage got the same button. The reason
+    has been on the token all along; this turns it into an answer the executive
+    can read off the card without opening anything.
+
+    Matches on the customer, then on the phone number, because a status or
+    collection visit is almost always about a job raised on an earlier visit
+    and so has no link on today's token.
+
+    Service Request carries no single status column -- the lifecycle lives in
+    the GoFix Status Log child table -- so the current state is the newest
+    to_status, with transfer_status as the fallback for jobs logged before that
+    trail existed.
+    """
+    _ensure_can_view_tokens()
+    tok = frappe.db.get_value(
+        "POS Kiosk Token", token,
+        ["name", "pos_profile", "company", "customer_phone", "visit_reason",
+         "visit_purpose", "linked_customer", "linked_service_request"],
+        as_dict=True)
+    if not tok:
+        frappe.throw(_("Token {0} not found.").format(token))
+    _assert_pos_profile_scope(tok.pos_profile)
+
+    is_repair = False
+    if tok.visit_reason and frappe.db.table_exists("GoFix Visit Reason"):
+        is_repair = bool(frappe.db.get_value("GoFix Visit Reason", tok.visit_reason, "is_repair"))
+
+    repairs: list = []
+    if frappe.db.table_exists("Service Request"):
+        # Company-scoped by construction: this token's company, never the
+        # caller's whole allowed set.
+        names: list = []
+        if tok.linked_service_request:
+            names.append(tok.linked_service_request)
+        if tok.linked_customer:
+            names += frappe.get_all(
+                "Service Request",
+                filters={"company": tok.company, "customer": tok.linked_customer},
+                order_by="creation desc", limit_page_length=10, pluck="name")
+        phone = (tok.customer_phone or "").strip()
+        if phone and len(phone) >= 10:
+            tail = phone[-10:]
+            names += frappe.get_all(
+                "Service Request",
+                filters={"company": tok.company, "contact_number": ("like", f"%{tail}")},
+                order_by="creation desc", limit_page_length=10, pluck="name")
+        seen: set = set()
+        names = [n for n in names if not (n in seen or seen.add(n))][:10]
+
+        if names:
+            rows = frappe.get_all(
+                "Service Request",
+                filters={"name": ("in", names)},
+                fields=["name", "customer", "customer_name", "device_brand", "device_model",
+                        "service_invoice", "total_estimated_cost", "transfer_status",
+                        "walkin_status", "creation"],
+                order_by="creation desc", limit_page_length=10)
+
+            latest: dict = {}
+            for row in frappe.get_all(
+                "GoFix Status Log",
+                filters={"parent": ("in", names), "parenttype": "Service Request"},
+                fields=["parent", "to_status", "changed_at"],
+                order_by="changed_at asc", limit_page_length=500,
+            ):
+                if row.get("to_status"):
+                    latest[row["parent"]] = row["to_status"]
+
+            for r in rows:
+                invoice = r.get("service_invoice")
+                outstanding = grand_total = None
+                if invoice:
+                    inv = frappe.db.get_value(
+                        "Sales Invoice", invoice,
+                        ["outstanding_amount", "grand_total"], as_dict=True) or {}
+                    outstanding = inv.get("outstanding_amount")
+                    grand_total = inv.get("grand_total")
+                repairs.append({
+                    "service_request": r["name"],
+                    "status": latest.get(r["name"]) or r.get("transfer_status") or r.get("walkin_status") or "",
+                    "device": " ".join(x for x in (r.get("device_brand"), _short_model(r.get("device_model"))) if x),
+                    "customer": r.get("customer_name") or r.get("customer"),
+                    "invoice": invoice,
+                    "outstanding": outstanding,
+                    "grand_total": grand_total,
+                    "estimate": r.get("total_estimated_cost"),
+                })
+
+    return {
+        "token": tok.name,
+        "visit_reason": tok.visit_reason,
+        "visit_purpose": tok.visit_purpose,
+        "is_repair": is_repair,
+        "customer_phone": tok.customer_phone,
+        "linked_customer": tok.linked_customer,
+        "repairs": repairs,
+    }
+
+
+def _short_model(model: str) -> str:
+    """CH Model names are compound keys; show the human tail only.
+
+    "Smart Phones-iOS Phones-Apple-Apple iPhone 13 Pro" reads as
+    "Apple iPhone 13 Pro" on a queue card.
+    """
+    if not model:
+        return ""
+    return model.rsplit("-", 1)[-1].strip()
+
+
+@frappe.whitelist()
+def get_referral_sources() -> list:
+    """Live attribution options for the counter's Log Walk-in dialog."""
+    if not frappe.db.table_exists("GoFix Referral Source"):
+        return []
+    return frappe.get_all(
+        "GoFix Referral Source",
+        filters={"disabled": 0},
+        fields=["name"],
+        order_by="display_order asc, name asc",
+        pluck="name",
+        limit_page_length=200)
+
+
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 @rate_limit(limit=20, seconds=300, methods=["POST"], ip_based=True)
 def create_tablet_token(
@@ -951,7 +1112,8 @@ def create_tablet_token(
     other_device_hint: str = "",
     selected_issues=None,
     additional_notes: str = "",
-    customer_language: str = "") -> dict:
+    customer_language: str = "",
+    referral_source: str = "") -> dict:
     """Create the walk-in token from the self check-in tablet.
 
     Same POS Kiosk Token the counter logs, so the customer keeps one token
@@ -967,6 +1129,7 @@ def create_tablet_token(
     other_device_hint = _bounded_public_text(other_device_hint, _("Other Device"), 140)
     additional_notes = _bounded_public_text(additional_notes, _("Notes"), 1000)
     customer_language = _bounded_public_text(customer_language, _("Language"), 40) or "English"
+    referral_source = _bounded_public_text(referral_source, _("Referral Source"), 140)
 
     _check_rate_limit(f"tablet_{_client_ip()}_{profile.name}")
     customer_phone = _validate_indian_phone(customer_phone)
@@ -976,6 +1139,11 @@ def create_tablet_token(
     if not visit_row or visit_row.get("disabled"):
         frappe.throw(_("Visit reason {0} is not available.").format(visit_reason))
     is_repair = bool(visit_row.get("is_repair"))
+
+    # Attribution is optional by design. An unknown or retired source is
+    # dropped rather than thrown, so a stale tablet cache cannot stop a
+    # customer getting a token over a marketing question.
+    referral_source = _valid_referral_source(referral_source)
 
     device = _normalise_device(device_type, device_brand, device_model, other_device_hint) if is_repair else {
         "device_type": "", "device_brand": "", "device_model": "", "other_device_hint": ""}
@@ -1013,6 +1181,7 @@ def create_tablet_token(
         "customer_phone": customer_phone,
         "customer_language": customer_language if customer_language in ("English", "Hindi") else "English",
         "visit_source": "Kiosk",
+        "referral_source": referral_source,
         "visit_purpose": "Repair" if is_repair else "Enquiry",
         "visit_reason": visit_reason,
         "device_type": device["device_type"],
@@ -1151,10 +1320,83 @@ def get_queue(pos_profile: str = None, status: str = None, date_filter: str = "t
             "issue_category", "issue_description",
             "technician", "assigned_at", "started_at", "completed_at",
             "pos_profile", "company", "linked_service_request",
+            # Everything the customer actually filled in on the tablet. The
+            # counter card used to show brand and issue category only, so a
+            # "collect my device" visitor and a water-damage repair looked
+            # identical and both were offered the same Create Request button.
+            # visit_reason in particular is the discriminator the action
+            # buttons key on -- without it the queue cannot tell why anyone
+            # is standing there.
+            "visit_reason", "visit_purpose", "visit_source", "referral_source",
+            "customer_language", "linked_customer", "converted_invoice",
+            "linked_buyback", "total_estimate", "expires_at",
         ],
         order_by="creation desc",
         limit_page_length=result_limit + 1)
     _ensure_result_limit(tokens, result_limit, _("Queue tokens"))
+
+    # Symptoms live in a child table, so they need their own pass. One query
+    # for the whole page rather than one per token.
+    token_names = [t["name"] for t in tokens]
+    symptoms_by_token: dict = {}
+    if token_names:
+        for row in frappe.get_all(
+            "POS Kiosk Token Symptom",
+            filters={"parent": ("in", token_names)},
+            fields=["parent", "symptom_name", "is_expert_check", "is_other"],
+            order_by="parent asc, idx asc",
+            limit_page_length=result_limit * 5 + 1,
+        ):
+            label = row.get("symptom_name")
+            if label:
+                symptoms_by_token.setdefault(row["parent"], []).append(label)
+    for t in tokens:
+        t["symptom_labels"] = symptoms_by_token.get(t["name"], [])
+
+    # What the counter should offer for each token's reason. Resolved here so
+    # the queue never has to hardcode reason names in JavaScript.
+    reason_names = sorted({t["visit_reason"] for t in tokens if t.get("visit_reason")})
+    reason_actions: dict = {}
+    if reason_names and frappe.db.table_exists("GoFix Visit Reason"):
+        fields = ["name", "is_repair"]
+        for extra in ("counter_action", "allow_create_request"):
+            if frappe.db.has_column("GoFix Visit Reason", extra):
+                fields.append(extra)
+        for row in frappe.get_all(
+            "GoFix Visit Reason", filters={"name": ("in", reason_names)},
+            fields=fields, limit_page_length=len(reason_names) + 1,
+        ):
+            reason_actions[row["name"]] = row
+    for t in tokens:
+        cfg = reason_actions.get(t.get("visit_reason")) or {}
+        # A site that has not taken the counter_action migration yet falls back
+        # to the old behaviour for repairs and to Withdraw-only otherwise,
+        # rather than showing Create Request to everyone as before.
+        t["counter_action"] = cfg.get("counter_action") or (
+            "Create Request" if cfg.get("is_repair") else "None")
+        t["allow_create_request"] = int(
+            cfg.get("allow_create_request") if cfg.get("allow_create_request") is not None
+            else cfg.get("is_repair") or 0)
+
+    # Repair status for the reason-aware counter view. A "check status" or
+    # "collect my device" visitor needs the answer read off the queue, not
+    # found by hand in another screen.
+    sr_names = [t["linked_service_request"] for t in tokens if t.get("linked_service_request")]
+    sr_info: dict = {}
+    if sr_names and frappe.db.table_exists("Service Request"):
+        sr_fields = ["name", "status"]
+        for extra in ("service_invoice", "total_estimated_cost"):
+            if frappe.db.has_column("Service Request", extra):
+                sr_fields.append(extra)
+        for row in frappe.get_all(
+            "Service Request",
+            filters={"name": ("in", sr_names)},
+            fields=sr_fields,
+            limit_page_length=result_limit + 1,
+        ):
+            sr_info[row["name"]] = row
+    for t in tokens:
+        t["service_request_info"] = sr_info.get(t.get("linked_service_request")) or {}
 
     technician_ids = sorted({t.technician for t in tokens if t.get("technician")})
     technician_names = {}
@@ -1992,7 +2234,8 @@ def log_counter_walkin(
     device_brand: str = "",
     device_model: str = "",
     item_code: str = "",
-    linked_customer: str = None) -> dict:
+    linked_customer: str = None,
+    referral_source: str = "") -> dict:
     """
     Create a minimal POS Kiosk Token for a direct-counter walk-in.
     This replaces the old log_walkin counter-only approach.
@@ -2075,6 +2318,7 @@ def log_counter_walkin(
         "customer_phone": customer_phone.strip() or "",
         "linked_customer": linked_customer,
         "visit_source": "Counter",
+        "referral_source": _valid_referral_source(referral_source),
         "visit_purpose": visit_purpose,
         "issue_description": remarks,
         "device_type": device["device_type"],
