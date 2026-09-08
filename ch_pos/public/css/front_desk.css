@@ -473,3 +473,124 @@
   color: #991b1b;
   white-space: nowrap;
 }
+
+/* ── Two panes: the queue, and the whole visit ────────────────────────
+   A card carries the opening remark; the pane carries the conversation. */
+.ch-queue-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: var(--pos-space-lg);
+  align-items: start;
+}
+.ch-queue-split > .ch-queue-token-list { min-width: 0; }
+.ch-queue-detail {
+  min-width: 0;
+  position: sticky;
+  top: var(--pos-space-sm);
+  max-height: calc(100vh - 190px);
+  overflow-y: auto;
+  background: var(--pos-surface);
+  border: 1px solid var(--pos-border);
+  border-radius: var(--pos-radius);
+  box-shadow: var(--pos-shadow-card);
+  padding: var(--pos-space-xl);
+}
+@media (max-width: 1280px) {
+  .ch-queue-split { grid-template-columns: 1fr; }
+  .ch-queue-detail { position: static; max-height: none; }
+}
+
+.ch-q-card--open {
+  border-color: var(--pos-primary) !important;
+  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.12);
+}
+.ch-q-card { cursor: pointer; }
+
+.ch-q-detail-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--pos-space-sm);
+  padding: var(--pos-space-2xl) var(--pos-space-lg);
+  text-align: center;
+  color: var(--pos-text-muted);
+  font-size: var(--pos-fs-md);
+}
+.ch-q-detail-empty i { font-size: 26px; opacity: 0.4; }
+
+.ch-q-d-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: var(--pos-space-lg);
+  padding-bottom: var(--pos-space-lg);
+  border-bottom: 1px solid var(--pos-border-light);
+}
+.ch-q-d-title {
+  display: flex; align-items: center; gap: var(--pos-space-sm);
+  font-size: var(--pos-fs-xl); font-weight: var(--pos-fw-bold);
+  letter-spacing: -0.01em; color: var(--pos-text);
+}
+.ch-q-d-sub {
+  margin-top: var(--pos-space-2xs);
+  font-family: var(--pos-font-mono); font-size: var(--pos-fs-sm);
+  color: var(--pos-text-muted);
+}
+.ch-q-d-actions { display: flex; gap: var(--pos-space-sm); flex-wrap: wrap; justify-content: flex-end; }
+
+.ch-q-d-also { margin: var(--pos-space-md) 0 0; font-size: var(--pos-fs-sm); color: var(--pos-text-muted); }
+.ch-q-d-quote {
+  margin-top: var(--pos-space-lg);
+  padding: var(--pos-space-md) var(--pos-space-lg);
+  border-left: 3px solid var(--pos-primary);
+  border-radius: 0 var(--pos-radius-sm) var(--pos-radius-sm) 0;
+  background: var(--pos-surface-sunken);
+  font-size: var(--pos-fs-md); line-height: 1.5; color: var(--pos-text);
+}
+.ch-q-d-section {
+  margin-top: var(--pos-space-xl);
+  font-size: var(--pos-fs-2xs); font-weight: var(--pos-fw-bold);
+  letter-spacing: 0.09em; text-transform: uppercase; color: var(--pos-text-muted);
+}
+.ch-q-d-facts {
+  margin: var(--pos-space-md) 0 0;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+  gap: var(--pos-space-md) var(--pos-space-lg);
+}
+.ch-q-d-fact dt {
+  font-size: var(--pos-fs-xs); font-weight: var(--pos-fw-medium);
+  letter-spacing: 0.04em; text-transform: uppercase; color: var(--pos-text-muted);
+}
+.ch-q-d-fact dd {
+  margin: 2px 0 0; font-size: var(--pos-fs-md); font-weight: var(--pos-fw-medium);
+  color: var(--pos-text); overflow-wrap: anywhere;
+}
+
+/* The exchange reads as a thread, because that is what it is. */
+.ch-q-d-notes { list-style: none; margin: var(--pos-space-md) 0 0; padding: 0; }
+.ch-q-d-notes li {
+  position: relative;
+  padding: 0 0 var(--pos-space-lg) var(--pos-space-xl);
+  border-left: 2px solid var(--pos-border-light);
+}
+.ch-q-d-notes li:last-child { padding-bottom: 0; border-left-color: transparent; }
+.ch-q-d-notes li::before {
+  content: ""; position: absolute; left: -5px; top: 5px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--pos-surface); border: 2px solid var(--pos-primary);
+}
+.ch-q-d-note-meta {
+  display: block; font-size: var(--pos-fs-xs);
+  font-weight: var(--pos-fw-medium); color: var(--pos-text-muted);
+}
+.ch-q-d-note-body {
+  margin-top: 2px; font-size: var(--pos-fs-md); line-height: 1.5; color: var(--pos-text);
+}
+.ch-q-d-none { margin: var(--pos-space-sm) 0 0; font-size: var(--pos-fs-md); color: var(--pos-text-muted); }
+.ch-q-d-list { list-style: none; margin: var(--pos-space-sm) 0 0; padding: 0; font-size: var(--pos-fs-md); }
+.ch-q-d-list li { padding: 3px 0; }
+.ch-q-d-dim { color: var(--pos-text-muted); margin-left: var(--pos-space-sm); }
+.ch-q-d-linked {
+  margin-top: var(--pos-space-xl);
+  display: flex; align-items: center; gap: var(--pos-space-sm);
+  padding: var(--pos-space-md) var(--pos-space-lg);
+  border-radius: var(--pos-radius-sm);
+  background: var(--pos-success-light); color: var(--pos-success-dark);
+  font-size: var(--pos-fs-md); font-weight: var(--pos-fw-medium);
+}

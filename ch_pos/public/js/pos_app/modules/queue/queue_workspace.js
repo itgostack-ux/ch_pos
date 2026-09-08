@@ -137,11 +137,19 @@ export class QueueWorkspace {
 					</button>
 				</div>
 
+				<div class="ch-queue-split">
 				<div class="ch-queue-token-list">
 					<div class="ch-queue-empty-state ch-queue-loading-state">
 						<i class="fa fa-spinner fa-spin fa-2x"></i>
 						<span>${__("Loading tokens…")}</span>
 					</div>
+				</div>
+				<div class="ch-queue-detail">
+					<div class="ch-q-detail-empty">
+						<i class="fa fa-comments-o"></i>
+						<span>${__("Pick anyone waiting to see everything they told us")}</span>
+					</div>
+				</div>
 				</div>
 			</div>
 		`);
@@ -185,6 +193,7 @@ export class QueueWorkspace {
 			.then((tokens) => {
 				this._tokens = tokens || [];
 				this._renderTokenList(this._tokens);
+				if (this._selected) this._openDetail(this._selected);
 			})
 			.catch(() => {
 				if (this._panel) {
@@ -285,6 +294,12 @@ export class QueueWorkspace {
 		);
 
 		// Bind action buttons
+		list.find(".ch-q-card").on("click", (e) => {
+			if ($(e.target).closest("button, a").length) return;   // let actions act
+			const name = $(e.currentTarget).data("token");
+			if (name) this._openDetail(name);
+		});
+
 		list.find(".ch-queue-reply-btn").on("click", (e) => {
 			const name = $(e.currentTarget).data("token");
 			const token = this._tokens.find((t) => t.name === name);
@@ -637,7 +652,27 @@ export class QueueWorkspace {
 		const action = t.counter_action || (is_svc ? "Create Request" : "Bill");
 		const allow_create = !!t.allow_create_request;
 		let actions_html = "";
-		if (is_svc && action !== "Create Request") {
+		if (t.channel_group === "remote") {
+			// Checked FIRST: counter_action comes from the visit reason, which
+			// only a walk-in has. A written request has none, so it defaulted to
+			// "None" and the card offered nothing but Withdraw.
+			actions_html = `
+				<button class="btn btn-sm btn-default ch-queue-reply-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-comment-o"></i> ${__("Reply")}
+				</button>
+				${is_svc ? `<button class="btn btn-sm btn-primary ch-queue-convert-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-plus"></i> ${__("Create Service Request")}
+				</button>` : `<button class="btn btn-sm btn-primary ch-queue-bill-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					${__("Bill")}
+				</button>`}
+				<button class="btn btn-sm btn-default ch-queue-drop-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					${__("Close")}
+				</button>`;
+		} else if (is_svc && action !== "Create Request") {
 			const buttons = [];
 			if (action === "Show Repair Status") {
 				buttons.push(`<button class="btn btn-sm btn-primary ch-queue-status-btn"
@@ -663,23 +698,6 @@ export class QueueWorkspace {
 				${__("Withdraw")}
 			</button>`);
 			actions_html = buttons.join("\n");
-		} else if (t.channel_group === "remote") {
-			// Nobody is at the till, so Bill is meaningless. What a written
-			// request needs is a reply and, once the customer turns up with the
-			// device, the same conversion every walk-in gets.
-			actions_html = `
-				<button class="btn btn-sm btn-default ch-queue-reply-btn"
-					data-token="${frappe.utils.escape_html(t.name)}">
-					<i class="fa fa-comment-o"></i> ${__("Reply")}
-				</button>
-				${is_svc ? `<button class="btn btn-sm btn-primary ch-queue-convert-btn"
-					data-token="${frappe.utils.escape_html(t.name)}">
-					<i class="fa fa-plus"></i> ${__("Book Device In")}
-				</button>` : ""}
-				<button class="btn btn-sm btn-default ch-queue-drop-btn"
-					data-token="${frappe.utils.escape_html(t.name)}">
-					${__("Close")}
-				</button>`;
 		} else if (is_svc) {
 			// Withdraw belongs here too. A service walk-in leaves without
 			// proceeding just as a retail one does -- the customer hears the
@@ -710,7 +728,9 @@ export class QueueWorkspace {
 		}
 
 		return `
-			<div class="ch-q-card ch-q-card--${st.cls}">
+			<div class="ch-q-card ch-q-card--${st.cls}${
+				this._selected === t.name ? " ch-q-card--open" : ""}"
+			     data-token="${frappe.utils.escape_html(t.name)}">
 				<div class="ch-q-indicator"></div>
 				<div class="ch-q-content">
 					<div class="ch-q-row-top">
@@ -999,6 +1019,123 @@ export class QueueWorkspace {
 			},
 		});
 		d.show();
+	}
+
+	// ── The whole visit ─────────────────────────────────────────────
+	//
+	// A card can only carry the opening remark. A request from a website form,
+	// WhatsApp or a helpdesk is a conversation, and the desk has to be able to
+	// read it — otherwise every reply since is invisible and the next person to
+	// pick the request up starts again.
+	_openDetail(name) {
+		this._selected = name;
+		const $d = this._panel.find(".ch-queue-detail");
+		this._panel.find(".ch-q-card").removeClass("ch-q-card--open");
+		this._panel.find(`.ch-q-card[data-token="${name}"]`).addClass("ch-q-card--open");
+		$d.html(`<div class="ch-q-detail-empty"><i class="fa fa-circle-o-notch fa-spin"></i>
+			<span>${__("Loading…")}</span></div>`);
+
+		frappe.xcall("gofix.gofix_services.inbox.get_visit", { name }).then((d) => {
+			if (this._selected !== name) return;          // they clicked on
+			$d.html(this._detailHtml(d));
+			$d.find(".ch-q-d-reply").on("click", () => this._replyDialog(d));
+			$d.find(".ch-q-d-convert").on("click", () => this._openIntake(d));
+			$d.find(".ch-q-d-close").on("click", () => this._showDropDialog(d));
+		}).catch(() => {
+			$d.html(`<div class="ch-q-detail-empty">
+				<span>${__("Could not load this visit.")}</span></div>`);
+		});
+	}
+
+	_detailHtml(d) {
+		const esc = (v) => frappe.utils.escape_html(String(v));
+		const remote = !["Kiosk", "Counter"].includes(d.visit_source);
+
+		// Only what we actually hold. Empty rows teach nobody anything and make
+		// a sparse request look like a broken screen.
+		const fact = (l, v) => v
+			? `<div class="ch-q-d-fact"><dt>${l}</dt><dd>${esc(v)}</dd></div>` : "";
+		const device = [d.device_type, d.device_brand, d.device_model_name || d.device_model]
+			.filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(" · ");
+		const facts = [
+			fact(__("Reached us by"), d.visit_source),
+			fact(__("Received"), frappe.datetime.str_to_user(d.creation)),
+			fact(__("Phone"), d.customer_phone),
+			fact(__("Alternate"), d.alternate_number),
+			fact(__("Email"), d.email),
+			fact(__("Customer"), d.linked_customer),
+			fact(__("Wants"), d.visit_purpose),
+			fact(__("Reason"), d.visit_reason),
+			fact(__("Device"), device || d.other_device_hint),
+			fact(__("IMEI / Serial"), d.serial_no),
+			fact(__("Issue"), d.issue_category),
+			fact(__("Symptoms"), (d.symptom_labels || []).join(", ")),
+			fact(__("Preferred slot"), d.preferred_datetime
+				? frappe.datetime.str_to_user(d.preferred_datetime) : ""),
+			fact(__("Heard about us via"), d.referral_source),
+			fact(__("Language"), d.customer_language),
+			fact(__("Owner"), d.assigned_to),
+			fact(__("Channel reference"), d.external_ref),
+			fact(__("Store"), d.pos_profile),
+		].join("");
+
+		const notes = (d.notes || []).length
+			? `<ul class="ch-q-d-notes">${d.notes.map((n) => `
+				<li>
+					<span class="ch-q-d-note-meta">${esc((n.note_datetime || "").slice(0, 16))}
+						${n.channel ? "· " + esc(n.channel) : ""}
+						${n.noted_by ? "· " + esc(n.noted_by) : ""}</span>
+					<div class="ch-q-d-note-body">${esc(n.note)}</div>
+				</li>`).join("")}</ul>`
+			: `<p class="ch-q-d-none">${
+				remote ? __("Nothing said back yet. Reply to start the thread.")
+					   : __("Nothing recorded on this visit yet.")}</p>`;
+
+		const repairs = (d.repairs || []).length
+			? `<ul class="ch-q-d-list">${d.repairs.map((r) => `
+				<li><a href="/app/service-request/${encodeURIComponent(r.name)}" target="_blank">${
+					esc(r.name)}</a>
+				<span class="ch-q-d-dim">${esc(r.decision || "")}${
+					r.device_model ? " · " + esc(r.device_model) : ""}</span></li>`).join("")}</ul>`
+			: `<p class="ch-q-d-none">${__("No repairs on this number yet.")}</p>`;
+
+		const others = (d.other_visits || []).length
+			? `<p class="ch-q-d-also">${__("Also open from this number:")} ${
+				d.other_visits.map((o) => `<b>${esc(o.visit_source)}</b>`).join(", ")}</p>`
+			: "";
+
+		return `
+			<div class="ch-q-d-head">
+				<div>
+					<div class="ch-q-d-title">${esc(d.customer_name || __("Unknown caller"))}
+						<span class="ch-q-chan" data-c="${esc(d.visit_source || "")}">${
+							esc(d.visit_source || "")}</span></div>
+					<div class="ch-q-d-sub">${esc(d.token_display || d.name)} · ${
+						esc(d.customer_phone || "")}</div>
+				</div>
+				<div class="ch-q-d-actions">
+					${remote ? `<button class="btn btn-sm btn-default ch-q-d-reply">
+						<i class="fa fa-comment-o"></i> ${__("Reply")}</button>` : ""}
+					${d.linked_service_request ? "" :
+						`<button class="btn btn-sm btn-primary ch-q-d-convert">
+							<i class="fa fa-plus"></i> ${__("Create Service Request")}</button>`}
+					<button class="btn btn-sm btn-default ch-q-d-close">${__("Close")}</button>
+				</div>
+			</div>
+			${others}
+			${d.issue_description
+				? `<div class="ch-q-d-quote">${esc(d.issue_description)}</div>` : ""}
+			<div class="ch-q-d-section">${__("What the customer told us")}</div>
+			<dl class="ch-q-d-facts">${facts}</dl>
+			<div class="ch-q-d-section">${__("Conversation")}</div>
+			${notes}
+			<div class="ch-q-d-section">${__("This number's repairs")}</div>
+			${repairs}
+			${d.linked_service_request
+				? `<div class="ch-q-d-linked"><i class="fa fa-check-circle"></i>
+					${__("Booked in as")} <a href="/app/service-request/${
+						encodeURIComponent(d.linked_service_request)}" target="_blank">${
+						esc(d.linked_service_request)}</a></div>` : ""}`;
 	}
 
 }
