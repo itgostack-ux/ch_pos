@@ -970,6 +970,51 @@ def _valid_referral_source(value: str) -> str:
 
 
 @frappe.whitelist()
+def find_waiting_token_by_phone(pos_profile: str, phone: str) -> dict:
+    """Find an open walk-in token for this phone at this store.
+
+    A technician who opens Repair directly and types the number never came
+    through the queue, so the intake had no source_token and the customer's
+    token stayed Waiting for the rest of the day -- the same person counted
+    twice, once in the queue and once as a ticket. Matching on the number
+    reunites them, and create_service_intake_from_pos then closes the token
+    against the new request through the path the queue already uses.
+
+    Matches the last 10 digits so +91-prefixed and bare numbers meet. Returns
+    the oldest open token, because a repeat visitor's earliest unserved token
+    is the one they have been waiting on.
+    """
+    _ensure_can_view_tokens()
+    _assert_pos_profile_scope(pos_profile)
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if len(digits) < 10:
+        return {}
+    tail = digits[-10:]
+
+    rows = frappe.get_all(
+        "POS Kiosk Token",
+        filters={
+            "pos_profile": pos_profile,
+            "status": ("in", ("Waiting", "Hold", "Engaged")),
+            "customer_phone": ("like", f"%{tail}"),
+            "linked_service_request": ("in", ("", None)),
+        },
+        fields=["name", "token_display", "customer_name", "customer_phone",
+                "visit_reason", "visit_purpose", "issue_category", "issue_description",
+                "device_type", "device_brand", "device_model", "device_model_name",
+                "other_device_hint", "linked_customer", "creation"],
+        order_by="creation asc", limit_page_length=1)
+    if not rows:
+        return {}
+    token = rows[0]
+    token["symptom_labels"] = frappe.get_all(
+        "POS Kiosk Token Symptom",
+        filters={"parent": token["name"]},
+        pluck="symptom_name", order_by="idx asc", limit_page_length=20)
+    return token
+
+
+@frappe.whitelist()
 def get_walkin_context(token: str) -> dict:
     """Resolve what the counter needs to act on this walk-in, keyed on reason.
 

@@ -585,6 +585,54 @@ export class RepairWorkspace {
 			});
 		});
 
+		// A technician who opens Repair directly and types the number never came
+		// through the Service Queue, so the intake carried no source_token and
+		// the customer's walk-in token stayed Waiting all day -- the same person
+		// counted twice, once in the queue and once as a ticket. Match on the
+		// number and adopt the token, which makes the intake close it through
+		// the same path the queue already uses.
+		panel.on("blur", ".ch-rep-phone", () => {
+			if (this._intakeToken) return;                    // already came from the queue
+			const phone = (panel.find(".ch-rep-phone").val() || "").trim();
+			const digits = phone.replace(/\D/g, "");
+			if (digits.length < 10) return;
+			if (this._phone_probe === digits) return;          // don't re-ask on every blur
+			this._phone_probe = digits;
+
+			frappe.xcall("ch_pos.api.token_api.find_waiting_token_by_phone", {
+				pos_profile: PosState.pos_profile,
+				phone: phone,
+			}).then((token) => {
+				if (!token || !token.name) return;
+				const who = token.customer_name || __("this customer");
+				const bits = [token.visit_reason, token.device_brand,
+					token.device_model_name || token.other_device_hint].filter(Boolean).join(" · ");
+				frappe.confirm(
+					__("{0} is already waiting in the queue as {1}.{2}<br><br>Link this ticket to that token and close it?",
+						[frappe.utils.escape_html(who),
+						 `<b>${frappe.utils.escape_html(token.token_display || token.name)}</b>`,
+						 bits ? `<br><span class="text-muted">${frappe.utils.escape_html(bits)}</span>` : ""]),
+					() => {
+						// Adopt it. The create handler already sends
+						// _intakeToken.name as source_token, and the server
+						// links and closes the token against the new request.
+						this._intakeToken = token;
+						if (!panel.find(".ch-rep-issue").val() && token.issue_description) {
+							panel.find(".ch-rep-issue").val(token.issue_description);
+						}
+						if (token.linked_customer && !cust_field.get_value()) {
+							cust_field.set_value(token.linked_customer);
+						}
+						frappe.show_alert({
+							message: __("Linked to {0} — it will close when the ticket is created",
+								[token.token_display || token.name]),
+							indicator: "green",
+						});
+					}
+				);
+			}).catch(() => { /* a queue lookup must never block an intake */ });
+		});
+
 		panel.on("click", ".ch-rep-create", () => {
 			const customer = cust_field.get_value();
 			const device_item = device_field.get_value();
