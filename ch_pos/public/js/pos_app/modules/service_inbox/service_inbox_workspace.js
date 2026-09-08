@@ -35,13 +35,17 @@ export class ServiceInboxWorkspace {
 		panel.html(`
 			<div class="ch-pos-mode-panel ch-si">
 				<div class="ch-si-bar">
-					<select class="form-control input-sm ch-si-f" data-f="_status"></select>
-					<select class="form-control input-sm ch-si-f" data-f="_channel"></select>
-					<input type="text" class="form-control input-sm ch-si-search"
+					<select class="ch-si-f" data-f="_status"
+					        aria-label="${__("Filter by status")}"></select>
+					<select class="ch-si-f" data-f="_channel"
+					        aria-label="${__("Filter by channel")}"></select>
+					<input type="search" class="ch-si-search"
+					       aria-label="${__("Search by phone or name")}"
 					       placeholder="${__("Phone or name")}">
-					<button class="btn btn-default btn-sm ch-si-refresh">
-						<i class="fa fa-refresh"></i></button>
-					<button class="btn btn-primary btn-sm ch-si-log">
+					<span class="ch-si-spacer"></span>
+					<button class="ch-si-btn is-icon ch-si-refresh" title="${__("Refresh")}"
+					        aria-label="${__("Refresh")}"><i class="fa fa-refresh"></i></button>
+					<button class="ch-si-btn is-primary ch-si-log">
 						<i class="fa fa-plus"></i> ${__("Log A Request")}</button>
 				</div>
 				<div class="ch-si-stats"></div>
@@ -88,6 +92,12 @@ export class ServiceInboxWorkspace {
 		panel.on("click", ".ch-si-refresh", () => this.load());
 		panel.on("click", ".ch-si-log", () => this._log_dialog());
 		panel.on("click", ".ch-si-card", (e) => this._open($(e.currentTarget).data("name")));
+		panel.on("keydown", ".ch-si-card", (e) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				this._open($(e.currentTarget).data("name"));
+			}
+		});
 		panel.on("click", ".ch-si-stat[data-status]", (e) => {
 			const s = $(e.currentTarget).data("status");
 			if (!s) return;
@@ -99,7 +109,8 @@ export class ServiceInboxWorkspace {
 
 	async load() {
 		this.panel.find(".ch-si-list").html(
-			`<div class="ch-si-empty">${__("Loading…")}</div>`);
+			`<div class="ch-si-empty"><i class="fa fa-circle-o-notch fa-spin"></i>${
+				__("Loading…")}</div>`);
 		const r = await frappe.xcall(`${API}.get_requests`, {
 			company: PosState.active_company || "",
 			status: this._status, channel: this._channel, search: this._search,
@@ -111,8 +122,12 @@ export class ServiceInboxWorkspace {
 			this._selected = null;
 		}
 		if (this._selected) this._open(this._selected);
-		else this.panel.find(".ch-si-detail").html(
-			`<div class="ch-si-empty">${__("Pick a request to see what the customer told us.")}</div>`);
+		else this.panel.find(".ch-si-detail").html(`
+			<div class="ch-si-empty">
+				<i class="fa fa-comments-o"></i>
+				<b>${__("Nothing selected")}</b>
+				${__("Pick a request to see what the customer told us.")}
+			</div>`);
 	}
 
 	_paint_stats(c) {
@@ -133,9 +148,12 @@ export class ServiceInboxWorkspace {
 	_paint_list() {
 		const $l = this.panel.find(".ch-si-list");
 		if (!this._rows.length) {
-			$l.html(`<div class="ch-si-empty">${
-				__("Nothing waiting. Requests from the website, the app, WhatsApp or a phone call land here.")
-			}</div>`);
+			$l.html(`
+				<div class="ch-si-empty">
+					<i class="fa fa-inbox"></i>
+					<b>${__("Nothing waiting")}</b>
+					${__("Requests from the website, the app, WhatsApp or a phone call land here.")}
+				</div>`);
 			return;
 		}
 		const esc = frappe.utils.escape_html;
@@ -146,21 +164,21 @@ export class ServiceInboxWorkspace {
 			const bits = [r.device_brand, r.device_model, r.issue_category]
 				.filter(Boolean).join(" · ");
 			return `
-			<div class="ch-si-card ${this._selected === r.name ? "sel" : ""}
-			     ${r.awaiting_response && r.age_hours > 4 ? "stale" : ""}"
-			     data-name="${r.name}">
+			<div class="ch-si-card${this._selected === r.name ? " sel" : ""}${
+				r.awaiting_response && r.age_hours > 4 ? " stale" : ""}"
+			     data-name="${r.name}" role="button" tabindex="0">
 				<div class="ch-si-row1">
-					<span class="ch-si-chan">${esc(r.channel || "")}</span>
+					<span class="ch-si-chan" data-c="${esc(r.channel || "")}">${esc(r.channel || "")}</span>
 					<span class="ch-si-age">${age}</span>
 				</div>
 				<div class="ch-si-who">${esc(r.customer_name || __("Unknown caller"))}
-					<span>${esc(r.contact_number || "")}</span></div>
+					<span class="ch-si-phone">${esc(r.contact_number || "")}</span></div>
 				${bits ? `<div class="ch-si-bits">${esc(bits)}</div>` : ""}
 				${r.issue_description
-					? `<div class="ch-si-said">"${esc(r.issue_description.slice(0, 100))}"</div>` : ""}
+					? `<div class="ch-si-said">${esc(r.issue_description)}</div>` : ""}
 				<div class="ch-si-row2">
-					<span class="ch-si-status s-${r.status}">${esc(r.status)}</span>
-					${r.service_request ? `<span class="ch-si-conv">→ ${esc(r.service_request)}</span>` : ""}
+					<span class="ch-si-status s-${esc(r.status)}">${esc(r.status)}</span>
+					${r.service_request ? `<span class="ch-si-conv">${esc(r.service_request)}</span>` : ""}
 				</div>
 			</div>`;
 		}).join(""));
@@ -175,40 +193,53 @@ export class ServiceInboxWorkspace {
 
 		const d = await frappe.xcall(`${API}.get_request`, { name });
 		const esc = frappe.utils.escape_html;
-		const row = (l, v) => v ? `<tr><th>${l}</th><td>${esc(String(v))}</td></tr>` : "";
+		// Only the facts we actually hold. An empty row teaches nobody anything
+		// and makes a sparse request look like a broken screen.
+		const fact = (l, v) => v
+			? `<div class="ch-si-fact"><dt>${l}</dt><dd>${esc(String(v))}</dd></div>` : "";
+		const facts = [
+			fact(__("Channel"), d.channel),
+			fact(__("Received"), (d.received_at || "").slice(0, 16)),
+			fact(__("Phone"), d.contact_number),
+			fact(__("Email"), d.email),
+			fact(__("Known customer"), d.customer),
+			fact(__("Category"), d.device_category),
+			fact(__("Brand"), d.device_brand),
+			fact(__("Model"), d.device_model),
+			fact(__("IMEI / Serial"), d.serial_no),
+			fact(__("Issue"), d.issue_category),
+			fact(__("Preferred slot"), d.preferred_datetime),
+			fact(__("Heard about us via"), d.referral_source),
+		].join("");
 
 		const notes = (d.notes || []).length
 			? `<ul class="ch-si-notes">${d.notes.map((n) => `
-				<li><span>${esc((n.note_datetime || "").slice(0, 16))} · ${esc(n.noted_by || "")}</span>
-				${esc(n.note)}</li>`).join("")}</ul>`
-			: `<p class="text-muted">${__("Nothing recorded yet.")}</p>`;
+				<li class="ch-si-note">
+					<span class="ch-si-note-meta">${esc((n.note_datetime || "").slice(0, 16))}
+						· ${esc(n.noted_by || "")}</span>
+					<div class="ch-si-note-body">${esc(n.note)}</div>
+				</li>`).join("")}</ul>`
+			: `<p class="ch-si-note-body" style="color:var(--pos-text-muted)">${
+				__("Nothing recorded yet.")}</p>`;
 
 		$d.html(`
 			<div class="ch-si-head">
-				<div><h4>${esc(d.customer_name || __("Unknown caller"))}
-					<span class="ch-si-status s-${d.status}">${esc(d.status)}</span></h4>
-					<div class="text-muted">${esc(d.name)} · ${esc(d.contact_number || "")}</div></div>
+				<div>
+					<div class="ch-si-title">${esc(d.customer_name || __("Unknown caller"))}
+						<span class="ch-si-status s-${esc(d.status)}">${esc(d.status)}</span></div>
+					<div class="ch-si-sub">${esc(d.name)} · ${esc(d.contact_number || "")}</div>
+				</div>
 				<div class="ch-si-actions"></div>
 			</div>
-			${d.issue_description ? `<div class="ch-si-quote">"${esc(d.issue_description)}"</div>` : ""}
-			<h6>${__("What the customer told us")}</h6>
-			<table class="ch-si-table">
-				${row(__("Channel"), d.channel)}
-				${row(__("Received"), d.received_at)}
-				${row(__("Phone"), d.contact_number)}
-				${row(__("Email"), d.email)}
-				${row(__("Known customer"), d.customer)}
-				${row(__("Category"), d.device_category)}
-				${row(__("Brand"), d.device_brand)}
-				${row(__("Model"), d.device_model)}
-				${row(__("IMEI / Serial"), d.serial_no)}
-				${row(__("Issue"), d.issue_category)}
-				${row(__("Preferred slot"), d.preferred_datetime)}
-				${row(__("Heard about us via"), d.referral_source)}
-			</table>
-			<h6>${__("Conversation")}</h6>${notes}
-			${d.service_request ? `<div class="ch-si-conv-box">${__("Booked in as")}
-				${esc(d.service_request)}</div>` : ""}`);
+			${d.issue_description
+				? `<div class="ch-si-quote">${esc(d.issue_description)}</div>` : ""}
+			<div class="ch-si-section">${__("What the customer told us")}</div>
+			<dl class="ch-si-facts">${facts}</dl>
+			<div class="ch-si-section">${__("Conversation")}</div>
+			${notes}
+			${d.service_request
+				? `<div class="ch-si-converted"><i class="fa fa-check-circle"></i>
+					${__("Booked in as {0}", [esc(d.service_request)])}</div>` : ""}`);
 
 		this._paint_actions(d);
 	}
@@ -216,15 +247,15 @@ export class ServiceInboxWorkspace {
 	_paint_actions(d) {
 		const $a = this.panel.find(".ch-si-actions");
 		const btn = (label, cls, fn) =>
-			$(`<button class="btn btn-xs ${cls}">${label}</button>`).on("click", fn).appendTo($a);
+			$(`<button class="ch-si-btn ${cls}">${label}</button>`).on("click", fn).appendTo($a);
 
-		btn(__("Add Note"), "btn-default", () => this._note_dialog(d));
+		btn(__("Add Note"), "", () => this._note_dialog(d));
 		if (["Converted", "Closed", "Spam", "Duplicate"].includes(d.status)) return;
 
 		// The point of having this inside the till: the customer is standing
 		// here, so the intake opens already filled in.
-		btn(__("Book The Device In"), "btn-primary", () => this._book_in(d));
-		btn(__("Close"), "btn-default", () => this._close_dialog(d));
+		btn(__("Book The Device In"), "is-primary", () => this._book_in(d));
+		btn(__("Close"), "", () => this._close_dialog(d));
 	}
 
 	_book_in(d) {

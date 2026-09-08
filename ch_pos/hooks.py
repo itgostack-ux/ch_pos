@@ -61,6 +61,10 @@ app_include_css = [
     "/assets/ch_pos/css/pos_variables.css",
     "/assets/ch_pos/css/pos_layout.css",
     "/assets/ch_pos/css/pos_components.css",
+    # Versioned because these assets are served straight off the symlink with
+    # no build hash -- editing a stylesheet in place leaves every till on the
+    # copy its browser already cached. Bump the version when this file changes.
+    "/assets/ch_pos/css/service_inbox.css?v=1",
     "/assets/ch_pos/css/stock_transfer.css",
 ]
 
