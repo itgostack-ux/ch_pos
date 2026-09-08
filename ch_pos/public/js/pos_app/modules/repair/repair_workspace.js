@@ -41,6 +41,20 @@ export class RepairWorkspace {
 					<span class="ch-mode-hint">${__("Create a walk-in GoFix Service Request from the POS counter")}</span>
 				</div>
 
+				<div class="ch-repair-freeze" style="display:none;margin-bottom:var(--pos-space-md);
+					padding:16px 18px;border:1px solid var(--pos-warning,#d8a760);
+					border-radius:var(--pos-radius-sm,6px);background:rgba(216,167,96,.12)">
+					<div style="font-weight:600;margin-bottom:4px">
+						<i class="fa fa-lock"></i> ${__("Log the walk-in first")}
+					</div>
+					<div style="font-size:13px;opacity:.85;margin-bottom:10px">
+						${__("Every device taken in has to be a counted walk-in. Log the customer, or type a number already waiting in the queue, and this form unlocks.")}
+					</div>
+					<button class="btn btn-sm btn-primary ch-repair-freeze-log">
+						<i class="fa fa-plus"></i> ${__("Log Walk-in")}
+					</button>
+				</div>
+
 				<!-- Section 1: Customer & Device -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header"><i class="fa fa-user"></i> ${__("Customer & Device")}</div>
@@ -534,6 +548,51 @@ export class RepairWorkspace {
 		PosState.repairIntakeToken = null;
 		this._intakeToken = intakeToken;
 
+		// ── Walk-in first ────────────────────────────────────────────────
+		// A Service Request raised straight from this screen left no walk-in
+		// token, so the customer never reached the queue, the footfall count or
+		// any token-based report. The screen now stays frozen until a token
+		// exists -- arrived from the queue, matched by phone, or logged right
+		// here. The server enforces the same rule; this is only the part the
+		// executive can see.
+		const _setFrozen = (frozen) => {
+			this._frozen = frozen;
+			panel.find(".ch-repair-freeze").toggle(!!frozen);
+			panel.find(".ch-pos-section-card").css({
+				opacity: frozen ? 0.45 : 1,
+				"pointer-events": frozen ? "none" : "auto",
+			});
+			panel.find(".ch-rep-create").prop("disabled", !!frozen);
+		};
+		this._unfreezeWithToken = (token) => {
+			this._intakeToken = token;
+			_setFrozen(false);
+		};
+
+		if (!intakeToken) {
+			frappe.xcall("ch_pos.api.repair.walkin_token_required")
+				.then((r) => { if (r && r.required) _setFrozen(true); })
+				.catch(() => { /* if we cannot ask, do not block the counter */ });
+		}
+
+		// The frozen banner is the way out, not a dead end: log the walk-in
+		// here and the screen unfreezes against the token it just created.
+		panel.on("click", ".ch-repair-freeze-log", () => EventBus.emit("walkin:open"));
+
+		// log_counter_walkin returns {status, token, name, visit_purpose,
+		// linked_customer} -- `name` is the token docname, which is all
+		// source_token needs, so adopt it directly rather than re-finding it.
+		EventBus.on("walkin:logged", (res) => {
+			if (!this._frozen || !res || !res.name) return;
+			this._unfreezeWithToken({ name: res.name, token_display: res.token });
+			if (res.linked_customer) cust_field.set_value(res.linked_customer);
+			frappe.show_alert({
+				message: __("Walk-in {0} logged — you can raise the request now",
+					[res.token || res.name]),
+				indicator: "green",
+			});
+		});
+
 		// ── Issue Category Multiselect (tag-based) ──
 		const selected_issues = [];
 		const issue_cat_field = frappe.ui.form.make_control({
@@ -616,7 +675,7 @@ export class RepairWorkspace {
 						// Adopt it. The create handler already sends
 						// _intakeToken.name as source_token, and the server
 						// links and closes the token against the new request.
-						this._intakeToken = token;
+						this._unfreezeWithToken(token);
 						if (!panel.find(".ch-rep-issue").val() && token.issue_description) {
 							panel.find(".ch-rep-issue").val(token.issue_description);
 						}

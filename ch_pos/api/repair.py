@@ -86,6 +86,28 @@ def describe_device_serial(serial_no: str) -> dict:
     }
 
 
+def _require_walkin_token() -> bool:
+	"""Whether a Service Request must be raised against a walk-in token."""
+	try:
+		from gofix.config import get_setting
+	except ImportError:
+		return False          # gofix not installed: nothing to enforce
+	try:
+		# get_setting, not get_int_setting. The latter is
+		# max(cint(value), minimum=1), so an unticked box collapses back to 1
+		# and the setting could never be turned off. get_setting deliberately
+		# exempts Check fields from its own zero-collapse.
+		return bool(get_setting("require_walkin_token", 1))
+	except Exception:
+		return True           # setting unreadable: keep the counter honest
+
+
+@frappe.whitelist()
+def walkin_token_required() -> dict:
+	"""Tell the Repair screen whether to freeze until a token exists."""
+	return {"required": _require_walkin_token()}
+
+
 @frappe.whitelist(methods=["POST"])
 def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	"""Create and SUBMIT a GoFix Service Request from the POS Service Intake form.
@@ -100,6 +122,24 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 
 	frappe.has_permission("Service Request", "create", throw=True)
 	anchors = assert_pos_profile_scope(pos_profile)
+
+	# Every device taken in must also be a counted walk-in. Raising a Service
+	# Request straight from the Repair screen left no token, so the customer was
+	# invisible to the queue, to footfall and to every token-based report -- on
+	# this site 23 of 28 counter-raised requests carried no token at all.
+	#
+	# Checked here, before the Service Request is built, because the token is
+	# only closed near the end of this function -- throwing there would leave a
+	# submitted, orphaned request behind. The Repair screen freezes itself too,
+	# but this is the control: a direct API call has to fail the same way.
+	# GoFix Settings.require_walkin_token turns it off for a store that must be
+	# able to take a device in while the queue is unavailable.
+	if not (data.get("source_token") or "").strip() and _require_walkin_token():
+		frappe.throw(
+			_("Log the walk-in first. A Service Request must be raised against a "
+			  "walk-in token so the customer is counted in the queue."),
+			title=_("Walk-in Token Required"),
+		)
 	if data.get("company") and data.get("company") != anchors.get("company"):
 		frappe.throw(_("Company does not match the active POS Profile."), frappe.PermissionError)
 	if data.get("source_warehouse") and data.get("source_warehouse") != anchors.get("warehouse"):
