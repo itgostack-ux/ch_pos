@@ -13,6 +13,9 @@ from ch_pos.config import get_control_setting, require_authenticated_user, requi
 
 
 PENDING_STATUSES = ("Waiting", "Hold", "Engaged", "In Progress")
+# Channels that mean somebody physically came to the shop. Only these are the
+# till's responsibility at settlement and at end of day.
+IN_PERSON_CHANNELS = ("Kiosk", "Counter")
 CLOSED_STATUSES = ("Completed", "Converted", "Cancelled", "Dropped", "Expired")
 
 
@@ -57,6 +60,11 @@ def get_pending_tokens_for_store(store_code: str = None, pos_profile: str = None
 	filters = {
 		"docstatus": [">", 0],  # Only submitted tokens
 		"status": ["in", PENDING_STATUSES],
+		# The till is accountable for the people who came into the shop. A
+		# written request waiting on a customer is the desk's work, not this
+		# session's, and blocking a cashier from closing out because somebody
+		# messaged on WhatsApp last week would be indefensible.
+		"visit_source": ["in", IN_PERSON_CHANNELS],
 	}
 
 	filters["pos_profile"] = pos_profile
@@ -136,18 +144,27 @@ def auto_close_pending_tokens_at_eod() -> None:
 	now = now_datetime()
 
 	batch_limit = max(1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000))
+	# Only visits that happened in the shop. A walk-in token is a queue
+	# position and expires with the trading day -- nobody is still standing
+	# there at midnight. A written request is not: it carries an agreed
+	# follow-up date, and sweeping it into Cancelled at 23:59 would silently
+	# throw away a message that is still live, with nobody the wiser.
+	# Requests past their date surface through inbox.overdue_requests, where a
+	# person extends them or closes them as withdrawn.
 	pending_tokens = frappe.db.sql(
 		"""
 		SELECT name, status, pos_profile, store, company, expires_at
 		FROM `tabPOS Kiosk Token`
 		WHERE docstatus > 0
 		  AND status IN %(statuses)s
+		  AND visit_source IN %(in_person)s
 		  AND (expires_at IS NULL OR expires_at <= %(now)s)
 		ORDER BY expires_at ASC, name ASC
 		LIMIT %(limit)s
 		FOR UPDATE
 		""",
-		{"statuses": PENDING_STATUSES, "now": now, "limit": batch_limit},
+		{"statuses": PENDING_STATUSES, "in_person": IN_PERSON_CHANNELS,
+		 "now": now, "limit": batch_limit},
 		as_dict=True)
 
 	closed_count = 0

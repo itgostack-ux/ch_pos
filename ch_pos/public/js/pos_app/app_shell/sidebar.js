@@ -239,8 +239,9 @@ export class Sidebar {
 					label: __("How did they reach us?"),
 					fieldname: "visit_source",
 					fieldtype: "Select",
-					options: ("Counter\nPhone Call\nWhatsApp\nWeb\nMobile App\n"
-							  + "Email\nAppointment\nSocial\nMarketplace\nPartner\nOther"),
+					// Filled from the doctype's own options below, so adding a
+					// channel is configuration rather than a release.
+					options: "Counter",
 					default: "Counter",
 					reqd: 1,
 				},
@@ -465,6 +466,15 @@ export class Sidebar {
 				}
 			},
 		});
+		// Channels come from the doctype, not from this file.
+		frappe.xcall("gofix.gofix_services.inbox.get_options").then((o) => {
+			const f = d.get_field("visit_source");
+			if (!f || !(o.channels || []).length) return;
+			f.df.options = o.channels.join("\n");
+			f.refresh();
+			d.set_value("visit_source", o.channels.includes("Counter") ? "Counter" : o.channels[0]);
+		}).catch(() => { /* the hardcoded fallback keeps the form usable */ });
+
 		// Fill the attribution list from the master. Failure is silent and the
 		// control simply stays empty -- logging the walk-in matters more than
 		// knowing where they heard about us.

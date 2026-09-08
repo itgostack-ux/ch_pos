@@ -2804,7 +2804,8 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                   visit_reason, visit_source, referral_source, customer_language,
                   linked_service_request, converted_invoice, linked_buyback,
                   total_estimate,
-                  preferred_datetime, first_response_at, assigned_to, email
+                  preferred_datetime, first_response_at, assigned_to, email,
+                  expires_at
            FROM `tabPOS Kiosk Token`
            WHERE company = %s
              AND visit_source NOT IN ('Kiosk', 'Counter')

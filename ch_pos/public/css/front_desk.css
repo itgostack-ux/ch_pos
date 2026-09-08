@@ -594,3 +594,29 @@
   background: var(--pos-success-light); color: var(--pos-success-dark);
   font-size: var(--pos-fs-md); font-weight: var(--pos-fw-medium);
 }
+
+/* ── Follow-up state ──────────────────────────────────────────────────
+   A written request is held to an agreed date. When that date passes,
+   somebody has to decide — so it is said loudly rather than left to rot. */
+.ch-q-overdue {
+  font-size: var(--pos-fs-2xs);
+  font-weight: var(--pos-fw-bold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--pos-radius-pill);
+  background: var(--pos-danger);
+  color: var(--pos-text-inverse);
+  white-space: nowrap;
+}
+.ch-q-duetoday {
+  font-size: var(--pos-fs-2xs);
+  font-weight: var(--pos-fw-bold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--pos-radius-pill);
+  background: var(--pos-warning-light);
+  color: #92400e;
+  white-space: nowrap;
+}

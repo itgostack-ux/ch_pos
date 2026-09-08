@@ -96,37 +96,10 @@ export class QueueWorkspace {
 					<span class="ch-mode-hint">${hint}</span>
 				</div>
 
-				<div class="ch-queue-filters">
-					<select class="ch-q-filter" data-f="status">
-						<option value="">${__("All open")}</option>
-						<option value="Waiting">${__("Waiting")}</option>
-						<option value="Hold">${__("Hold")}</option>
-						<option value="Engaged">${__("Engaged")}</option>
-						<option value="In Progress">${__("In Progress")}</option>
-					</select>
-					<select class="ch-q-filter" data-f="channel">
-						<option value="">${__("All channels")}</option>
-						<option value="__in_person">${__("In the shop")}</option>
-						<option value="__remote">${__("Wrote in")}</option>
-						<option value="Counter">${__("Counter")}</option>
-						<option value="Kiosk">${__("Kiosk")}</option>
-						<option value="WhatsApp">${__("WhatsApp")}</option>
-						<option value="Web">${__("Website")}</option>
-						<option value="Mobile App">${__("Mobile App")}</option>
-						<option value="Phone Call">${__("Phone Call")}</option>
-						<option value="Email">${__("Email")}</option>
-						<option value="Appointment">${__("Appointment")}</option>
-					</select>
-					<select class="ch-q-filter" data-f="purpose">
-						<option value="">${__("Any purpose")}</option>
-						<option value="Repair">${__("Repair")}</option>
-						<option value="Sales">${__("Sales")}</option>
-						<option value="Buyback">${__("Buyback")}</option>
-						<option value="Enquiry">${__("Enquiry")}</option>
-					</select>
-					<input type="search" class="ch-q-search" placeholder="${__("Phone or name")}">
-					<button class="btn btn-xs btn-default ch-q-clear">${__("Clear")}</button>
-				</div>
+				<!-- Options are fetched from the doctype and the masters, so a
+				     new channel or a retired purpose is configuration, not a
+				     release. -->
+				<div class="ch-queue-filters"></div>
 
 				<div class="ch-queue-toolbar">
 					<div class="ch-queue-stats">
@@ -154,11 +127,12 @@ export class QueueWorkspace {
 			</div>
 		`);
 
+		this._loadOptions().then(() => this._paintFilters());
 		panel.find(".ch-queue-refresh-btn").on("click", () => this._loadTokens());
 
 		// Filtering the loaded list rather than re-querying: the desk is a
 		// small set and the counter wants it to respond as they type.
-		this._filters = { status: "", channel: "", purpose: "", search: "" };
+		this._filters = { status: "", channel: "", purpose: "", due: "", search: "" };
 		panel.on("change", ".ch-q-filter", (e) => {
 			this._filters[$(e.currentTarget).data("f")] = e.currentTarget.value;
 			this._renderTokenList(this._tokens);
@@ -168,7 +142,7 @@ export class QueueWorkspace {
 			this._renderTokenList(this._tokens);
 		}, 200));
 		panel.on("click", ".ch-q-clear", () => {
-			this._filters = { status: "", channel: "", purpose: "", search: "" };
+			this._filters = { status: "", channel: "", purpose: "", due: "", search: "" };
 			panel.find(".ch-q-filter").val("");
 			panel.find(".ch-q-search").val("");
 			this._renderTokenList(this._tokens);
@@ -218,6 +192,8 @@ export class QueueWorkspace {
 			if (f.channel === "__in_person" && t.channel_group === "remote") return false;
 			if (f.channel && !f.channel.startsWith("__")
 				&& (t.visit_source || "") !== f.channel) return false;
+			if (f.due === "overdue" && !this._isOverdue(t)) return false;
+			if (f.due === "today" && !this._isDueToday(t)) return false;
 			if (f.search) {
 				const hay = `${t.customer_name || ""} ${t.customer_phone || ""} ${
 					t.token_display || ""} ${t.name}`.toLowerCase();
@@ -298,6 +274,18 @@ export class QueueWorkspace {
 			if ($(e.target).closest("button, a").length) return;   // let actions act
 			const name = $(e.currentTarget).data("token");
 			if (name) this._openDetail(name);
+		});
+
+		list.find(".ch-queue-extend-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._extendDialog(token);
+		});
+
+		list.find(".ch-queue-note-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._replyDialog(token);
 		});
 
 		list.find(".ch-queue-reply-btn").on("click", (e) => {
@@ -567,6 +555,14 @@ export class QueueWorkspace {
 		const channel = t.visit_source || (t.channel_group === "remote" ? "Other" : "Counter");
 		const chan_pill = `<span class="ch-q-chan" data-c="${frappe.utils.escape_html(channel)}">${
 			frappe.utils.escape_html(channel)}</span>`;
+		// The agreed date has passed and nobody has decided anything. This is
+		// the state a written request rots in, so it is said loudly.
+		const overdue = this._isOverdue(t)
+			? `<span class="ch-q-overdue" title="${__("The follow-up date has passed")}">${
+				__("overdue")}</span>`
+			: (this._isDueToday(t)
+				? `<span class="ch-q-duetoday">${__("due today")}</span>` : "");
+
 		// Nobody has replied yet, and it is not a person standing here.
 		const unanswered = t.channel_group === "remote" && t.awaiting_response
 			? `<span class="ch-q-unanswered" title="${
@@ -600,6 +596,8 @@ export class QueueWorkspace {
 					${tag("fa-wrench", t.issue_category)}
 					${tag("fa-clock-o", t.preferred_datetime
 						? __("Wants {0}", [frappe.datetime.str_to_user(t.preferred_datetime)]) : "")}
+					${tag("fa-calendar-check-o", t.expires_at
+						? __("Decide by {0}", [frappe.datetime.str_to_user(t.expires_at)]) : "")}
 					${tag("fa-envelope-o", t.email)}
 					${tag("fa-bullhorn", t.referral_source)}
 					${tag("fa-user-o", t.assigned_to)}
@@ -661,6 +659,10 @@ export class QueueWorkspace {
 					data-token="${frappe.utils.escape_html(t.name)}">
 					<i class="fa fa-comment-o"></i> ${__("Reply")}
 				</button>
+				${this._isOverdue(t) ? `<button class="btn btn-sm btn-default ch-queue-extend-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-calendar-plus-o"></i> ${__("Extend")}
+				</button>` : ""}
 				${is_svc ? `<button class="btn btn-sm btn-primary ch-queue-convert-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					<i class="fa fa-plus"></i> ${__("Create Service Request")}
@@ -693,6 +695,10 @@ export class QueueWorkspace {
 					<i class="fa fa-plus"></i> ${__("GoFix Request")}
 				</button>`);
 			}
+			buttons.push(`<button class="btn btn-sm btn-default ch-queue-note-btn"
+				data-token="${frappe.utils.escape_html(t.name)}">
+				<i class="fa fa-comment-o"></i> ${__("Note")}
+			</button>`);
 			buttons.push(`<button class="btn btn-sm btn-default ch-queue-drop-btn"
 				data-token="${frappe.utils.escape_html(t.name)}">
 				${__("Withdraw")}
@@ -711,6 +717,10 @@ export class QueueWorkspace {
 					data-token="${frappe.utils.escape_html(t.name)}">
 					<i class="fa fa-plus"></i> ${__("GoFix Request")}
 				</button>
+				<button class="btn btn-sm btn-default ch-queue-note-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-comment-o"></i> ${__("Note")}
+				</button>
 				<button class="btn btn-sm btn-default ch-queue-drop-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					${__("Withdraw")}
@@ -720,6 +730,10 @@ export class QueueWorkspace {
 				<button class="btn btn-sm btn-primary ch-queue-bill-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					${__("Bill")}
+				</button>
+				<button class="btn btn-sm btn-default ch-queue-note-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-comment-o"></i> ${__("Note")}
 				</button>
 				<button class="btn btn-sm btn-default ch-queue-drop-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
@@ -737,6 +751,7 @@ export class QueueWorkspace {
 						<span class="ch-q-token-id">${frappe.utils.escape_html(t.token_display || t.name)}</span>
 						${chan_pill}
 						${unanswered}
+						${overdue}
 						<span class="ch-q-status ch-q-status--${st.cls}">
 							<span class="ch-q-status-dot"></span> ${st.label}
 						</span>
@@ -1039,7 +1054,11 @@ export class QueueWorkspace {
 			if (this._selected !== name) return;          // they clicked on
 			$d.html(this._detailHtml(d));
 			$d.find(".ch-q-d-reply").on("click", () => this._replyDialog(d));
+			$d.find(".ch-q-d-extend").on("click", () => this._extendDialog(d));
 			$d.find(".ch-q-d-convert").on("click", () => this._openIntake(d));
+			// Retail: the same billing path a walk-in takes, so the invoice
+			// links back to the visit exactly as it already does.
+			$d.find(".ch-q-d-bill").on("click", () => this._startBilling(d));
 			$d.find(".ch-q-d-close").on("click", () => this._showDropDialog(d));
 		}).catch(() => {
 			$d.html(`<div class="ch-q-detail-empty">
@@ -1070,6 +1089,8 @@ export class QueueWorkspace {
 			fact(__("IMEI / Serial"), d.serial_no),
 			fact(__("Issue"), d.issue_category),
 			fact(__("Symptoms"), (d.symptom_labels || []).join(", ")),
+			fact(__("Decide by"), remote && d.expires_at
+				? frappe.datetime.str_to_user(d.expires_at) : ""),
 			fact(__("Preferred slot"), d.preferred_datetime
 				? frappe.datetime.str_to_user(d.preferred_datetime) : ""),
 			fact(__("Heard about us via"), d.referral_source),
@@ -1114,11 +1135,15 @@ export class QueueWorkspace {
 						esc(d.customer_phone || "")}</div>
 				</div>
 				<div class="ch-q-d-actions">
-					${remote ? `<button class="btn btn-sm btn-default ch-q-d-reply">
-						<i class="fa fa-comment-o"></i> ${__("Reply")}</button>` : ""}
-					${d.linked_service_request ? "" :
-						`<button class="btn btn-sm btn-primary ch-q-d-convert">
-							<i class="fa fa-plus"></i> ${__("Create Service Request")}</button>`}
+					<button class="btn btn-sm btn-default ch-q-d-reply">
+						<i class="fa fa-comment-o"></i> ${remote ? __("Reply") : __("Note")}</button>
+					${remote && d.expires_at ? `<button class="btn btn-sm btn-default ch-q-d-extend">
+						<i class="fa fa-calendar-plus-o"></i> ${__("Extend")}</button>` : ""}
+					${d.linked_service_request || d.converted_invoice ? "" : (_is_service()
+						? `<button class="btn btn-sm btn-primary ch-q-d-convert">
+							<i class="fa fa-plus"></i> ${__("Create Service Request")}</button>`
+						: `<button class="btn btn-sm btn-primary ch-q-d-bill">
+							${__("Bill")}</button>`)}
 					<button class="btn btn-sm btn-default ch-q-d-close">${__("Close")}</button>
 				</div>
 			</div>
@@ -1135,7 +1160,97 @@ export class QueueWorkspace {
 				? `<div class="ch-q-d-linked"><i class="fa fa-check-circle"></i>
 					${__("Booked in as")} <a href="/app/service-request/${
 						encodeURIComponent(d.linked_service_request)}" target="_blank">${
-						esc(d.linked_service_request)}</a></div>` : ""}`;
+						esc(d.linked_service_request)}</a></div>` : ""}
+			${d.converted_invoice
+				? `<div class="ch-q-d-linked"><i class="fa fa-check-circle"></i>
+					${__("Billed on")} <a href="/app/sales-invoice/${
+						encodeURIComponent(d.converted_invoice)}" target="_blank">${
+						esc(d.converted_invoice)}</a></div>` : ""}`;
+	}
+
+	// ── Options, from where they are configured ─────────────────────
+	_loadOptions() {
+		if (this._options) return Promise.resolve(this._options);
+		return frappe.xcall("gofix.gofix_services.inbox.get_options")
+			.then((o) => { this._options = o; return o; })
+			.catch(() => {
+				// Losing the masters must not leave the desk without filters.
+				this._options = { channels: [], purposes: [], open_statuses: [],
+								  in_person_channels: [], remote_channels: [],
+								  visit_reasons: [], referral_sources: [], followup_days: 3 };
+				return this._options;
+			});
+	}
+
+	_paintFilters() {
+		const o = this._options || {};
+		const opt = (v, l) => `<option value="${frappe.utils.escape_html(v)}">${
+			frappe.utils.escape_html(l)}</option>`;
+		this._panel.find(".ch-queue-filters").html(`
+			<select class="ch-q-filter" data-f="status" aria-label="${__("Filter by status")}">
+				${opt("", __("All open"))}
+				${(o.open_statuses || []).map((x) => opt(x, __(x))).join("")}
+			</select>
+			<select class="ch-q-filter" data-f="channel" aria-label="${__("Filter by channel")}">
+				${opt("", __("All channels"))}
+				${opt("__in_person", __("In the shop"))}
+				${opt("__remote", __("Wrote in"))}
+				${(o.channels || []).map((x) => opt(x, __(x))).join("")}
+			</select>
+			<select class="ch-q-filter" data-f="purpose" aria-label="${__("Filter by purpose")}">
+				${opt("", __("Any purpose"))}
+				${(o.purposes || []).map((x) => opt(x, __(x))).join("")}
+			</select>
+			<select class="ch-q-filter" data-f="due" aria-label="${__("Filter by follow-up")}">
+				${opt("", __("Any follow-up"))}
+				${opt("overdue", __("Overdue"))}
+				${opt("today", __("Due today"))}
+			</select>
+			<input type="search" class="ch-q-search" placeholder="${__("Phone or name")}"
+			       aria-label="${__("Search by phone or name")}">
+			<button class="btn btn-xs btn-default ch-q-clear">${__("Clear")}</button>`);
+	}
+
+	// A written request carries an agreed date; a walk-in does not, and its
+	// expiry is a queue TTL rather than a promise to anybody.
+	_isOverdue(t) {
+		if (t.channel_group !== "remote" || !t.expires_at) return false;
+		return frappe.datetime.str_to_obj(t.expires_at) < new Date();
+	}
+
+	_isDueToday(t) {
+		if (t.channel_group !== "remote" || !t.expires_at || this._isOverdue(t)) return false;
+		return frappe.datetime.str_to_obj(t.expires_at).toDateString() === new Date().toDateString();
+	}
+
+	_extendDialog(t) {
+		const days = (this._options && this._options.followup_days) || 3;
+		const d = new frappe.ui.Dialog({
+			title: __("Move the follow-up date"),
+			fields: [
+				{ fieldtype: "HTML", options: `<p class="text-muted">${
+					__("This request was due on {0} and nobody has decided anything. Give it a new date, or close it as withdrawn.",
+						[frappe.datetime.str_to_user(t.expires_at)])}</p>` },
+				{ fieldname: "follow_up_on", fieldtype: "Datetime", reqd: 1,
+				  label: __("Decide by"),
+				  default: frappe.datetime.add_days(frappe.datetime.now_datetime(), days) },
+				{ fieldname: "note", fieldtype: "Small Text", label: __("Why"),
+				  description: __("A date that slips quietly is worse than none at all.") },
+			],
+			primary_action_label: __("Extend"),
+			primary_action: (v) => {
+				frappe.xcall("gofix.gofix_services.inbox.extend_follow_up", {
+					inbox: t.name, follow_up_on: v.follow_up_on, note: v.note,
+				}).then(() => {
+					d.hide();
+					frappe.show_alert({ message: __("Follow-up moved"), indicator: "green" });
+					this._loadTokens();
+				});
+			},
+			secondary_action_label: __("Close as withdrawn"),
+			secondary_action: () => { d.hide(); this._showDropDialog(t); },
+		});
+		d.show();
 	}
 
 }

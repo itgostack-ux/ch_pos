@@ -530,31 +530,36 @@
    "fieldname": "external_ref",
    "fieldtype": "Data",
    "label": "Channel Reference",
-   "description": "The sender's own id \u2014 a WhatsApp message id, a web form submission. Used to refuse the same request twice."
+   "description": "The sender's own id \u2014 a WhatsApp message id, a web form submission. Used to refuse the same request twice.",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "email",
    "fieldtype": "Data",
    "options": "Email",
-   "label": "Email"
+   "label": "Email",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "alternate_number",
    "fieldtype": "Data",
    "options": "Phone",
-   "label": "Alternate Number"
+   "label": "Alternate Number",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "city",
    "fieldtype": "Link",
    "options": "CH City",
-   "label": "City"
+   "label": "City",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "preferred_datetime",
    "fieldtype": "Datetime",
    "label": "Preferred Slot",
-   "description": "When a remote customer asked to be seen."
+   "description": "When a remote customer asked to be seen.",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "column_break_remote",
@@ -564,32 +569,37 @@
    "fieldname": "assigned_to",
    "fieldtype": "Link",
    "options": "User",
-   "label": "Owner"
+   "label": "Owner",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "first_response_at",
    "fieldtype": "Datetime",
    "label": "First Response",
    "read_only": 1,
-   "description": "Set the first time anyone records having replied."
+   "description": "Set the first time anyone records having replied.",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "closed_reason",
    "fieldtype": "Small Text",
-   "label": "Closed Reason"
+   "label": "Closed Reason",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "duplicate_of",
    "fieldtype": "Link",
    "options": "POS Kiosk Token",
    "label": "Duplicate Of",
-   "read_only": 1
+   "read_only": 1,
+   "allow_on_submit": 1
   },
   {
    "fieldname": "attachment",
    "fieldtype": "Attach",
    "label": "Attachment",
-   "description": "A photo or voice note the customer sent."
+   "description": "A photo or voice note the customer sent.",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "device_detail_section",
@@ -601,13 +611,15 @@
    "fieldname": "device_category",
    "fieldtype": "Link",
    "options": "CH Category",
-   "label": "Category"
+   "label": "Category",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "device_item",
    "fieldtype": "Link",
    "options": "Item",
-   "label": "Device Item"
+   "label": "Device Item",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "column_break_device_detail",
@@ -616,7 +628,8 @@
   {
    "fieldname": "serial_no",
    "fieldtype": "Data",
-   "label": "IMEI / Serial"
+   "label": "IMEI / Serial",
+   "allow_on_submit": 1
   },
   {
    "fieldname": "conversation_section",
@@ -628,7 +641,8 @@
    "fieldname": "notes",
    "fieldtype": "Table",
    "options": "CH Front Desk Note",
-   "label": "Notes"
+   "label": "Notes",
+   "allow_on_submit": 1
   }
  ],
  "index_web_pages_for_search": 0,
