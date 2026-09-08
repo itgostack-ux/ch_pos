@@ -867,7 +867,9 @@ export class RepairWorkspace {
 					source_warehouse: PosState.warehouse || "",
 					service_date: frappe.datetime.get_today(),
 					priority: priority,
-					walkin_source: "POS Counter",
+					// Left to the server, which reads it off the originating
+					// visit. Hardcoding it here made every ticket claim it was
+					// a counter walk-in whatever the customer actually did.
 					// Starts a Diagnosis Job Assignment so Analysis time is
 					// attributed from the moment the device is taken in.
 					diagnosis_technician: panel.find(".ch-rep-technician").val() || "",

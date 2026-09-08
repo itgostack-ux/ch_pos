@@ -225,7 +225,11 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		if not sr.get("actual_imei"):
 			sr.actual_imei = sr.serial_no
 	sr.decision = "Draft"
-	sr.walkin_source = data.get("walkin_source") or "POS Counter"
+	# How the customer actually reached us, not an assumption. Every ticket
+	# used to claim POS Counter, so a WhatsApp enquiry and somebody walking
+	# through the door were indistinguishable once the ticket existed -- and
+	# the lead-source reporting was answering a question nobody had asked.
+	sr.walkin_source = _resolve_walkin_source(data)
 	sr.product_condition_desc = product_condition_desc
 	sr.backup_info = backup_info
 	if not sr.service_date:
@@ -240,6 +244,11 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	# serial. One intake form now feeds both, and the token is closed here
 	# rather than by a second endpoint that built a second Service Request.
 	source_token = (data.get("source_token") or "").strip()
+	# Which front-desk visit became this ticket. The token already points
+	# forward; without the reverse link the ticket cannot say where it came
+	# from, which is the first thing anyone asks of it.
+	if source_token and sr.meta.get_field("front_desk_visit"):
+		sr.db_set("front_desk_visit", source_token, update_modified=False)
 	if source_token:
 		try:
 			from ch_pos.api.token_api import link_token_to_service_request
@@ -444,3 +453,38 @@ def get_device_coverage(serial_no, company=None) -> dict:
 		"warranty_status": "Under Warranty" if result.get("warranty_covered") else "No Warranty",
 		"cover": cover,
 	}
+
+
+def _resolve_walkin_source(data) -> str:
+    """The Walkin Source row matching how this customer reached us.
+
+    Reads the originating front-desk visit rather than trusting the screen,
+    because the screen only knows it is the repair intake -- it does not know
+    whether the person walked in or messaged three days ago.
+    """
+    explicit = (data.get("walkin_source") or "").strip()
+    if explicit and frappe.db.exists("Walkin Source", explicit):
+        return explicit
+
+    channel = ""
+    token = (data.get("source_token") or "").strip()
+    if token:
+        channel = frappe.db.get_value("POS Kiosk Token", token, "visit_source") or ""
+    if not channel:
+        inbox = (data.get("source_inbox") or "").strip()
+        if inbox:
+            channel = frappe.db.get_value("POS Kiosk Token", inbox, "visit_source") or ""
+
+    if channel:
+        try:
+            from gofix.patches.seed_gofix_service_masters import (
+                VISIT_SOURCE_TO_WALKIN_SOURCE)
+
+            mapped = VISIT_SOURCE_TO_WALKIN_SOURCE.get(channel, channel)
+        except Exception:
+            mapped = channel
+        if frappe.db.exists("Walkin Source", mapped):
+            return mapped
+
+    # Nothing to go on: the ticket was raised straight at the counter.
+    return "POS Counter" if frappe.db.exists("Walkin Source", "POS Counter") else None

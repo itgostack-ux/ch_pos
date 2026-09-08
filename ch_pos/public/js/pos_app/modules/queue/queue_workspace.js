@@ -1093,6 +1093,7 @@ export class QueueWorkspace {
 			$d.html(this._detailHtml(d));
 			$d.find(".ch-q-d-reply").on("click", () => this._replyDialog(d));
 			$d.find(".ch-q-d-extend").on("click", () => this._extendDialog(d));
+			if (!d.pos_profile) this._mountStorePicker($d, d);
 			$d.find(".ch-q-d-convert").on("click", () => this._openIntake(d));
 			// Retail: the same billing path a walk-in takes, so the invoice
 			// links back to the visit exactly as it already does.
@@ -1186,6 +1187,15 @@ export class QueueWorkspace {
 				</div>
 			</div>
 			${others}
+			${d.pos_profile ? "" : `
+				<div class="ch-q-d-route">
+					<div class="ch-q-d-route-head">
+						<i class="fa fa-map-marker"></i>
+						${__("Not routed to a store yet")}
+					</div>
+					<p>${__("Ask the customer which store suits them and set it here. Until then this request sits in the unrouted list and no store is looking after it.")}</p>
+					<div class="ch-q-d-route-field"></div>
+				</div>`}
 			${d.issue_description
 				? `<div class="ch-q-d-quote">${esc(d.issue_description)}</div>` : ""}
 			<div class="ch-q-d-section">${__("What the customer told us")}</div>
@@ -1327,6 +1337,50 @@ export class QueueWorkspace {
 					this._loadTokens();
 				});
 			});
+	}
+
+	// A real store picker rather than "take it here": the executive is on the
+	// phone working out which branch is convenient for the customer, and that
+	// is often not the one they happen to be sitting in.
+	_mountStorePicker($d, visit) {
+		const $slot = $d.find(".ch-q-d-route-field");
+		if (!$slot.length) return;
+
+		const field = frappe.ui.form.make_control({
+			parent: $slot.get(0),
+			df: {
+				fieldtype: "Link",
+				options: "POS Profile",
+				fieldname: "route_to",
+				label: __("Which store will handle it?"),
+				// Their own company only. Offering another company's branch
+				// would be a boundary breach dressed as a routing choice.
+				get_query: () => ({
+					filters: { company: visit.company, disabled: 0 },
+				}),
+			},
+			render_input: true,
+		});
+		field.refresh();
+
+		$(`<button class="btn btn-sm btn-primary" style="margin-top:8px">${
+			__("Route To This Store")}</button>`)
+			.on("click", () => {
+				const target = field.get_value();
+				if (!target) {
+					frappe.show_alert({ message: __("Pick a store first"), indicator: "orange" });
+					return;
+				}
+				frappe.xcall("gofix.gofix_services.inbox.assign_store", {
+					inbox: visit.name, pos_profile: target,
+				}).then(() => {
+					frappe.show_alert({
+						message: __("Routed to {0}", [target]), indicator: "green" });
+					this._loadTokens();
+					this._openDetail(visit.name);
+				});
+			})
+			.appendTo($slot);
 	}
 
 }

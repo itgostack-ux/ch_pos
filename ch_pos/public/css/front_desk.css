@@ -620,3 +620,29 @@
   color: #92400e;
   white-space: nowrap;
 }
+
+/* ── Routing prompt ───────────────────────────────────────────────────
+   Shown only when nobody owns the request yet. It is a question for the
+   customer, not a setting, so it reads as one. */
+.ch-q-d-route {
+  margin-top: var(--pos-space-lg);
+  padding: var(--pos-space-lg);
+  border: 1px dashed var(--pos-warning);
+  border-radius: var(--pos-radius-sm);
+  background: var(--pos-warning-light);
+}
+.ch-q-d-route-head {
+  display: flex;
+  align-items: center;
+  gap: var(--pos-space-sm);
+  font-size: var(--pos-fs-md);
+  font-weight: var(--pos-fw-semibold);
+  color: #92400e;
+}
+.ch-q-d-route p {
+  margin: var(--pos-space-xs) 0 var(--pos-space-md);
+  font-size: var(--pos-fs-sm);
+  line-height: 1.5;
+  color: var(--pos-text-secondary);
+}
+.ch-q-d-route-field .frappe-control { margin-bottom: 0; }
