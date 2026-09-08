@@ -732,43 +732,21 @@ export class RepairWorkspace {
 			if (this._phone_probe === digits) return;          // don't re-ask on every blur
 			this._phone_probe = digits;
 
-			frappe.xcall("ch_pos.api.token_api.find_waiting_token_by_phone", {
-				pos_profile: PosState.pos_profile,
+			// ONE lookup, not two. The queue and the inbox used to be asked
+			// separately, so a customer who had both messaged us and taken a
+			// token produced two stacked dialogs asking nearly the same thing.
+			// The server resolves the identity behind the number and answers
+			// once, across every number it holds for that customer.
+			frappe.xcall("gofix.gofix_services.inbox.lookup_by_phone", {
 				phone: phone,
-			}).then((token) => {
-				if (!token || !token.name) return;
-				const who = token.customer_name || __("this customer");
-				const bits = [token.visit_reason, token.device_brand,
-					token.device_model_name || token.other_device_hint].filter(Boolean).join(" · ");
-				frappe.confirm(
-					__("{0} is already waiting in the queue as {1}.{2}<br><br>Link this ticket to that token and close it?",
-						[frappe.utils.escape_html(who),
-						 `<b>${frappe.utils.escape_html(token.token_display || token.name)}</b>`,
-						 bits ? `<br><span class="text-muted">${frappe.utils.escape_html(bits)}</span>` : ""]),
-					() => {
-						// Adopt it. The create handler already sends
-						// _intakeToken.name as source_token, and the server
-						// links and closes the token against the new request.
-						this._unfreezeWithToken(token);
-						if (!panel.find(".ch-rep-issue").val() && token.issue_description) {
-							panel.find(".ch-rep-issue").val(token.issue_description);
-						}
-						if (token.linked_customer && !cust_field.get_value()) {
-							cust_field.set_value(token.linked_customer);
-						}
-						frappe.show_alert({
-							message: __("Linked to {0} — it will close when the ticket is created",
-								[token.token_display || token.name]),
-							indicator: "green",
-						});
-					}
-				);
-			}).catch(() => { /* a queue lookup must never block an intake */ });
-
-			// The customer may have written in before walking in -- website
-			// form, the app, WhatsApp, or a call somebody logged. Offer what
-			// they already told us instead of asking them to say it twice.
-			this._offerInboxRequest(panel, cust_field, phone);
+				company: PosState.active_company || "",
+			}).then((found) => {
+				if (!found || !found.known) return;
+				this._offerWhatWeKnow(panel, {
+					cust_field, category_field, brand_field, model_field,
+					device_field, serial_field,
+				}, found);
+			}).catch(() => { /* a lookup must never block an intake */ });
 		});
 
 		// Arriving from the Service Inbox with a request already picked. The
@@ -1707,49 +1685,122 @@ export class RepairWorkspace {
 			.catch(() => { /* a stale request must never block an intake */ });
 	}
 
-	// ── Recognising a customer who already wrote in ─────────────
+	// ── Recognising a customer who already reached us ───────────
 
-	// Looks the number up in the service inbox and, if this person has an open
-	// request, offers to carry it into the intake form rather than starting
-	// from blank. Adopting it links the two, so the enquiry is not left
-	// hanging once the device is actually booked in.
-	_offerInboxRequest(panel, cust_field, phone) {
-		frappe.xcall("gofix.gofix_services.inbox.lookup_by_phone", {
-			phone: phone,
-			company: PosState.company || "",
-		}).then((found) => {
-			const open = (found && found.requests) || [];
-			if (!open.length) return;
+	// One dialog covering everything the number resolves to: the walk-in token
+	// they are holding, whatever they wrote in from any channel, and repairs
+	// already on their name. Accepting links the lot to this ticket and closes
+	// the rest, so a customer who messaged on Tuesday, rang on Wednesday and
+	// walked in on Thursday leaves one open item behind, not three.
+	_offerWhatWeKnow(panel, fields, found) {
+		const esc = frappe.utils.escape_html;
 
-			const req = open[0];
-			const bits = [req.channel, req.device_brand, req.device_model,
-				req.issue_category].filter(Boolean).join(" · ");
-			const said = req.issue_description
-				? `<br><span class="text-muted">"${frappe.utils.escape_html(req.issue_description)}"</span>`
-				: "";
+		// A number belonging to two customers is a question, not an answer.
+		// Guessing would attach a stranger's repair history to whoever is
+		// standing here, so a person picks.
+		if (found.ambiguous) {
+			this._askWhichCustomer(panel, fields, found);
+			return;
+		}
 
-			frappe.confirm(
-				__("{0} already contacted us on {1}.{2}{3}<br><br>Use what they told us?",
-					[frappe.utils.escape_html(req.customer_name || __("This customer")),
-					 `<b>${frappe.utils.escape_html(req.channel)}</b>`,
-					 bits ? `<br><span class="text-muted">${frappe.utils.escape_html(bits)}</span>` : "",
-					 said]),
-				() => {
-					this._inboxRequest = req.name;
-					const set = (sel, value) => {
-						if (value && !panel.find(sel).val()) panel.find(sel).val(value);
-					};
-					set(".ch-rep-issue", req.issue_description);
-					if (found.customer && !cust_field.get_value()) {
-						cust_field.set_value(found.customer.name);
-					}
-					frappe.show_alert({
-						message: __("Using request {0} — it will close when the ticket is created", [req.name]),
-						indicator: "green",
-					});
-				}
-			);
-		}).catch(() => { /* the inbox is a convenience, never a blocker */ });
+		const req = (found.requests || [])[0] || null;
+		const token = found.token || null;
+		const who = (found.customer && found.customer.customer_name)
+			|| (req && req.customer_name) || (token && token.customer_name)
+			|| __("this customer");
+
+		const lines = [];
+		if (token) {
+			lines.push(`<li><b>${__("Waiting in the queue")}</b> — ${
+				esc(token.token_display || token.name)}${
+				token.visit_reason ? ` · ${esc(token.visit_reason)}` : ""}</li>`);
+		}
+		(found.requests || []).forEach((r) => {
+			lines.push(`<li><b>${esc(r.channel)}</b> — ${
+				r.issue_description ? `"${esc(r.issue_description.slice(0, 70))}"`
+									: esc(r.status)}</li>`);
+		});
+		const older = (found.service_requests || []).filter((x) => x.delivered_datetime);
+		if (older.length) {
+			lines.push(`<li class="text-muted">${
+				__("{0} earlier repair(s) on this customer", [older.length])}</li>`);
+		}
+		if (!lines.length) return;
+
+		const extra = (found.numbers || []).length > 1
+			? `<p class="text-muted" style="margin-top:6px">${
+				__("Matched across the {0} numbers we hold for them.", [found.numbers.length])}</p>`
+			: "";
+
+		frappe.confirm(
+			`<p>${__("We already know {0}.", [`<b>${esc(who)}</b>`])}</p>
+			 <ul style="margin:8px 0 0;padding-left:18px">${lines.join("")}</ul>${extra}
+			 <p style="margin-top:10px">${
+				__("Use this, and close the rest against the new ticket?")}</p>`,
+			() => this._adoptWhatWeKnow(panel, fields, found, req, token)
+		);
+	}
+
+	_adoptWhatWeKnow(panel, fields, found, req, token) {
+		if (token) {
+			// The create handler sends _intakeToken.name as source_token and
+			// the server closes it against the new request.
+			this._unfreezeWithToken(token);
+		}
+		if (req) this._inboxRequest = req.name;
+
+		// Everything they already told us, without overwriting what the
+		// operator has already typed.
+		const setText = (sel, v) => { if (v && !panel.find(sel).val()) panel.find(sel).val(v); };
+		const setLink = (f, v) => { if (v && f && !f.get_value()) f.set_value(v); };
+
+		setText(".ch-rep-issue", (req && req.issue_description)
+			|| (token && token.issue_description));
+		setLink(fields.cust_field, (found.customer && found.customer.name)
+			|| (token && token.linked_customer));
+		if (req) {
+			setLink(fields.category_field, req.device_category);
+			setLink(fields.brand_field, req.device_brand);
+			setLink(fields.model_field, req.device_model);
+			setLink(fields.device_field, req.device_item);
+			setLink(fields.serial_field, req.serial_no);
+		}
+
+		frappe.show_alert({
+			message: __("Linked — it all closes when the ticket is created"),
+			indicator: "green",
+		});
+	}
+
+	// Two customers on one number: a shared household line, or two records for
+	// the same person. Either way a human decides, and the choice narrows the
+	// lookup to that customer alone.
+	_askWhichCustomer(panel, fields, found) {
+		const d = new frappe.ui.Dialog({
+			title: __("Two customers use this number"),
+			fields: [
+				{ fieldtype: "HTML", options: `<p>${
+					__("This number is on more than one customer record. Pick who is at the counter — we will not guess, because the wrong choice shows one customer another's repairs.")
+				}</p>` },
+				{
+					fieldname: "customer", fieldtype: "Select", reqd: 1,
+					label: __("Who is this?"),
+					options: found.customers.map((c) =>
+						({ label: `${c.customer_name} (${c.customer})`, value: c.customer })),
+				},
+			],
+			primary_action_label: __("That's them"),
+			primary_action: (v) => {
+				d.hide();
+				if (fields.cust_field) fields.cust_field.set_value(v.customer);
+				const picked = found.customers.find((c) => c.customer === v.customer);
+				this._offerWhatWeKnow(panel, fields, Object.assign({}, found, {
+					ambiguous: false,
+					customer: { name: picked.customer, customer_name: picked.customer_name },
+				}));
+			},
+		});
+		d.show();
 	}
 
 }

@@ -253,21 +253,26 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 				f"POS intake: could not close token {source_token} for {sr.name}",
 			)
 
-	# The customer may have reached us before they reached the counter -- a web
-	# form, the app, WhatsApp, a call somebody logged. Closing that request
-	# against the ticket is what stops the same person being chased twice.
-	source_inbox = (data.get("source_inbox") or "").strip()
-	if source_inbox:
-		try:
-			from gofix.gofix_services.inbox import link_to_service_request
+	# The customer may have reached us several times before they reached the
+	# counter -- a web form on Tuesday, a call on Wednesday, a walk-in today.
+	# Consolidation attaches the newest of those to the ticket and closes the
+	# rest against it, searching every number held for that customer rather
+	# than only the one typed here, so nobody is chased twice.
+	try:
+		from gofix.gofix_services.identity import consolidate_into_request
 
-			link_to_service_request(source_inbox, sr.name)
-		except Exception:
-			# Same reasoning as the token: the device is already on the counter.
-			frappe.log_error(
-				frappe.get_traceback(),
-				f"POS intake: could not link inbox request {source_inbox} to {sr.name}",
-			)
+		consolidate_into_request(
+			sr.name,
+			phone=data.get("contact_number"),
+			inbox=(data.get("source_inbox") or "").strip() or None,
+			token=source_token or None,
+		)
+	except Exception:
+		# The device is already on the counter; a tidy-up must never fail intake.
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"POS intake: could not consolidate earlier contacts for {sr.name}",
+		)
 
 	# A counter check-in IS the acceptance. The customer has handed the device
 	# over and signed the intake, so parking the ticket in a Draft queue for
