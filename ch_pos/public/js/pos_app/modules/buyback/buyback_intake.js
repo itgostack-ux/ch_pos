@@ -99,7 +99,7 @@ export class BuybackIntake {
 			_chunk(tests, CHUNK).forEach((rows, i, all) =>
 				steps.push({
 					key: `diag_${i}`, label: __("Tests"), kind: "diagnostics", rows,
-					title: __("Device tests"),
+					title: __("Diagnostic Tests"),
 					hint: all.length > 1 ? __("Screen {0} of {1}", [i + 1, all.length]) : "",
 				}));
 			const by_purpose = { Grading: [], Deduction: [], Eligibility: [] };
@@ -707,6 +707,9 @@ export class BuybackIntake {
 
 		if (step.key === "device") {
 			if (!d.item) return this._show_form_error(__("Select the device"));
+			if (!d.is_phone_dead && !d.imei_serial) {
+				return this._show_form_error(__("Enter the IMEI/serial, or check \"Phone does not switch on\""));
+			}
 			if (!d.quotable) {
 				this._check_quotable();
 				return this._show_form_error(__("Checking the selected price band…"));
@@ -723,9 +726,8 @@ export class BuybackIntake {
 			return this._load_questions();   // step list depends on the item
 		}
 
-		if (step.kind === "questions" || step.kind === "diagnostics") {
-			const bucket = step.kind === "diagnostics" ? "diagnostics" : "answers";
-			const missing = step.rows.filter(r => !this.data[bucket][r.name]).length;
+		if (step.kind === "questions") {
+			const missing = step.rows.filter(r => !this.data.answers[r.name]).length;
 			if (missing) {
 				return this._show_form_error(__("{0} unanswered on this screen", [missing]));
 			}

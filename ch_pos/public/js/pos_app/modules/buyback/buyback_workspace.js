@@ -1769,9 +1769,17 @@ export class BuybackWorkspace {
 			}
 			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}`);
 
+			const reset_btn = () => {
+				btn.prop("disabled", false).html(`<i class="fa fa-search-plus"></i> ${__("Inspect Device")}`);
+			};
+
 			if (data.buyback_inspection) {
 				// Already have an inspection — reload so the render switch picks
 				// up data.inspection and shows the inline form.
+				if (!this._current_data || !this._panel) {
+					reset_btn();
+					return;
+				}
 				this._reload();
 				return;
 			}
@@ -1779,8 +1787,10 @@ export class BuybackWorkspace {
 				assessment_name: data.name,
 			}).then(() => {
 				this._reload();
-			}).catch(() => {
-				btn.prop("disabled", false).html(`<i class="fa fa-search-plus"></i> ${__("Inspect Device")}`);
+			}).catch((e) => {
+				const message = _api_error_message(e, __("Failed to start inspection."));
+				frappe.show_alert({ message, indicator: "red" });
+				reset_btn();
 			});
 		});
 

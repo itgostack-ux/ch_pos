@@ -15456,6 +15456,16 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price, pos_p
         if remarks:
             order.remarks = str(remarks)[:500]
 
+        # KYC is collected while only the assessment exists (see
+        # pos_start_buyback_order) — copy the persisted evidence and ID data
+        # across this boundary the same way, so the customer approval page
+        # (which reads these fields off Buyback Order) reflects it.
+        order.customer_id_type = getattr(assessment, "kyc_id_type", "") or ""
+        order.customer_id_number = getattr(assessment, "kyc_id_number", "") or ""
+        order.customer_id_front = getattr(assessment, "customer_id_front", "") or ""
+        order.customer_id_back = getattr(assessment, "customer_id_back", "") or ""
+        order.customer_photo = getattr(assessment, "customer_photo", "") or ""
+
         # Carry forward a clean Sanchar Saathi check already done at intake.
         if assessment.imei_validation_status == "Verified Clean":
             order.imei_validation_status = assessment.imei_validation_status
@@ -15492,6 +15502,19 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price, pos_p
                 }
             raise
         order.submit()
+
+        # A complete POS KYC pack has already been checked by the signed-in
+        # store user — stamp it through the domain method (see
+        # pos_start_buyback_order) so verification/audit/customer master
+        # sync all happen in one place, rather than leaving it unverified.
+        if (
+            order.customer_id_type
+            and order.customer_id_number
+            and order.customer_id_front
+            and order.customer_photo
+        ):
+            order.verify_kyc()
+            order.reload()
 
         order_name = order.name
         order_status = frappe.db.get_value("Buyback Order", order_name, "status")
