@@ -1088,6 +1088,20 @@ def get_walkin_context(token: str) -> dict:
                 if row.get("to_status"):
                     latest[row["parent"]] = row["to_status"]
 
+            # The delivery gates live on the Service Order (a Sales Order
+            # flagged is_service_order), not on the Service Request, so the
+            # handover dialog needs that name to act on.
+            so_by_sr: dict = {}
+            if frappe.db.has_column("Sales Order", "service_request"):
+                for so in frappe.get_all(
+                    "Sales Order",
+                    filters={"service_request": ("in", names), "is_service_order": 1, "docstatus": ("<", 2)},
+                    fields=["name", "service_request", "qc_status", "delivery_otp_verified",
+                            "accessories_received", "accessories_returned"],
+                    order_by="creation desc", limit_page_length=20,
+                ):
+                    so_by_sr.setdefault(so["service_request"], so)
+
             for r in rows:
                 invoice = r.get("service_invoice")
                 outstanding = grand_total = None
@@ -1097,7 +1111,13 @@ def get_walkin_context(token: str) -> dict:
                         ["outstanding_amount", "grand_total"], as_dict=True) or {}
                     outstanding = inv.get("outstanding_amount")
                     grand_total = inv.get("grand_total")
+                so = so_by_sr.get(r["name"]) or {}
                 repairs.append({
+                    "service_order": so.get("name"),
+                    "qc_status": so.get("qc_status"),
+                    "otp_verified": int(so.get("delivery_otp_verified") or 0),
+                    "accessories_received": int(so.get("accessories_received") or 0),
+                    "accessories_returned": int(so.get("accessories_returned") or 0),
                     "service_request": r["name"],
                     "status": latest.get(r["name"]) or r.get("transfer_status") or r.get("walkin_status") or "",
                     "device": " ".join(x for x in (r.get("device_brand"), _short_model(r.get("device_model"))) if x),

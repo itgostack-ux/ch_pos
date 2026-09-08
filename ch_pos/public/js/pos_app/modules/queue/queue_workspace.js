@@ -206,6 +206,87 @@ export class QueueWorkspace {
 		this._resolveContexts(list, tokens);
 	}
 
+	// ── Device handover ─────────────────────────────────────────
+
+	// Drives the delivery gates that already existed in gofix and had no caller
+	// anywhere: readiness, OTP to the customer's registered number, verify,
+	// then complete. complete_delivery re-checks every gate server-side, so
+	// this dialog guides the executive rather than being the control itself.
+	_openHandover(token, repair) {
+		const so = repair.service_order;
+		const api = "gofix.gofix_services.api.";
+		const d = new frappe.ui.Dialog({
+			title: __("Hand Over Device — {0}", [repair.service_request]),
+			size: "large",
+			fields: [
+				{ fieldtype: "HTML", fieldname: "gates" },
+				{ fieldtype: "Section Break" },
+				{ fieldtype: "Data", fieldname: "otp", label: __("Delivery OTP"),
+				  description: __("The customer receives this on their registered number.") },
+				{ fieldtype: "Button", fieldname: "send_otp", label: __("Send OTP to Customer") },
+				{ fieldtype: "Column Break" },
+				{ fieldtype: "Button", fieldname: "verify_otp", label: __("Verify OTP") },
+			],
+		});
+
+		const paint = (readiness) => {
+			const ok = readiness && readiness.ready;
+			const blockers = (readiness && readiness.blockers) || [];
+			const rows = blockers.length
+				? blockers.map((b) => `<li style="color:var(--red-600,#b02a1f)">${frappe.utils.escape_html(b)}</li>`).join("")
+				: `<li style="color:var(--green-600,#22684c)">${__("All delivery gates passed.")}</li>`;
+			const inv = repair.invoice
+				? `<p style="margin:6px 0 0">${__("Invoice")}:
+					<a href="/app/sales-invoice/${encodeURIComponent(repair.invoice)}" target="_blank">${frappe.utils.escape_html(repair.invoice)}</a>
+					${(repair.outstanding) ? ` — <b>${format_currency(repair.outstanding)} ${__("due")}</b>` : ` — ${__("settled")}`}</p>`
+				: "";
+			d.fields_dict.gates.$wrapper.html(
+				`<div><b>${__("Service Order")}:</b> ${frappe.utils.escape_html(so)}
+					${repair.device ? ` · ${frappe.utils.escape_html(repair.device)}` : ""}
+				 <ul style="margin:8px 0 0;padding-left:18px">${rows}</ul>${inv}</div>`
+			);
+			d.set_primary_action(
+				ok ? __("Complete Handover") : __("Complete Handover (blocked)"),
+				ok ? () => {
+					frappe.xcall(api + "complete_delivery", { service_order: so })
+						.then(() => {
+							frappe.show_alert({ message: __("Device handed over"), indicator: "green" });
+							d.hide();
+							this._loadTokens();
+						})
+						.catch(() => { /* server message already shown */ });
+				} : null
+			);
+		};
+
+		const refresh = () => frappe.xcall(api + "validate_delivery_readiness", { service_order: so })
+			.then(paint)
+			.catch(() => paint({ ready: false, blockers: [__("Could not read delivery readiness.")] }));
+
+		d.fields_dict.send_otp.$input.on("click", () => {
+			frappe.xcall(api + "generate_delivery_otp", { service_order: so })
+				.then((r) => frappe.show_alert({
+					message: (r && r.message) || __("OTP sent to customer"), indicator: "blue" }))
+				.catch(() => { /* server message already shown */ });
+		});
+		d.fields_dict.verify_otp.$input.on("click", () => {
+			const otp = d.get_value("otp");
+			if (!otp) { frappe.show_alert({ message: __("Enter the OTP"), indicator: "orange" }); return; }
+			frappe.xcall(api + "verify_delivery_otp", { service_order: so, otp_input: otp })
+				.then((r) => {
+					frappe.show_alert({
+						message: (r && r.message) || "",
+						indicator: (r && r.verified) ? "green" : "red",
+					});
+					refresh();
+				})
+				.catch(() => { /* server message already shown */ });
+		});
+
+		refresh();
+		d.show();
+	}
+
 	// ── Reason-aware context ────────────────────────────────────
 
 	_resolveContexts(list, tokens) {
@@ -291,14 +372,16 @@ export class QueueWorkspace {
 					</table>`,
 				}],
 			});
-			// Collection ends in payment, so offer the cart directly rather
-			// than making the executive re-find the invoice.
-			const payable = repairs.find((r) => r.invoice && r.outstanding);
-			if (collecting && payable) {
-				d.set_primary_action(__("Collect Payment"), () => {
+			// Handover is not "open the invoice". The gates live on the Service
+			// Order -- QC passed, nothing outstanding, delivery OTP verified,
+			// accessories returned -- and complete_delivery refuses on any of
+			// them. Routing to the invoice skipped all four, which is why the
+			// OTP machinery had never once run.
+			const handover = repairs.find((r) => r.service_order);
+			if (collecting && handover) {
+				d.set_primary_action(__("Hand Over Device"), () => {
 					d.hide();
-					PosState.kiosk_token = token.name;
-					frappe.set_route("Form", "Sales Invoice", payable.invoice);
+					this._openHandover(token, handover);
 				});
 			}
 			d.show();
