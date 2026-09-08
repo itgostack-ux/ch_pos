@@ -160,7 +160,7 @@ export class BuybackIntake {
 	}
 
 	_show_form_error(raw) {
-		const message = frappe.utils.strip_html(String(raw || __("Please retry."))).trim();
+		const message = strip_html(String(raw || __("Please retry."))).trim();
 		this.data.form_error = message;
 		let $error = this.$host.find(".ch-bbi-form-error");
 		if (!$error.length) {
@@ -791,7 +791,7 @@ export class BuybackIntake {
 	}
 
 	_show_quote_error(raw) {
-		const message = frappe.utils.strip_html(String(raw || __("Pricing configuration is incomplete."))).trim();
+		const message = strip_html(String(raw || __("Pricing configuration is incomplete."))).trim();
 		this.data.quote_ready = false;
 		this.data.quote_error = message;
 		this.$host.find(".ch-bbi-price").text(__("Cannot quote"));

@@ -3636,26 +3636,20 @@
 }
 
 /* ── Automated diagnostics ─────────────── */
-.ch-ins-diag-grid {
-  padding: 4px 0;
-}
-.ch-ins-diag-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--pos-border-light, #f1f5f9);
-  font-size: 13px;
-}
-.ch-ins-diag-row:last-child { border-bottom: none; }
-.ch-ins-diag-row.ch-ins-mismatch {
-  background: #fef2f2;
-  border-left: 3px solid var(--pos-danger, #ef4444);
-}
-.ch-ins-diag-name {
-  flex: 1;
+/* Diagnostic rows now reuse .ch-ins-row/.ch-ins-compare (Condition
+   Evaluation's layout) for visual consistency — only the inspector re-test
+   <select> needs its own rule, matching .ch-ins-col-insp .ch-ins-answer. */
+.ch-ins-col-insp .ch-ins-diag-answer {
+  font-size: 12px;
   font-weight: 600;
-  color: var(--pos-text, #1e293b);
+  padding: 4px 8px;
+  border-radius: var(--pos-radius-sm, 6px);
+  border-color: var(--pos-primary, #6366f1);
+  min-height: 32px;
+}
+.ch-ins-col-insp .ch-ins-diag-answer:focus {
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.15);
+  border-color: var(--pos-primary, #6366f1);
 }
 
 /* ── Inspector Decision panel ──────────── */

@@ -14275,13 +14275,28 @@ def get_pos_buyback_detail(assessment_name) -> dict:
             # Inspection diagnostics (automated tests)
             ins_diagnostics = []
             for id_ in (ins.inspection_diagnostics or []):
+                # Fetch result options for the inspector re-test selector,
+                # same pattern as the response rows below.
+                diag_options = []
+                if id_.get("test"):
+                    diag_options = frappe.get_all(
+                        "Buyback Question Option",
+                        filters={"parent": id_.get("test")},
+                        fields=["option_value", "option_label", "price_impact_percent"],
+                        order_by="idx asc")
                 ins_diagnostics.append({
+                    "test": id_.get("test") or "",
                     "test_name": id_.get("test_name") or "",
                     "test_code": id_.get("test_code") or "",
                     "assessment_result": id_.get("assessment_result") or "",
                     "assessment_depreciation": flt(id_.get("assessment_depreciation")),
                     "inspector_result": id_.get("inspector_result") or "",
                     "inspector_depreciation": flt(id_.get("inspector_depreciation")),
+                    "options": [
+                        {"value": o.option_value, "label": o.option_label,
+                         "impact": flt(o.price_impact_percent)}
+                        for o in diag_options
+                    ],
                 })
             inspection = {
                 "name": ins.name,
@@ -14301,6 +14316,8 @@ def get_pos_buyback_detail(assessment_name) -> dict:
                     {"name": g.name, "label": g.grade_name or g.name}
                     for g in grades
                 ],
+                "account_lock_cleared": cint(ins.account_lock_cleared),
+                "account_lock_check_notes": ins.account_lock_check_notes or "",
             }
         except frappe.DoesNotExistError:
             pass
@@ -15349,13 +15366,18 @@ def pos_create_inspection(assessment_name) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def pos_complete_inspection(inspection_name, condition_grade, final_price,
+def pos_complete_inspection(inspection_name, condition_grade, final_price, pos_profile,
                             price_override_reason="", remarks="",
                             account_lock_cleared=0, account_lock_check_notes="") -> dict:
     """Complete the inline POS inspection and create a Buyback Order.
 
     Idempotent — if an order already exists for the assessment it is returned
     without creating a second one.
+
+    `pos_profile` resolves the order's store/company the same way
+    `pos_start_buyback_order` does — the assessment's own `store` field is
+    often blank (e.g. "App"/public-portal self-assessments never collect a
+    store at intake), so it can't be relied on alone.
     """
     from buyback.api import complete_inspection
 
@@ -15392,6 +15414,7 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
     assessment_name = frappe.db.get_value("Buyback Inspection", inspection_name, "buyback_assessment")
     assessment = frappe.get_doc("Buyback Assessment", assessment_name)
     _assert_buyback_doc_scope(assessment, "read")
+    anchors = _assert_buyback_profile_match(assessment, pos_profile)
 
     # Create Buyback Order (idempotent — return existing if already present)
     existing_order = frappe.db.get_value(
@@ -15419,8 +15442,8 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         )
         order.customer_name = ins.customer_name or assessment.customer_name or ""
         order.mobile_no = ins.mobile_no or assessment.mobile_no or ""
-        order.store = ins.store or assessment.store or ""
-        order.company = assessment.company or ins.company or ""
+        order.store = anchors.get("warehouse") or ins.store or assessment.store or ""
+        order.company = anchors.get("company") or assessment.company or ins.company or ""
         order.item = ins.item or assessment.item or ""
         order.item_name = ins.item_name or assessment.item_name or ""
         order.brand = assessment.brand or ""
@@ -15479,6 +15502,72 @@ def pos_complete_inspection(inspection_name, condition_grade, final_price,
         "order_name": order_name,
         "order_status": order_status,
         "assessment_name": assessment_name,
+    }
+
+
+@frappe.whitelist(methods=["POST"])
+def pos_update_inspector_finding(inspection_name, kind, value, code=None) -> dict:
+    """Record one inspector answer/result/grade choice on an in-progress
+    inline POS inspection.
+
+    Deliberately thin: it only sets the raw field the inspector chose.
+    ``BuybackInspection.validate()`` (via ``.save()``) is what derives
+    ``inspector_impact``/``inspector_depreciation`` from the Question Bank,
+    re-sets ``condition_grade``, and recalculates ``revised_price`` — the
+    same authoritative pipeline every other inspection save already goes
+    through. The POS UI reloads afterwards to show those server-computed
+    numbers rather than re-implementing the pricing math client-side, which
+    would drift from `pos_complete_inspection`'s own recalculation and its
+    price-match check.
+    """
+    inspection = frappe.get_doc("Buyback Inspection", inspection_name)
+    _assert_buyback_doc_scope(inspection, "write")
+    # pos_complete_inspection only flips Draft → In Progress right before the
+    # final submit, so the inline form is answering questions while the
+    # inspection is still Draft. Match BuybackInspection.validate()'s own
+    # recalculation eligibility (Draft or In Progress), not a narrower one.
+    if inspection.status not in ("Draft", "In Progress"):
+        frappe.throw(_("Inspection must be Draft or In Progress to record findings."))
+
+    value = (value or "").strip()
+    if kind == "grade":
+        if value and not frappe.db.exists("Grade Master", {"name": value, "is_salvage": 0}):
+            frappe.throw(_("Invalid grade: {0}").format(value))
+        inspection.post_inspection_grade = value
+    elif kind == "response":
+        row = next(
+            (r for r in inspection.inspection_responses
+             if r.question_code == code or r.question == code),
+            None)
+        if not row:
+            frappe.throw(_("Unknown question: {0}").format(code))
+        option = None
+        if value:
+            option = frappe.db.get_value(
+                "Buyback Question Option", {"parent": row.question, "option_value": value},
+                ["option_value", "option_label"], as_dict=True)
+            if not option:
+                frappe.throw(_("Invalid answer for this question."))
+        row.inspector_answer = value
+        row.inspector_answer_label = option.option_label if option else ""
+    elif kind == "diagnostic":
+        row = next((d for d in inspection.inspection_diagnostics if d.test_code == code), None)
+        if not row:
+            frappe.throw(_("Unknown diagnostic test: {0}").format(code))
+        if value and row.test and not frappe.db.exists(
+            "Buyback Question Option", {"parent": row.test, "option_value": value}
+        ):
+            frappe.throw(_("Invalid result for this test."))
+        row.inspector_result = value
+    else:
+        frappe.throw(_("Invalid kind: {0}").format(kind))
+
+    inspection.save()
+    return {
+        "revised_price": flt(inspection.revised_price),
+        "quoted_price": flt(inspection.quoted_price),
+        "condition_grade": inspection.condition_grade or "",
+        "post_inspection_grade": inspection.post_inspection_grade or "",
     }
 
 

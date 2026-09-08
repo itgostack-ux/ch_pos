@@ -433,7 +433,21 @@ export class BuybackWorkspace {
 		else if (stage === STAGE.INSPECT) {
 			const ins_name = data.buyback_inspection
 				|| (data.inspection && data.inspection.name);
-			if (ins_name) {
+			if (data.order && ["Draft", "Awaiting Approval"].includes(data.order.status)) {
+				// Order already created (inline completion, or Desk) — this is the
+				// manager-approval screen, not the inspection form. Must be checked
+				// before the inspection branch below: an order can exist AND still
+				// carry a buyback_inspection link.
+				body_html = this._html_inspect_awaiting(data);
+			} else if (data.inspection && data.inspection.name) {
+				// Real inspection data (grades/comparison/diagnostics) is available —
+				// render the inspection form inline in POS instead of sending staff
+				// to the Desk form.
+				body_html = this._html_inspect_inline(data.inspection, data);
+			} else if (ins_name) {
+				// Defensive fallback: inspection is linked but its rich data failed
+				// to load (e.g. permission issue) — offer the Desk form rather than
+				// showing nothing.
 				body_html = `
 					<div style="padding:20px;text-align:center">
 						<div style="margin-bottom:16px;font-size:13px;color:var(--pos-text-muted)">
@@ -445,8 +459,6 @@ export class BuybackWorkspace {
 							<i class="fa fa-external-link"></i> ${__("Open Inspection Form")}
 						</button>
 					</div>`;
-			} else if (data.order && ["Draft", "Awaiting Approval"].includes(data.order.status)) {
-				body_html = this._html_inspect_awaiting(data);
 			} else {
 				body_html = `<div style="padding:30px;text-align:center">
 					<i class="fa fa-spinner fa-spin fa-2x" style="opacity:0.3"></i>
@@ -583,16 +595,25 @@ export class BuybackWorkspace {
 		let action_btn = "";
 
 		const is_mobile_app = (data.source || "") === "Mobile App";
+		// "App" (public web self-assessment) has no device in staff hands at
+		// intake — unlike Mobile App/Kiosk/Store Manual, where the customer or
+		// staff is standing at the counter. So it skips the pre-inspection IMEI
+		// gate below and goes straight to a real inspection like Mobile App;
+		// create_inspection() lets this source through without the check, and
+		// the Buyback Order gate (+ in-store approval wizard's IMEI step)
+		// enforces it afterwards, once the device is physically in for grading.
+		const is_app_source = (data.source || "") === "App";
 		const can_start = status === "Submitted" || status === "Quote Generated";
 		const inspection_in_progress = status === "Inspection Created" && !!data.buyback_inspection;
 		const kyc_done = _kyc_done(data);
 
 		// IMEI / Sanchar Saathi check — recommended before inspection starts so
 		// staff don't waste time grading a device that's nationally blacklisted.
-		// create_inspection() hard-blocks on this server-side; this panel is what
-		// lets staff actually clear it from the ASSESS stage.
+		// create_inspection() hard-blocks on this server-side (except for "App",
+		// see above); this panel is what lets staff actually clear it from the
+		// ASSESS stage.
 		const imei_clean = data.imei_validation_status === "Verified Clean";
-		if (can_start && !imei_clean) {
+		if (can_start && !imei_clean && !is_app_source) {
 			return `
 				<div class="ch-bb-valuation-banner">
 					<div class="ch-bb-val-label">${__("Assessed Value")}</div>
@@ -624,10 +645,11 @@ export class BuybackWorkspace {
 					<i class="fa fa-external-link"></i> ${__("Open Assessment Form")}
 				</button>`;
 
-		} else if (can_start && is_mobile_app) {
-			// Mobile App flow — KYC is no longer enforced at ASSESS stage.
-			// Customer self-assessed via app → straight to physical inspection.
-			// KYC will be required after Inspect, before order creation.
+		} else if (can_start && (is_mobile_app || is_app_source)) {
+			// Mobile App / App flow — KYC is no longer enforced at ASSESS stage.
+			// Customer self-assessed remotely → straight to physical inspection.
+			// KYC (and, for App, the IMEI check) will be required after Inspect,
+			// before order creation.
 			action_btn = `
 				<button class="btn btn-primary btn-lg ch-bb-act ch-bb-start-inspection"
 					data-name="${data.name}"
@@ -635,7 +657,7 @@ export class BuybackWorkspace {
 					<i class="fa fa-search-plus"></i> ${__("Inspect Device")}
 				</button>`;
 
-		} else if (can_start && !is_mobile_app) {
+		} else if (can_start && !is_mobile_app && !is_app_source) {
 
 			
 			action_btn = `
@@ -763,6 +785,19 @@ export class BuybackWorkspace {
 		const revised = ins.revised_price || quoted;
 		const is_completed = ins.status === "Completed";
 		const is_mobile = data && data.source === "Mobile App";
+		// "App" owes its deferred Sanchar Saathi check at this point (see
+		// _html_assess/create_inspection) — pos_complete_inspection creates the
+		// Buyback Order in the same call as completing the inspection, so the
+		// check must block HERE, before "Complete Inspection & Create Order" is
+		// reachable, not later on an order screen that may never render.
+		const needs_imei_first = !is_completed && data
+			&& data.source === "App" && data.imei_validation_status !== "Verified Clean";
+		// pos_complete_inspection creates the Buyback Order in the same call as
+		// completing the inspection (unlike the Desk path, where completing and
+		// order-creation are separate steps) — so KYC, like IMEI above, has to
+		// be required HERE too, or it's skipped entirely rather than merely
+		// deferred to the later in-store approval wizard's KYC step.
+		const needs_kyc = !is_completed && !needs_imei_first && data && !_kyc_done(data);
 
 		const grade_options = (ins.grades || []).map(g =>
 			`<option value="${frappe.utils.escape_html(g.name)}"
@@ -836,16 +871,51 @@ export class BuybackWorkspace {
 		const diag = ins.diagnostics || [];
 		let diag_html = "";
 		if (diag.length) {
-			const diag_rows = diag.map(d => {
+			const diag_rows = diag.map((d, i) => {
 				const assess = d.assessment_result || "—";
+				const assess_impact = -Math.abs(d.assessment_depreciation || 0);
 				const insp = d.inspector_result || "";
+				const insp_impact = -Math.abs(d.inspector_depreciation || 0);
 				const mismatch = insp && insp !== d.assessment_result;
+				const opt_html = (d.options || []).map(o =>
+					`<option value="${frappe.utils.escape_html(o.value)}"
+						${insp === o.value ? "selected" : ""}
+						data-impact="${o.impact}">
+						${frappe.utils.escape_html(o.label)}${o.impact ? ` (${o.impact > 0 ? "+" : ""}${o.impact}%)` : ""}
+					</option>`
+				).join("");
 				return `
-				<div class="ch-ins-diag-row ${mismatch ? "ch-ins-mismatch" : ""}">
-					<span class="ch-ins-diag-name">${frappe.utils.escape_html(d.test_name)}</span>
-					<span class="ch-pos-badge badge-${assess === "Pass" ? "success" : assess === "Fail" ? "danger" : "muted"}">${__(assess)}</span>
-					<i class="fa fa-arrow-right" style="opacity:0.3;font-size:10px"></i>
-					<span class="ch-pos-badge badge-${insp === "Pass" ? "success" : insp === "Fail" ? "danger" : "muted"}">${insp ? __(insp) : "—"}</span>
+				<div class="ch-ins-row ${mismatch ? "ch-ins-mismatch" : ""} ${i % 2 === 0 ? "" : "ch-ins-row-alt"}">
+					<div class="ch-ins-question">
+						<span class="ch-ins-q-num">${i + 1}</span>
+						<span class="ch-ins-q-text">${frappe.utils.escape_html(d.test_name || "—")}</span>
+					</div>
+					<div class="ch-ins-compare">
+						<div class="ch-ins-col ch-ins-col-cust">
+							<div class="ch-ins-col-label">${__("Customer")}</div>
+							<div class="ch-ins-col-val ${assess_impact < 0 ? "ch-ins-deduct" : "ch-ins-pass"}">
+								${frappe.utils.escape_html(__(assess))}
+								${assess_impact ? `<span class="ch-ins-impact">${assess_impact}%</span>` : ""}
+							</div>
+						</div>
+						<div class="ch-ins-col-arrow">
+							${mismatch ? '<i class="fa fa-exclamation-triangle" style="color:#f97316"></i>'
+								: (insp ? '<i class="fa fa-check" style="color:#22c55e"></i>' : '<i class="fa fa-arrow-right" style="opacity:0.3"></i>')}
+						</div>
+						<div class="ch-ins-col ch-ins-col-insp">
+							<div class="ch-ins-col-label">${__("Inspector")}</div>
+							${is_completed
+								? `<div class="ch-ins-col-val ${insp_impact < 0 ? "ch-ins-deduct" : "ch-ins-pass"}">
+									${frappe.utils.escape_html(insp ? __(insp) : "—")}
+									${insp_impact ? `<span class="ch-ins-impact">${insp_impact}%</span>` : ""}
+								  </div>`
+								: `<select class="form-control form-control-sm ch-ins-diag-answer"
+									data-test-code="${frappe.utils.escape_html(d.test_code || "")}">
+									<option value="">${__("-- Select --")}</option>
+									${opt_html}
+								  </select>`}
+						</div>
+					</div>
 				</div>`;
 			}).join("");
 			diag_html = `
@@ -855,7 +925,7 @@ export class BuybackWorkspace {
 						<span>${__("Automated Diagnostics")}</span>
 						<span class="ch-ins-badge">${diag.length} ${__("tests")}</span>
 					</div>
-					<div class="ch-ins-diag-grid">${diag_rows}</div>
+					<div class="ch-ins-grid">${diag_rows}</div>
 				</div>`;
 		}
 
@@ -879,7 +949,31 @@ export class BuybackWorkspace {
 			</div>
 			${comparison_html}
 			${diag_html}
-			${is_completed ? "" : `
+			${is_completed ? "" : (needs_imei_first ? `
+			<div class="ch-ins-eval-panel">
+				<div class="ch-ins-section-header" style="margin-bottom:10px">
+					<i class="fa fa-shield" style="color:var(--blue-600,#1565c0)"></i>
+					<span>${__("Sanchar Saathi check required before completing inspection")}</span>
+				</div>
+				${this._html_imei_check_card(data, "assessment")}
+			</div>
+			` : (needs_kyc ? `
+			<div class="ch-ins-eval-panel">
+				<div class="ch-ins-section-header" style="margin-bottom:10px">
+					<i class="fa fa-id-card"></i>
+					<span>${__("KYC required before completing inspection")}</span>
+				</div>
+				<div class="ch-bb-info-note" style="margin-bottom:10px;background:#fef3c7;border-color:#f59e0b;color:#92400e">
+					<i class="fa fa-exclamation-triangle"></i>
+					${__("Aadhaar (or other ID) must be uploaded before the Buyback Order can be created.")}
+				</div>
+				<button class="btn btn-warning btn-lg ch-bb-act ch-bb-upload-kyc"
+					data-name="${frappe.utils.escape_html(data.name)}"
+					style="width:100%;border-radius:var(--pos-radius,8px);font-weight:700;min-height:48px;background:#f59e0b;border-color:#f59e0b;color:#fff">
+					<i class="fa fa-id-card"></i> ${__("Upload Customer KYC (Aadhaar)")}
+				</button>
+			</div>
+			` : `
 			<div class="ch-ins-eval-panel">
 				<div class="ch-ins-section-header" style="margin-bottom:10px">
 					<i class="fa fa-user-md"></i>
@@ -946,7 +1040,7 @@ export class BuybackWorkspace {
 					</button>
 				</div>
 			</div>
-			`}`;
+			`))}`;
 	}
 
 	_html_inspect_awaiting(data) {
@@ -984,11 +1078,32 @@ export class BuybackWorkspace {
 		const order = data.order;
 		const ins = data.inspection;
 		const kyc_done = _kyc_done(data);
+		// "App" skips the pre-inspection IMEI gate (see _html_assess), so it
+		// still owes the Sanchar Saathi check at this point — surface it as the
+		// very next step once inspection completes, before KYC/order creation.
+		const imei_clean = data.imei_validation_status === "Verified Clean";
 
-		// Inspection completed but order not yet created — KYC gate applies here
+		// Inspection completed but order not yet created — IMEI, then KYC, gate here
 		if (!order && ins && ins.status === "Completed") {
 			const price = ins.revised_price || ins.quoted_price || data.quoted_price || data.estimated_price;
 			const grade = ins.post_inspection_grade || ins.condition_grade || ins.pre_inspection_grade || "";
+
+			if (!imei_clean) {
+				return `
+					<div class="ch-bb-valuation-banner"
+						style="background:#d1fae5;border-color:#10b981">
+						<div class="ch-bb-val-label" style="color:#065f46">
+							<i class="fa fa-check-circle"></i> ${__("Inspection Complete")}
+						</div>
+						<div class="ch-bb-val-amount" style="color:#065f46">₹${format_number(price)}</div>
+						<div class="ch-bb-val-sub">
+							${grade ? __("Grade") + " " + frappe.utils.escape_html(grade) + " · " : ""}
+							${frappe.utils.escape_html(data.customer_name || data.mobile_no || "—")}
+						</div>
+					</div>
+					${this._html_imei_check_card(data, "assessment")}
+				`;
+			}
 
 			if (!kyc_done) {
 				// KYC blocks order creation — show upload panel + locked button
@@ -1655,20 +1770,92 @@ export class BuybackWorkspace {
 			btn.prop("disabled", true).html(`<i class="fa fa-spinner fa-spin"></i> ${__("Loading...")}`);
 
 			if (data.buyback_inspection) {
-				frappe.set_route("Form", "Buyback Inspection", data.buyback_inspection);
+				// Already have an inspection — reload so the render switch picks
+				// up data.inspection and shows the inline form.
+				this._reload();
 				return;
 			}
 			frappe.xcall("ch_pos.api.pos_api.pos_create_inspection", {
 				assessment_name: data.name,
-			}).then((ins) => {
-				const ins_name = ins && (ins.name || ins.inspection_name);
-				if (ins_name) {
-					frappe.set_route("Form", "Buyback Inspection", ins_name);
-				} else {
-					this._reload();
-				}
+			}).then(() => {
+				this._reload();
 			}).catch(() => {
 				btn.prop("disabled", false).html(`<i class="fa fa-search-plus"></i> ${__("Inspect Device")}`);
+			});
+		});
+
+		// Inspector answer/result/grade selections — each is saved immediately
+		// so BuybackInspection.validate() can recompute impacts, condition_grade,
+		// and revised_price server-side. We patch just the price/grade summary
+		// in place instead of a full _reload() — a full reload rebuilds the
+		// whole panel from scratch (flicker, lost scroll position) after every
+		// single dropdown pick, which is unusable across a 15-20 question list.
+		// The per-row selection itself is already visible immediately (the
+		// browser shows the chosen <option> the instant it's picked); only the
+		// aggregate price/grade banner actually depends on the server's answer.
+		const inspector_finding_name = data.buyback_inspection
+			|| (data.inspection && data.inspection.name);
+
+		const _apply_finding_result = (res) => {
+			if (data.inspection) {
+				data.inspection.revised_price = res.revised_price;
+				data.inspection.condition_grade = res.condition_grade;
+				data.inspection.post_inspection_grade = res.post_inspection_grade;
+			}
+			const grades = (data.inspection && data.inspection.grades) || [];
+			const grade_label = (grades.find(g => g.name === res.condition_grade) || {}).label || res.condition_grade || "";
+			el.find(".ch-ins-revised-display").text(`₹${format_number(res.revised_price)}`);
+			el.find(".ch-ins-grade-display").text(grade_label ? `${__("Grade")} ${grade_label}` : " ");
+			el.find(".ch-bb-ins-price").val(res.revised_price);
+		};
+
+		el.on("change.bbstage", ".ch-ins-answer", (e) => {
+			const $sel = $(e.currentTarget);
+			$sel.prop("disabled", true);
+			frappe.xcall("ch_pos.api.pos_api.pos_update_inspector_finding", {
+				inspection_name: inspector_finding_name,
+				kind: "response",
+				code: $sel.data("question"),
+				value: $sel.val(),
+			}).then((res) => {
+				$sel.prop("disabled", false);
+				_apply_finding_result(res);
+			}).catch((err) => {
+				$sel.prop("disabled", false);
+				frappe.show_alert({ message: _api_error_message(err, __("Failed to save answer")), indicator: "red" });
+			});
+		});
+
+		el.on("change.bbstage", ".ch-ins-diag-answer", (e) => {
+			const $sel = $(e.currentTarget);
+			$sel.prop("disabled", true);
+			frappe.xcall("ch_pos.api.pos_api.pos_update_inspector_finding", {
+				inspection_name: inspector_finding_name,
+				kind: "diagnostic",
+				code: $sel.data("test-code"),
+				value: $sel.val(),
+			}).then((res) => {
+				$sel.prop("disabled", false);
+				_apply_finding_result(res);
+			}).catch((err) => {
+				$sel.prop("disabled", false);
+				frappe.show_alert({ message: _api_error_message(err, __("Failed to save result")), indicator: "red" });
+			});
+		});
+
+		el.on("change.bbstage", ".ch-bb-ins-grade", (e) => {
+			const $sel = $(e.currentTarget);
+			$sel.prop("disabled", true);
+			frappe.xcall("ch_pos.api.pos_api.pos_update_inspector_finding", {
+				inspection_name: inspector_finding_name,
+				kind: "grade",
+				value: $sel.val(),
+			}).then((res) => {
+				$sel.prop("disabled", false);
+				_apply_finding_result(res);
+			}).catch((err) => {
+				$sel.prop("disabled", false);
+				frappe.show_alert({ message: _api_error_message(err, __("Failed to save grade")), indicator: "red" });
 			});
 		});
 
@@ -1712,6 +1899,7 @@ export class BuybackWorkspace {
 			frappe.xcall("ch_pos.api.pos_api.pos_complete_inspection", {
 
 				inspection_name,
+				pos_profile: PosState.pos_profile || "",
 				condition_grade: grade,
 				final_price: price,
 				price_override_reason: override_reason,
