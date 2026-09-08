@@ -771,6 +771,12 @@ export class RepairWorkspace {
 			this._offerInboxRequest(panel, cust_field, phone);
 		});
 
+		// Arriving from the Service Inbox with a request already picked. The
+		// hub sets these before routing here; without reading them the counter
+		// would land on a blank form and the customer would repeat themselves,
+		// which is the whole thing the inbox exists to stop.
+		this._consumeInboxRoute(panel, cust_field);
+
 		panel.on("click", ".ch-rep-create", () => {
 			const customer = cust_field.get_value();
 			const device_item = device_field.get_value();
@@ -1660,6 +1666,47 @@ export class RepairWorkspace {
 			ch_pos_show_error(err, __("Repair Closure Failed"));
 		});
 	}
+	// Reads (and clears) the route options the Service Inbox sets, prefills the
+	// phone, and pulls the rest of the request in. Cleared on read so a later
+	// visit to this screen does not resurrect a stale request.
+	_consumeInboxRoute(panel, cust_field) {
+		// Two sources because the till may ask for a store before this screen
+		// renders, and route_options do not reliably survive that detour.
+		const opts = frappe.route_options || {};
+		let request = opts.inbox_request;
+		let phone = opts.phone;
+		if (!request) {
+			try {
+				const held = JSON.parse(sessionStorage.getItem("gofix_inbox_handoff") || "null");
+				if (held) { request = held.request; phone = phone || held.phone; }
+			} catch (e) { /* nothing held */ }
+		}
+		if (!request && !phone) return;
+		// Consumed once: a later visit to this screen must not resurrect it.
+		frappe.route_options = {};
+		try { sessionStorage.removeItem("gofix_inbox_handoff"); } catch (e) {}
+
+		if (phone) {
+			panel.find(".ch-rep-phone").val(phone);
+			this._phone_probe = String(phone).replace(/\D/g, "");
+		}
+        if (!request) return;
+
+		frappe.xcall("gofix.gofix_services.inbox.prefill_from_request", { inbox: request })
+			.then((r) => {
+				if (!r) return;
+				this._inboxRequest = request;
+				const set = (sel, v) => { if (v && !panel.find(sel).val()) panel.find(sel).val(v); };
+				set(".ch-rep-issue", r.issue_description);
+				if (r.customer && !cust_field.get_value()) cust_field.set_value(r.customer);
+				frappe.show_alert({
+					message: __("Using request {0} — it will close when the ticket is created", [request]),
+					indicator: "green",
+				});
+			})
+			.catch(() => { /* a stale request must never block an intake */ });
+	}
+
 	// ── Recognising a customer who already wrote in ─────────────
 
 	// Looks the number up in the service inbox and, if this person has an open
