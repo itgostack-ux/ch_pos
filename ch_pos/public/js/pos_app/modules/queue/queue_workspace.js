@@ -1128,6 +1128,10 @@ export class QueueWorkspace {
 			fact(__("IMEI / Serial"), d.serial_no),
 			fact(__("Issue"), d.issue_category),
 			fact(__("Symptoms"), (d.symptom_labels || []).join(", ")),
+			fact(__("Arrived by"), d.intake_method),
+			fact(__("Goes back by"), d.return_method),
+			fact(__("Carrier"), d.return_partner),
+			fact(__("Tracking"), d.return_tracking_number),
 			fact(__("Decide by"), remote && d.expires_at
 				? frappe.datetime.str_to_user(d.expires_at) : ""),
 			fact(__("Preferred slot"), d.preferred_datetime
