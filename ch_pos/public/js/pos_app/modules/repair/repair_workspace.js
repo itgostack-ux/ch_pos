@@ -28,6 +28,71 @@ export class RepairWorkspace {
 		});
 	}
 
+	// Adopt a token the customer already has. Lists what is actually waiting at
+	// this store, skipping anything already converted, and prefills the intake
+	// from it exactly as arriving from the Service Queue does.
+	_pickFromQueue(panel) {
+		frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", {
+			pos_profile: PosState.pos_profile,
+		}).then((tokens) => {
+			const open = (tokens || []).filter(
+				(t) => !t.linked_service_request && ["Waiting", "Hold", "Engaged"].includes(t.status)
+			);
+			if (!open.length) {
+				frappe.msgprint({
+					title: __("Nothing waiting"),
+					message: __("No open walk-in token at this store. Log the walk-in instead."),
+					indicator: "orange",
+				});
+				return;
+			}
+			const esc = frappe.utils.escape_html;
+			const rows = open.map((t) => {
+				const bits = [t.visit_reason, t.device_brand,
+					t.device_model_name || t.other_device_hint].filter(Boolean).join(" · ");
+				return `<tr class="ch-pick-row" data-token="${esc(t.name)}" style="cursor:pointer">
+					<td><b>${esc(t.token_display || t.name)}</b></td>
+					<td>${esc(t.customer_name || "—")}</td>
+					<td>${esc(t.customer_phone || "—")}</td>
+					<td>${esc(bits || "—")}</td>
+					<td>${esc(t.status)}</td>
+				</tr>`;
+			}).join("");
+			const d = new frappe.ui.Dialog({
+				title: __("Pick a Waiting Walk-in"),
+				size: "large",
+				fields: [{
+					fieldtype: "HTML", fieldname: "list",
+					options: `<table class="table table-hover" style="margin:0">
+						<thead><tr>
+							<th>${__("Token")}</th><th>${__("Customer")}</th><th>${__("Phone")}</th>
+							<th>${__("Reason / Device")}</th><th>${__("Status")}</th>
+						</tr></thead><tbody>${rows}</tbody></table>`,
+				}],
+			});
+			d.$wrapper.on("click", ".ch-pick-row", (e) => {
+				const name = $(e.currentTarget).data("token");
+				const token = open.find((t) => t.name === name);
+				if (!token) return;
+				d.hide();
+				// Same door the Service Queue uses (see queue_workspace
+				// _openIntake): hand the token over and re-enter the mode, so
+				// every prefill rule stays in one place. The intake falls back
+				// to a phone lookup when the token carries no resolved
+				// customer, so a new walk-in still lands correctly.
+				PosState.repairIntakeToken = token;
+				EventBus.emit("mode:set", "repair");
+				EventBus.emit("mode:switch", "repair");
+				frappe.show_alert({
+					message: __("Using {0}", [token.token_display || token.name]),
+					indicator: "green",
+				});
+			});
+			d.show();
+		}).catch(() => frappe.show_alert({
+			message: __("Could not load the queue"), indicator: "orange" }));
+	}
+
 	render(panel) {
 		panel.html(`
 			<div class="ch-pos-mode-panel">
@@ -50,7 +115,10 @@ export class RepairWorkspace {
 					<div style="font-size:13px;opacity:.85;margin-bottom:10px">
 						${__("Every device taken in has to be a counted walk-in. Log the customer, or type a number already waiting in the queue, and this form unlocks.")}
 					</div>
-					<button class="btn btn-sm btn-primary ch-repair-freeze-log">
+					<button class="btn btn-sm btn-primary ch-repair-freeze-pick">
+						<i class="fa fa-list"></i> ${__("Pick from Queue")}
+					</button>
+					<button class="btn btn-sm btn-default ch-repair-freeze-log">
 						<i class="fa fa-plus"></i> ${__("Log Walk-in")}
 					</button>
 				</div>
@@ -578,6 +646,12 @@ export class RepairWorkspace {
 		// The frozen banner is the way out, not a dead end: log the walk-in
 		// here and the screen unfreezes against the token it just created.
 		panel.on("click", ".ch-repair-freeze-log", () => EventBus.emit("walkin:open"));
+
+		// Most customers already have a token: they checked in at the kiosk and
+		// are standing in the queue. Offering only "Log Walk-in" would make the
+		// counter create a second one for the same person, which is the double
+		// count this whole change exists to stop.
+		panel.on("click", ".ch-repair-freeze-pick", () => this._pickFromQueue(panel));
 
 		// log_counter_walkin returns {status, token, name, visit_purpose,
 		// linked_customer} -- `name` is the token docname, which is all

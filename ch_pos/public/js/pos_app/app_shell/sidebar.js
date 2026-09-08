@@ -26,7 +26,7 @@ const MODE_SECTIONS = [
 		label: __("Services"),
 		modes: [
 			{ key: "buyback", icon: "fa-exchange",  label: __("Buyback") },
-			{ key: "repair",  icon: "fa-wrench",    label: __("Repair") },
+			{ key: "repair",  icon: "fa-wrench",    label: __("SO Create") },
 			{ key: "service", icon: "fa-cogs",      label: __("Service") },
 			{ key: "claims",  icon: "fa-shield",    label: __("Claims") },
 			{ key: "exceptions", icon: "fa-exclamation-triangle", label: __("Bill Exceptions") },
