@@ -39,6 +39,32 @@ function _chunk(list, size) {
 	return out;
 }
 
+// These three categories are individually small/lower-priority, so they're
+// clubbed to always sit adjacent (each still gets its own header) instead of
+// landing on separate screens depending on incidental database ordering.
+const CLUBBED_CATEGORIES = ["Physical", "Accessories", "General"];
+
+/** Reorder rows so same Reporting Category questions sit adjacently — named
+ * categories first (in first-seen order, except CLUBBED_CATEGORIES which are
+ * always grouped together), uncategorized rows grouped last under a
+ * "General" catch-all — so chunking into screens naturally clusters by
+ * category instead of splitting them arbitrarily by count. */
+function _group_by_category(rows) {
+	const general = __("General");
+	const buckets = new Map();
+	rows.forEach((r) => {
+		const cat = r.question_category || general;
+		if (!buckets.has(cat)) buckets.set(cat, []);
+		buckets.get(cat).push(r);
+	});
+	const clubbed = CLUBBED_CATEGORIES.filter((c) => buckets.has(c));
+	const rest = [...buckets.keys()].filter((k) => !CLUBBED_CATEGORIES.includes(k));
+	const keys = [...clubbed, ...rest];
+	const out = [];
+	keys.forEach((k) => out.push(...buckets.get(k)));
+	return out;
+}
+
 export class BuybackIntake {
 	constructor({ store, on_created, on_cancel }) {
 		this.store = store || "";
@@ -95,6 +121,12 @@ export class BuybackIntake {
 	/** Rebuild the tail of the step list once the item's questions are known. */
 	_build_steps(tests, questions) {
 		const steps = this._base_steps();
+		// Diagnostic test → fault_code, so an already-answered automated test
+		// can hide the matching manual question later (see _hidden_fault_codes).
+		this._diag_fault_by_name = {};
+		(tests || []).forEach((t) => {
+			if (t.fault_code) this._diag_fault_by_name[t.name] = t.fault_code;
+		});
 		if (!this.data.is_phone_dead) {
 			_chunk(tests, CHUNK).forEach((rows, i, all) =>
 				steps.push({
@@ -109,7 +141,7 @@ export class BuybackIntake {
 				["Deduction", __("Faults")],
 				["Eligibility", __("Eligibility")],
 			].forEach(([purpose, label]) => {
-				_chunk(by_purpose[purpose] || [], CHUNK).forEach((rows, i, all) =>
+				_chunk(_group_by_category(by_purpose[purpose] || []), CHUNK).forEach((rows, i, all) =>
 					steps.push({
 						key: `${purpose}_${i}`, label, kind: "questions", rows,
 						title: label,
@@ -120,6 +152,28 @@ export class BuybackIntake {
 		steps.push({ key: "review", label: __("Quote"),
 			title: __("Review and confirm"), hint: __("Check the details before creating the assessment.") });
 		this.steps = steps;
+	}
+
+	/** Fault codes already covered by an answered Diagnostic Test — computed
+	 * live off current answers, not baked into the step list, so it reflects
+	 * changes made after going Back and re-answering a diagnostic. */
+	_hidden_fault_codes() {
+		const map = this._diag_fault_by_name || {};
+		const codes = new Set();
+		Object.keys(this.data.diagnostics).forEach((name) => {
+			if (map[name]) codes.add(map[name]);
+		});
+		return codes;
+	}
+
+	/** A manual question is skipped once its matching automated test (same
+	 * fault_code) has already been answered — same fault, already covered,
+	 * no need to ask the customer/staff again. */
+	_visible_rows(step) {
+		if (step.kind !== "questions") return step.rows;
+		const hidden = this._hidden_fault_codes();
+		if (!hidden.size) return step.rows;
+		return step.rows.filter((r) => !r.fault_code || !hidden.has(r.fault_code));
 	}
 
 	// ── rendering ────────────────────────────────────────────────────
@@ -210,7 +264,7 @@ export class BuybackIntake {
 		if (step.key === "device") return this._html_device();
 		if (step.key === "review") return this._html_review();
 		if (step.kind === "diagnostics") return this._html_rows(step.rows, "diagnostics");
-		return this._html_rows(step.rows, "answers");
+		return this._html_rows(this._visible_rows(step), "answers");
 	}
 
 	_field(label, inner, hint, req) {
@@ -336,14 +390,30 @@ export class BuybackIntake {
 
 	_html_rows(rows, bucket) {
 		const chosen = this.data[bucket];
+		let last_category = null;
 		return rows.map((r) => {
 			const key = r.name;
 			const label = bucket === "diagnostics" ? r.test_name : r.question_text;
 			const opts = r.options || [];
 			const done = !!chosen[key];
+			const optional = bucket === "answers" && !r.is_mandatory;
+
+			// Customer questions are shown grouped by Reporting Category —
+			// a header renders whenever the category changes from the row
+			// before it (rows already arrive pre-grouped by category).
+			let category_header = "";
+			if (bucket === "answers") {
+				const category = r.question_category || __("General");
+				if (category !== last_category) {
+					category_header = `<div class="ch-bbi-cat-head">${esc(category)}</div>`;
+					last_category = category;
+				}
+			}
+
 			return `
+				${category_header}
 				<div class="ch-bbi-q ${done ? "done" : ""}">
-					<div class="ch-bbi-q-t">${esc(label)}</div>
+					<div class="ch-bbi-q-t">${esc(label)}${optional ? `<span class="ch-bbi-optional">${__("Optional")}</span>` : ""}</div>
 					<div class="ch-bbi-chips">
 						${opts.map(o => `
 							<button class="ch-bbi-chip ${chosen[key] === o.value ? "on" : ""} ch-bbi-opt"
@@ -445,6 +515,13 @@ export class BuybackIntake {
 		.ch-bbi-body-questions .ch-bbi-q{margin-bottom:0}
 		.ch-bbi-q.done{border-color:#c7f0d8;background:#fbfefc}
 		.ch-bbi-q-t{font-weight:600;font-size:14px;margin-bottom:9px;line-height:1.35}
+		.ch-bbi-cat-head{grid-column:1/-1;font-size:11px;font-weight:700;text-transform:uppercase;
+			letter-spacing:.6px;color:var(--text-muted,#8a94a6);padding:14px 2px 2px;
+			border-top:1px solid var(--border-color,#eef1f5)}
+		.ch-bbi-cat-head:first-child{padding-top:0;border-top:0}
+		.ch-bbi-optional{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;
+			color:var(--text-muted,#8a94a6);background:var(--bg-light-gray,#f2f4f7);
+			border-radius:6px;padding:1px 6px;margin-left:6px;vertical-align:middle}
 		.ch-bbi-picked{display:flex;align-items:center;justify-content:space-between;gap:10px;
 			border:1px solid var(--border-color,#dfe3e8);border-radius:10px;padding:10px 13px}
 		.ch-bbi-picked-name{font-weight:650;font-size:14px}
@@ -505,7 +582,9 @@ export class BuybackIntake {
 		this.$host
 			.off(".bbi")
 			.on("click.bbi", ".ch-bbi-cancel", () => this.close())
-			.on("click.bbi", ".ch-bbi-back", () => { if (this.idx > 0) { this.idx--; this._render(); } })
+			.on("click.bbi", ".ch-bbi-back", () => {
+				if (this.idx > 0) { this.idx--; this._skip_empty_steps(-1); this._render(); }
+			})
 			.on("click.bbi", ".ch-bbi-next", () => {
 				// A throw inside the step logic used to die in the console and the
 				// button just looked dead. Surface it instead.
@@ -727,7 +806,8 @@ export class BuybackIntake {
 		}
 
 		if (step.kind === "questions") {
-			const missing = step.rows.filter(r => !this.data.answers[r.name]).length;
+			const visible = this._visible_rows(step);
+			const missing = visible.filter(r => r.is_mandatory && !this.data.answers[r.name]).length;
 			if (missing) {
 				return this._show_form_error(__("{0} unanswered on this screen", [missing]));
 			}
@@ -736,7 +816,23 @@ export class BuybackIntake {
 		if (step.key === "review") return this._create();
 
 		this.idx++;
+		this._skip_empty_steps(1);
 		this._render();
+	}
+
+	/** A manual-question screen can end up with nothing left to show once
+	 * every one of its rows got hidden by a matching answered diagnostic —
+	 * step past those instead of rendering a blank screen. */
+	_step_is_empty(step) {
+		return step.kind === "questions" && this._visible_rows(step).length === 0;
+	}
+
+	_skip_empty_steps(direction) {
+		while (this.steps[this.idx] && this._step_is_empty(this.steps[this.idx])) {
+			const next_idx = this.idx + direction;
+			if (next_idx < 0 || next_idx >= this.steps.length) break;
+			this.idx = next_idx;
+		}
 	}
 
 	_load_questions() {
