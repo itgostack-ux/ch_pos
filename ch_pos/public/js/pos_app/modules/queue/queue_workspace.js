@@ -165,9 +165,7 @@ export class QueueWorkspace {
 		const pos_profile = PosState.pos_profile;
 		if (!pos_profile) return;
 
-		// The routing pool is a separate, deliberate view. It is company-wide
-		// by nature, so it is never mixed into a store's own queue -- that is
-		// exactly what put one customer on four desks.
+		// Pool only, when it is asked for explicitly.
 		if ((this._filters || {}).channel === "__unassigned") {
 			this._loadUnassigned();
 			return;
@@ -182,9 +180,23 @@ export class QueueWorkspace {
 			);
 		}
 
-		frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile })
-			.then((tokens) => {
-				this._tokens = tokens || [];
+		// Unrouted requests ride along with the store's own queue rather than
+		// hiding behind a filter. Nobody thinks to check a filter, so a request
+		// that belonged to no store simply rotted there. They stay in their own
+		// clearly-labelled section and never mix into this store's work -- one
+		// lead on four desks was the original complaint, and the answer to it
+		// is a visible unowned pile, not an invisible one.
+		const own = frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile });
+		const pool = frappe.xcall("gofix.gofix_services.inbox.unassigned_requests", {
+			company: PosState.active_company || "",
+		}).catch(() => []);
+
+		Promise.all([own, pool])
+			.then(([tokens, unrouted]) => {
+				this._tokens = (tokens || []).concat(
+					(unrouted || []).map((r) => Object.assign({}, r, {
+						channel_group: "remote", unassigned: 1,
+					})));
 				this._renderTokenList(this._tokens);
 				if (this._selected) this._openDetail(this._selected);
 			})
@@ -253,12 +265,16 @@ export class QueueWorkspace {
 			return;
 		}
 
-		const remote_count = (tokens || []).filter((t) => t.channel_group === "remote").length;
+		const unrouted_count = (tokens || []).filter((t) => t.unassigned).length;
+		const remote_count = (tokens || []).filter(
+			(t) => t.channel_group === "remote" && !t.unassigned).length;
 		const unanswered = (tokens || []).filter(
 			(t) => t.channel_group === "remote" && t.awaiting_response).length;
 
+		// "In store" means people actually in the shop -- not those who wrote
+		// in, and not the unowned pool riding along beneath them.
 		let stats_html = `<span class="ch-queue-count-text">${
-			tokens.length - remote_count} ${__("in store")}</span>`;
+			tokens.length - remote_count - unrouted_count} ${__("in store")}</span>`;
 		if (remote_count > 0) {
 			stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${
 				remote_count} ${__("wrote in")}</span>`;
@@ -266,6 +282,10 @@ export class QueueWorkspace {
 		if (unanswered > 0) {
 			stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${
 				unanswered} ${__("unanswered")}</span>`;
+		}
+		if (unrouted_count > 0) {
+			stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${
+				unrouted_count} ${__("unrouted")}</span>`;
 		}
 		if (hold > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${hold} ${__("on hold")}</span>`;
 		if (waiting > 0) stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${waiting} ${__("waiting")}</span>`;
@@ -275,20 +295,27 @@ export class QueueWorkspace {
 		// People physically here come first: they are standing in the shop while
 		// a message can wait a few minutes. Both are the same record, so this is
 		// ordering, not separation.
-		const here = tokens.filter((t) => t.channel_group !== "remote");
-		const wrote = tokens.filter((t) => t.channel_group === "remote");
+		const here = tokens.filter((t) => t.channel_group !== "remote" && !t.unassigned);
+		const wrote = tokens.filter((t) => t.channel_group === "remote" && !t.unassigned);
+		const unrouted = tokens.filter((t) => t.unassigned);
 		const section = (label, rows) => rows.length
 			? `<div class="ch-queue-section-label">${label} · ${rows.length}</div>
 			   <div class="ch-queue-cards">${rows.map((t) => this._tokenCard(t)).join("")}</div>`
 			: "";
-		list.html(
-			this._filters && this._filters.channel === "__unassigned"
-				? section(__("Not yet routed to any store"), tokens)
-				: (here.length && wrote.length)
-				? section(__("In the shop"), here) + section(__("Waiting on a reply"), wrote)
-				: `<div class="ch-queue-cards">${
-					tokens.map((t) => this._tokenCard(t)).join("")}</div>`
-		);
+		if (this._filters && this._filters.channel === "__unassigned") {
+			list.html(section(__("Not yet routed to any store"), tokens));
+		} else if (here.length || wrote.length || unrouted.length) {
+			list.html(
+				section(__("In the shop"), here)
+				+ section(__("Waiting on a reply"), wrote)
+				// Last, and named for what it is: nobody owns these, and
+				// anyone can take them.
+				+ section(__("Not yet routed — anyone can take these"), unrouted)
+			);
+		} else {
+			list.html(`<div class="ch-queue-cards">${
+				tokens.map((t) => this._tokenCard(t)).join("")}</div>`);
+		}
 
 		// Bind action buttons
 		list.find(".ch-q-card").on("click", (e) => {
