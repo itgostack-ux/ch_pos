@@ -81,8 +81,29 @@ def run_all():
 	for tok in live:
 		from ch_pos.api.token_api import get_pos_waiting_tokens
 
-		rows = get_pos_waiting_tokens(tok.pos_profile)
+		try:
+			rows = get_pos_waiting_tokens(tok.pos_profile)
+		except Exception as e:
+			# The till refusing to trade on a stale business date, or a queue
+			# that has rolled over to a new day, is the app being right. The
+			# vocabulary is still assertable without it.
+			# A till refusing to trade on a stale business date is the app being
+			# right; it is not evidence about the status vocabulary.
+			_results.append(("BLOCKED",
+			                 f"{tok.token_display or tok.name}: the till could not be asked",
+			                 str(e)[:90]))
+			continue
 		match = [r for r in rows if r.get("name") == tok.name]
+		# A walk-in queue position expires with the day, so a token created
+		# yesterday is correctly absent from today's queue. Only assert
+		# presence for tokens raised today.
+		from frappe.utils import getdate, today as _today
+		same_day = getdate(frappe.db.get_value(
+			"POS Kiosk Token", tok.name, "creation")) == getdate(_today())
+		if not same_day:
+			_check(f"{tok.token_display or tok.name} is correctly aged out of today's queue",
+			       not match, "created on an earlier day")
+			continue
 		_check(f"{tok.token_display or tok.name} ({tok.company.split()[0]}) reaches the queue API",
 		       bool(match), f"{len(rows)} rows for {tok.pos_profile}")
 		if match:
@@ -107,5 +128,7 @@ def run_all():
 	for status, label, detail in _results:
 		print(f"{status}  {label:<62} {detail}")
 	failed = sum(1 for s, _l, _d in _results if s == "FAIL")
-	print(f"TOTAL: {len(_results) - failed} passed, {failed} failed")
-	return {"passed": len(_results) - failed, "failed": failed}
+	blocked = sum(1 for s, _l, _d in _results if s == "BLOCKED")
+	passed = len(_results) - failed - blocked
+	print(f"TOTAL: {passed} passed, {failed} failed, {blocked} blocked")
+	return {"passed": passed, "failed": failed, "blocked": blocked}

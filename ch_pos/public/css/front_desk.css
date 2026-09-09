@@ -662,3 +662,44 @@
 .ch-pos-cart-panel.ch-pos-cart-intake-only {
 	align-content: flex-start;
 }
+
+/* ── Service Intake runs the full width ─────────────────────────────────── */
+/* The cart panel used to stay open on this screen holding a single dropdown,
+   while the intake form -- eighteen fields across three sections -- was
+   squeezed into two thirds of the width. The panel closes here and the form
+   gets the room, the same way the Front Desk does. */
+.ch-pos-container.ch-pos-full-width .ch-pos-content-panel {
+	flex: 1 1 100%;
+	max-width: 100%;
+	width: 100%;
+}
+.ch-pos-container.ch-pos-full-width .ch-pos-cart-panel {
+	display: none !important;
+}
+
+/* Billed By, moved into the form. It sits above the intake header so the
+   person taking the device in can see whose name goes on the ticket. */
+.ch-pos-executive-bar.ch-pos-exec-inline {
+	display: flex !important;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin: 0 0 var(--pos-space-md, 14px);
+	padding: 8px 12px;
+	border: 1px solid var(--pos-border, #e2e8f0);
+	border-radius: var(--pos-radius-sm, 6px);
+	background: var(--pos-surface-2, #f8fafc);
+}
+.ch-pos-executive-bar.ch-pos-exec-inline .ch-pos-executive-select-wrapper {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+.ch-pos-executive-bar.ch-pos-exec-inline .ch-pos-executive-select {
+	min-width: 200px;
+	max-width: 320px;
+}
+.ch-pos-executive-bar.ch-pos-exec-inline .ch-pos-company-switcher {
+	flex: 0 0 auto;
+}

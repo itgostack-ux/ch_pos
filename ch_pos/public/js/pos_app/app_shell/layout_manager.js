@@ -127,6 +127,14 @@ export class LayoutManager {
 	 * @param {string} mode - Mode key (sell, buyback, repair, etc.)
 	 */
 	_switch_to(mode) {
+		// Rescue the Billed By control before the panel is cleared. On Service
+		// Intake it lives INSIDE the form; emptying the panel would destroy it,
+		// and the next sale would have no way to name who is billing.
+		const $inline = this.$content_panel.find(".ch-pos-executive-bar.ch-pos-exec-inline");
+		if ($inline.length) {
+			this.$cart_panel.prepend($inline.removeClass("ch-pos-exec-inline"));
+		}
+
 		// Remove all delegated jQuery handlers from previous module, then clear DOM
 		this.$content_panel.off();
 		this.$content_panel.empty();
@@ -141,9 +149,17 @@ export class LayoutManager {
 		// Service Intake takes in a device; it does not sell anything. A cart
 		// beside it is an invitation to bill against a repair that has no price
 		// yet, and it was showing the previous mode's basket next to a ticket
-		// for a different customer entirely. Only "Billed By" stays, because the
-		// ticket needs to record who took the device in.
-		this.$cart_panel.toggleClass("ch-pos-cart-intake-only", mode === "repair");
+		// for a different customer entirely.
+		//
+		// Hiding only the cart's contents left a third of the screen holding one
+		// dropdown while the intake form -- eighteen fields over three sections
+		// -- was squeezed into what remained. The panel now closes entirely, the
+		// form runs the full width like the Front Desk, and "Billed By" moves
+		// into the form, where the person taking the device in can see it.
+		const intake = mode === "repair";
+		this.$cart_panel.toggleClass("ch-pos-cart-intake-only", intake);
+		if (intake) this.$cart_panel.hide();
+		this.$container.toggleClass("ch-pos-full-width", intake);
 
 		// Emit for module workspaces to render their content
 		EventBus.emit("workspace:render", {
@@ -151,6 +167,17 @@ export class LayoutManager {
 			panel: this.$content_panel,
 			cart_panel: this.$cart_panel,
 		});
+
+		// Move the Billed By control into the intake form -- moved, not cloned,
+		// because it carries its own bindings and two copies would drift apart.
+		// After the emit: the workspace replaces the panel's HTML when it draws.
+		if (intake) {
+			const $exec = this.$cart_panel.find(".ch-pos-executive-bar");
+			const $host = this.$content_panel.find(".ch-pos-mode-panel").first();
+			if ($exec.length && $host.length) {
+				$host.prepend($exec.addClass("ch-pos-exec-inline"));
+			}
+		}
 	}
 
 	/** Get the content panel (for modules to render into) */
