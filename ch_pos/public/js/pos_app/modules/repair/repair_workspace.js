@@ -153,9 +153,14 @@ export class RepairWorkspace {
 					</button>
 				</div>
 
-				<!-- Section 1: Customer & Device -->
+				<!-- Section 1: the person. Who they are, how to reach them, and
+				     how their device gets here and home again -- everything the
+				     counter settles with the customer standing in front of them.
+				     The device itself is its own section below, because the two
+				     are answered by different people at different moments: the
+				     customer answers this one, the bench answers that one. -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
-					<div class="section-header"><i class="fa fa-user"></i> ${__("Customer & Device")}</div>
+					<div class="section-header"><i class="fa fa-user"></i> ${__("Customer")}</div>
 					<div class="section-body">
 						<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md)">
 							<div class="ch-pos-field-group">
@@ -172,6 +177,80 @@ export class RepairWorkspace {
 								<label>${__("Contact Phone")} <span style="color:var(--pos-danger)">*</span></label>
 								<input type="text" class="form-control ch-rep-phone" placeholder="${__("Phone number")}">
 							</div>
+						</div>
+
+						<div class="ch-rep-movement-block" style="margin-top:var(--pos-space-md);
+							padding-top:var(--pos-space-md);border-top:1px solid var(--pos-border,#e5e7eb)">
+							<div style="font-size:11px;font-weight:700;letter-spacing:.04em;
+								text-transform:uppercase;color:var(--pos-text-muted,#6b7280);
+								margin-bottom:var(--pos-space-sm)">
+								<i class="fa fa-truck"></i> ${__("How It Reaches Us & Goes Back")}
+							</div>
+							<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:var(--pos-space-md)">
+								<div class="ch-pos-field-group">
+									<label>${__("How It Reached Us")}</label>
+									<select class="form-control ch-rep-intake-method">
+										<option value="">${__("Loading…")}</option>
+									</select>
+								</div>
+								<div class="ch-pos-field-group ch-rep-in-partner-wrap" style="display:none">
+									<label>${__("Collected By")}</label>
+									<select class="form-control ch-rep-intake-partner">
+										<option value="">${__("Select partner…")}</option>
+									</select>
+								</div>
+								<div class="ch-pos-field-group ch-rep-in-track-wrap" style="display:none">
+									<label>${__("Inbound Tracking / Task No")}</label>
+									<input type="text" class="form-control ch-rep-intake-tracking"
+										placeholder="${__("Waybill or task reference")}">
+								</div>
+								<div class="ch-pos-field-group ch-rep-in-recv-wrap" style="display:none">
+									<label>${__("Device Received At")}</label>
+									<input type="datetime-local" class="form-control ch-rep-intake-received">
+								</div>
+								<div class="ch-pos-field-group ch-rep-in-slot-wrap" style="display:none">
+									<label>${__("Pickup Slot")}</label>
+									<input type="datetime-local" class="form-control ch-rep-pickup-slot">
+								</div>
+							</div>
+							<div class="ch-pos-field-group ch-rep-in-addr-wrap" style="display:none;margin-top:var(--pos-space-sm)">
+								<label>${__("Collected From")}</label>
+								<textarea class="form-control ch-rep-pickup-address" rows="2"
+									placeholder="${__("Where the device was picked up")}"></textarea>
+							</div>
+							<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:var(--pos-space-md)";margin-top:var(--pos-space-sm)">
+								<div class="ch-pos-field-group">
+									<label>${__("How It Goes Back")}</label>
+									<select class="form-control ch-rep-return-method">
+										<option value="">${__("Decide at billing")}</option>
+									</select>
+									<small class="text-muted">${__("Can be left open, but it must be agreed before the invoice — billing will refuse until it is.")}</small>
+								</div>
+								<div class="ch-pos-field-group ch-rep-out-partner-wrap" style="display:none">
+									<label>${__("Returned By")}</label>
+									<select class="form-control ch-rep-return-partner">
+										<option value="">${__("Select partner…")}</option>
+									</select>
+								</div>
+								<div class="ch-pos-field-group ch-rep-out-slot-wrap" style="display:none">
+									<label>${__("Return Slot")}</label>
+									<input type="datetime-local" class="form-control ch-rep-return-slot">
+								</div>
+							</div>
+							<div class="ch-pos-field-group ch-rep-out-addr-wrap" style="display:none;margin-top:var(--pos-space-sm)">
+								<label>${__("Return Address")}</label>
+								<textarea class="form-control ch-rep-return-address" rows="2"
+									placeholder="${__("Where the device has to be delivered")}"></textarea>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- Section 2: the thing on the counter. -->
+				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
+					<div class="section-header"><i class="fa fa-mobile"></i> ${__("Device")}</div>
+					<div class="section-body">
+						<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md)">
 							<div class="ch-pos-field-group">
 								<label>${__("Category")} <span style="color:var(--pos-danger)">*</span></label>
 								<div class="ch-repair-category-link"></div>
@@ -319,74 +398,6 @@ export class RepairWorkspace {
 								<option value="">${__("Unassigned — nobody is recorded as working on it")}</option>
 							</select>
 							<small class="text-muted">${__("Analysis time starts being recorded against whoever you pick.")}</small>
-						</div>
-					</div>
-				</div>
-
-				<!-- A device that arrives by courier and goes home by Porter is
-				     two journeys nobody was recording. Asked here because this is
-				     the only moment the customer is standing in front of us; left
-				     to billing it becomes a phone call. Which boxes appear is
-				     decided by the Device Logistics Method master, so ops can add
-				     a channel without a code change. -->
-				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
-					<div class="section-header"><i class="fa fa-truck"></i> ${__("Device Movement")}</div>
-					<div class="section-body">
-						<div class="ch-pos-field-row">
-							<div class="ch-pos-field-group">
-								<label>${__("How It Reached Us")}</label>
-								<select class="form-control ch-rep-intake-method">
-									<option value="">${__("Loading…")}</option>
-								</select>
-							</div>
-							<div class="ch-pos-field-group ch-rep-in-partner-wrap" style="display:none">
-								<label>${__("Collected By")}</label>
-								<select class="form-control ch-rep-intake-partner">
-									<option value="">${__("Select partner…")}</option>
-								</select>
-							</div>
-							<div class="ch-pos-field-group ch-rep-in-track-wrap" style="display:none">
-								<label>${__("Inbound Tracking / Task No")}</label>
-								<input type="text" class="form-control ch-rep-intake-tracking"
-									placeholder="${__("Waybill or task reference")}">
-							</div>
-							<div class="ch-pos-field-group ch-rep-in-recv-wrap" style="display:none">
-								<label>${__("Device Received At")}</label>
-								<input type="datetime-local" class="form-control ch-rep-intake-received">
-							</div>
-							<div class="ch-pos-field-group ch-rep-in-slot-wrap" style="display:none">
-								<label>${__("Pickup Slot")}</label>
-								<input type="datetime-local" class="form-control ch-rep-pickup-slot">
-							</div>
-						</div>
-						<div class="ch-pos-field-group ch-rep-in-addr-wrap" style="display:none;margin-top:var(--pos-space-sm)">
-							<label>${__("Collected From")}</label>
-							<textarea class="form-control ch-rep-pickup-address" rows="2"
-								placeholder="${__("Where the device was picked up")}"></textarea>
-						</div>
-						<div class="ch-pos-field-row" style="margin-top:var(--pos-space-sm)">
-							<div class="ch-pos-field-group">
-								<label>${__("How It Goes Back")}</label>
-								<select class="form-control ch-rep-return-method">
-									<option value="">${__("Decide at billing")}</option>
-								</select>
-								<small class="text-muted">${__("Can be left open, but it must be agreed before the invoice — billing will refuse until it is.")}</small>
-							</div>
-							<div class="ch-pos-field-group ch-rep-out-partner-wrap" style="display:none">
-								<label>${__("Returned By")}</label>
-								<select class="form-control ch-rep-return-partner">
-									<option value="">${__("Select partner…")}</option>
-								</select>
-							</div>
-							<div class="ch-pos-field-group ch-rep-out-slot-wrap" style="display:none">
-								<label>${__("Return Slot")}</label>
-								<input type="datetime-local" class="form-control ch-rep-return-slot">
-							</div>
-						</div>
-						<div class="ch-pos-field-group ch-rep-out-addr-wrap" style="display:none;margin-top:var(--pos-space-sm)">
-							<label>${__("Return Address")}</label>
-							<textarea class="form-control ch-rep-return-address" rows="2"
-								placeholder="${__("Where the device has to be delivered")}"></textarea>
 						</div>
 					</div>
 				</div>
@@ -1142,14 +1153,33 @@ export class RepairWorkspace {
 			// Customer: the queue already resolved (or just created) it, so use
 			// that directly instead of re-guessing. Fall back to the phone
 			// lookup only when the queue handed us nothing.
+			// A token holds a name and a number; it does not hold a Customer.
+			// When neither the queue nor the number resolves one, the counter
+			// was left on a form with Customer blank, the device on the desk
+			// and nothing telling them what to do about it -- the create form
+			// is the answer, with what the token already knows in it.
+			const _needCustomer = () => {
+				if (cust_field.get_value()) return;
+				this._ensureCustomer(panel, { cust_field },
+					{ phone: intakeToken.customer_phone || "" },
+					intakeToken.customer_name || "");
+			};
 			if (intakeToken._resolved_customer) {
 				cust_field.set_value(intakeToken._resolved_customer);
 			} else if (intakeToken.customer_phone) {
 				frappe.xcall("ch_pos.api.token_api.lookup_walkin_customer", {
 					phone: intakeToken.customer_phone,
 				}).then((m) => {
-					if (m && m.customer) cust_field.set_value(m.customer);
-				}).catch(() => {});
+					if (m && m.customer) {
+						cust_field.set_value(m.customer);
+						return;
+					}
+					// Let the rest of the prefill land first, so the dialog
+					// opens over a form the counter can already read.
+					setTimeout(_needCustomer, 700);
+				}).catch(() => setTimeout(_needCustomer, 700));
+			} else {
+				setTimeout(_needCustomer, 700);
 			}
 
 			// Device: carry Category / Brand / Model chosen on the Log Walk-in
@@ -1895,6 +1925,13 @@ export class RepairWorkspace {
 					message: __("Using request {0} — it will close when the ticket is created", [request]),
 					indicator: "green",
 				});
+				// A written-in request names a person, not a Customer. Same
+				// dead end as the queue handover, same way out of it.
+				if (!cust_field.get_value()) {
+					setTimeout(() => this._ensureCustomer(panel, { cust_field },
+						{ phone: phone || r.contact_number || "" },
+						r.customer_name || ""), 700);
+				}
 			})
 			.catch(() => { /* a stale request must never block an intake */ });
 	}
