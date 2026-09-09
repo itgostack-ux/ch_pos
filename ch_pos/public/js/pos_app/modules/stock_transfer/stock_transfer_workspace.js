@@ -383,8 +383,17 @@ export class StockTransferWorkspace {
                 <i class="fa fa-check"></i> ${__("Mark as Packed")}
             </button>` : "";
 
-        const box_label_statuses = ["Partially Packed", "Packed", "Ready For Pickup", "Assigned",
-            "In Transit", "Ready For Receive", "Receive At Transit", "Transferred"];
+        // "Pending With Goods" is deliberately included even though it reads
+        // like an earlier stage: pack_box_stock_entry does NOT advance
+        // custom_status while boxes are still being added — only "Mark as
+        // Packed" moves it, straight to "Packed". So a document sits at
+        // "Pending With Goods" for its entire packing session regardless of
+        // how many boxes already exist, and gating this button on "Partially
+        // Packed" onward (as the backend form's own button once did too)
+        // made it unreachable until Mark as Packed was already clicked —
+        // exactly backwards from what this button is for.
+        const box_label_statuses = ["Pending With Goods", "Partially Packed", "Packed", "Ready For Pickup",
+            "Assigned", "In Transit", "Ready For Receive", "Receive At Transit", "Transferred"];
         const print_box_label_btn = (tab === "outgoing"
             && se.has_packages && box_label_statuses.includes(cs)) ? `
             <button class="btn btn-xs btn-outline-secondary ch-st-boxlabel-btn"
@@ -625,21 +634,71 @@ export class StockTransferWorkspace {
     }
 
     _render_pack_box_dialog(panel, se_name, remaining_total) {
+        // staged_boxes are added locally via "Add Pack Box" — no server call
+        // yet, just held client-side and shown as "pending" in the table —
+        // and only get sent to the server (one pack_box_stock_entry call
+        // each, in order) when "Box Confirmed" is clicked. boxes_this_session
+        // is what that batch actually saved.
+        let staged_boxes = [];
         let boxes_this_session = [];
+        let additional_photos = []; // plain array of file URLs — stored as JSON, no child doctype
         const primary_label = () => __("Box Confirmed");
+
+        const render_additional_photos = () => {
+            const $wrapper = d.fields_dict.additional_photos_html.$wrapper;
+            const thumbs = additional_photos.map((url, idx) => `
+                <div class="ap-thumb" data-idx="${idx}" style="position:relative;display:inline-block;margin:0 8px 8px 0;">
+                    <img src="${frappe.utils.escape_html(url)}"
+                         style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid var(--pos-border-light);">
+                    <span class="ap-remove" data-idx="${idx}" title="${__("Remove")}"
+                        style="position:absolute;top:-6px;right:-6px;background:#d1242f;color:#fff;
+                               border-radius:50%;width:18px;height:18px;line-height:18px;
+                               text-align:center;font-size:12px;cursor:pointer;">×</span>
+                </div>
+            `).join("");
+            $wrapper.html(`
+                <div class="control-label" style="margin-bottom:4px;">${__("Additional Photos")}</div>
+                <button type="button" class="btn btn-xs btn-secondary ap-add-btn" style="margin-bottom:8px;">
+                    ${__("+ Add Photos")}
+                </button>
+                <div class="ap-thumbs">${thumbs}</div>
+            `);
+            $wrapper.find(".ap-add-btn").on("click", () => {
+                new frappe.ui.FileUploader({
+                    allow_multiple: true,
+                    restrictions: { allowed_file_types: ["image/*"] },
+                    on_success(file) {
+                        additional_photos.push(file.file_url);
+                        render_additional_photos();
+                    },
+                });
+            });
+            $wrapper.find(".ap-remove").on("click", (e) => {
+                const idx = parseInt($(e.currentTarget).attr("data-idx"), 10);
+                additional_photos.splice(idx, 1);
+                render_additional_photos();
+            });
+        };
 
         const render_box_table = () => {
             const $wrapper = d.fields_dict.box_table.$wrapper;
-            const rows = boxes_this_session.length
-                ? boxes_this_session.map((b, i) => `
-                    <tr>
-                        <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);">${i + 1}</td>
-                        <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);">${frappe.utils.escape_html(b.package_label || "—")}</td>
-                        <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);text-align:right;">${b.packed_qty}</td>
-                    </tr>`).join("")
-                : `<tr>
-                    <td colspan="3" class="text-muted" style="padding:8px;text-align:center;">${__("No boxes added yet this session.")}</td>
-                </tr>`;
+            const staged_rows = staged_boxes.map((b, i) => `
+                <tr style="opacity:0.65">
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);">${i + 1}</td>
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);font-style:italic;">${__("Box {0} (pending)", [i + 1])}</td>
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);text-align:right;">${b.packed_qty}</td>
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);text-align:right;">
+                        <a href="#" class="remove-staged-box text-danger" data-staged-idx="${i}" style="font-size:11px;">${__("Remove")}</a>
+                    </td>
+                </tr>`);
+            const saved_rows = boxes_this_session.map((b, i) => `
+                <tr>
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);">${staged_boxes.length + i + 1}</td>
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);">${frappe.utils.escape_html(b.package_label || "—")}</td>
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);text-align:right;">${b.packed_qty}</td>
+                    <td style="padding:4px 8px;border-bottom:1px solid var(--pos-border-light);"></td>
+                </tr>`);
+            const rows = [...staged_rows, ...saved_rows];
             $wrapper.html(`
                 <table style="width:100%;border-collapse:collapse;font-size:12px;">
                     <thead>
@@ -647,9 +706,12 @@ export class StockTransferWorkspace {
                             <th style="padding:4px 8px;text-align:left;">#</th>
                             <th style="padding:4px 8px;text-align:left;">${__("Box")}</th>
                             <th style="padding:4px 8px;text-align:right;">${__("Qty")}</th>
+                            <th style="padding:4px 8px;"></th>
                         </tr>
                     </thead>
-                    <tbody>${rows}</tbody>
+                    <tbody>${rows.length ? rows.join("") : `
+                        <tr><td colspan="4" class="text-muted" style="padding:8px;text-align:center;">${__("No boxes added yet this session.")}</td></tr>
+                    `}</tbody>
                 </table>`);
         };
 
@@ -664,6 +726,10 @@ export class StockTransferWorkspace {
                         check_packed_qty_live();
                     },
                 },
+                {
+                    fieldname: "add_pack_box", fieldtype: "Button", label: __("Add Pack Box"),
+                    click() { stage_current_box(); },
+                },
                 { fieldname: "weight_kg", fieldtype: "Float", label: __("Weight (kg)") },
                 {
                     fieldname: "dimensions_cm", fieldtype: "Data", label: __("Dimensions (LxWxH cm)"),
@@ -676,46 +742,48 @@ export class StockTransferWorkspace {
                     options: "\nSealed\nOpen",
                 },
                 { fieldname: "packing_photo", fieldtype: "Attach Image", label: __("Packing Photo") },
+                { fieldname: "additional_photos_html", fieldtype: "HTML" },
                 { fieldname: "notes", fieldtype: "Small Text", label: __("Notes") },
                 { fieldname: "sec_boxes", fieldtype: "Section Break", label: __("Boxes Packed This Session") },
                 { fieldname: "box_table", fieldtype: "HTML" },
             ],
             primary_action_label: primary_label(),
-            primary_action: (values) => {
-                if (!values.packed_qty || values.packed_qty <= 0) {
-                    frappe.msgprint(__("Enter a packed quantity greater than zero."));
-                    return;
-                }
-                if (values.packed_qty > remaining_total) {
-                    frappe.msgprint({
-                        title: __("Overpack Blocked"),
-                        indicator: "red",
-                        message: __("Cannot pack {0} units — only {1} remaining.",
-                            [values.packed_qty, remaining_total]),
-                    });
-                    return;
-                }
-                frappe.call({
-                    method: "ch_erp15.ch_erp15.custom.stock_entry.pack_box_stock_entry",
-                    args: {
-                        stock_entry: se_name,
-                        packed_qty: values.packed_qty,
-                        weight_kg: values.weight_kg,
-                        dimensions_cm: values.dimensions_cm,
-                        seal_number: values.seal_number,
-                        seal_status: values.seal_status,
-                        packing_photo: values.packing_photo,
-                        notes: values.notes,
-                    },
-                    freeze: true,
-                }).then((r) => {
-                    const m = r.message || {};
-                    boxes_this_session.push({ package_label: m.package_label, packed_qty: values.packed_qty });
-                    render_box_table();
-                    remaining_total -= values.packed_qty;
+            primary_action: () => {
+                if (!staged_boxes.length) return; // button should be disabled anyway
+                const to_save = staged_boxes.slice();
+                const primary_btn = d.get_primary_btn();
+                primary_btn.prop("disabled", true);
 
+                // Sequential, not parallel — each save should see the previous
+                // one's effect on the server's own remaining-qty bookkeeping.
+                let chain = Promise.resolve();
+                to_save.forEach((box) => {
+                    chain = chain.then(() => frappe.call({
+                        method: "ch_erp15.ch_erp15.custom.stock_entry.pack_box_stock_entry",
+                        args: {
+                            stock_entry: se_name,
+                            packed_qty: box.packed_qty,
+                            weight_kg: box.weight_kg,
+                            dimensions_cm: box.dimensions_cm,
+                            seal_number: box.seal_number,
+                            seal_status: box.seal_status,
+                            packing_photo: box.packing_photo,
+                            additional_photos: box.additional_photos,
+                            notes: box.notes,
+                        },
+                        freeze: true,
+                        freeze_message: __("Saving boxes…"),
+                    }).then((r) => {
+                        const m = r.message || {};
+                        boxes_this_session.push({ package_label: m.package_label, packed_qty: box.packed_qty });
+                        staged_boxes.shift();
+                        render_box_table();
+                    }));
+                });
+
+                chain.then(() => {
                     frappe.show_alert({
-                        message: __("Box {0} packed ({1} units).", [m.package_label || se_name, values.packed_qty]),
+                        message: __("{0} box(es) packed.", [to_save.length]),
                         indicator: "green",
                     }, 4);
 
@@ -730,17 +798,7 @@ export class StockTransferWorkspace {
                         return;
                     }
 
-                    d.set_value("packed_qty", remaining_total);
-                    d.set_value("weight_kg", "");
-                    d.set_value("dimensions_cm", "");
-                    d.set_value("seal_number", "");
-                    d.set_value("seal_status", "");
-                    d.set_value("packing_photo", "");
-                    d.set_value("notes", "");
-                    d.get_field("packed_qty").set_description(
-                        __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
-                    );
-                    d.get_primary_btn().html(primary_label());
+                    primary_btn.prop("disabled", true); // nothing staged anymore until Add Pack Box is clicked again
                 });
             },
             on_hide: () => {
@@ -767,13 +825,90 @@ export class StockTransferWorkspace {
                       )}</span>`
                     : __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
             );
-            d.get_primary_btn().prop("disabled", over || !qty || qty <= 0);
-            d.get_primary_btn().html(primary_label());
+            d.get_field("add_pack_box").$input.prop("disabled", over || !qty || qty <= 0);
         }
 
+        // Add Pack Box stages the current form values locally — no server
+        // call — clears the form for the next box, and is the only thing
+        // that enables Box Confirmed, which then saves everything staged.
+        function stage_current_box() {
+            const qty = flt(d.get_value("packed_qty"));
+            if (!qty || qty <= 0) {
+                frappe.msgprint(__("Enter a packed quantity greater than zero."));
+                return;
+            }
+            if (qty > remaining_total) {
+                frappe.msgprint({
+                    title: __("Overpack Blocked"),
+                    indicator: "red",
+                    message: __("Cannot pack {0} units — only {1} remaining.", [qty, remaining_total]),
+                });
+                return;
+            }
+            // Packing Photo is mandatory on CH Stock Entry Package server-side —
+            // catch it here, before staging, instead of leaving it to surface at
+            // Box Confirmed time against a different, already-cleared box.
+            if (!d.get_value("packing_photo")) {
+                frappe.msgprint(__("Attach a packing photo before adding this box."));
+                return;
+            }
+
+            staged_boxes.push({
+                packed_qty: qty,
+                weight_kg: d.get_value("weight_kg"),
+                dimensions_cm: d.get_value("dimensions_cm"),
+                seal_number: d.get_value("seal_number"),
+                seal_status: d.get_value("seal_status"),
+                packing_photo: d.get_value("packing_photo"),
+                additional_photos: additional_photos.slice(),
+                notes: d.get_value("notes"),
+            });
+            remaining_total -= qty;
+            render_box_table();
+            d.get_primary_btn().prop("disabled", false);
+
+            // Clear the form for the next box.
+            d.set_value("packed_qty", remaining_total > 0 ? remaining_total : 0);
+            d.set_value("weight_kg", "");
+            d.set_value("dimensions_cm", "");
+            d.set_value("seal_number", "");
+            d.set_value("seal_status", "");
+            d.set_value("packing_photo", "");
+            additional_photos = [];
+            render_additional_photos();
+            d.set_value("notes", "");
+            d.get_field("packed_qty").set_description(
+                remaining_total > 0
+                    ? __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
+                    : __("Nothing left to pack — click {0} to save.", [primary_label()])
+            );
+            d.get_field("add_pack_box").$input.prop("disabled", remaining_total <= 0);
+        }
+
+        // Delegated so it keeps working across re-renders (render_box_table
+        // rebuilds the table's HTML from scratch every time). Only pending
+        // (staged, not-yet-saved) boxes are removable — anything already in
+        // boxes_this_session has been persisted via pack_box_stock_entry and
+        // undoing it would need a real server-side unpack.
+        d.$wrapper.on("click", ".remove-staged-box", (e) => {
+            e.preventDefault();
+            const idx = parseInt($(e.currentTarget).attr("data-staged-idx"), 10);
+            if (Number.isNaN(idx) || !staged_boxes[idx]) return;
+            remaining_total += flt(staged_boxes[idx].packed_qty);
+            staged_boxes.splice(idx, 1);
+            render_box_table();
+            d.get_primary_btn().prop("disabled", !staged_boxes.length);
+            d.get_field("packed_qty").set_description(
+                __("How many item units are physically in this box? Max: {0} remaining.", [remaining_total])
+            );
+            d.get_field("add_pack_box").$input.prop("disabled", remaining_total <= 0);
+        });
+
         render_box_table();
+        render_additional_photos();
         d.show();
         d.get_field("packed_qty").$input.on("input", check_packed_qty_live);
+        d.get_primary_btn().prop("disabled", true); // nothing staged yet
     }
 
     // ════════════════════════════════════════════════════════════════════════
