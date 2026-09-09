@@ -200,6 +200,18 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		"email", "alternate_contact", "password", "pattern",
 		"customer_remarks", "internal_remarks", "referral_code",
 		"advance_amount", "estimated_cost",
+		# How the device physically got here and how it goes home. Recorded at
+		# intake because that is the only moment the customer is standing there
+		# to be asked; leaving it to billing turns it into a phone call. The
+		# Device Logistics Method master says which of these each mode needs,
+		# and validate_logistics enforces that server-side.
+		"intake_method", "intake_partner", "intake_tracking_number",
+		"intake_received_datetime",
+		# The inbound leg's address and slot live on the pre-existing pickup
+		# fields, which is what validate_logistics checks it against.
+		"pickup_address", "pickup_scheduled_datetime",
+		"return_method", "return_partner", "return_address",
+		"return_scheduled_datetime",
 	):
 		if data.get(field):
 			sr.set(field, data[field])

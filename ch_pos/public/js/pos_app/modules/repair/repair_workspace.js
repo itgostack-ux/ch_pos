@@ -323,6 +323,74 @@ export class RepairWorkspace {
 					</div>
 				</div>
 
+				<!-- A device that arrives by courier and goes home by Porter is
+				     two journeys nobody was recording. Asked here because this is
+				     the only moment the customer is standing in front of us; left
+				     to billing it becomes a phone call. Which boxes appear is
+				     decided by the Device Logistics Method master, so ops can add
+				     a channel without a code change. -->
+				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
+					<div class="section-header"><i class="fa fa-truck"></i> ${__("Device Movement")}</div>
+					<div class="section-body">
+						<div class="ch-pos-field-row">
+							<div class="ch-pos-field-group">
+								<label>${__("How It Reached Us")}</label>
+								<select class="form-control ch-rep-intake-method">
+									<option value="">${__("Loading…")}</option>
+								</select>
+							</div>
+							<div class="ch-pos-field-group ch-rep-in-partner-wrap" style="display:none">
+								<label>${__("Collected By")}</label>
+								<select class="form-control ch-rep-intake-partner">
+									<option value="">${__("Select partner…")}</option>
+								</select>
+							</div>
+							<div class="ch-pos-field-group ch-rep-in-track-wrap" style="display:none">
+								<label>${__("Inbound Tracking / Task No")}</label>
+								<input type="text" class="form-control ch-rep-intake-tracking"
+									placeholder="${__("Waybill or task reference")}">
+							</div>
+							<div class="ch-pos-field-group ch-rep-in-recv-wrap" style="display:none">
+								<label>${__("Device Received At")}</label>
+								<input type="datetime-local" class="form-control ch-rep-intake-received">
+							</div>
+							<div class="ch-pos-field-group ch-rep-in-slot-wrap" style="display:none">
+								<label>${__("Pickup Slot")}</label>
+								<input type="datetime-local" class="form-control ch-rep-pickup-slot">
+							</div>
+						</div>
+						<div class="ch-pos-field-group ch-rep-in-addr-wrap" style="display:none;margin-top:var(--pos-space-sm)">
+							<label>${__("Collected From")}</label>
+							<textarea class="form-control ch-rep-pickup-address" rows="2"
+								placeholder="${__("Where the device was picked up")}"></textarea>
+						</div>
+						<div class="ch-pos-field-row" style="margin-top:var(--pos-space-sm)">
+							<div class="ch-pos-field-group">
+								<label>${__("How It Goes Back")}</label>
+								<select class="form-control ch-rep-return-method">
+									<option value="">${__("Decide at billing")}</option>
+								</select>
+								<small class="text-muted">${__("Can be left open, but it must be agreed before the invoice — billing will refuse until it is.")}</small>
+							</div>
+							<div class="ch-pos-field-group ch-rep-out-partner-wrap" style="display:none">
+								<label>${__("Returned By")}</label>
+								<select class="form-control ch-rep-return-partner">
+									<option value="">${__("Select partner…")}</option>
+								</select>
+							</div>
+							<div class="ch-pos-field-group ch-rep-out-slot-wrap" style="display:none">
+								<label>${__("Return Slot")}</label>
+								<input type="datetime-local" class="form-control ch-rep-return-slot">
+							</div>
+						</div>
+						<div class="ch-pos-field-group ch-rep-out-addr-wrap" style="display:none;margin-top:var(--pos-space-sm)">
+							<label>${__("Return Address")}</label>
+							<textarea class="form-control ch-rep-return-address" rows="2"
+								placeholder="${__("Where the device has to be delivered")}"></textarea>
+						</div>
+					</div>
+				</div>
+
 				<!-- Success result (injected after creation) -->
 				<div class="ch-rep-result-area"></div>
 
@@ -734,6 +802,84 @@ export class RepairWorkspace {
 			_render_issue_tags();
 		});
 
+		// ── Device movement ─────────────────────────────────────────
+		// The master carries its own rules, so the form asks a courier for a
+		// waybill and a customer collecting at the counter for nothing. Keeping
+		// that in the master is what lets ops add Porter or Swiggy without
+		// touching this file.
+		this._movement = { methods: [], partners: [] };
+		const $in_method  = panel.find(".ch-rep-intake-method");
+		const $out_method = panel.find(".ch-rep-return-method");
+
+		const _applyMovementRules = (method_name, which) => {
+			const cfg = (this._movement.methods || []).find((m) => m.name === method_name);
+            const pre = which === "in" ? ".ch-rep-in-" : ".ch-rep-out-";
+            const show = (suffix, on) => panel.find(pre + suffix).toggle(!!on);
+			if (!cfg) {
+				["partner-wrap", "track-wrap", "recv-wrap", "slot-wrap", "addr-wrap"]
+					.forEach((sfx) => show(sfx, false));
+				return;
+			}
+			show("partner-wrap", cfg.requires_partner);
+			if (which === "in") {
+				show("track-wrap", cfg.requires_tracking);
+				// Anything that did not walk in arrived at some point worth
+				// recording -- it is the clock the customer's device has been
+				// with us against.
+				show("recv-wrap", !cfg.customer_present);
+				// The same two the server checks the inbound leg against, so
+				// the form cannot ask for less than the save demands.
+				show("addr-wrap", cfg.requires_address);
+				show("slot-wrap", cfg.requires_schedule);
+			} else {
+				show("slot-wrap", cfg.requires_schedule);
+				show("addr-wrap", cfg.requires_address);
+			}
+		};
+
+		frappe.xcall("gofix.gofix_services.logistics.movement_options")
+			.then((opts) => {
+				this._movement = opts || { methods: [], partners: [] };
+				const methods = this._movement.methods || [];
+				const partners = this._movement.partners || [];
+				const m_opts = methods.map((m) =>
+					`<option value="${frappe.utils.escape_html(m.name)}">${
+						__(m.name)}</option>`).join("");
+				$in_method.html(`<option value="">${__("Select…")}</option>` + m_opts);
+				$out_method.html(`<option value="">${__("Decide at billing")}</option>` + m_opts);
+				const p_opts = partners.map((p) =>
+					`<option value="${frappe.utils.escape_html(p.name)}">${
+						frappe.utils.escape_html(p.partner_name || p.name)}</option>`).join("");
+				panel.find(".ch-rep-intake-partner, .ch-rep-return-partner")
+					.html(`<option value="">${__("Select partner…")}</option>` + p_opts);
+				// A counter intake is somebody standing here; default to that
+				// rather than making them pick it every single time.
+				const in_person = methods.find((m) => m.customer_present);
+				if (in_person && !this._intakeToken) {
+					$in_method.val(in_person.name);
+					_applyMovementRules(in_person.name, "in");
+				}
+			})
+			.catch(() => {
+				// Movement is a detail on the ticket, never a reason an intake
+				// cannot be taken.
+				$in_method.html(`<option value="">${__("Unavailable")}</option>`);
+				$out_method.html(`<option value="">${__("Decide at billing")}</option>`);
+			});
+
+		const _resetMovement = () => {
+			panel.find(".ch-rep-in-partner-wrap, .ch-rep-in-track-wrap, .ch-rep-in-recv-wrap, "
+				+ ".ch-rep-in-addr-wrap, .ch-rep-in-slot-wrap, "
+				+ ".ch-rep-out-partner-wrap, .ch-rep-out-slot-wrap, .ch-rep-out-addr-wrap").hide();
+			const in_person = (this._movement.methods || []).find((m) => m.customer_present);
+			$in_method.val(in_person ? in_person.name : "");
+			$out_method.val("");
+			if (in_person) _applyMovementRules(in_person.name, "in");
+		};
+
+		$in_method.on("change",  () => _applyMovementRules($in_method.val(), "in"));
+		$out_method.on("change", () => _applyMovementRules($out_method.val(), "out"));
+
 		// ── New Customer quick-create ──
 		panel.on("click", ".ch-rep-new-customer", () => {
 			window.ch_open_new_customer_dialog({
@@ -771,11 +917,27 @@ export class RepairWorkspace {
 				phone: phone,
 				company: PosState.active_company || "",
 			}).then((found) => {
-				if (!found || !found.known) return;
-				this._offerWhatWeKnow(panel, {
-					cust_field, category_field, brand_field, model_field,
-					device_field, serial_field,
-				}, found);
+				if (found && found.known) {
+					this._offerWhatWeKnow(panel, {
+						cust_field, category_field, brand_field, model_field,
+						device_field, serial_field,
+					}, found);
+					return;
+				}
+				// A number nobody recognises used to do nothing at all -- the
+				// counter typed it, the form sat there, and the only way on was
+				// to notice the small New Customer button. An unknown number IS
+				// the signal to open that form, with the number already in it.
+				if (cust_field.get_value()) return;      // somebody is already picked
+				window.ch_open_new_customer_dialog({
+					company: PosState.company,
+					prefill_mobile: phone,
+					on_success: (name, mobile) => {
+						cust_field.set_value(name);
+						if (mobile) panel.find(".ch-rep-phone").val(mobile);
+					},
+					on_use_existing: (customer) => cust_field.set_value(customer),
+				});
 			}).catch(() => { /* a lookup must never block an intake */ });
 		});
 
@@ -882,6 +1044,19 @@ export class RepairWorkspace {
 					// server closes that token against the new request.
 					source_token: this._intakeToken ? this._intakeToken.name : "",
 					source_inbox: this._inboxRequest || "",
+					// How it got here and how it goes home. The server drops any
+					// detail the chosen method does not call for, so a counter
+					// walk-in never carries a stray waybill.
+					intake_method: panel.find(".ch-rep-intake-method").val() || "",
+					intake_partner: panel.find(".ch-rep-intake-partner").val() || "",
+					intake_tracking_number: panel.find(".ch-rep-intake-tracking").val().trim(),
+					intake_received_datetime: panel.find(".ch-rep-intake-received").val() || "",
+					pickup_address: panel.find(".ch-rep-pickup-address").val().trim(),
+					pickup_scheduled_datetime: panel.find(".ch-rep-pickup-slot").val() || "",
+					return_method: panel.find(".ch-rep-return-method").val() || "",
+					return_partner: panel.find(".ch-rep-return-partner").val() || "",
+					return_address: panel.find(".ch-rep-return-address").val().trim(),
+					return_scheduled_datetime: panel.find(".ch-rep-return-slot").val() || "",
 				},
 			}).then((doc) => {
 				frappe.show_alert({
@@ -927,6 +1102,12 @@ export class RepairWorkspace {
 				issue_cat_field.set_value("");
 				selected_issues.length = 0;
 				_render_issue_tags();
+				// The conditional movement boxes stay on screen otherwise, so
+				// the next customer is asked for the last one's waybill.
+				_resetMovement();
+				// The number is cleared with the form, so let the next one be
+				// looked up instead of being suppressed as already probed.
+				this._phone_probe = null;
 				// Create a walk-in token for this repair intake — but not when the
 				// ticket came FROM a token, or the queue gains a duplicate entry
 				// for a customer who is already standing at the counter.
@@ -1139,6 +1320,7 @@ export class RepairWorkspace {
 			issue_cat_field.set_value("");
 			selected_issues.length = 0;
 			_render_issue_tags();
+			_resetMovement();
 		});
 	}
 
@@ -1769,8 +1951,37 @@ export class RepairWorkspace {
 			 <ul style="margin:8px 0 0;padding-left:18px">${lines.join("")}</ul>${extra}
 			 <p style="margin-top:10px">${
 				__("Use this, and close the rest against the new ticket?")}</p>`,
-			() => this._adoptWhatWeKnow(panel, fields, found, req, token)
+			() => this._adoptWhatWeKnow(panel, fields, found, req, token),
+			// Declining still leaves a device on the counter and no customer on
+			// the form, so the number goes to the create form rather than
+			// nowhere.
+			() => this._ensureCustomer(panel, fields, found, who)
 		);
+	}
+
+	/**
+	 * A number we recognise is not the same thing as a customer we hold.
+	 *
+	 * A walk-in token carries a name and a number and no Customer at all, so
+	 * "we already know Vignesh T" was perfectly true and still left the
+	 * Customer field empty with nothing offering to fill it -- the counter had
+	 * to spot the small New Customer button on their own. If we come out of the
+	 * recognition step with no customer, this opens the create form with what
+	 * the number already told us.
+	 */
+	_ensureCustomer(panel, fields, found, who) {
+		if (fields.cust_field.get_value()) return;
+		const phone = found.phone || (panel.find(".ch-rep-phone").val() || "").trim();
+		window.ch_open_new_customer_dialog({
+			company: PosState.company,
+			prefill_mobile: phone,
+			prefill_name: (who && who !== __("this customer")) ? who : "",
+			on_success: (name, mobile) => {
+				fields.cust_field.set_value(name);
+				if (mobile) panel.find(".ch-rep-phone").val(mobile);
+			},
+			on_use_existing: (customer) => fields.cust_field.set_value(customer),
+		});
 	}
 
 	_adoptWhatWeKnow(panel, fields, found, req, token) {
@@ -1796,6 +2007,14 @@ export class RepairWorkspace {
 			setLink(fields.model_field, req.device_model);
 			setLink(fields.device_field, req.device_item);
 			setLink(fields.serial_field, req.serial_no);
+		}
+
+		// Recognising the number told us a name, not a Customer. If nothing
+		// filled the field, the counter still needs one before they can bill.
+		if (!fields.cust_field.get_value()) {
+			const who = (found.customer && found.customer.customer_name)
+				|| (req && req.customer_name) || (token && token.customer_name) || "";
+			setTimeout(() => this._ensureCustomer(panel, fields, found, who), 300);
 		}
 
 		frappe.show_alert({
