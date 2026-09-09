@@ -17,9 +17,39 @@ from frappe.utils import (
 from buyback.utils import validate_indian_phone
 from ch_pos.config import get_control_setting
 
-# Statuses after which a token can no longer move. Shared by the API layer,
-# the tablet queue position and the quick-intake job-card handoff.
+# ── The token's status vocabulary, defined ONCE ──────────────────────────
+#
+# It had been copied into a dozen places and each copy drifted. Service Intake's
+# "Pick from Queue" listed ("Waiting", "Hold", "Engaged") and so could not see
+# GF-AMBATTUR-001, which was sitting In Progress: the Front Desk showed
+# "1 in store, 1 active" while the intake form said "Nothing waiting". The phone
+# lookup that reunites a typed number with a queued customer had the same three,
+# so an engaged customer got counted twice -- the exact double-count its
+# docstring says it exists to prevent. The store hub filtered on "In Queue",
+# which is not a status this doctype has ever had.
+#
+# Anything that needs to know whether a token is still live imports from here.
+# `test_token_status_vocabulary` asserts these against the doctype's own Select
+# options, so a status added to the field cannot silently fall through the gaps.
+
+# A token can no longer move. Shared by the API layer, the tablet queue position
+# and the quick-intake job-card handoff.
 TERMINAL_STATUSES = ("Completed", "Cancelled", "Converted", "Dropped", "Expired")
+
+# Still live: the customer is in the shop or waiting on us.
+OPEN_STATUSES = ("Waiting", "Hold", "Engaged", "In Progress")
+
+# Nobody has picked them up yet.
+QUEUE_STATUSES = ("Waiting", "Hold")
+
+# Somebody is serving them right now.
+SERVING_STATUSES = ("Engaged", "In Progress")
+
+# What the expiry sweep may close. Deliberately NOT "In Progress": that means an
+# executive is mid-service, and a token expiring under them would drop a customer
+# who is standing at the counter. Session close already handles the abandoned
+# case -- see session_validation.
+EXPIRABLE_STATUSES = ("Waiting", "Hold", "Engaged")
 
 
 def _gofix_int_setting(fieldname: str, default: int) -> int:
@@ -110,7 +140,8 @@ def expire_old_tokens():
     batch_limit = max(1, min(cint(get_control_setting("scheduler_batch_limit", 500)), 5000))
     tokens = frappe.get_all(
         "POS Kiosk Token",
-        filters={"status": ("in", ["Waiting", "Engaged"]), "expires_at": ("<", now_datetime()), "docstatus": 1},
+        filters={"status": ("in", list(EXPIRABLE_STATUSES)),
+                 "expires_at": ("<", now_datetime()), "docstatus": 1},
         pluck="name",
         order_by="expires_at asc, name asc",
         limit_page_length=batch_limit,

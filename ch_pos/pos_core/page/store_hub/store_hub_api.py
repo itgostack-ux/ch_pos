@@ -361,7 +361,11 @@ def get_store_hub_data(company=None, store=None, from_date=None, to_date=None):
             "action": "Investigate variance sources and tighten cash handling procedures."
         })
     # Kiosk queue insight
-    waiting_tokens = sum(1 for t in kiosk_tokens if t.get("status") in ("Waiting", "In Queue"))
+    # "In Queue" has never been one of this doctype's statuses, so this counted
+    # Waiting only and missed everyone on Hold or already being served.
+    from ch_pos.pos_kiosk.doctype.pos_kiosk_token.pos_kiosk_token import QUEUE_STATUSES
+
+    waiting_tokens = sum(1 for t in kiosk_tokens if t.get("status") in QUEUE_STATUSES)
     if waiting_tokens > 5:
         ai_insights.append({
             "severity": "Medium",

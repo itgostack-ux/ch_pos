@@ -35,8 +35,13 @@ export class RepairWorkspace {
 		frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", {
 			pos_profile: PosState.pos_profile,
 		}).then((tokens) => {
+			// The server says which tokens are still live. This used to keep its
+			// own list -- ["Waiting", "Hold", "Engaged"] -- which had drifted
+			// from the doctype's vocabulary, so a customer sitting In Progress
+			// was invisible here while the Front Desk showed them "1 active"
+			// on the next screen.
 			const open = (tokens || []).filter(
-				(t) => !t.linked_service_request && ["Waiting", "Hold", "Engaged"].includes(t.status)
+				(t) => !t.linked_service_request && t.is_open !== false
 			);
 			if (!open.length) {
 				frappe.msgprint({

@@ -23,7 +23,16 @@ from ch_pos.config import (
 	has_configured_roles,
 	is_privileged_user,
 	require_configured_roles)
+from ch_pos.pos_kiosk.doctype.pos_kiosk_token.pos_kiosk_token import (
+    OPEN_STATUSES,
+    SERVING_STATUSES,
+)
 from ch_pos.rate_limits import increment_fixed_window
+
+# Interpolated into the two raw queue queries below, which use positional
+# parameters -- a named placeholder cannot be mixed in. Code-controlled
+# constants derived from the one true tuple, never user input.
+_OPEN_SQL = ", ".join(f"'{_s}'" for _s in OPEN_STATUSES)
 
 
 def _configured_limit(fieldname: str, default: int, maximum: int) -> int:
@@ -995,7 +1004,11 @@ def find_waiting_token_by_phone(pos_profile: str, phone: str) -> dict:
         "POS Kiosk Token",
         filters={
             "pos_profile": pos_profile,
-            "status": ("in", ("Waiting", "Hold", "Engaged")),
+            # An engaged customer is still an open token. Omitting "In Progress"
+            # here meant the counter typing the number found nothing and raised a
+            # second ticket -- the same person counted twice, which is exactly
+            # what this function exists to prevent.
+            "status": ("in", OPEN_STATUSES),
             "customer_phone": ("like", f"%{tail}"),
             "linked_service_request": ("in", ("", None)),
         },
@@ -2758,7 +2771,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     today = frappe.utils.today()
     result_limit = _configured_limit("token_queue_result_limit", 200, 2000)
     tokens = frappe.db.sql(
-        """SELECT name, token_display, customer_name, customer_phone,
+        f"""SELECT name, token_display, customer_name, customer_phone,
                   device_type, device_brand, device_model, device_model_name,
                   other_device_hint,
                   issue_category, issue_description, status,
@@ -2775,7 +2788,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                   total_estimate
            FROM `tabPOS Kiosk Token`
            WHERE pos_profile = %s
-                         AND status IN ('Waiting', 'Hold', 'Engaged', 'In Progress')
+             AND status IN ({_OPEN_SQL})
              -- People who came into the shop. Written requests are fetched
              -- separately below; without this a request that arrived today AND
              -- carries a store matches both queries and appears twice in the
@@ -2804,7 +2817,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     # unassigned list.
     company = frappe.db.get_value("POS Profile", pos_profile, "company")
     remote = frappe.db.sql(
-        """SELECT name, token_display, customer_name, customer_phone,
+        f"""SELECT name, token_display, customer_name, customer_phone,
                   device_type, device_brand, device_model, device_model_name,
                   other_device_hint,
                   issue_category, issue_description, status,
@@ -2820,7 +2833,7 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
            FROM `tabPOS Kiosk Token`
            WHERE company = %s
              AND visit_source NOT IN ('Kiosk', 'Counter')
-             AND status IN ('Waiting', 'Hold', 'Engaged', 'In Progress')
+             AND status IN ({_OPEN_SQL})
              AND pos_profile = %s
            ORDER BY creation DESC
            LIMIT %s""",
@@ -2833,6 +2846,14 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     for row in remote:
         row["channel_group"] = "remote"
         row["awaiting_response"] = not row.get("first_response_at")
+
+    # Say whether a token is still actionable rather than making every screen
+    # keep its own copy of the status vocabulary. Service Intake kept one and it
+    # had drifted, so a customer visible on the Front Desk was invisible to the
+    # intake form standing next to it.
+    for row in tokens + remote:
+        row["is_open"] = row.get("status") in OPEN_STATUSES
+        row["is_being_served"] = row.get("status") in SERVING_STATUSES
 
     return _enrich_tokens(tokens + remote, result_limit * 2)
 
