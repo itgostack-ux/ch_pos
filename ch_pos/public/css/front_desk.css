@@ -646,3 +646,19 @@
   color: var(--pos-text-secondary);
 }
 .ch-q-d-route-field .frappe-control { margin-bottom: 0; }
+
+
+/* ── Service Intake: Billed By only ──────────────────────────────────────── */
+/* The intake screen keeps the right-hand column for one thing: naming the
+   person taking the device in. Everything that belongs to a sale -- the
+   basket, totals, sale type, Pay -- is hidden, because nothing is being sold
+   and the price is not known until the device has been looked at. */
+.ch-pos-cart-panel.ch-pos-cart-intake-only > *:not(.ch-pos-executive-bar) {
+	display: none !important;
+}
+.ch-pos-cart-panel.ch-pos-cart-intake-only .ch-pos-executive-bar {
+	display: flex !important;
+}
+.ch-pos-cart-panel.ch-pos-cart-intake-only {
+	align-content: flex-start;
+}

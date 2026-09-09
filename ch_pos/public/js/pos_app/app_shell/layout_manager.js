@@ -138,6 +138,13 @@ export class LayoutManager {
 			this.$cart_panel.show();
 		}
 
+		// Service Intake takes in a device; it does not sell anything. A cart
+		// beside it is an invitation to bill against a repair that has no price
+		// yet, and it was showing the previous mode's basket next to a ticket
+		// for a different customer entirely. Only "Billed By" stays, because the
+		// ticket needs to record who took the device in.
+		this.$cart_panel.toggleClass("ch-pos-cart-intake-only", mode === "repair");
+
 		// Emit for module workspaces to render their content
 		EventBus.emit("workspace:render", {
 			mode: mode,

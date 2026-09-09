@@ -145,6 +145,12 @@ export class CartService {
 				is_free_sale: PosState.is_free_sale || false,
 				exception_request: PosState.exception_request,
 				exception_request_data: PosState.exception_request_data,
+				// Whose cart this is. Without it a cart saved at one company was
+				// restored into whichever company happened to be active next --
+				// another company's items, customer and exception sitting in the
+				// till, ready to be billed against the wrong books.
+				company: PosState.active_company || PosState.company || "",
+				pos_profile: PosState.pos_profile || "",
 				timestamp: frappe.datetime.now_datetime(),
 			};
 			localStorage.setItem("ch_pos_active_cart", JSON.stringify(data));
@@ -158,6 +164,20 @@ export class CartService {
 			const raw = localStorage.getItem("ch_pos_active_cart");
 			if (!raw) return;
 			const data = JSON.parse(raw);
+			// A cart belongs to the company and the till that built it. Restoring
+			// one into a different company is a cross-company leak, so it is
+			// dropped rather than shown. Carts saved before this field existed
+			// carry no company and are dropped for the same reason.
+			const here = PosState.active_company || PosState.company || "";
+			const till = PosState.pos_profile || "";
+			if (here && data.company !== here) {
+				localStorage.removeItem("ch_pos_active_cart");
+				return;
+			}
+			if (till && data.pos_profile && data.pos_profile !== till) {
+				localStorage.removeItem("ch_pos_active_cart");
+				return;
+			}
 			// Only restore if saved within last 12 hours
 			if (data.timestamp) {
 				const saved = new Date(data.timestamp);
@@ -309,6 +329,9 @@ export class CartService {
 		EventBus.on("cart:add_item", (item_data) => this.add_to_cart(item_data));
 
 		EventBus.on("company:switched", () => {
+			// Unconditionally: an empty till with a stored cart used to keep that
+			// cart across the switch and hand it back under the new company.
+			localStorage.removeItem("ch_pos_active_cart");
 			if (PosState.cart.length) {
 				this._release_kiosk_billing(true).finally(() => {
 					PosState.reset_transaction();

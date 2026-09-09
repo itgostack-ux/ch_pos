@@ -6,13 +6,35 @@
  */
 import { PosState, EventBus } from "../../state.js";
 import { format_number } from "../../shared/helpers.js";
-import { print_invoice_pdf } from "../../shared/print_helper.js";
 
 const DECISION_MAP = {
 	Draft: "warning", Accepted: "info", "In Service": "warning",
 	Completed: "success", Invoiced: "info", Delivered: "success",
 	Withdrawn: "muted", Rejected: "danger", Cancelled: "muted",
 };
+
+/**
+ * May this ticket be acted on this way?
+ *
+ * The answer comes from the server with the row, so a button the POS shows and
+ * a click the server accepts are the same rule. Each card used to carry its own
+ * list of statuses inline, and the Ops Hub carried different ones -- the same
+ * ticket then offered different actions depending on which screen you opened.
+ *
+ * Missing permissions mean an older payload: fall back to showing the button
+ * rather than emptying the card, because the server still refuses what it must.
+ */
+function _may(sr, action) {
+	const perms = sr.permitted_actions;
+	if (!perms || !perms[action]) return true;
+	return !!perms[action].allowed;
+}
+
+/** Why an action is unavailable, for a tooltip. */
+function _whyNot(sr, action) {
+	const perms = sr.permitted_actions || {};
+	return (perms[action] && perms[action].reason) || "";
+}
 
 export class ServiceWorkspace {
 	constructor() {
@@ -167,18 +189,23 @@ export class ServiceWorkspace {
 							style="border-radius:var(--pos-radius-sm);font-weight:700">
 							<i class="fa fa-external-link"></i> ${__("Open in Ops Hub")}
 						</button>
-						${(sr.transfer_actions || []).includes("dispatch") && ["Draft", "Accepted", "In Service"].includes(sr.decision) ? `
+						${(sr.transfer_actions || []).includes("dispatch") && _may(sr, "dispatch") ? `
 							<button class="btn btn-sm btn-outline-warning ch-svc-send-hub" data-sr="${sr.name}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700"
 								title="${__("This store cannot do the repair — send the device to a hub")}">
 								<i class="fa fa-truck"></i> ${__("Send to Hub")}
 							</button>` : ""}
-						${!["Delivered","Invoiced","Cancelled","Rejected","Withdrawn"].includes(sr.decision) ? `
+						${_may(sr, "close_without_repair") ? `
 							<button class="btn btn-sm btn-outline-danger ch-svc-close-nofix" data-sr="${sr.name}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700"
 								title="${__("End this job without a repair — device goes back to the customer")}">
 								<i class="fa fa-ban"></i> ${__("Close Without Repair")}
 							</button>` : ""}
+						<button class="btn btn-sm btn-outline-secondary ch-svc-job-sheet" data-sr="${sr.name}"
+							style="border-radius:var(--pos-radius-sm);font-weight:700"
+							title="${__("What the customer signed when they handed the device in")}">
+							<i class="fa fa-file-text-o"></i> ${__("Job Sheet")}
+						</button>
 						<button class="btn btn-sm btn-outline-secondary ch-svc-note" data-sr="${sr.name}"
 							style="border-radius:var(--pos-radius-sm);font-weight:700"
 							title="${__("Notes can be added at any point, including while the device is away")}">
@@ -207,7 +234,7 @@ export class ServiceWorkspace {
 								title="${frappe.utils.escape_html(sr.movement_status ? __("Consignment is at: {0}", [sr.movement_status]) : __("No transfer document"))}">
 								<i class="fa fa-truck"></i> ${frappe.utils.escape_html(sr.awaiting_pickup ? __("Awaiting Pickup") : sr.transfer_status)}${sr.transferred_to_store ? " → " + frappe.utils.escape_html(String(sr.transferred_to_store).split(" - ")[0]) : ""}
 							</span>` : ""}
-						${["Completed","Invoiced","Delivered"].includes(sr.decision) ? `
+						${_may(sr, "customer_return") ? `
 							<button class="btn btn-sm btn-outline-danger ch-svc-reopen" data-sr="${sr.name}"
 								style="border-radius:var(--pos-radius-sm);font-weight:700"
 								title="${__("Customer is back — this repair has not held")}">
@@ -224,28 +251,33 @@ export class ServiceWorkspace {
 								style="border-radius:var(--pos-radius-sm);font-weight:700">
 								<i class="fa fa-file-text-o"></i> ${__("View Invoice")}
 							</button>
-							<button class="btn btn-sm btn-primary ch-svc-print-invoice" data-name="${frappe.utils.escape_html(inv)}"
-								style="border-radius:var(--pos-radius-sm);font-weight:700">
+							<button class="btn btn-sm btn-primary ch-svc-print-invoice" data-sr="${sr.name}"
+								style="border-radius:var(--pos-radius-sm);font-weight:700"
+								${sr.invoice_printable ? "" : "disabled"}
+								title="${sr.invoice_printable
+									? __("The billed invoice for this repair")
+									: __("Not billed yet — the invoice exists once the repair is billed, not when the work or the quality check finishes")}">
 								<i class="fa fa-print"></i> ${__("Print Invoice")}
 							</button>
 						` : `
-							${sr.status === "Completed" ? `
+							${_may(sr, "add_to_bill") ? `
 								<button class="btn btn-sm btn-success ch-svc-add-to-bill" data-name="${sr.name}"
 									style="border-radius:var(--pos-radius-sm);font-weight:700">
 									<i class="fa fa-cart-plus"></i> ${__("Add to Bill")}
 								</button>
 							` : ""}
-							${!sr.job_assignment && sr.status !== "Completed" ? `
+							${_may(sr, "create_job") ? `
 								<button class="btn btn-sm btn-outline-primary ch-svc-create-job" data-name="${sr.name}"
 									style="border-radius:var(--pos-radius-sm);font-weight:700"
 									title="${__("Open the repair job so a technician can start work")}">
 									<i class="fa fa-cog"></i> ${__("Create Job")}
 								</button>
 							` : ""}
-							<button class="btn btn-sm btn-outline-warning ch-svc-raise-exception" data-sr="${sr_payload}"
-								style="border-radius:var(--pos-radius-sm);font-weight:700">
-								<i class="fa fa-exclamation-triangle"></i> ${__("Raise Exception")}
-							</button>
+							${_may(sr, "raise_exception") ? `
+								<button class="btn btn-sm btn-outline-warning ch-svc-raise-exception" data-sr="${sr_payload}"
+									style="border-radius:var(--pos-radius-sm);font-weight:700">
+									<i class="fa fa-exclamation-triangle"></i> ${__("Raise Exception")}
+								</button>` : ""}
 						`}
 					</div>
 				</div>`;
@@ -298,13 +330,32 @@ export class ServiceWorkspace {
 		panel.on("click", ".ch-svc-open-sr", function () {
 			frappe.set_route("Form", "Service Request", $(this).data("name"));
 		});
+		// Both documents come from one helper, so the POS, the Ops Hub and the
+		// Job Tracker print the same two under the same rules.
+		panel.on("click", ".ch-svc-job-sheet", function () {
+			const sr = $(this).data("sr");
+			window.gofix_print_documents.fetch(sr)
+				.then((docs) => window.gofix_print_documents.open(docs.job_sheet))
+				.catch(() => frappe.show_alert({
+					message: __("Could not open the job sheet."), indicator: "red" }));
+		});
+
 		panel.on("click", ".ch-svc-view-invoice", function () {
 			frappe.set_route("Form", "Sales Invoice", $(this).data("name"));
 		});
 		panel.on("click", ".ch-svc-print-invoice", function () {
-			const invoice = $(this).data("name");
-			if (!invoice) return;
-			print_invoice_pdf(invoice, null, { doctype: "Sales Invoice" });
+			// The server decides whether an invoice exists to print. A draft
+			// invoice is not one: it would hand the customer a bill nobody has
+			// actually raised.
+			const sr = $(this).data("sr");
+			window.gofix_print_documents.fetch(sr).then((docs) => {
+				if (!docs.invoice.available) {
+					frappe.show_alert({ message: docs.invoice.reason, indicator: "orange" });
+					return;
+				}
+				window.gofix_print_documents.open(docs.invoice);
+			}).catch(() => frappe.show_alert({
+				message: __("Could not open the invoice."), indicator: "red" }));
 		});
 		panel.on("click", ".ch-svc-raise-exception", function () {
 			let sr = {};

@@ -1068,6 +1068,9 @@ export class RepairWorkspace {
 					return_partner: panel.find(".ch-rep-return-partner").val() || "",
 					return_address: panel.find(".ch-rep-return-address").val().trim(),
 					return_scheduled_datetime: panel.find(".ch-rep-return-slot").val() || "",
+					// Whoever the till has as Billed By is who took the device
+					// in, and is the name printed on the customer's receipt.
+					intake_executive: PosState.sales_executive || "",
 				},
 			}).then((doc) => {
 				frappe.show_alert({
@@ -1088,7 +1091,11 @@ export class RepairWorkspace {
 						<i class="fa fa-check-circle" style="font-size:18px;color:var(--pos-success)"></i>
 						<span><b>${doc.name}</b> ${__("created & submitted")}</span>
 						<div style="margin-left:auto;display:flex;gap:6px">
-							<button class="btn btn-sm btn-primary ch-rep-accept-job"
+							<button class="btn btn-sm btn-primary ch-rep-print-receipt"
+								data-name="${doc.name}" style="border-radius:var(--pos-radius-sm);font-weight:700">
+								<i class="fa fa-file-text-o"></i> ${__("Print Job Sheet")}
+							</button>
+							<button class="btn btn-sm btn-default ch-rep-accept-job"
 								data-name="${doc.name}" style="border-radius:var(--pos-radius-sm);font-weight:700">
 								<i class="fa fa-cog"></i> ${__("Accept & Create Job")}
 							</button>
@@ -1338,6 +1345,20 @@ export class RepairWorkspace {
 				console.error("Repair closure dialog error", err);
 				restore();
 			});
+		});
+
+		// The device receipt is what the customer walks away with, and it is the
+		// only record of the state the device arrived in. It existed as a print
+		// format and nothing ever opened it, so it was never handed to anybody.
+		panel.on("click", ".ch-rep-print-receipt", function () {
+			const sr = $(this).data("name");
+			if (!sr) return;
+			// One helper, so the job sheet printed here is the same document the
+			// Ops Hub and the Job Tracker print, under the same rules.
+			window.gofix_print_documents.fetch(sr)
+				.then((docs) => window.gofix_print_documents.open(docs.job_sheet))
+				.catch(() => frappe.show_alert({
+					message: __("Could not open the job sheet."), indicator: "red" }));
 		});
 
 		panel.on("click", ".ch-rep-clear", () => {

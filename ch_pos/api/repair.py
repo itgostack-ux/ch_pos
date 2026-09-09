@@ -210,6 +210,8 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		# The inbound leg's address and slot live on the pre-existing pickup
 		# fields, which is what validate_logistics checks it against.
 		"pickup_address", "pickup_scheduled_datetime",
+		# The counter person who accepted the device, from the till's Billed By.
+		"intake_executive",
 		"return_method", "return_partner", "return_address",
 		"return_scheduled_datetime",
 	):
