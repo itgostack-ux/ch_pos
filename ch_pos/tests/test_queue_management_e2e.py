@@ -15,6 +15,26 @@ from frappe.utils import nowdate, now_datetime
 _results = []
 
 
+def _real_device() -> dict:
+    """A category / brand / model trio that actually exists here.
+
+    CH Model names are the compound taxonomy key, so the model carries its own
+    category and brand; reading them off one row keeps the three consistent.
+    """
+    row = frappe.db.sql("""
+        SELECT m.name AS device_model, m.brand AS device_brand
+        FROM `tabCH Model` m
+        WHERE m.name LIKE 'Smart Phones-%%' AND IFNULL(m.brand, '') <> ''
+        ORDER BY m.name LIMIT 1""", as_dict=True)
+    category = frappe.db.get_value("CH Category", "Smart Phones", "name")
+    if not row:
+        return {"device_type": category} if category else {}
+    out = dict(row[0])
+    if category:
+        out["device_type"] = category
+    return out
+
+
 def _ok(flow, step, detail=""):
     _results.append({"flow": flow, "step": step, "status": "PASS"})
     print(f"  PASS  [{flow}] {step}" + (f"  ({detail})" if detail else ""))
@@ -77,9 +97,12 @@ def _create_test_token(pos_profile_name, suffix=""):
         "token_display": token_display,
         "customer_name": f"Test Customer{suffix}",
         "customer_phone": "9876543210",
-        "device_type": "Mobile",
-        "device_brand": "Samsung",
-        "device_model": "Galaxy A54",
+        # Resolved from the site's own masters. These were hardcoded as
+        # ("Mobile", "Galaxy A54"), neither of which is a CH Category or a
+        # CH Model on any site -- so every test in this file died at setup with
+        # "Could not find Device Category: Mobile" and none of its assertions
+        # ever ran.
+        **_real_device(),
         "issue_category": "Screen Replacement",
         "issue_description": "Cracked screen",
         "visit_source": "Kiosk",
@@ -445,7 +468,21 @@ def test_12_engage_token():
             return
 
         from ch_pos.api.token_api import engage_token
-        result = engage_token(token_name=doc.name, sales_executive="Administrator")
+        # "Administrator" is a User, not a POS Executive, and engage_token
+        # validates the executive against the token's own till.
+        # engage_token checks the executive's company and STORE against the
+        # till's anchors, so the executive has to belong to that store.
+        from ch_pos.api.scope_guard import get_pos_profile_anchors
+
+        anchors = get_pos_profile_anchors(doc.pos_profile) or {}
+        criteria = {"company": anchors.get("company") or doc.company, "is_active": 1}
+        if anchors.get("store"):
+            criteria["store"] = anchors["store"]
+        executive = frappe.db.get_value("POS Executive", criteria, "name")
+        if not executive:
+            _skip(FLOW, "12 engage_token", "No active POS Executive for this till")
+            return
+        result = engage_token(token_name=doc.name, sales_executive=executive)
 
         assert result.get("status") == "ok", f"engage_token should return ok"
         assert result.get("token_status") == "Engaged", f"token_status should be Engaged"
@@ -512,7 +549,7 @@ def test_14_quick_walkin():
         result = quick_walkin(
             pos_profile=profile.name,
             visit_purpose="Sales",
-            category_interest="Mobile",  # valid value per CH Token doctype
+            category_interest=(_real_device().get("device_type") or "Smart Phones"),
             brand_interest="Samsung",
             budget_range="10K-20K",  # valid enum value
         )
