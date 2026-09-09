@@ -505,7 +505,42 @@ export class Sidebar {
 	 * / buyback / bill downstream each re-guess the customer -- which is how
 	 * duplicate Customer records get made.
 	 */
+	/**
+	 * Create the customer this walk-in belongs to, from the counter, now.
+	 *
+	 * The panel used to say "a new one will be created at billing" and stop
+	 * there, so an unknown number reached the till with no Customer and the
+	 * person billing had to invent one -- which is how the same human ends up
+	 * with two records under two spellings. Prefilled with what the counter has
+	 * already typed, and the created customer is linked to the token at birth.
+	 */
+	_createWalkinCustomer(dialog, field, render) {
+		const phone = (field.$input.val() || "").replace(/\D/g, "").slice(-10);
+		window.ch_open_new_customer_dialog({
+			company: PosState.active_company || PosState.company,
+			prefill_mobile: phone,
+			prefill_name: (dialog.get_value("customer_name") || "").trim(),
+			// on_success(customer_docname, mobile_no) -- two arguments, not three.
+			on_success: (name, mobile) => {
+				dialog._linked_customer = name;
+				if (mobile) dialog.set_value("customer_phone", mobile);
+				frappe.db.get_value("Customer", name, "customer_name", (r) => {
+					const label = (r && r.customer_name) || name;
+					if (!(dialog.get_value("customer_name") || "").trim()) {
+						dialog.set_value("customer_name", label);
+					}
+					render({ found: true, customer: name, customer_name: label });
+				});
+			},
+			on_use_existing: (customer) => {
+				dialog._linked_customer = customer;
+				render({ found: true, customer: customer });
+			},
+		});
+	}
+
 	_attach_walkin_customer_lookup(dialog) {
+		const self = this;
 		const field = dialog.get_field("customer_phone");
 		if (!field || !field.$input) return;
 
@@ -527,10 +562,22 @@ export class Sidebar {
 		const render = (res) => {
 			const esc = frappe.utils.escape_html;
 			if (!res || !res.found) {
+				// Telling the counter a number is unknown and then offering
+				// nothing to do about it is how a walk-in reaches billing with
+				// no customer on it. Same affordance as Service Intake.
 				dialog._linked_customer = null;
 				$panel.css({ background: "var(--bg-light-gray, #f4f5f6)", color: "var(--text-muted, #8d99a6)" })
-					.text(__("No existing customer with this number — a new one will be created at billing."))
+					.html(
+						`<div>${__("No existing customer with this number.")}</div>` +
+						`<button type="button" class="btn btn-xs btn-primary ch-walkin-new-cust"
+							style="margin-top:6px">+ ${__("Create customer")}</button>` +
+						`<span style="opacity:.75;margin-left:8px">${
+							__("or leave it — one is created at billing")}</span>`
+					)
 					.show();
+				$panel.find(".ch-walkin-new-cust").off("click").on("click", () => {
+					self._createWalkinCustomer(dialog, field, render);
+				});
 				return;
 			}
 			if (res.restricted) {
