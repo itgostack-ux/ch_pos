@@ -39,6 +39,10 @@ export class CartService {
 				credit,
 				invoice: PosState.product_exchange_invoice,
 				return_items: PosState.return_items || [],
+				// The credit was raised against one company's invoice. Applying
+				// it under another discounts a sale the other company's books
+				// never funded.
+				...this._client_scope(),
 				timestamp: frappe.datetime.now_datetime(),
 			}));
 		} catch (e) { /* storage unavailable - non-critical */ }
@@ -50,6 +54,15 @@ export class CartService {
 			if (!raw) return null;
 			const s = JSON.parse(raw);
 			if (!s || !s.customer || !flt(s.credit)) return null;
+			// Not ours, or not provably ours: leave it alone rather than apply
+			// it. Null means the company is not known yet -- the stash keeps
+			// until it is.
+			const verdict = this._scope_verdict(s);
+			if (verdict === null) return null;
+			if (verdict === false) {
+				localStorage.removeItem("ch_pos_exchange_credit");
+				return null;
+			}
 			// Same 12h horizon the cart restore uses.
 			if (s.timestamp && (Date.now() - new Date(s.timestamp).getTime()) / 3600000 > 12) {
 				localStorage.removeItem("ch_pos_exchange_credit");
@@ -108,6 +121,40 @@ export class CartService {
 		}).catch(() => null);
 	}
 
+	// ── Whose client-side state is this? ───────────────────────────
+	// Everything this service parks in localStorage -- the active cart, held
+	// bills, an exchange credit -- is a scope surface. The browser is shared
+	// between companies and tills, so each stored object records which one it
+	// belongs to and is refused everywhere else.
+	_client_scope() {
+		return {
+			company: PosState.active_company || PosState.company || "",
+			pos_profile: PosState.pos_profile || "",
+		};
+	}
+
+	/**
+	 * Does stored state belong to the till we are on now?
+	 *
+	 * Returns true, false, or **null meaning "cannot tell yet"** -- and null is
+	 * the case that leaked. CartService is constructed before session:loaded
+	 * fires, so at restore time the company is routinely still unknown; a guard
+	 * written as `if (here && data.company !== here)` simply does not run, and
+	 * the other company's cart is handed back. Callers must treat null as "do
+	 * not use this yet", never as a pass.
+	 */
+	_scope_verdict(data) {
+		const { company: here, pos_profile: till } = this._client_scope();
+		if (!here) return null;
+		// Saved before the stamp existed. We cannot prove it is ours, and the
+		// company pill on the desk reloads the page rather than telling the POS,
+		// so an unstamped object is exactly what a cross-company cart looks like.
+		if (!data || !data.company) return false;
+		if (data.company !== here) return false;
+		if (till && data.pos_profile && data.pos_profile !== till) return false;
+		return true;
+	}
+
 	// POS-10 fix: Auto-persist active cart state to localStorage on every change
 	_persist_active_cart() {
 		try {
@@ -159,22 +206,28 @@ export class CartService {
 		}
 	}
 
+	/**
+	 * Restore the cart, but only once we know whose till this is.
+	 *
+	 * Called from the constructor, which runs before session:loaded -- so on
+	 * the first pass the company is unknown and nothing is restored. The desk's
+	 * company pill switches company with location.reload(), which means the POS
+	 * never sees company:switched on that path: the reloaded page IS the
+	 * switch, and restoring before the answer arrives is what put a GoGizmo
+	 * basket on a GoFix till.
+	 */
 	_restore_active_cart() {
 		try {
 			const raw = localStorage.getItem("ch_pos_active_cart");
 			if (!raw) return;
 			const data = JSON.parse(raw);
-			// A cart belongs to the company and the till that built it. Restoring
-			// one into a different company is a cross-company leak, so it is
-			// dropped rather than shown. Carts saved before this field existed
-			// carry no company and are dropped for the same reason.
-			const here = PosState.active_company || PosState.company || "";
-			const till = PosState.pos_profile || "";
-			if (here && data.company !== here) {
-				localStorage.removeItem("ch_pos_active_cart");
+			const verdict = this._scope_verdict(data);
+			if (verdict === null) {
+				// Company not known yet. Wait to be told, rather than guessing.
+				this._arm_deferred_restore();
 				return;
 			}
-			if (till && data.pos_profile && data.pos_profile !== till) {
+			if (verdict === false) {
 				localStorage.removeItem("ch_pos_active_cart");
 				return;
 			}
@@ -323,6 +376,28 @@ export class CartService {
 		} catch (e) {
 			localStorage.removeItem("ch_pos_active_cart");
 		}
+	}
+
+	/**
+	 * Try the restore again as soon as the company is known.
+	 *
+	 * session:loaded is the normal answer; company:switched covers the in-POS
+	 * switcher. Armed once -- a second listener would restore twice.
+	 */
+	_arm_deferred_restore() {
+		if (this._deferred_restore_armed) return;
+		this._deferred_restore_armed = true;
+		const retry = () => {
+			// Never over an active till: whatever is on screen wins.
+			if (PosState.cart && PosState.cart.length) return;
+			this._restore_active_cart();
+		};
+		// setTimeout is load-bearing, not incidental. session:loaded is emitted
+		// immediately before _load_profile() sets pos_profile and company
+		// synchronously; deferring by one task means the retry sees both, so
+		// the till is checked and not just the company.
+		EventBus.on("session:loaded", () => setTimeout(retry, 0));
+		EventBus.on("company:switched", () => setTimeout(retry, 0));
 	}
 
 	_bind_events() {
@@ -2820,6 +2895,10 @@ export class CartService {
 					free_sale_reason: PosState.free_sale_reason || "",
 					free_sale_approved_by: PosState.free_sale_approved_by || "",
 					_payment_state: PosState._payment_state || null,
+					// A held bill is a cart parked in the same shared browser,
+					// and it was the one client-side store carrying no owner at
+					// all: every ch_pos_held_* key was listed to every till.
+					...this._client_scope(),
 					timestamp: frappe.datetime.now_datetime(),
 				};
 				localStorage.setItem(key, JSON.stringify(data));
@@ -2841,11 +2920,20 @@ export class CartService {
 	_show_held_bills_dialog() {
 		// Collect all held bills from localStorage
 		const bills = [];
+		let hidden = 0;
 		for (let i = 0; i < localStorage.length; i++) {
 			const k = localStorage.key(i);
 			if (!k.startsWith("ch_pos_held_")) continue;
 			try {
 				const d = JSON.parse(localStorage.getItem(k));
+				// Only this company's, and only this till's. Bills held before
+				// the stamp existed are hidden rather than deleted -- we cannot
+				// prove whose they are, but somebody's customer is waiting on
+				// one, so they stay in storage.
+				if (this._scope_verdict(d) !== true) {
+					hidden += 1;
+					continue;
+				}
 				bills.push({ key: k, ...d });
 			} catch (_) { /* skip corrupt entries */ }
 		}
@@ -2854,7 +2942,12 @@ export class CartService {
 		bills.sort((a, b) => (b.timestamp > a.timestamp ? 1 : -1));
 
 		if (!bills.length) {
-			frappe.show_alert({ message: __("No held bills"), indicator: "blue" });
+			frappe.show_alert({
+				message: hidden
+					? __("No held bills for this company ({0} held elsewhere)", [hidden])
+					: __("No held bills"),
+				indicator: "blue",
+			});
 			return;
 		}
 
