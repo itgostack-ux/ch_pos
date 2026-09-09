@@ -370,6 +370,10 @@ export class RepairWorkspace {
 							<textarea class="form-control ch-rep-issue" rows="3"
 								style="min-height:80px;resize:vertical"
 								placeholder="${__("Describe the customer's issue...")}"></textarea>
+							<!-- The customer's first question is "how much, and how long?",
+							     and until now nobody at the counter could answer it: the
+							     price only existed after a technician ran Analysis. -->
+							<div class="ch-rep-triage" style="margin-top:6px"></div>
 						</div>
 						<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pos-space-md);margin-top:var(--pos-space-sm)">
 							<div class="ch-pos-field-group">
@@ -783,6 +787,81 @@ export class RepairWorkspace {
 			parent: panel.find(".ch-repair-issue-cat-link"),
 			render_input: true,
 		});
+		// ── Counter triage ────────────────────────────────────────────────
+		// Answers the two questions every customer asks -- what is wrong, and
+		// what will it cost -- while they are still standing at the counter. The
+		// price only existed after a technician ran Analysis, a mean 13.5 hours
+		// later, and 15 of 97 repairs were then rejected once the number finally
+		// arrived. Suggestions only: nothing here books itself in.
+		let _triage_seq = 0;
+		const _render_triage = (r) => {
+			const box = panel.find(".ch-rep-triage");
+			if (!r || !r.ready) { box.empty(); return; }
+			const money = (n) => `₹${format_number(n || 0)}`;
+			const chips = (r.issues || []).map((i) => `
+				<button type="button" class="btn btn-xs ch-rep-triage-add"
+					data-cat="${frappe.utils.escape_html(i.category)}"
+					title="${frappe.utils.escape_html((i.why || []).join(" · "))}"
+					style="border-radius:12px;margin:2px 4px 2px 0">
+					+ ${frappe.utils.escape_html(i.category)}
+				</button>`).join("");
+			const hist = r.history && r.history.jobs
+				? `<div style="font-size:11px;color:var(--text-muted)">
+					${__("We have done {0} of these before — typically {1}{2}.",
+						[r.history.jobs, money(r.history.median_amount),
+						 r.history.median_hours ? __(", about {0}h", [r.history.median_hours]) : ""])}
+				   </div>` : "";
+			const ask = (r.ask_the_customer || []).length
+				? `<div style="font-size:11px;margin-top:4px">
+					<b>${__("Worth asking")}:</b> ${r.ask_the_customer.map(frappe.utils.escape_html).join(" · ")}
+				   </div>` : "";
+			box.html(`
+				<div style="border:1px solid var(--pos-border,#e2e8f0);border-radius:8px;padding:8px 10px;background:#fbfdff">
+					<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+						<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted)">
+							${r.confident ? __("Likely faults") : __("Best guess")}
+						</div>
+						${r.price && r.price.total
+							? `<div style="font-weight:700">${money(r.price.total)}
+								<span style="font-weight:400;font-size:11px;color:var(--text-muted)">${__("indicative")}</span></div>`
+							: ""}
+					</div>
+					<div style="margin-top:4px">${chips || ""}</div>
+					${hist}
+					${ask}
+					<div style="font-size:10.5px;color:var(--text-muted);margin-top:4px">${frappe.utils.escape_html(r.disclaimer || "")}</div>
+				</div>`);
+		};
+
+		const _run_triage = frappe.utils.debounce(() => {
+			const text = (panel.find(".ch-rep-issue").val() || "").trim();
+			if (text.length < 8) { panel.find(".ch-rep-triage").empty(); return; }
+			const seq = ++_triage_seq;
+			frappe.xcall("gofix.ai.triage.triage", {
+				description: text,
+				// The device controls are frappe Link controls, not plain inputs,
+				// and they live on the Device step -- read through them, and
+				// tolerate a fault typed before the device is chosen.
+				brand: (brand_field && brand_field.get_value()) || "",
+				device_model: (model_field && model_field.get_value()) || "",
+				device_item: (device_field && device_field.get_value()) || "",
+				company: PosState.active_company || PosState.company || "",
+				warranty_status: panel.find(".ch-rep-warranty").val() || "",
+			}).then((r) => {
+				// A slow answer to an old sentence must not overwrite a new one.
+				if (seq === _triage_seq) _render_triage(r);
+			}).catch(() => panel.find(".ch-rep-triage").empty());
+		}, 600);
+
+		panel.on("input", ".ch-rep-issue", _run_triage);
+		panel.on("click", ".ch-rep-triage-add", function () {
+			const cat = $(this).data("cat");
+			if (cat && !selected_issues.includes(cat)) {
+				selected_issues.push(cat);
+				_render_issue_tags();
+			}
+		});
+
 		const _render_issue_tags = () => {
 			const container = panel.find(".ch-rep-issue-tags");
 			container.empty();
