@@ -187,8 +187,11 @@ export class QueueWorkspace {
 		// lead on four desks was the original complaint, and the answer to it
 		// is a visible unowned pile, not an invisible one.
 		const own = frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile });
+		// Named by store, not by company: active_company is the billing
+		// selection and is still null on a restored session, and a blank
+		// company used to widen the pool to every company on the site.
 		const pool = frappe.xcall("gofix.gofix_services.inbox.unassigned_requests", {
-			company: PosState.active_company || "",
+			pos_profile,
 		}).catch(() => []);
 
 		Promise.all([own, pool])
@@ -1340,7 +1343,7 @@ export class QueueWorkspace {
 				<span>${__("Loading unrouted requests…")}</span></div>`);
 
 		frappe.xcall("gofix.gofix_services.inbox.unassigned_requests", {
-			company: PosState.active_company || "",
+			pos_profile: PosState.pos_profile,
 		}).then((rows) => {
 			this._tokens = (rows || []).map((r) => Object.assign({}, r, {
 				channel_group: "remote", unassigned: 1,
