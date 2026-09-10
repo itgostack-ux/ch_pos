@@ -9880,6 +9880,17 @@ def get_pending_material_requests(pos_profile) -> list:
         as_dict=True)
     item_counts = {r.parent: r.item_count for r in rows}
 
+    item_rows = frappe.db.sql(
+        """SELECT parent, item_code, item_name, qty, uom
+           FROM `tabMaterial Request Item`
+           WHERE parent IN %(names)s
+           ORDER BY idx""",
+        {"names": tuple(names)},
+        as_dict=True)
+    items_map = {}
+    for row in item_rows:
+        items_map.setdefault(row.parent, []).append(row)
+
     out = []
     now_dt = now_datetime()
     closed_statuses = {"Received", "Transferred", "Stopped", "Cancelled", "Issued"}
@@ -9916,6 +9927,7 @@ def get_pending_material_requests(pos_profile) -> list:
             "delay_label": delay_label,
             "delay_state": delay_state,
             "item_count": item_counts.get(req["name"], 0),
+            "items": items_map.get(req["name"], []),
             "purchase_requests": req.get("purchase_requests", []),
             "stock_entries": req.get("stock_entries", []),
             "per_ordered": req.get("per_ordered", 0),
@@ -9967,6 +9979,7 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
                              se.remarks,
                se.custom_status, se.custom_logistics_status,
                se.custom_transfer_manifest,
+               se.custom_delivery_challan,
                se.custom_logistics_person,
                COALESCE(drv.full_name, se.custom_logistics_person) AS custom_logistics_person_name,
                (SELECT COUNT(*) FROM `tabStock Entry Detail` sed

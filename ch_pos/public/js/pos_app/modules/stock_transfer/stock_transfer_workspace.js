@@ -404,13 +404,23 @@ export class StockTransferWorkspace {
 
         // Delivery Challan, unconditional from Draft onward — same as the
         // backend form's own E-Way Bill / Delivery Challan buttons, which
-        // never gate on custom_status either.
+        // never gate on custom_status either. The button always just prints
+        // this Stock Entry through the CH Delivery Challan format; the
+        // number shown alongside it is the actual CH Delivery Challan
+        // record, auto-issued (as a snapshot) once this transfer reached
+        // Pending With Goods — see _create_delivery_challan in
+        // ch_erp15.custom.stock_entry. Blank here means it hasn't reached
+        // that stage yet.
         const delivery_challan_btn = (tab === "outgoing" && se.docstatus === 0) ? `
             <button class="btn btn-xs btn-outline-secondary ch-st-delivery-challan-btn"
                     data-name="${esc(se.name)}"
                     style="border-radius:var(--pos-radius-sm)">
                 <i class="fa fa-file-text-o"></i> ${__("Delivery Challan")}
-            </button>` : "";
+            </button>
+            ${se.custom_delivery_challan ? `
+                <span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-left:4px">
+                    ${esc(se.custom_delivery_challan)}
+                </span>` : ""}` : "";
 
         // "Manifest / E-Way Bill" hidden per explicit request — this store's
         // outgoing transfers don't go through a logistics manifest, so this

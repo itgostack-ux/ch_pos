@@ -73,7 +73,7 @@ export class MaterialRequestWorkspace {
 							</div>
 							<div class="ch-pos-field-group">
 								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Need By Date")}</label>
-								<input type="date" class="form-control ch-mr-needed-date" style="border-radius:var(--pos-radius-sm);height:36px">
+								<div class="ch-mr-needed-date"></div>
 							</div>
 							<div class="ch-pos-field-group">
 								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Need By Time")}</label>
@@ -123,6 +123,7 @@ export class MaterialRequestWorkspace {
 		`);
 
 		this._init_item_field(panel);
+		this._init_needed_date_field(panel);
 		this._bind(panel);
 		this._apply_due_defaults(panel, true);
 		this._load_zone_info(panel);
@@ -144,6 +145,26 @@ export class MaterialRequestWorkspace {
 			render_input: true,
 		});
 		this.item_field.$input.css({ "border-radius": "var(--pos-radius-sm)" });
+		el.find(".frappe-control").css({ "margin-bottom": "0" });
+	}
+
+	_init_needed_date_field(panel) {
+		// A native <input type="date"> displays per the browser/OS locale,
+		// not the site's configured date_format — Frappe's own Date control
+		// (same one used for every other date field on the site) reads
+		// sys_defaults.date_format instead, so this always renders dd-mm-yyyy
+		// regardless of the browser. get_value()/set_value() still work in
+		// plain ISO (yyyy-mm-dd), so nothing downstream needs to change.
+		const el = panel.find(".ch-mr-needed-date");
+		this.needed_date_field = frappe.ui.form.make_control({
+			df: {
+				fieldname: "needed_date",
+				fieldtype: "Date",
+			},
+			parent: el,
+			render_input: true,
+		});
+		this.needed_date_field.$input.css({ "border-radius": "var(--pos-radius-sm)", height: "36px" });
 		el.find(".frappe-control").css({ "margin-bottom": "0" });
 	}
 
@@ -169,13 +190,12 @@ export class MaterialRequestWorkspace {
 	}
 
 	_apply_due_defaults(panel, force = false) {
-		const dateInput = panel.find(".ch-mr-needed-date");
 		const timeInput = panel.find(".ch-mr-needed-time");
-		if (!dateInput.length || !timeInput.length) return;
-		if (!force && dateInput.val() && timeInput.val()) return;
+		if (!this.needed_date_field || !timeInput.length) return;
+		if (!force && this.needed_date_field.get_value() && timeInput.val()) return;
 
 		const defaults = this._get_due_defaults(panel.find(".ch-mr-urgency").val() || "Standard");
-		dateInput.val(defaults.date);
+		this.needed_date_field.set_value(defaults.date);
 		timeInput.val(defaults.time);
 	}
 
@@ -243,6 +263,10 @@ export class MaterialRequestWorkspace {
 		panel.on("click", ".ch-mr-draft-select", (e) => {
 			const name = $(e.currentTarget).data("name");
 			this._select_draft(panel, name);
+		});
+		panel.on("click", ".ch-mr-id-link", (e) => {
+			e.stopPropagation();
+			this._show_mr_detail_popup($(e.currentTarget).data("name"));
 		});
 		panel.on("click", ".ch-mr-deselect-draft-btn", () => {
 			this._deselect_draft(panel);
@@ -420,7 +444,7 @@ export class MaterialRequestWorkspace {
 
 		// Create new request
 		const urgency = panel.find(".ch-mr-urgency").val() || "Standard";
-		const required_by_date = panel.find(".ch-mr-needed-date").val() || "";
+		const required_by_date = (this.needed_date_field && this.needed_date_field.get_value()) || "";
 		const required_by_time = panel.find(".ch-mr-needed-time").val() || "";
 		const notes = panel.find(".ch-mr-notes").val() || "";
 		if (!required_by_date || !required_by_time) {
@@ -520,6 +544,8 @@ export class MaterialRequestWorkspace {
 					return;
 				}
 				section.show();
+				this._mr_lookup = this._mr_lookup || {};
+				drafts.forEach((d) => { this._mr_lookup[d.name] = d; });
 				list.html(drafts.map((d) => {
 					const items_text = (d.items || []).map(i =>
 						`${frappe.utils.escape_html(i.item_name || i.item_code)} x${i.qty}`
@@ -535,7 +561,9 @@ export class MaterialRequestWorkspace {
 							cursor:pointer;${selected ? "background:#eff6ff;border-left:3px solid #2563eb" : ""}">
 							<div style="flex:1;min-width:0">
 								<div style="display:flex;align-items:center;gap:8px">
-									<span style="font-weight:700;font-size:var(--pos-fs-sm)">${frappe.utils.escape_html(d.name)}</span>
+									<span class="ch-mr-id-link" data-name="${frappe.utils.escape_html(d.name)}"
+										style="font-weight:700;font-size:var(--pos-fs-sm);cursor:pointer;text-decoration:underline dotted"
+										title="${__("View details")}">${frappe.utils.escape_html(d.name)}</span>
 									<span class="ch-pos-badge ch-pos-badge-warning" style="font-size:10px">${__("Draft")}</span>
 									<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${d.priority}</span>
 								</div>
@@ -559,6 +587,44 @@ export class MaterialRequestWorkspace {
 				}).join(""));
 			},
 		});
+	}
+
+	_show_mr_detail_popup(name) {
+		const d = (this._mr_lookup || {})[name];
+		if (!d) return;
+		const esc = frappe.utils.escape_html;
+		const priority = esc(d.priority || "");
+		const rows = (d.items || []).length
+			? d.items.map(it => `
+				<tr>
+					<td>
+						<div style="font-weight:600">${esc(it.item_name || it.item_code)}</div>
+						<div style="font-size:11px;color:var(--pos-text-muted)">${esc(it.item_code)}</div>
+					</td>
+					<td class="text-center" style="font-weight:600">${flt(it.qty)} ${esc(it.uom || "")}</td>
+					<td class="text-center">${priority}</td>
+				</tr>`).join("")
+			: `<tr><td colspan="3" style="text-align:center;color:var(--pos-text-muted)">${__("No items found")}</td></tr>`;
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("{0} details", [name]),
+			fields: [{
+				fieldtype: "HTML",
+				fieldname: "draft_detail_html",
+				options: `
+					<table class="table table-bordered" style="margin-bottom:0">
+						<thead>
+							<tr>
+								<th>${__("Item")}</th>
+								<th class="text-center" style="width:100px">${__("Qty")}</th>
+								<th class="text-center" style="width:120px">${__("Request Type")}</th>
+							</tr>
+						</thead>
+						<tbody>${rows}</tbody>
+					</table>`,
+			}],
+		});
+		dialog.show();
 	}
 
 	_select_draft(panel, name) {
@@ -615,6 +681,8 @@ export class MaterialRequestWorkspace {
 					`);
 					return;
 				}
+				this._mr_lookup = this._mr_lookup || {};
+				requests.forEach((mr) => { this._mr_lookup[mr.name] = mr; });
 				list.html(requests.map(mr => {
 					// Prefer the server-computed display_status so terminal MR
 					// states (Stopped / Received / Transferred / Issued / short-
@@ -636,12 +704,18 @@ export class MaterialRequestWorkspace {
 						: (mr.delay_state === "due" && mr.delay_label
 							? `<span style="color:#92400e;font-size:10px;font-weight:700"><i class="fa fa-hourglass-half"></i> ${__("Due in")} ${frappe.utils.escape_html(mr.delay_label)}</span>`
 							: "");
+					const priority = mr.priority || "Standard";
 					return `
 						<div class="ch-mr-request-row" style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--pos-border-light)">
 							<div>
-								<div style="font-weight:700;font-size:var(--pos-fs-sm)">${frappe.utils.escape_html(mr.name)}${sla_warn}</div>
+								<div style="display:flex;align-items:center;gap:8px">
+									<span class="ch-mr-id-link" data-name="${frappe.utils.escape_html(mr.name)}"
+										style="font-weight:700;font-size:var(--pos-fs-sm);cursor:pointer;text-decoration:underline dotted"
+										title="${__("View details")}">${frappe.utils.escape_html(mr.name)}</span>${sla_warn}
+									<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${frappe.utils.escape_html(priority)}</span>
+								</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
-									${dueText} · ${mr.item_count} ${__("items")} · ${mr.priority || "Standard"}
+									${dueText} · ${mr.item_count} ${__("items")}
 								</div>
 								${delayText ? `<div style="margin-top:4px">${delayText}</div>` : ""}
 							</div>
