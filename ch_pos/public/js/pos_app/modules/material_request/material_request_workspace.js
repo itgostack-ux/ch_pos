@@ -255,6 +255,10 @@ export class MaterialRequestWorkspace {
 			this.request_items.splice(idx, 1);
 			this._render_items(panel);
 		});
+		panel.on("click", ".ch-mr-item-photo-btn, .ch-mr-item-photo-thumb", (e) => {
+			const idx = $(e.currentTarget).data("idx");
+			this._upload_item_photo(panel, idx);
+		});
 		panel.on("click", ".ch-mr-view-detail", function () {
 			const name = $(this).data("name");
 			frappe.set_route("Form", "Material Request", name);
@@ -298,6 +302,7 @@ export class MaterialRequestWorkspace {
 							item_name: d.item_name || item_code,
 							uom: d.stock_uom || "Nos",
 							qty,
+							photo: null,
 						});
 					},
 				});
@@ -376,6 +381,7 @@ export class MaterialRequestWorkspace {
 					<th>${__("Item")}</th>
 					<th class="text-center" style="width:80px">${__("Qty")}</th>
 					<th class="text-center" style="width:80px">${__("UOM")}</th>
+					<th class="text-center" style="width:70px">${__("Photo")}</th>
 					<th style="width:40px"></th>
 				</tr></thead>
 				<tbody>
@@ -388,6 +394,15 @@ export class MaterialRequestWorkspace {
 							<td class="text-center"><strong>${r.qty}</strong></td>
 							<td class="text-center" style="color:var(--pos-text-muted)">${frappe.utils.escape_html(r.uom)}</td>
 							<td class="text-center">
+								${r.photo
+									? `<img src="${frappe.utils.escape_html(r.photo)}" data-idx="${idx}" class="ch-mr-item-photo-thumb"
+										style="width:32px;height:32px;object-fit:cover;border-radius:4px;cursor:pointer" title="${__("Change photo")}">`
+									: `<button class="btn btn-xs btn-outline-secondary ch-mr-item-photo-btn" data-idx="${idx}" title="${__("Upload photo")}" style="padding:4px 8px">
+										<i class="fa fa-camera"></i>
+									</button>`
+								}
+							</td>
+							<td class="text-center">
 								<button class="btn btn-link text-danger ch-mr-remove-row" data-idx="${idx}" style="padding:2px">
 									<i class="fa fa-trash-o"></i>
 								</button>
@@ -397,6 +412,19 @@ export class MaterialRequestWorkspace {
 				</tbody>
 			</table>
 		`);
+	}
+
+	_upload_item_photo(panel, idx) {
+		const row = this.request_items[idx];
+		if (!row) return;
+		new frappe.ui.FileUploader({
+			allow_multiple: false,
+			restrictions: { allowed_file_types: ["image/*"] },
+			on_success: (file_doc) => {
+				row.photo = file_doc.file_url;
+				this._render_items(panel);
+			},
+		});
 	}
 
 	_submit_request(panel) {
@@ -603,8 +631,13 @@ export class MaterialRequestWorkspace {
 					</td>
 					<td class="text-center" style="font-weight:600">${flt(it.qty)} ${esc(it.uom || "")}</td>
 					<td class="text-center">${priority}</td>
+					<td class="text-center">
+						${it.photo
+							? `<img src="${esc(it.photo)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px">`
+							: ""}
+					</td>
 				</tr>`).join("")
-			: `<tr><td colspan="3" style="text-align:center;color:var(--pos-text-muted)">${__("No items found")}</td></tr>`;
+			: `<tr><td colspan="4" style="text-align:center;color:var(--pos-text-muted)">${__("No items found")}</td></tr>`;
 
 		const dialog = new frappe.ui.Dialog({
 			title: __("{0} details", [name]),
@@ -618,6 +651,7 @@ export class MaterialRequestWorkspace {
 								<th>${__("Item")}</th>
 								<th class="text-center" style="width:100px">${__("Qty")}</th>
 								<th class="text-center" style="width:120px">${__("Request Type")}</th>
+								<th class="text-center" style="width:60px">${__("Photo")}</th>
 							</tr>
 						</thead>
 						<tbody>${rows}</tbody>
