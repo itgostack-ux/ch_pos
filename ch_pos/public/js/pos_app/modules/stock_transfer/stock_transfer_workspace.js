@@ -307,13 +307,21 @@ export class StockTransferWorkspace {
             "Force Closed":          "ch-pos-badge-muted",
         };
 
-        const status_label = cs
-            || (se.docstatus === 0 ? __("Draft")
-                : se.docstatus === 1 ? __("Submitted")
-                : __("Cancelled"));
+        // A fresh transfer's custom_status is blank at the DB level, not
+        // literally "Draft" — falls through to the docstatus-based label
+        // below. Relabeled the same way as the desk form/list view
+        // (custom/stock_entry.js, custom/stock_entry_list.js) so "Draft"
+        // never surfaces to the user here either — it reads as an ERP
+        // document state, not what's actually happening (stock about to
+        // move out of the store).
+        const raw_status_label = cs
+            || (se.docstatus === 0 ? "Draft"
+                : se.docstatus === 1 ? "Submitted"
+                : "Cancelled");
+        const status_label = __(raw_status_label === "Draft" ? "Stock Outward" : raw_status_label);
         const status_cls = STATUS_COLOR[cs]
-            || (se.docstatus === 1
-                ? "ch-pos-badge-success" : "ch-pos-badge-muted");
+            || (raw_status_label === "Draft" ? "ch-pos-badge-muted"
+                : se.docstatus === 1 ? "ch-pos-badge-success" : "ch-pos-badge-muted");
 
         const arrow_color = tab === "incoming"
             ? "var(--pos-success)" : "var(--pos-danger)";
