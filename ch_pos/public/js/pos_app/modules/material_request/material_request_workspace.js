@@ -26,6 +26,15 @@ export class MaterialRequestWorkspace {
 		this.request_items = [];
 		this.selected_draft = null;
 		this.zone_info = null;
+		// Track the Request Type / Need By Date / Need By Time the current
+		// in-progress item list was actually built under — a Material
+		// Request has exactly one value for each across the whole document,
+		// not one per line, so changing any of them mid-build would
+		// silently misrepresent whichever items were added under the old
+		// value. See _guard_field_change.
+		this._confirmed_urgency = "Standard";
+		this._confirmed_needed_date = null;
+		this._confirmed_needed_time = null;
 
 		panel.html(`
 			<div class="ch-pos-mode-panel">
@@ -126,6 +135,8 @@ export class MaterialRequestWorkspace {
 		this._init_needed_date_field(panel);
 		this._bind(panel);
 		this._apply_due_defaults(panel, true);
+		this._confirmed_needed_date = this.needed_date_field.get_value();
+		this._confirmed_needed_time = panel.find(".ch-mr-needed-time").val();
 		this._load_zone_info(panel);
 		this._load_drafts(panel);
 		this._load_pending(panel);
@@ -160,6 +171,14 @@ export class MaterialRequestWorkspace {
 			df: {
 				fieldname: "needed_date",
 				fieldtype: "Date",
+				// Stock can't be requested for a date that's already gone —
+				// grey out everything before today in the picker. Must be
+				// midnight, not `new Date()`'s current time-of-day: air-datepicker
+				// compares each day cell's own midnight timestamp against this
+				// value, so a same-day minDate carrying the current clock time
+				// would push its own comparison point past midnight and disable
+				// today itself along with the actual past dates.
+				min_date: new Date(new Date().setHours(0, 0, 0, 0)),
 			},
 			parent: el,
 			render_input: true,
@@ -189,6 +208,29 @@ export class MaterialRequestWorkspace {
 		};
 	}
 
+	_now_hhmm() {
+		const now = new Date();
+		return String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+	}
+
+	/**
+	 * Need By Time only makes sense restricted to "not yet passed" when Need
+	 * By Date is today — any other (future) date has no such constraint.
+	 * Sets the native `min` so the browser's own time picker/validity UI
+	 * reflects it; submission is still hard-checked in _submit_request since
+	 * `min` alone doesn't stop a typed-in past value in every browser.
+	 */
+	_apply_time_min(panel) {
+		const timeInput = panel.find(".ch-mr-needed-time");
+		if (!this.needed_date_field || !timeInput.length) return;
+		const is_today = this.needed_date_field.get_value() === frappe.datetime.nowdate();
+		if (is_today) {
+			timeInput.attr("min", this._now_hhmm());
+		} else {
+			timeInput.removeAttr("min");
+		}
+	}
+
 	_apply_due_defaults(panel, force = false) {
 		const timeInput = panel.find(".ch-mr-needed-time");
 		if (!this.needed_date_field || !timeInput.length) return;
@@ -197,6 +239,72 @@ export class MaterialRequestWorkspace {
 		const defaults = this._get_due_defaults(panel.find(".ch-mr-urgency").val() || "Standard");
 		this.needed_date_field.set_value(defaults.date);
 		timeInput.val(defaults.time);
+		this._apply_time_min(panel);
+	}
+
+	/**
+	 * Shared guard for Request Type / Need By Date / Need By Time — a
+	 * Material Request has exactly one value for each across the whole
+	 * document, not one per line, so changing any of them after items are
+	 * already added would silently apply the new value to items the user
+	 * added expecting the old one. If nothing's been added yet, or it's a
+	 * no-op change, just accepts the new value (calling on_adopt). Otherwise
+	 * confirms: Yes clears the in-progress item list and accepts the new
+	 * value; No reverts the field via set_value and leaves the items
+	 * untouched.
+	 */
+	_guard_field_change(panel, { field_label, tracker_key, get_value, set_value, on_adopt }) {
+		const new_value = get_value();
+		const previous = this[tracker_key];
+		if (!this.request_items.length || new_value === previous) {
+			this[tracker_key] = new_value;
+			on_adopt && on_adopt();
+			return;
+		}
+
+		const item_count = this.request_items.length;
+		frappe.confirm(
+			__("You already added {0} item(s) with {1} set to {2}. Changing it to {3} will clear {0} out — continue?",
+				[item_count, field_label, previous, new_value]),
+			() => {
+				this[tracker_key] = new_value;
+				this.request_items = [];
+				this._render_items(panel);
+				on_adopt && on_adopt();
+			},
+			() => {
+				set_value(previous);
+			}
+		);
+	}
+
+	_on_urgency_change(panel, $select) {
+		this._guard_field_change(panel, {
+			field_label: __("Request Type"),
+			tracker_key: "_confirmed_urgency",
+			get_value: () => $select.val(),
+			set_value: (v) => $select.val(v),
+			on_adopt: () => this._apply_due_defaults(panel, true),
+		});
+	}
+
+	_on_needed_date_change(panel) {
+		this._guard_field_change(panel, {
+			field_label: __("Need By Date"),
+			tracker_key: "_confirmed_needed_date",
+			get_value: () => this.needed_date_field.get_value(),
+			set_value: (v) => this.needed_date_field.set_value(v),
+			on_adopt: () => this._apply_time_min(panel),
+		});
+	}
+
+	_on_needed_time_change(panel, $input) {
+		this._guard_field_change(panel, {
+			field_label: __("Need By Time"),
+			tracker_key: "_confirmed_needed_time",
+			get_value: () => $input.val(),
+			set_value: (v) => $input.val(v),
+		});
 	}
 
 	_format_delay(minutes) {
@@ -240,7 +348,9 @@ export class MaterialRequestWorkspace {
 	}
 
 	_bind(panel) {
-		panel.on("change", ".ch-mr-urgency", () => this._apply_due_defaults(panel, true));
+		panel.on("change", ".ch-mr-urgency", (e) => this._on_urgency_change(panel, $(e.currentTarget)));
+		this.needed_date_field.$input.on("change", () => this._on_needed_date_change(panel));
+		panel.on("change", ".ch-mr-needed-time", (e) => this._on_needed_time_change(panel, $(e.currentTarget)));
 		panel.on("click", ".ch-mr-add-btn", () => this._add_item(panel));
 		panel.on("click", ".ch-mr-clear-btn", () => {
 			this.request_items = [];
@@ -477,6 +587,12 @@ export class MaterialRequestWorkspace {
 		const notes = panel.find(".ch-mr-notes").val() || "";
 		if (!required_by_date || !required_by_time) {
 			frappe.show_alert({ message: __("Please choose the required date and time."), indicator: "orange" });
+			return;
+		}
+		// `min` on the time input is a UI hint only — browsers still let a
+		// past value through if it was typed in directly, so re-check here.
+		if (required_by_date === frappe.datetime.nowdate() && required_by_time < this._now_hhmm()) {
+			frappe.show_alert({ message: __("Need By Time can't be in the past for today's date."), indicator: "orange" });
 			return;
 		}
 		const submit_btn = panel.find(".ch-mr-submit-btn");
