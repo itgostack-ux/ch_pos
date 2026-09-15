@@ -18,6 +18,7 @@ from frappe.utils import flt, now_datetime
 
 from ch_item_master.ch_core.cost_center import resolve_cost_center
 from ch_pos.api.scope_guard import assert_session_scope
+from ch_pos.audit import log_privileged_bypass
 from ch_pos.config import assert_session_operator, is_privileged_user
 
 
@@ -169,7 +170,14 @@ class CHPOSSettlement(Document):
                 frappe.PermissionError,
             )
         session = frappe.get_doc("CH POS Session", self.session)
-        if not is_privileged_user():
+        if is_privileged_user():
+            log_privileged_bypass(
+                "settlement_session_scope",
+                store=session.store,
+                company=session.company,
+                remarks=f"session operator: {session.user}",
+            )
+        else:
             assert_session_scope(self.session)
             assert_session_operator(session, _("settle another cashier's POS session"))
         self.company = session.company
@@ -192,19 +200,32 @@ class CHPOSSettlement(Document):
             if self.session:
                 self.calculate_from_transactions()
         if self.signoff_by_manager:
-            if not (
-                self.flags.get("ch_manager_approval_verified")
-                or is_privileged_user()
-            ):
+            manager_verified = self.flags.get("ch_manager_approval_verified")
+            manager_bypassed = (not manager_verified) and is_privileged_user()
+            if not (manager_verified or manager_bypassed):
                 frappe.throw(
                     _("Settlement manager approval was not verified by the server."),
                     frappe.PermissionError,
+                )
+            if manager_bypassed:
+                log_privileged_bypass(
+                    "settlement_manager_signoff_verification",
+                    store=self.store,
+                    company=self.company,
                 )
             self.manager_signoff_time = self.manager_signoff_time or now_datetime()
         else:
             self.manager_signoff_time = None
 
-        if self.is_new() or is_privileged_user():
+        if self.is_new():
+            self.server_signature = make_settlement_signature(self)
+        elif is_privileged_user():
+            log_privileged_bypass(
+                "settlement_signature_restamp",
+                store=self.store,
+                company=self.company,
+                remarks="server_signature re-minted on an existing settlement",
+            )
             self.server_signature = make_settlement_signature(self)
         elif not has_valid_settlement_signature(self):
             frappe.throw(
@@ -412,10 +433,19 @@ class CHPOSSettlement(Document):
         if not self.signoff_by_user:
             frappe.throw(_("Cashier sign-off is mandatory before submitting settlement."), title=_("Ch Pos Settlement Error"))
         session_user = frappe.db.get_value("CH POS Session", self.session, "user")
-        if not is_privileged_user(self.signoff_by_user) and self.signoff_by_user != session_user:
+        privileged = is_privileged_user(self.signoff_by_user)
+        if not privileged and self.signoff_by_user != session_user:
             frappe.throw(
                 _("Settlement cashier sign-off does not match the session operator."),
                 frappe.PermissionError,
+            )
+        if privileged and self.signoff_by_user != session_user:
+            log_privileged_bypass(
+                "settlement_signoff_mismatch",
+                user=self.signoff_by_user,
+                store=self.store,
+                company=self.company,
+                remarks=f"session operator: {session_user}",
             )
 
     def _validate_variance_approval(self):

@@ -9,6 +9,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from ch_pos.audit import log_privileged_bypass
 from ch_pos.config import is_privileged_user
 
 
@@ -84,7 +85,14 @@ class CHFreeSaleApproval(Document):
                 frappe.PermissionError,
             )
 
-        if self.is_new() or self.flags.get("ch_server_state_update") or is_privileged_user():
+        if self.is_new() or self.flags.get("ch_server_state_update"):
+            return
+        if is_privileged_user():
+            log_privileged_bypass(
+                "free_sale_sealed_field_override",
+                store=self.store,
+                company=self.company,
+            )
             return
         previous = self.get_doc_before_save()
         if not previous:

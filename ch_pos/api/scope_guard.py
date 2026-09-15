@@ -5,6 +5,7 @@ from __future__ import annotations
 import frappe
 from frappe import _
 
+from ch_pos.audit import log_privileged_bypass
 from ch_pos.config import is_privileged_user, require_authenticated_user
 
 
@@ -14,6 +15,11 @@ def assert_store_scope(store=None, company=None, warehouse=None, user=None, msg=
     if user == "Guest":
         require_authenticated_user()
     if is_privileged_user(user):
+        # Throttled: this gate runs on essentially every POS request, so an
+        # untamed row-per-call buries the rare, deliberate bypasses.
+        log_privileged_bypass(
+            "store_scope", user=user, store=store, company=company, throttle=True
+        )
         return
 
     try:
@@ -218,6 +224,7 @@ def assert_any_warehouse_scope(warehouses, company=None, user=None) -> None:
     user = user or frappe.session.user
     require_authenticated_user()
     if is_privileged_user(user):
+        log_privileged_bypass("any_warehouse_scope", user=user, company=company, throttle=True)
         return
 
     candidates = [str(warehouse).strip() for warehouse in (warehouses or []) if warehouse]
@@ -248,6 +255,7 @@ def assert_pos_executive(store, user=None, msg=None) -> None:
     if user == "Guest":
         require_authenticated_user()
     if is_privileged_user(user):
+        log_privileged_bypass("pos_executive_till_access", user=user, store=store)
         return
     if frappe.db.exists(
         "POS Executive", {"user": user, "store": store, "is_active": 1}

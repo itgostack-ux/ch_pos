@@ -13,6 +13,7 @@ from frappe import _
 from frappe.utils import cint, flt, nowdate
 
 from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_sales_invoice_scope
+from ch_pos.audit import log_privileged_bypass
 from ch_pos.config import is_privileged_user
 
 # ── Idempotent Invoice Creation ───────────────────────────────────────────────
@@ -189,7 +190,9 @@ def get_customer_catalog(limit=500, pos_profile=None):
     frappe.has_permission("Customer", "read", throw=True)
     if pos_profile:
         assert_pos_profile_scope(pos_profile)
-    elif not is_privileged_user():
+    elif is_privileged_user():
+        log_privileged_bypass("customer_catalog_no_profile", remarks="pos_profile omitted")
+    else:
         frappe.throw(_("POS Profile is required for the customer catalog."), frappe.PermissionError)
     limit = max(1, min(cint(limit) or 500, 500))
 

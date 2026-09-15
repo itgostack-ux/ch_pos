@@ -9,6 +9,7 @@ from frappe.model.document import Document
 from frappe.utils import cint
 from frappe.utils.password import get_decrypted_password
 
+from ch_pos.audit import log_privileged_bypass
 from ch_pos.config import get_configured_roles, get_control_setting, is_privileged_user
 from ch_pos.rate_limits import clear_fixed_window, increment_fixed_window
 
@@ -199,6 +200,13 @@ def verify_manager_pin(pin, store=None, permission=None):
     if len(matches) == 1:
         mgr, manager_store = matches[0]
         _clear_pin_failures(attempt_key)
+        if is_privileged_user(mgr.user):
+            log_privileged_bypass(
+                "manager_pin_store_match",
+                user=mgr.user,
+                store=store,
+                remarks=f"acting session: {frappe.session.user}",
+            )
         return {
             "valid": True,
             "user": mgr.user,

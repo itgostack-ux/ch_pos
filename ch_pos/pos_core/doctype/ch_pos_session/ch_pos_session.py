@@ -23,6 +23,7 @@ from frappe.utils import flt, cint, now_datetime, getdate, nowdate, time_diff_in
 from frappe.utils.password import get_encryption_key
 
 from ch_pos.config import get_control_setting, is_privileged_user
+from ch_pos.audit import log_privileged_bypass
 
 
 VARIANCE_AUTO_ALLOW = 100  # ₹100 default threshold
@@ -62,6 +63,12 @@ class CHPOSSession(Document):
             if not self.opening_approved_by:
                 frappe.throw(_("Verified opening approval is missing its manager identity."))
         elif is_privileged_user():
+            log_privileged_bypass(
+                "session_opening_approval",
+                user=self.user,
+                store=self.store,
+                company=self.company,
+            )
             self.opening_approved_by = frappe.session.user
             self.opening_approved_at = now_datetime()
         else:
@@ -283,6 +290,12 @@ class CHPOSSession(Document):
         if self.docstatus != 0:
             return
         if is_privileged_user(self.user):
+            log_privileged_bypass(
+                "pos_executive_allocation",
+                user=self.user,
+                store=self.store,
+                company=self.company,
+            )
             return
 
         # Check POS Executive — the single source of truth

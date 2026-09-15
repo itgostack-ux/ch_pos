@@ -21,6 +21,7 @@ from frappe.utils import flt, now_datetime
 
 from ch_item_master.ch_core.cost_center import resolve_cost_center
 from ch_pos.api.scope_guard import assert_session_scope
+from ch_pos.audit import log_privileged_bypass
 from ch_pos.config import assert_session_operator, is_privileged_user
 
 # Types that require manager approval
@@ -62,7 +63,14 @@ class CHCashDrop(Document):
         if not self.session:
             return
         session = frappe.get_doc("CH POS Session", self.session)
-        if not is_privileged_user():
+        if is_privileged_user():
+            log_privileged_bypass(
+                "cash_drop_session_scope",
+                store=session.store,
+                company=session.company,
+                remarks=f"session operator: {session.user}",
+            )
+        else:
             assert_session_scope(self.session)
             assert_session_operator(
                 session, _("record a cash movement on another cashier's session")
@@ -79,7 +87,16 @@ class CHCashDrop(Document):
             self.status = "Draft"
 
         if self.approved_by:
-            if self.flags.get("ch_manager_approval_verified") or is_privileged_user():
+            manager_verified = self.flags.get("ch_manager_approval_verified")
+            self_approved = (not manager_verified) and is_privileged_user()
+            if manager_verified or self_approved:
+                if self_approved:
+                    log_privileged_bypass(
+                        "cash_drop_self_approval",
+                        user=self.approved_by,
+                        store=self.store,
+                        company=self.company,
+                    )
                 self.approved_at = self.approved_at or now_datetime()
                 self.approval_signature = make_approval_signature(self)
             elif not has_valid_approval_signature(self):
