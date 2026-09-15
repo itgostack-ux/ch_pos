@@ -160,8 +160,25 @@ def require_configured_roles(fieldname: str, defaults=(), action: str | None = N
 
 
 def assert_session_operator(session, action: str) -> None:
-	"""Allow a session owner, privileged user, or configured override role."""
+	"""Allow a session owner, a colleague at the same store, a privileged user,
+	or a configured override role.
+
+	A till is worked by whoever is on shift, not only by whoever unlocked it in
+	the morning, so an active POS Executive of the session's own store may pick
+	it up without a fresh approval. That reuses the gate that already decides
+	till access, which keeps other stores — and the other company — out.
+
+	Without this the fallback is ``session_override_roles``, an empty Table
+	MultiSelect whose docfield default never applies, so every colleague was
+	refused with "Required role: none configured".
+	"""
 	if session.user == frappe.session.user or is_privileged_user():
+		return
+	store = session.get("store") if hasattr(session, "get") else getattr(session, "store", None)
+	if store and frappe.db.exists(
+		"POS Executive",
+		{"user": frappe.session.user, "store": store, "is_active": 1},
+	):
 		return
 	require_configured_roles(
 		"session_override_roles",

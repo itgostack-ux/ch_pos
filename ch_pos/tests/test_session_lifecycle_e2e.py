@@ -20,6 +20,7 @@ import traceback
 
 import frappe
 from frappe.utils import nowdate, now_datetime, getdate, add_days, flt
+from ch_pos.tests.session_grant import test_session_grant
 
 results = []
 
@@ -383,7 +384,7 @@ def test_06_open_session():
         result = open_session(
             pos_profile=ctx["pos_profile"],
             opening_cash=5000,
-            manager_pin="1234",
+            session_grant=test_session_grant(ctx["pos_profile"]),
         )
 
         session_name = result.get("session_name")
@@ -435,7 +436,7 @@ def test_07_open_session_blocks_duplicate():
         result1 = open_session(
             pos_profile=ctx["pos_profile"],
             opening_cash=3000,
-            manager_pin="1234",
+            session_grant=test_session_grant(ctx["pos_profile"]),
         )
         session1 = result1.get("session_name")
         assert session1, "First session should open"
@@ -445,7 +446,7 @@ def test_07_open_session_blocks_duplicate():
             open_session(
                 pos_profile=ctx["pos_profile"],
                 opening_cash=2000,
-                manager_pin="1234",
+                session_grant=test_session_grant(ctx["pos_profile"]),
             )
             fail("07 open_session — blocks duplicate", "Second session should have been blocked!")
         except frappe.exceptions.ValidationError:
@@ -482,7 +483,7 @@ def test_08_get_session_status_with_active_session():
         result = open_session(
             pos_profile=ctx["pos_profile"],
             opening_cash=4000,
-            manager_pin="1234",
+            session_grant=test_session_grant(ctx["pos_profile"]),
         )
         session_name = result["session_name"]
 
@@ -529,7 +530,7 @@ def test_09_close_session():
         open_result = open_session(
             pos_profile=ctx["pos_profile"],
             opening_cash=5000,
-            manager_pin="1234",
+            session_grant=test_session_grant(ctx["pos_profile"]),
         )
         session_name = open_result["session_name"]
 
@@ -688,7 +689,7 @@ def test_11_complete_lifecycle():
         open_result = open_session(
             pos_profile=ctx["pos_profile"],
             opening_cash=10000,
-            manager_pin="1234",
+            session_grant=test_session_grant(ctx["pos_profile"]),
         )
         session_name = open_result["session_name"]
 
@@ -827,7 +828,7 @@ def test_13_open_session_blocked_on_closed_day():
             open_session(
                 pos_profile=ctx["pos_profile"],
                 opening_cash=5000,
-                manager_pin="1234",
+                session_grant=test_session_grant(ctx["pos_profile"]),
             )
             fail("13 open blocked on closed day", "Should have been blocked!")
         except Exception as e:

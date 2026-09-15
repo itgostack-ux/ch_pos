@@ -31,6 +31,7 @@ Ties to memory:
 
 import frappe
 from frappe.utils import add_days, flt, cint, now_datetime, nowdate
+from ch_pos.tests.session_grant import test_session_grant
 
 _results = []
 FLOW = "ExceptionScope+FreeBundle"
@@ -210,7 +211,7 @@ def _ensure_today_session(profile_name):
         open_session(
             pos_profile=profile_name,
             opening_cash=1000,
-            manager_pin=pin,
+            session_grant=test_session_grant(profile_name),
         )
         frappe.db.commit()
     except Exception as _open_err:

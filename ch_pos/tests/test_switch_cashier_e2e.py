@@ -20,6 +20,7 @@ import traceback
 
 import frappe
 from frappe.utils import nowdate, now_datetime, flt
+from ch_pos.tests.session_grant import test_session_grant
 
 _results = []
 
@@ -177,7 +178,7 @@ def _open_session(ctx):
     result = open_session(
         pos_profile=ctx["pos_profile"],
         opening_cash=5000,
-        manager_pin="1234",
+        session_grant=test_session_grant(ctx["pos_profile"]),
     )
     return result.get("session_name")
 

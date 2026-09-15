@@ -23,6 +23,10 @@ from ch_pos.config import (
     get_control_setting,
     is_privileged_user,
     require_configured_roles)
+from ch_pos.api.manager_approval import (
+    consume_action_grant,
+    request_session_open_otp as _request_session_open_otp,
+    verify_session_open_otp as _verify_session_open_otp)
 from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import is_session_stale
 from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import build_settlement_snapshot
@@ -196,8 +200,25 @@ def get_session_status(pos_profile) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> dict:
-    """Open a new POS session. Called from the POS opening screen."""
+def request_session_open_otp(pos_profile) -> dict:
+    """Email the caller a 6-digit code for opening this profile's till."""
+    return _request_session_open_otp(pos_profile)
+
+
+@frappe.whitelist(methods=["POST"])
+def verify_session_open_otp(pos_profile, otp) -> dict:
+    """Exchange the emailed code for a single-use session-open grant."""
+    return _verify_session_open_otp(pos_profile, otp)
+
+
+@frappe.whitelist(methods=["POST"])
+def open_session(pos_profile, opening_cash, session_grant=None, device=None) -> dict:
+    """Open a new POS session. Called from the POS opening screen.
+
+    ``session_grant`` is the single-use token returned by
+    ``verify_session_open_otp`` — proof that the caller entered a code sent to
+    their own email, which is what makes ``opening_approved_by`` a real identity.
+    """
     frappe.has_permission("Sales Invoice", "create", throw=True)
     assert_pos_profile_scope(pos_profile)
     opening_cash = flt(opening_cash)
@@ -304,15 +325,20 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
     # ── Mandatory validations ────────────────────────────────
         if not opening_cash:
             frappe.throw(_("Opening Cash is mandatory. Count the cash in the drawer before starting."), title=_("API Error"))
-        if not manager_pin:
-            frappe.throw(_("Manager PIN is mandatory to open a POS session."), title=_("API Error"))
+        if not session_grant:
+            frappe.throw(
+                _("Request a code by email and enter it to open the till."),
+                title=_("Verification Required"))
 
-    # Manager PIN verification for opening approval
-        manager_user = None
-        pin_result = verify_manager_pin(manager_pin, store=store, permission="can_approve_opening")
-        if not pin_result.get("valid"):
-            frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
-        manager_user = pin_result["user"]
+    # The opener proves their own identity with a code sent to their inbox, so
+    # the session records who actually started it. A manager PIN could only ever
+    # show that *a* manager approved — never which person was standing there.
+        consume_action_grant(
+            "session_open",
+            session_grant,
+            expected={"user": frappe.session.user, "store": store, "pos_profile": pos_profile},
+            restore_on_rollback=True)
+        manager_user = frappe.session.user
 
         # Validate opening cash against previous closing / expected float
         expected_float = _get_expected_float(pos_profile, store)
@@ -404,6 +430,18 @@ def open_session(pos_profile, opening_cash, manager_pin=None, device=None) -> di
         session.flags.ch_opening_approval_verified = True
         session.insert()
         session.submit()
+
+        # Distinguish a proven OTP open from a privileged bypass, which logs
+        # itself separately — otherwise both look identical in the trail.
+        from ch_pos.audit import log_business_event
+
+        log_business_event(
+            event_type="Session Opened",
+            ref_doctype="CH POS Session",
+            ref_name=session.name,
+            store=store,
+            company=company,
+            remarks=f"session opened via email OTP by {frappe.session.user}")
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key))
 

@@ -488,13 +488,18 @@ export class SessionOpeningScreen {
 				reqd: 1,
 				description: __("Count the cash in the drawer and enter the total"),
 			},
-			{ fieldtype: "Section Break", label: __("Manager Approval") },
+			{ fieldtype: "Section Break", label: __("Verify It Is You") },
 			{
-				fieldname: "manager_pin",
-				fieldtype: "Password",
-				label: __("Manager PIN"),
+				fieldname: "send_otp",
+				fieldtype: "Button",
+				label: __("Email me a code"),
+			},
+			{
+				fieldname: "otp",
+				fieldtype: "Data",
+				label: __("6-digit code"),
 				reqd: 1,
-				description: __("4-6 digit PIN for opening approval (mandatory)"),
+				description: __("We email the code to you, so the till records who opened it"),
 			},
 		);
 
@@ -547,8 +552,40 @@ export class SessionOpeningScreen {
 			}
 		});
 
+		this._wire_otp_button(dlg);
+
 		dlg.show();
 		this._dialog = dlg;
+	}
+
+	/**
+	 * "Email me a code" — sends a 6-digit code to the signed-in user's own
+	 * inbox. The till then records who opened it, which a shared manager PIN
+	 * could never establish.
+	 */
+	_wire_otp_button(dlg) {
+		const btn = dlg.fields_dict.send_otp;
+		if (!btn) return;
+		btn.$input?.on("click", () => {
+			const profile = dlg.get_value("pos_profile");
+			if (!profile) {
+				frappe.show_alert({ message: __("Pick a POS Profile first"), indicator: "orange" });
+				return;
+			}
+			btn.$input.prop("disabled", true).text(__("Sending…"));
+			frappe.xcall("ch_pos.api.session_api.request_session_open_otp", { pos_profile: profile })
+				.then((r) => {
+					dlg.set_df_property("otp", "description", r.message || __("Code sent."));
+					frappe.show_alert({ message: r.message, indicator: "green" });
+					dlg.fields_dict.otp?.$input?.focus();
+				})
+				.catch(() => {
+					// The server has already shown why; just let them retry.
+				})
+				.finally(() => {
+					btn.$input.prop("disabled", false).text(__("Email me a code"));
+				});
+		});
 	}
 
 	_show_day_closed_message(data) {
@@ -659,13 +696,18 @@ export class SessionOpeningScreen {
 				default: 0,
 				description: __("Count cash in drawer before starting"),
 			},
-			{ fieldtype: "Section Break", label: __("Manager Approval") },
+			{ fieldtype: "Section Break", label: __("Verify It Is You") },
 			{
-				fieldname: "manager_pin",
-				fieldtype: "Password",
-				label: __("Manager PIN"),
+				fieldname: "send_otp",
+				fieldtype: "Button",
+				label: __("Email me a code"),
+			},
+			{
+				fieldname: "otp",
+				fieldtype: "Data",
+				label: __("6-digit code"),
 				reqd: 1,
-				description: __("4-6 digit PIN for opening approval"),
+				description: __("We email the code to you, so the till records who opened it"),
 			},
 			{
 				fieldname: "error_area",
@@ -682,6 +724,19 @@ export class SessionOpeningScreen {
 				this._create_session(dlg, pos_profile, values, {}, resolve, company, ctx);
 			},
 		});
+		// This dialog already knows its profile, so the button needs no picker.
+		dlg.fields_dict.send_otp?.$input?.on("click", () => {
+			const btn = dlg.fields_dict.send_otp.$input;
+			btn.prop("disabled", true).text(__("Sending…"));
+			frappe.xcall("ch_pos.api.session_api.request_session_open_otp", { pos_profile })
+				.then((r) => {
+					dlg.set_df_property("otp", "description", r.message || __("Code sent."));
+					frappe.show_alert({ message: r.message, indicator: "green" });
+					dlg.fields_dict.otp?.$input?.focus();
+				})
+				.catch(() => {})
+				.finally(() => btn.prop("disabled", false).text(__("Email me a code")));
+		});
 		dlg.show();
 		this._dialog = dlg;
 	}
@@ -692,16 +747,47 @@ export class SessionOpeningScreen {
 			dlg.fields_dict.error_area.$wrapper.html("");
 		}
 		dlg.disable_primary_action();
-		const args = {
-			pos_profile: pos_profile,
-			opening_cash: values.opening_cash || 0,
-			manager_pin: values.manager_pin || null,
+
+		const show_error = (msg) => {
+			dlg.enable_primary_action();
+			if (dlg.fields_dict.error_area) {
+				dlg.fields_dict.error_area.$wrapper.html(
+					`<div class="alert alert-danger" style="margin-top:10px">
+						<i class="fa fa-exclamation-circle"></i> ${msg}
+					</div>`
+				);
+			}
 		};
-		// Pass device from context if available
-		if (ctx && ctx.device) {
-			args.device = ctx.device;
+
+		if (!values.otp) {
+			show_error(__("Enter the 6-digit code we emailed you."));
+			return;
 		}
-		frappe.call({
+
+		// Exchange the emailed code for a single-use grant, then open with it.
+		// The grant is what proves to the server which person is at the till.
+		frappe.xcall("ch_pos.api.session_api.verify_session_open_otp", {
+			pos_profile,
+			otp: values.otp,
+		}).then((v) => {
+			const args = {
+				pos_profile: pos_profile,
+				opening_cash: values.opening_cash || 0,
+				session_grant: v.session_grant,
+			};
+			// Pass device from context if available
+			if (ctx && ctx.device) {
+				args.device = ctx.device;
+			}
+			return this._open_with_grant(dlg, pos_profile, args, open_map, resolve, company, ctx);
+		}).catch(() => {
+			// The server explains why the code failed; re-enable so they retry.
+			dlg.enable_primary_action();
+		});
+	}
+
+	_open_with_grant(dlg, pos_profile, args, open_map, resolve, company, ctx) {
+		return frappe.call({
 			method: "ch_pos.api.session_api.open_session",
 			args: args,
 			callback: (r) => {

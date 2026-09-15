@@ -10,6 +10,7 @@ bench --site erpnext.local execute ch_pos.tests.test_modules_e2e.run_all
 
 import frappe
 from frappe.utils import cint, flt, nowdate, today, add_days, now_datetime, getdate
+from ch_pos.tests.session_grant import test_session_grant
 
 
 PASS = 0
@@ -298,7 +299,7 @@ def test_session_management(ctx):
         result = session_api.open_session(
             pos_profile=profile,
             opening_cash=5000,
-            manager_pin=pin,
+            session_grant=test_session_grant(profile),
         )
         session_name = result.get("session_name")
         assert_true(session_name, "open_session should return session_name")

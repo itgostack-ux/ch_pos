@@ -4,11 +4,11 @@ import pickle
 import secrets
 
 import frappe
+from buyback.utils import validate_indian_phone
 from frappe import _
 from frappe.utils import cint, flt, now_datetime
 
-from buyback.utils import validate_indian_phone
-from ch_pos.api.scope_guard import assert_pos_profile_scope, assert_store_scope
+from ch_pos.api.scope_guard import assert_pos_profile_scope
 from ch_pos.config import get_control_setting, has_configured_roles, is_privileged_user
 
 
@@ -286,3 +286,105 @@ def consume_action_grant(
 
         frappe.db.after_rollback.add(restore_grant)
     return payload
+
+
+# ── Session open: an OTP to the opener's own inbox ───────────────────────────
+#
+# A manager PIN proves that *a* manager approved, never *who* — PINs get shared,
+# and this estate once had every active PIN row using one 5-digit code. A code
+# delivered to the opener's own mailbox proves the person, so the session can
+# record who actually started it.
+#
+# CH OTP Log already provides 6 digits, a 5-minute expiry, attempt lockout,
+# 5-per-hour rate limiting per identity and single-use semantics, so nothing
+# here re-implements any of that.
+
+_SESSION_OTP_PURPOSE = "POS Session Open"
+
+
+def _mask_email(address: str) -> str:
+    """j***e@example.com — enough to confirm the inbox without printing it."""
+    address = str(address or "").strip()
+    if "@" not in address:
+        return "your registered email"
+    local, _, domain = address.partition("@")
+    if len(local) <= 2:
+        masked = local[:1] + "*"
+    else:
+        masked = f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}"
+    return f"{masked}@{domain}"
+
+
+def request_session_open_otp(pos_profile: str) -> dict:
+    """Email the caller a code that lets them open this profile's till."""
+    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+
+    from ch_pos.api.scope_guard import assert_pos_executive
+
+    anchors = assert_pos_profile_scope(pos_profile)
+    store = anchors.get("store")
+    if not store:
+        frappe.throw(_("This POS Profile is not mapped to a store."))
+
+    # Check entitlement BEFORE sending: never mail a code to someone who could
+    # not open this till anyway, since that alone would leak which stores exist.
+    assert_pos_executive(store)
+
+    user = frappe.session.user
+    email = frappe.db.get_value("User", user, "email") or user
+    if "@" not in str(email):
+        frappe.throw(
+            _("Your account has no email address, so a code cannot be sent. Ask an administrator to add one."))
+
+    otp = CHOTPLog.generate_otp(email=email, purpose=_SESSION_OTP_PURPOSE)
+
+    frappe.sendmail(
+        recipients=[email],
+        subject=_("Your POS session code: {0}").format(otp),
+        message=_(
+            "<p>Use this code to open the till at <b>{store}</b>.</p>"
+            "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
+            "<p>It expires in 5 minutes and can be used once. "
+            "If you did not ask to open a till, tell your manager — someone has your login.</p>"
+        ).format(store=frappe.utils.escape_html(store), otp=otp),
+        now=True,
+    )
+
+    return {
+        "sent": True,
+        "sent_to": _mask_email(email),
+        "expires_in": 300,
+        "message": _("We sent a 6-digit code to {0}.").format(_mask_email(email)),
+    }
+
+
+def verify_session_open_otp(pos_profile: str, otp: str) -> dict:
+    """Exchange a correct code for a single-use grant that opens the session."""
+    from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+
+    from ch_pos.api.scope_guard import assert_pos_executive
+
+    anchors = assert_pos_profile_scope(pos_profile)
+    store = anchors.get("store")
+    if not store:
+        frappe.throw(_("This POS Profile is not mapped to a store."))
+
+    # Re-assert: entitlement can have been withdrawn between send and verify.
+    assert_pos_executive(store)
+
+    user = frappe.session.user
+    email = frappe.db.get_value("User", user, "email") or user
+    result = CHOTPLog.verify_otp(email=email, purpose=_SESSION_OTP_PURPOSE, otp_code=otp)
+    if not result.get("valid"):
+        frappe.throw(result.get("message") or _("That code is not valid."), frappe.PermissionError)
+
+    grant = issue_action_grant(
+        "session_open",
+        {"user": user, "store": store, "pos_profile": str(pos_profile or "")},
+    )
+    return {
+        "verified": True,
+        "session_grant": grant,
+        "expires_in": _grant_ttl(),
+        "message": _("Code accepted. Opening the session."),
+    }
