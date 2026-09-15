@@ -40,6 +40,42 @@ class POSExecutive(Document):
             self.sales_person = sp
 
 
+def assert_valid_sales_executive(sales_executive, store=None, company=None, msg=None) -> None:
+    """Require a genuine, active POS Executive as a document's billing identity.
+
+    A till is shared across a shift, so the login is not the person — every
+    money-moving document has to name who actually served the customer.
+
+    Deliberately NOT bypassable by ``is_privileged_user()``: a scope bypass
+    lets an admin work across stores, which is legitimate, but nobody at any
+    privilege level gets to leave a sale unattributed. A System Manager who
+    needs to bill creates their own POS Executive row first.
+
+    ``msg`` re-words the empty-value prompt for counters that are not billing
+    (device intake, say), so the person reading it is told what THEY left out.
+    """
+    if not sales_executive:
+        frappe.throw(
+            msg or frappe._("Select who is billing this sale (Billed By) before continuing."),
+            title=frappe._("Billed By Required"),
+        )
+
+    filters = {"name": sales_executive, "is_active": 1}
+    if company:
+        filters["company"] = company
+    # Store is only asserted when the POS Profile actually resolves to a CH
+    # Store. An unmapped profile is a master-data gap, and must not be able to
+    # take a till down — company + active still has to hold.
+    if store:
+        filters["store"] = store
+
+    if not frappe.db.exists("POS Executive", filters):
+        frappe.throw(
+            frappe._("Billed By must be an active POS Executive for this store."),
+            title=frappe._("Invalid Billed By"),
+        )
+
+
 def ensure_scope_store_grant(user: str, store: str) -> None:
     """Auto-provision the CH User Scope store row implied by a POS assignment.
 

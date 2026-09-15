@@ -4,6 +4,7 @@ from frappe import _
 from buyback.utils import validate_indian_phone
 
 from ch_pos.api.scope_guard import assert_pos_profile_scope
+from ch_pos.pos_core.doctype.pos_executive.pos_executive import assert_valid_sales_executive
 
 
 def build_condition_and_backup(device_condition, accessories, data_disclaimer):
@@ -146,6 +147,17 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		frappe.throw(_("Warehouse does not match the active POS Profile."), frappe.PermissionError)
 	data["company"] = anchors.get("company")
 	data["source_warehouse"] = anchors.get("warehouse")
+
+	# Who physically took the device from the customer. A shared counter login
+	# cannot answer that, so intake names the executive the same way billing
+	# does — and refuses the ticket without one, rather than leaving the
+	# custody trail pointing at whoever happened to be signed in.
+	assert_valid_sales_executive(
+		data.get("intake_executive"),
+		store=anchors.get("store"),
+		company=anchors.get("company"),
+		msg=_("Select who is taking this device in (Billed By) before raising the ticket."),
+	)
 
 	if data.get("contact_number"):
 		data["contact_number"] = validate_indian_phone(data["contact_number"], "Contact Phone")

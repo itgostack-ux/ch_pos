@@ -35,6 +35,7 @@ from ch_pos.config import (
     require_configured_roles,
     require_privileged_user)
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+from ch_pos.pos_core.doctype.pos_executive.pos_executive import assert_valid_sales_executive
 from ch_erp15.config import has_counter_staff_bypass
 
 
@@ -4016,14 +4017,16 @@ def create_pos_invoice(
         inv.loyalty_points = cint(loyalty_points)
         inv.loyalty_amount = flt(loyalty_amount)
 
-    if sales_executive:
-        inv.custom_sales_executive = sales_executive
-        sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
-        if sales_person:
-            inv.append("sales_team", {
-                "sales_person": sales_person,
-                "allocated_percentage": 100,
-            })
+    assert_valid_sales_executive(
+        sales_executive, store=profile_anchors.get("store"), company=profile.company
+    )
+    inv.custom_sales_executive = sales_executive
+    sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
+    if sales_person:
+        inv.append("sales_team", {
+            "sales_person": sales_person,
+            "allocated_percentage": 100,
+        })
 
     if cint(is_free_sale):
         inv.custom_ch_sale_type = "Free Sale"
@@ -4690,20 +4693,19 @@ def create_pos_invoice(
     # Create incentive ledger entries for the sales executive
     incentive_total = 0
     incentive_warning = ""
-    if sales_executive:
-        try:
-            incentive_total = _create_incentive_entries(
-                invoice=inv,
-                pos_executive=sales_executive,
-                transaction_type="Sale")
-            if _missing_incentive_setup(inv, sales_executive):
-                incentive_warning = frappe._(
-                    "Incentive setup missing for this executive/company. "
-                    "Please configure active POS Incentive Slabs."
-                )
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), f"Incentive ledger failed for {inv.name}")
-            incentive_warning = frappe._("Incentive calculation failed. Please check Error Log.")
+    try:
+        incentive_total = _create_incentive_entries(
+            invoice=inv,
+            pos_executive=sales_executive,
+            transaction_type="Sale")
+        if _missing_incentive_setup(inv, sales_executive):
+            incentive_warning = frappe._(
+                "Incentive setup missing for this executive/company. "
+                "Please configure active POS Incentive Slabs."
+            )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Incentive ledger failed for {inv.name}")
+        incentive_warning = frappe._("Incentive calculation failed. Please check Error Log.")
 
     # ── Audit logging (best-effort, never blocks sale) ────────────────────────
     try:
@@ -6471,14 +6473,14 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
             "tax_amount": -1 * flt(tax.tax_amount) if tax.charge_type == "Actual" else 0,
         })
 
-    if sales_executive:
-        ret.custom_sales_executive = sales_executive
-        sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
-        if sales_person:
-            ret.append("sales_team", {
-                "sales_person": sales_person,
-                "allocated_percentage": 100,
-            })
+    assert_valid_sales_executive(sales_executive, store=orig_store, company=orig.company)
+    ret.custom_sales_executive = sales_executive
+    sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
+    if sales_person:
+        ret.append("sales_team", {
+            "sales_person": sales_person,
+            "allocated_percentage": 100,
+        })
 
     # Compute the correct grand_total AFTER applying taxes so the payment
     # amount matches exactly and GL entries balance.  Previously this used
@@ -6605,19 +6607,18 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
 
     # Create return incentive (clawback) entries
     incentive_clawback = 0
-    if sales_executive:
-        try:
-            incentive_clawback = _create_return_incentive_entries(ret, sales_executive)
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), f"Incentive clawback failed for {ret.name}")
-            # Always raise — a return without incentive recovery is a financial integrity failure.
-            # The store manager must resolve this before the return is processed.
-            frappe.throw(
-                frappe._("Return blocked: Incentive clawback journal entry failed for {0}. "
-                         "Contact the store manager to resolve incentive entries before retrying.").format(
-                    frappe.bold(ret.name)
-                ),
-                title=frappe._("Incentive Clawback Required"))
+    try:
+        incentive_clawback = _create_return_incentive_entries(ret, sales_executive)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Incentive clawback failed for {ret.name}")
+        # Always raise — a return without incentive recovery is a financial integrity failure.
+        # The store manager must resolve this before the return is processed.
+        frappe.throw(
+            frappe._("Return blocked: Incentive clawback journal entry failed for {0}. "
+                     "Contact the store manager to resolve incentive entries before retrying.").format(
+                frappe.bold(ret.name)
+            ),
+            title=frappe._("Incentive Clawback Required"))
 
     # Audit
     try:
@@ -7786,19 +7787,22 @@ def _validate_service_cart_rows(service_billing, customer):
 @frappe.whitelist(methods=["POST"])
 def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile,
                            customer="Walk-in Customer", service_order=None, upi_txn_id=None,
-                           remote_otp=None) -> dict:
+                           remote_otp=None, sales_executive=None) -> dict:
     """Create a Sales Invoice to collect payment for a completed repair job.
 
     Marks Service Request as billed after invoice submission.
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
     frappe.has_permission("Sales Invoice", "submit", throw=True)
-    assert_pos_profile_scope(pos_profile)
+    profile_anchors = assert_pos_profile_scope(pos_profile)
     amount = flt(amount)
     if amount <= 0:
         frappe.throw(frappe._("Repair charge must be greater than zero"))
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    assert_valid_sales_executive(
+        sales_executive, store=profile_anchors.get("store"), company=profile.company
+    )
     sr_doc = _assert_service_request_scope(service_request, permission="write")
     if sr_doc.get("company") and sr_doc.company != profile.company:
         frappe.throw(_("Service Request belongs to another company."), frappe.PermissionError)
@@ -7854,6 +7858,8 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     inv.is_pos = 1
     inv.is_created_using_pos = 1
     inv.update_stock = 0  # Service item — no stock movement
+
+    inv.custom_sales_executive = sales_executive
 
     inv.append("items", {
         "item_code": repair_item,
@@ -8141,7 +8147,7 @@ def _normalize_repair_spare_parts(sr, requested_parts) -> list[dict]:
 def close_repair_order(service_request, pos_profile, payments, qc_result,
                        qc_remarks="", delivery_ack=0, delivery_note="",
                        technician="", spare_parts=None, service_charge=0,
-                       remote_otp=None) -> None:
+                       remote_otp=None, sales_executive=None) -> None:
     """Complete the repair closure flow in one atomic call.
 
     Steps:
@@ -8158,7 +8164,7 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
     frappe.has_permission("Sales Invoice", "submit", throw=True)
-    assert_pos_profile_scope(pos_profile)
+    profile_anchors = assert_pos_profile_scope(pos_profile)
 
     if isinstance(payments, str):
         payments = frappe.parse_json(payments)
@@ -8172,6 +8178,9 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
         frappe.throw(_("Invalid QC result."))
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    assert_valid_sales_executive(
+        sales_executive, store=profile_anchors.get("store"), company=profile.company
+    )
     sr = _assert_service_request_scope(service_request, permission="write")
     if sr.get("company") and sr.company != profile.company:
         frappe.throw(_("Service Request belongs to another company."), frappe.PermissionError)
@@ -8292,6 +8301,8 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     inv.is_pos = 1
     inv.is_created_using_pos = 1
     inv.update_stock = 0  # consumed spares already own submitted Stock Entries
+
+    inv.custom_sales_executive = sales_executive
 
     # Link GoFix service details
     inv.custom_gofix_service_request = service_request

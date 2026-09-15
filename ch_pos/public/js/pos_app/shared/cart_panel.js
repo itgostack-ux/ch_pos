@@ -238,39 +238,45 @@ export class CartPanel {
 		const company = PosState.active_company;
 		const execs = (access.store_executives || {})[company] || [];
 
-		let options = "";
+		// A till is shared: the person billing has to be chosen, so the list
+		// always opens with an unfilled prompt rather than someone's name.
+		let options = `<option value="">${__("Select who is billing")}</option>`;
 		for (const ex of execs) {
 			const sel = ex.name === PosState.sales_executive ? " selected" : "";
 			const role_tag = ex.role !== "Executive" ? ` (${ex.role})` : "";
 			options += `<option value="${frappe.utils.escape_html(ex.name)}"${sel}>${frappe.utils.escape_html(ex.executive_name)}${role_tag}</option>`;
 		}
 
-		if (!options) {
+		if (!execs.length) {
 			options = `<option value="">${__("No executives for this company")}</option>`;
 		}
 
 		select.html(options);
 
-		// Auto-select: prefer current selection, then own exec for this company, then cashier match, then first
+		// Default only to the cashier's OWN record — never to a stranger's.
+		// Picking execs[0] used to bill an arbitrary colleague whenever the
+		// signed-in user had no record of their own, which is precisely the
+		// misattribution Billed By exists to prevent. With no own-record match
+		// the field stays empty and checkout blocks until someone chooses.
 		if (!PosState.sales_executive || !execs.find((e) => e.name === PosState.sales_executive)) {
-			// Prefer own_by_company for the active company, fall back to own_executive
 			const comp_exec = (access.own_by_company || {})[company];
 			const own = comp_exec || access.own_executive;
-			if (own && execs.find((e) => e.name === own.name)) {
-				select.val(own.name);
-				PosState.sales_executive = own.name;
-				PosState.sales_executive_name = own.executive_name;
+			const cashier = PosState.pos_cashier || frappe.session.user;
+			const own_match =
+				(own && execs.find((e) => e.name === own.name)) ||
+				execs.find((e) => e.user === cashier);
+
+			if (own_match) {
+				select.val(own_match.name);
+				PosState.sales_executive = own_match.name;
+				PosState.sales_executive_name = own_match.executive_name;
 			} else {
-				// Find exec matching current POS cashier for this company
-				const cashier = PosState.pos_cashier || frappe.session.user;
-				const user_exec = execs.find((e) => e.user === cashier);
-				const fallback = user_exec || execs[0];
-				if (fallback) {
-					select.val(fallback.name);
-					PosState.sales_executive = fallback.name;
-					PosState.sales_executive_name = fallback.executive_name;
-				}
+				select.val("");
+				PosState.sales_executive = "";
+				PosState.sales_executive_name = "";
 			}
+			// An auto-filled default is a suggestion, not a confirmation.
+			PosState.sales_executive_confirmed = false;
 		}
 	}
 
@@ -933,6 +939,8 @@ export class CartPanel {
 			const exec = execs.find((ex) => ex.name === val);
 			PosState.sales_executive = val;
 			PosState.sales_executive_name = exec ? exec.executive_name : "";
+			// Someone actively chose — this is no longer an unconfirmed default.
+			PosState.sales_executive_confirmed = !!val;
 			EventBus.emit("executive:changed", val);
 		});
 

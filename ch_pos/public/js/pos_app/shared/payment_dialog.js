@@ -2836,6 +2836,24 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			return;
 		}
 
+		// Billed By is mandatory: a shared till's login is not a person, and
+		// this name drives the incentive the sale pays out on. The server
+		// refuses an unattributed invoice too — this only saves the round trip.
+		if (!PosState.sales_executive) {
+			frappe.show_alert({ message: __("Select who is billing this sale (Billed By) before confirming payment"), indicator: "red" });
+			this._submitting = false;
+			return;
+		}
+
+		// Where several people work one till, an auto-filled default is not
+		// good enough — somebody has to say who actually served this customer.
+		const _company_execs = (PosState.executive_access?.store_executives || {})[PosState.active_company] || [];
+		if (_company_execs.length > 1 && !PosState.sales_executive_confirmed) {
+			frappe.show_alert({ message: __("Confirm who is billing this sale (Billed By) before confirming payment"), indicator: "orange" });
+			this._submitting = false;
+			return;
+		}
+
 		const gstin_check = this._validate_billing_gstin(PosState.billing_gstin);
 		if (!gstin_check.valid) {
 			frappe.show_alert({ message: gstin_check.message, indicator: "red" });
