@@ -13,3 +13,4 @@ ch_pos.patches.v1_0.drop_pos_repair_intake_sidebar_refs
 
 [post_model_sync]
 ch_pos.patches.v2_0.walkin_token_device_taxonomy # 2026-09-04 - token device category/brand/model are item-master links; normalise rows, re-key symptoms
+ch_pos.patches.v2_0.seed_manager_pin_roles # 2026-09-15 - manager PIN gate had no roles, so only System Manager could ever approve
