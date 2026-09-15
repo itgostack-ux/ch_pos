@@ -949,6 +949,22 @@ def after_migrate():
     _ensure_pos_control_defaults()
     _ensure_fifo_override_reasons()
     _ensure_repair_consumable_groups()
+    _seed_pos_profiles()
+
+
+def _seed_pos_profiles():
+    """Restore POS Profiles a rebuilt site is missing.
+
+    Profiles are created by hand, so a fresh DR / staging / tenant site used to
+    come up with none of them. Additive only — an existing profile is never
+    touched, so live tuning survives.
+    """
+    from ch_pos.pos_core.pos_profile_seed import seed_baseline_pos_profiles
+
+    try:
+        seed_baseline_pos_profiles()
+    except Exception:  # noqa: BLE001 — a seed failure must not abort the migrate
+        frappe.log_error(frappe.get_traceback(), "seed_baseline_pos_profiles failed")
 
 
 def _ensure_repair_consumable_groups():
