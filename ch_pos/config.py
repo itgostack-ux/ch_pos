@@ -147,17 +147,32 @@ def has_any_roles(roles, user: str | None = None) -> bool:
 	return bool(set(frappe.get_roles(user)).intersection(role for role in roles if role))
 
 
-def require_configured_roles(fieldname: str, defaults=(), action: str | None = None) -> None:
-	require_authenticated_user()
-	if has_configured_roles(fieldname, defaults):
-		return
-	frappe.throw(
-		_("You do not have permission to {0}. Required role: {1}").format(
-			action or _("perform this action"),
-			", ".join(sorted(get_configured_roles(fieldname, defaults))) or _("none configured")),
-		frappe.PermissionError,
-		title=_("Permission Denied"))
+# def require_configured_roles(fieldname: str, defaults=(), action: str | None = None) -> None:
+# 	require_authenticated_user()
+# 	if has_configured_roles(fieldname, defaults):
+# 		return
+# 	frappe.throw(
+# 		_("You do not have permission to {0}. Required role: {1}").format(
+# 			action or _("perform this action"),
+# 			", ".join(sorted(get_configured_roles(fieldname, defaults))) or _("none configured")),
+# 		frappe.PermissionError,
+# 		title=_("Permission Denied"))
 
+def require_configured_roles(setting_field, action=None):
+    roles = get_configured_roles(setting_field) # Or how roles are fetched from CH POS Control Settings
+    
+    # FIX: If no override roles are configured, don't block users who already have standard DocType access
+    if not roles:
+        return
+
+    # Check if current user has any of the configured roles
+    user_roles = set(frappe.get_roles())
+    if not user_roles.intersection(set(roles)):
+        frappe.throw(
+            _("You do not have permission to {0}.").format(action),
+            frappe.PermissionError,
+            title=_("Permission Denied")
+        )
 
 def assert_session_operator(session, action: str) -> None:
 	"""Allow a session owner, a colleague at the same store, a privileged user,
