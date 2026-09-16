@@ -269,6 +269,9 @@ def get_pos_context(all_companies=0) -> dict:
         "user": user,
         "company": company,
         "store": store,
+        # The shop's name, so screens can say "Anna Nagar" where the code
+        # GF-ANNANAGAR means nothing to the person at the counter.
+        "store_name": frappe.db.get_value("CH Store", store, "store_name") if store else None,
         "device": device,
         "business_date": str(business_date) if business_date else None,
         "day_closed": day_closed,
@@ -326,6 +329,7 @@ def get_pos_context_for_store(store) -> dict:
         "user": user,
         "company": company,
         "store": store,
+        "store_name": store_doc.store_name,
         "device": None,
         "business_date": str(business_date) if business_date else None,
         "day_closed": day_closed,

@@ -643,6 +643,48 @@ def _annotate_gofix_enabled(profiles: list) -> list:
     return profiles
 
 
+def _annotate_store(profiles: list) -> list:
+    """Stamp the store a profile belongs to, and a name a cashier recognises.
+
+    A till is picked by shop — "Anna Nagar" — not by
+    ``POS - STO-GSPL-CHENNA-0003``. ``CH Store`` is the only place the two are
+    tied together, and the mapping is one store to one profile on this estate.
+
+    ``label`` keeps the code after the name rather than replacing it: the code
+    is what every other screen, report and error message shows, so dropping it
+    would make the two impossible to reconcile. A profile with no store falls
+    back to its own name, so an unmapped till is still selectable.
+    """
+    if not profiles:
+        return profiles
+    for row in profiles:
+        row["store"] = None
+        row["store_name"] = None
+        row["label"] = row.get("name")
+
+    names = [row.get("name") for row in profiles if row.get("name")]
+    if not names:
+        return profiles
+
+    by_profile = {}
+    for store in frappe.get_all(
+        "CH Store",
+        filters={"pos_profile": ("in", names)},
+        fields=["name", "store_name", "pos_profile"],
+        limit_page_length=len(names) + 1,
+    ):
+        by_profile.setdefault(store.pos_profile, store)
+
+    for row in profiles:
+        store = by_profile.get(row.get("name"))
+        if not store:
+            continue
+        row["store"] = store.name
+        row["store_name"] = store.store_name or store.name
+        row["label"] = f"{row['store_name']} · {store.name}"
+    return profiles
+
+
 # ---------------------------------------------------------------------------
 # Device taxonomy — the item master is the only source
 #
@@ -2707,8 +2749,8 @@ def get_pos_profiles() -> list:
             fields=["name", "company", "warehouse"],
             order_by="name asc",
             limit_page_length=result_limit + 1)
-        return _annotate_gofix_enabled(
-            _ensure_result_limit(all_profiles, result_limit, _("POS profiles")))
+        return _annotate_store(_annotate_gofix_enabled(
+            _ensure_result_limit(all_profiles, result_limit, _("POS profiles"))))
 
     try:
         from ch_erp15.ch_erp15.scope import get_user_scope
@@ -2723,8 +2765,8 @@ def get_pos_profiles() -> list:
             fields=["name", "company", "warehouse"],
             order_by="name asc",
             limit_page_length=result_limit + 1)
-        return _annotate_gofix_enabled(
-            _ensure_result_limit(all_profiles, result_limit, _("POS profiles")))
+        return _annotate_store(_annotate_gofix_enabled(
+            _ensure_result_limit(all_profiles, result_limit, _("POS profiles"))))
 
     stores = scope.get("stores") or set()
     if not stores:
@@ -2748,8 +2790,8 @@ def get_pos_profiles() -> list:
         fields=["name", "company", "warehouse"],
         order_by="name asc",
         limit_page_length=result_limit + 1)
-    return _annotate_gofix_enabled(
-        _ensure_result_limit(profiles, result_limit, _("Scoped POS profiles")))
+    return _annotate_store(_annotate_gofix_enabled(
+        _ensure_result_limit(profiles, result_limit, _("Scoped POS profiles"))))
 
 
 # ---------------------------------------------------------------------------

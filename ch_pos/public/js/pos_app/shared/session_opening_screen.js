@@ -452,16 +452,42 @@ export class SessionOpeningScreen {
 		});
 	}
 
+	/**
+	 * Ask which till, then how much cash is in it.
+	 *
+	 * The profile list is fetched rather than left to a Link field for two
+	 * reasons: a Link searches every POS Profile the user can read, which is
+	 * wider than the set they are actually entitled to open, and it shows the
+	 * profile code — `POS - STO-GSPL-CHENNA-0005` — which nobody at a counter
+	 * recognises. `get_pos_profiles` returns the scoped set already labelled
+	 * with the shop name.
+	 */
 	_show_profile_and_opening(open_entries, resolve) {
+		frappe.xcall("ch_pos.api.token_api.get_pos_profiles")
+			.then((profiles) => this._render_profile_and_opening(
+				open_entries, resolve, profiles || []))
+			// Never strand the opener on a list that failed to load: fall back
+			// to the unlabelled picker. The server re-checks entitlement on
+			// open either way, so this loses the nicety, not the gate.
+			.catch(() => this._render_profile_and_opening(open_entries, resolve, null));
+	}
+
+	_render_profile_and_opening(open_entries, resolve, profiles) {
 		this._dismiss_dialog();
 		open_entries = open_entries || [];
 		const open_map = {};
 		open_entries.forEach((e) => { open_map[e.pos_profile] = e; });
 
+		const by_profile = {};
+		(profiles || []).forEach((p) => { by_profile[p.name] = p; });
+		const label_for = (name) => (by_profile[name] && by_profile[name].label) || name;
+
 		const fields = [];
 
 		if (open_entries.length) {
-			const names = open_entries.map((e) => `<b>${e.pos_profile}</b>`).join(", ");
+			const names = open_entries
+				.map((e) => `<b>${frappe.utils.escape_html(label_for(e.pos_profile))}</b>`)
+				.join(", ");
 			fields.push({
 				fieldname: "open_info",
 				fieldtype: "HTML",
@@ -472,14 +498,27 @@ export class SessionOpeningScreen {
 		}
 
 		fields.push(
-			{
-				fieldname: "pos_profile",
-				fieldtype: "Link",
-				label: __("POS Profile"),
-				options: "POS Profile",
-				reqd: 1,
-				default: open_entries.length ? open_entries[0].pos_profile : undefined,
-			},
+			profiles
+				? {
+					fieldname: "pos_profile",
+					fieldtype: "Select",
+					label: __("Store / Till"),
+					// {label, value} pairs: the cashier reads the shop name,
+					// the server still receives the profile code.
+					options: profiles.map((p) => ({ value: p.name, label: p.label || p.name })),
+					reqd: 1,
+					default: open_entries.length
+						? open_entries[0].pos_profile
+						: (profiles.length === 1 ? profiles[0].name : undefined),
+				}
+				: {
+					fieldname: "pos_profile",
+					fieldtype: "Link",
+					label: __("POS Profile"),
+					options: "POS Profile",
+					reqd: 1,
+					default: open_entries.length ? open_entries[0].pos_profile : undefined,
+				},
 			{ fieldtype: "Column Break" },
 			{
 				fieldname: "opening_cash",
@@ -732,11 +771,14 @@ export class SessionOpeningScreen {
 
 	_show_opening_form(pos_profile, company, resolve, ctx) {
 		this._dismiss_dialog();
+		const store_label = ctx && ctx.store
+			? (ctx.store_name ? `${ctx.store_name} · ${ctx.store}` : ctx.store)
+			: "";
 		const context_info = ctx ? `
 			<div class="text-muted" style="margin-bottom:12px">
-				${__("Profile")}: <b>${pos_profile}</b><br>
+				${store_label ? `${__("Store")}: <b>${frappe.utils.escape_html(store_label)}</b><br>` : ""}
+				${__("Till")}: <b>${frappe.utils.escape_html(pos_profile)}</b><br>
 				${ctx.company ? `${__("Company")}: <b>${frappe.utils.escape_html(ctx.company)}</b><br>` : ""}
-				${ctx.store ? `${__("Store")}: <b>${frappe.utils.escape_html(ctx.store)}</b><br>` : ""}
 				${ctx.device ? `${__("Device")}: <b>${frappe.utils.escape_html(ctx.device)}</b><br>` : ""}
 				${ctx.business_date ? `${__("Business Date")}: <b>${ctx.business_date}</b>` : ""}
 			</div>` : `
