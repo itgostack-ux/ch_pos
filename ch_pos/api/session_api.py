@@ -212,7 +212,8 @@ def verify_session_open_otp(pos_profile, otp) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def open_session(pos_profile, opening_cash, session_grant=None, device=None) -> dict:
+def open_session(pos_profile, opening_cash, session_grant=None, device=None,
+                 manager_pin=None) -> dict:
     """Open a new POS session. Called from the POS opening screen.
 
     ``session_grant`` is the single-use token returned by
@@ -325,20 +326,36 @@ def open_session(pos_profile, opening_cash, session_grant=None, device=None) -> 
     # ── Mandatory validations ────────────────────────────────
         if not opening_cash:
             frappe.throw(_("Opening Cash is mandatory. Count the cash in the drawer before starting."), title=_("API Error"))
-        if not session_grant:
-            frappe.throw(
-                _("Request a code by email and enter it to open the till."),
-                title=_("Verification Required"))
-
     # The opener proves their own identity with a code sent to their inbox, so
     # the session records who actually started it. A manager PIN could only ever
     # show that *a* manager approved — never which person was standing there.
-        consume_action_grant(
-            "session_open",
-            session_grant,
-            expected={"user": frappe.session.user, "store": store, "pos_profile": pos_profile},
-            restore_on_rollback=True)
-        manager_user = frappe.session.user
+    #
+    # The PIN is still accepted as a fallback. Python and the JS bundle deploy
+    # separately, and a till running the previous bundle has no way to request
+    # a code: it posts manager_pin and nothing else. Refusing that took every
+    # store offline until the assets caught up, so both are honoured and the
+    # session records which was used.
+        if session_grant:
+            consume_action_grant(
+                "session_open",
+                session_grant,
+                expected={"user": frappe.session.user, "store": store,
+                          "pos_profile": pos_profile},
+                restore_on_rollback=True)
+            manager_user = frappe.session.user
+            opened_via = "email OTP"
+        elif manager_pin:
+            pin_result = verify_manager_pin(
+                manager_pin, store=store, permission="can_approve_opening")
+            if not pin_result.get("valid"):
+                frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+            manager_user = pin_result["user"]
+            opened_via = "manager PIN"
+        else:
+            frappe.throw(
+                _("Request a code by email and enter it, or enter a manager PIN, "
+                  "to open the till."),
+                title=_("Verification Required"))
 
         # Validate opening cash against previous closing / expected float
         expected_float = _get_expected_float(pos_profile, store)
@@ -441,7 +458,7 @@ def open_session(pos_profile, opening_cash, session_grant=None, device=None) -> 
             ref_name=session.name,
             store=store,
             company=company,
-            remarks=f"session opened via email OTP by {frappe.session.user}")
+            remarks=f"session opened via {opened_via} by {frappe.session.user}")
     finally:
         frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_key))
 
