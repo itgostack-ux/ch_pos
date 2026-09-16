@@ -598,6 +598,42 @@ export class SessionOpeningScreen {
 			});
 	}
 
+	/**
+	 * Request a code for a PIN-gated action, then exchange it for a grant as
+	 * soon as the operator types it. Keyed by action so the remaining PIN
+	 * popups can reuse it.
+	 */
+	_send_action_otp(kind, store) {
+		const dlg = this._dialog;
+		if (!dlg) return;
+		const btn = dlg.fields_dict.send_otp && dlg.fields_dict.send_otp.$input;
+		if (btn) btn.prop("disabled", true).text(__("Sending…"));
+		frappe.xcall("ch_pos.api.session_api.request_action_otp", { kind, store })
+			.then((r) => {
+				dlg.set_df_property("otp", "description", r.message || __("Code sent."));
+				frappe.show_alert({ message: r.message, indicator: "green" });
+				const otp_field = dlg.fields_dict.otp && dlg.fields_dict.otp.$input;
+				if (otp_field) {
+					otp_field.focus();
+					otp_field.off("input.chotp").on("input.chotp", () => {
+						const code = (otp_field.val() || "").trim();
+						if (code.length !== 6) return;
+						frappe.xcall("ch_pos.api.session_api.verify_action_otp",
+							{ kind, store, otp: code })
+							.then((v) => {
+								this._action_grant = v.action_grant;
+								frappe.show_alert({ message: v.message, indicator: "green" });
+							})
+							.catch(() => { this._action_grant = null; });
+					});
+				}
+			})
+			.catch(() => {})
+			.finally(() => {
+				if (btn) btn.prop("disabled", false).text(__("Email me a code"));
+			});
+	}
+
 	_show_day_closed_message(data) {
 		this._dismiss_dialog();
 		const store = data.store;
@@ -634,13 +670,27 @@ export class SessionOpeningScreen {
 					label: __("Reason"),
 					default: __("Advance to next business day"),
 				},
-				{ fieldtype: "Section Break", label: __("Manager Authorization") },
+				{ fieldtype: "Section Break", label: __("Verify It Is You") },
+				{
+					fieldname: "send_otp",
+					fieldtype: "Button",
+					label: __("Email me a code"),
+					// An executive holds no approver role by design, so a manager
+					// PIN can only ever answer "Invalid PIN" and the store is
+					// stranded. A code to their own inbox proves who rolled the day.
+					click: () => this._send_action_otp("business_date_override", store),
+				},
+				{
+					fieldname: "otp",
+					fieldtype: "Data",
+					label: __("6-digit code"),
+					description: __("We email the code to you; the day roll records who did it"),
+				},
 				{
 					fieldname: "manager_pin",
 					fieldtype: "Password",
-					label: __("Manager PIN"),
-					reqd: 1,
-					description: __("Manager PIN required to advance business date"),
+					label: __("Manager PIN (alternative)"),
+					description: __("Only if a manager is approving instead"),
 				},
 			],
 			primary_action_label: __("Advance Date & Start New Day"),
@@ -656,7 +706,8 @@ export class SessionOpeningScreen {
 						store: store,
 						new_date: values.new_date,
 						reason: values.reason || "Advance to next business day",
-						manager_pin: values.manager_pin,
+						manager_pin: values.manager_pin || null,
+						action_grant: this._action_grant || null,
 					},
 					callback: (r) => {
 						if (r.message) {

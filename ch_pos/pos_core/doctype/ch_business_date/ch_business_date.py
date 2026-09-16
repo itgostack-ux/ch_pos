@@ -19,14 +19,32 @@ class CHBusinessDate(Document):
 			self.set_at = now_datetime()
 
 
-def advance_business_date(store, new_date, reason=None, manager_user=None):
-	"""Advance the business date for a store. Requires manager override."""
+def advance_business_date(store, new_date, reason=None, manager_user=None,
+			  authorised=False):
+	"""Advance the business date for a store.
+
+	`authorised=True` says the caller has already proved the right to roll the
+	day — an emailed code or a manager PIN, plus store scope — and that its
+	verification, not a role, is the gate.
+
+	The default stays closed. Without it this falls back to the
+	`CH Business Date` write DocPerm, which only System Manager holds, so any
+	future caller that forgets to authorise is refused rather than waved
+	through.
+
+	Why the flag exists at all: a store executive holds no manager role by
+	design, so the DocPerm check refused the two paths built for them — the
+	day-roll dialog (after the OTP was accepted) and the automatic advance at
+	end of day, which would have thrown inside `close_session` and rolled the
+	whole close back.
+	"""
 	lock_key = f"bd_advance_{frappe.scrub(store)}"
 	lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 15)", (lock_key,))[0][0]
 	if lock_result != 1:
 		frappe.throw(_("Business date for store {0} is being updated by another process. Please retry.").format(store))
 	try:
-		frappe.has_permission("CH Business Date", "write", throw=True)
+		if not authorised:
+			frappe.has_permission("CH Business Date", "write", throw=True)
 		new_date = getdate(new_date)
 		if new_date > getdate(nowdate()):
 			frappe.throw(

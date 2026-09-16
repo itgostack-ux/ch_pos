@@ -212,6 +212,20 @@ def verify_session_open_otp(pos_profile, otp) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
+def request_action_otp(kind, store) -> dict:
+    """Email the caller a code authorising a PIN-gated action at this store."""
+    from ch_pos.api.manager_approval import request_action_otp as _req
+    return _req(kind, store)
+
+
+@frappe.whitelist(methods=["POST"])
+def verify_action_otp(kind, store, otp) -> dict:
+    """Exchange that code for a single-use grant."""
+    from ch_pos.api.manager_approval import verify_action_otp as _ver
+    return _ver(kind, store, otp)
+
+
+@frappe.whitelist(methods=["POST"])
 def open_session(pos_profile, opening_cash, session_grant=None, device=None,
                  manager_pin=None) -> dict:
     """Open a new POS session. Called from the POS opening screen.
@@ -729,7 +743,8 @@ def admin_reopen_session(session_name, reason) -> dict:
                     store=session.store,
                     new_date=session_bd,
                     reason="Admin reopen of session {0}: {1}".format(session_name, reason),
-                    manager_user=frappe.session.user)
+                    manager_user=frappe.session.user,
+                    authorised=True)
                 bd_rollback = {"from": str(current_bd), "to": str(session_bd)}
             elif current_bd_status == "Closed":
                 # Same business date — just demote the status because the
@@ -913,23 +928,58 @@ def get_business_date(store) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def override_business_date(store, new_date, reason, manager_pin) -> dict:
-    """Override the business date. Requires manager with override permission."""
+def override_business_date(store, new_date, reason, manager_pin=None,
+                           action_grant=None) -> dict:
+    """Advance the business date.
+
+    Verified either by a code emailed to the person doing it, or by a manager
+    PIN. Rolling the day is operational rather than a concession, and an
+    executive holds no approver role by design — so a PIN could only ever tell
+    them "Invalid PIN", which is what stranded stores. The emailed code proves
+    who actually advanced it, and that is recorded.
+    """
     frappe.has_permission("Sales Invoice", "create", throw=True)
     store_company = frappe.db.get_value("CH Store", store, "company")
     assert_store_scope(store=store, company=store_company)
 
-    pin_result = verify_manager_pin(
-        manager_pin, store=store, permission="can_override_business_date"
-    )
-    if not pin_result.get("valid"):
-        frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+    if action_grant:
+        consume_action_grant(
+            "business_date_override", action_grant,
+            expected={"user": frappe.session.user, "store": store},
+            restore_on_rollback=True)
+        approver = frappe.session.user
+        approver_label = frappe.db.get_value("User", approver, "full_name") or approver
+        verified_via = "email OTP"
+    elif manager_pin:
+        pin_result = verify_manager_pin(
+            manager_pin, store=store, permission="can_override_business_date")
+        if not pin_result.get("valid"):
+            frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+        approver = pin_result["user"]
+        approver_label = pin_result["name"]
+        verified_via = "manager PIN"
+    else:
+        frappe.throw(
+            _("Request a code by email and enter it, or enter a manager PIN, "
+              "to advance the business date."),
+            title=_("Verification Required"))
 
     from ch_pos.pos_core.doctype.ch_business_date.ch_business_date import advance_business_date
-    result = advance_business_date(store, new_date, reason, manager_user=pin_result["user"])
+    result = advance_business_date(
+        store, new_date, reason, manager_user=approver, authorised=True)
+    try:
+        from ch_pos.audit import log_business_event
+
+        log_business_event(
+            event_type="Business Date Change", store=store, company=store_company,
+            remarks=f"advanced to {new_date} via {verified_via} by {frappe.session.user}")
+    except Exception:  # noqa: BLE001 — the audit row must not block the day roll
+        frappe.log_error(title="Business date audit log failed",
+                         message=frappe.get_traceback())
     return {
         "business_date": str(result.get("business_date")),
-        "set_by": pin_result["name"],
+        "set_by": approver_label,
+        "verified_via": verified_via,
     }
 
 
@@ -1295,7 +1345,11 @@ def _auto_advance_business_date_after_eod(store, closed_business_date):
         store=store,
         new_date=next_bd,
         reason=f"Auto advance after EOD close for {closed_business_date}",
-        manager_user=frappe.session.user)
+        manager_user=frappe.session.user,
+        # reached only after close_session verified the closer; the cashier
+        # standing there holds no CH Business Date write DocPerm and must not
+        # have their close rolled back for it.
+        authorised=True)
 
     return {
         "advanced": True,
