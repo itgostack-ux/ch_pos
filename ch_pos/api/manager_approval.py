@@ -340,7 +340,10 @@ def request_session_open_otp(pos_profile: str) -> dict:
 
     frappe.sendmail(
         recipients=[email],
-        subject=_("Your POS session code: {0}").format(otp),
+        # The code stays out of the subject: subjects render in Windows toast
+        # popups, phone lock screens and Outlook's preview pane, so a subject
+        # carrying the code shows it to anyone walking past the counter.
+        subject=_("Your POS session code"),
         message=_(
             "<p>Use this code to open the till at <b>{store}</b>.</p>"
             "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
@@ -427,7 +430,8 @@ def request_action_otp(kind: str, store: str) -> dict:
     otp = CHOTPLog.generate_otp(email=email, purpose=purpose)
     frappe.sendmail(
         recipients=[email],
-        subject=_("Your POS verification code: {0}").format(otp),
+        # Kept out of the subject for the same reason as the session code above.
+        subject=_("Your POS verification code"),
         message=_(
             "<p>Use this code to continue at <b>{store}</b>.</p>"
             "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
