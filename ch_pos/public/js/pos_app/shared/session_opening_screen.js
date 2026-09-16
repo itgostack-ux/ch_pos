@@ -493,6 +493,11 @@ export class SessionOpeningScreen {
 				fieldname: "send_otp",
 				fieldtype: "Button",
 				label: __("Email me a code"),
+				// frappe/form/controls/button.js dispatches a dialog button
+				// through df.click. Binding to $input instead only works if the
+				// control happens to be rendered already, and fails silently
+				// when it is not — which is why no code was being sent.
+				click: () => this._send_session_otp(this._dialog),
 			},
 			{
 				fieldname: "otp",
@@ -552,8 +557,6 @@ export class SessionOpeningScreen {
 			}
 		});
 
-		this._wire_otp_button(dlg);
-
 		dlg.show();
 		this._dialog = dlg;
 	}
@@ -563,29 +566,36 @@ export class SessionOpeningScreen {
 	 * inbox. The till then records who opened it, which a shared manager PIN
 	 * could never establish.
 	 */
-	_wire_otp_button(dlg) {
-		const btn = dlg.fields_dict.send_otp;
-		if (!btn) return;
-		btn.$input?.on("click", () => {
-			const profile = dlg.get_value("pos_profile");
-			if (!profile) {
-				frappe.show_alert({ message: __("Pick a POS Profile first"), indicator: "orange" });
-				return;
-			}
-			btn.$input.prop("disabled", true).text(__("Sending…"));
-			frappe.xcall("ch_pos.api.session_api.request_session_open_otp", { pos_profile: profile })
-				.then((r) => {
-					dlg.set_df_property("otp", "description", r.message || __("Code sent."));
-					frappe.show_alert({ message: r.message, indicator: "green" });
-					dlg.fields_dict.otp?.$input?.focus();
-				})
-				.catch(() => {
-					// The server has already shown why; just let them retry.
-				})
-				.finally(() => {
-					btn.$input.prop("disabled", false).text(__("Email me a code"));
-				});
-		});
+	/**
+	 * Request the emailed code. Called from the Button field's `click`, which
+	 * is what frappe.ui.form.ControlButton.onclick() invokes for a dialog.
+	 *
+	 * `pos_profile` may come from a picker (the profile dialog) or be fixed by
+	 * the caller (the store-context dialog), so it is resolved from whichever
+	 * is available rather than assumed.
+	 */
+	_send_session_otp(dlg, fixed_profile) {
+		if (!dlg) return;
+		const profile = fixed_profile || dlg.get_value("pos_profile");
+		if (!profile) {
+			frappe.show_alert({ message: __("Pick a POS Profile first"), indicator: "orange" });
+			return;
+		}
+		const btn = dlg.fields_dict.send_otp && dlg.fields_dict.send_otp.$input;
+		if (btn) btn.prop("disabled", true).text(__("Sending…"));
+		frappe.xcall("ch_pos.api.session_api.request_session_open_otp", { pos_profile: profile })
+			.then((r) => {
+				dlg.set_df_property("otp", "description", r.message || __("Code sent."));
+				frappe.show_alert({ message: r.message, indicator: "green" });
+				dlg.fields_dict.otp && dlg.fields_dict.otp.$input &&
+					dlg.fields_dict.otp.$input.focus();
+			})
+			.catch(() => {
+				// The server has already explained why; let them retry.
+			})
+			.finally(() => {
+				if (btn) btn.prop("disabled", false).text(__("Email me a code"));
+			});
 	}
 
 	_show_day_closed_message(data) {
@@ -701,6 +711,8 @@ export class SessionOpeningScreen {
 				fieldname: "send_otp",
 				fieldtype: "Button",
 				label: __("Email me a code"),
+				// see _send_session_otp: dialog buttons dispatch via df.click
+				click: () => this._send_session_otp(this._dialog, pos_profile),
 			},
 			{
 				fieldname: "otp",
@@ -723,19 +735,6 @@ export class SessionOpeningScreen {
 			primary_action: (values) => {
 				this._create_session(dlg, pos_profile, values, {}, resolve, company, ctx);
 			},
-		});
-		// This dialog already knows its profile, so the button needs no picker.
-		dlg.fields_dict.send_otp?.$input?.on("click", () => {
-			const btn = dlg.fields_dict.send_otp.$input;
-			btn.prop("disabled", true).text(__("Sending…"));
-			frappe.xcall("ch_pos.api.session_api.request_session_open_otp", { pos_profile })
-				.then((r) => {
-					dlg.set_df_property("otp", "description", r.message || __("Code sent."));
-					frappe.show_alert({ message: r.message, indicator: "green" });
-					dlg.fields_dict.otp?.$input?.focus();
-				})
-				.catch(() => {})
-				.finally(() => btn.prop("disabled", false).text(__("Email me a code")));
 		});
 		dlg.show();
 		this._dialog = dlg;
