@@ -182,6 +182,18 @@ export class SessionOpeningScreen {
 						this._continue_with_store(resumeStore, _done);
 						return;
 					}
+					// `no_allocation` means the server already knows this user
+					// cannot open a till — no active POS Executive record. It
+					// was handled in _check_existing_session but not here, on
+					// the path every launch actually takes, so the status fell
+					// through to the final `else` and opened the till picker:
+					// a required POS Profile control that no amount of picking
+					// can satisfy, and no word of why. Say what the server said.
+					if (ctx.status === "no_allocation") {
+						this._pending_promise = null;
+						this._show_no_allocation(ctx);
+						return;
+					}
 					if (ctx.status === "select_store") {
 						const stores = ctx.stores || [];
 						if (resumeStore && stores.some((s) => s.name === resumeStore)) {
@@ -225,17 +237,44 @@ export class SessionOpeningScreen {
 					}
 				},
 				error: () => {
-					// Fallback if isolation API fails
 					this._pending_promise = null;
+					// A known entry is still a safe resume: the profile is
+					// already decided, and the server re-checks it.
 					if (open_entries && open_entries.length === 1) {
 						this._check_existing_session(open_entries[0], _done);
-					} else {
-						this._show_profile_and_opening(open_entries, _done);
+						return;
 					}
+					// Otherwise the context is precisely what we do not have.
+					// assert_store_scope throws from get_pos_context, and
+					// answering a scope guard with a till picker is the
+					// fail-open this codebase forbids — Frappe has already
+					// shown the server's reason; do not paper over it with a
+					// list the user cannot use.
+					this._show_no_allocation({});
 				},
 			});
 		});
 		return this._pending_promise;
+	}
+
+	/**
+	 * Why this till cannot be opened — the one place that says it.
+	 *
+	 * Every caller here has established that the opener has no till to pick:
+	 * no active POS Executive record, a scope guard that refused, or an
+	 * entitled list that came back empty. The dialog they would otherwise get
+	 * asks for a required POS Profile and offers nothing, which reads as a
+	 * broken screen rather than as missing setup — so name the reason and
+	 * point at who can fix it.
+	 */
+	_show_no_allocation(ctx) {
+		this._dismiss_dialog();
+		frappe.msgprint({
+			title: __("POS Setup Required"),
+			indicator: "red",
+			message: (ctx && ctx.message)
+				|| __("You are not allocated to any store for POS operations. Ask your manager for an active POS Executive record."),
+		});
 	}
 
 	_check_existing_session(entry, resolve, ctx) {
@@ -250,11 +289,7 @@ export class SessionOpeningScreen {
 			callback: (r) => {
 				const freshCtx = r.message || {};
 				if (freshCtx.status === "no_allocation") {
-					frappe.msgprint({
-						title: __("POS Setup Required"),
-						indicator: "red",
-						message: freshCtx.message || __("You are not allocated to any store for POS operations."),
-					});
+					this._show_no_allocation(freshCtx);
 				} else if (freshCtx.status === "select_store") {
 					const resumeStore = this._consume_store_resume();
 					const stores = freshCtx.stores || [];
@@ -464,8 +499,24 @@ export class SessionOpeningScreen {
 	 */
 	_show_profile_and_opening(open_entries, resolve) {
 		frappe.xcall("ch_pos.api.token_api.get_pos_profiles")
-			.then((profiles) => this._render_profile_and_opening(
-				open_entries, resolve, profiles || []))
+			.then((profiles) => {
+				// An empty list is an answer, not a list. `get_pos_profiles`
+				// returns [] deliberately for a user with no resolved scope
+				// (fail-closed), and `[]` is truthy — so this used to render a
+				// Select with no options beside a required marker, which is
+				// unanswerable and explains nothing. Only a list with tills in
+				// it is a picker; nothing to pick means nothing to open, unless
+				// an existing entry already names the till to resume.
+				if (Array.isArray(profiles) && !profiles.length
+					&& !(open_entries && open_entries.length)) {
+					this._pending_promise = null;
+					this._show_no_allocation({
+						message: __("No till is assigned to you. Ask your manager to add your store to your CH User Scope."),
+					});
+					return;
+				}
+				this._render_profile_and_opening(open_entries, resolve, profiles || []);
+			})
 			// Never strand the opener on a list that failed to load: fall back
 			// to the unlabelled picker. The server re-checks entitlement on
 			// open either way, so this loses the nicety, not the gate.
