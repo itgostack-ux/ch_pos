@@ -24,10 +24,23 @@ from ch_pos.config import assert_session_operator
 class TestSessionOpenContract(unittest.TestCase):
     """Shape checks — cheap, and they catch a silent revert."""
 
-    def test_open_session_takes_a_grant_not_a_pin(self):
+    def test_open_session_takes_a_grant_and_keeps_the_pin_fallback(self):
+        """Both are accepted on purpose.
+
+        Python and the JS bundle deploy separately: a till still running the
+        previous bundle can only post manager_pin, and refusing that took the
+        whole estate offline. The OTP grant stays the intended path; the PIN
+        is the compatibility fallback.
+        """
         params = inspect.signature(open_session).parameters
         self.assertIn("session_grant", params)
-        self.assertNotIn("manager_pin", params)
+        self.assertIn("manager_pin", params)
+
+    def test_open_session_refuses_when_neither_is_supplied(self):
+        src = inspect.getsource(open_session)
+        # the else branch that throws must still exist
+        self.assertIn("Verification Required", src)
+        self.assertIn("verify_manager_pin", src)
 
     def test_open_session_consumes_the_grant(self):
         src = inspect.getsource(open_session)
