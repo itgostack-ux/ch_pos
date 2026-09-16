@@ -675,13 +675,21 @@ def _annotate_store(profiles: list) -> list:
     ):
         by_profile.setdefault(store.pos_profile, store)
 
+    # One label function for the till picker and the Desk title field, so the
+    # two cannot drift apart. See ch_erp15.pos_profile_display.
+    try:
+        from ch_erp15.ch_erp15.pos_profile_display import compute_label
+    except ImportError:  # ch_erp15 absent — keep the picker working
+        def compute_label(profile, store_name=None, store_code=None):
+            return f"{store_name} · {store_code}" if store_name else profile
+
     for row in profiles:
         store = by_profile.get(row.get("name"))
         if not store:
             continue
         row["store"] = store.name
         row["store_name"] = store.store_name or store.name
-        row["label"] = f"{row['store_name']} · {store.name}"
+        row["label"] = compute_label(row["name"], row["store_name"], store.name)
     return profiles
 
 
@@ -2717,24 +2725,33 @@ def get_reports(pos_profile: str = None, days: int = 7) -> dict:
 
 @frappe.whitelist()
 def get_pos_profiles() -> list:
-    """Returns active POS Profiles the caller is entitled to see.
+    """Returns the active POS Profiles the caller may actually open.
 
-    Filter rules (Tier 1 CH User Scope hardening, SAP/Oracle parity):
+    This fills the till picker, so it answers the operational question, not
+    the org one. Both axes have to agree, because ``open_session`` checks
+    both — ``assert_pos_profile_scope`` then ``assert_pos_executive``:
 
-      1. **System Manager / Administrator**: full list (bypass).
-      2. Any other authenticated user: only profiles whose ``name`` appears
-         in the resolved store set of the user's ``CH User Scope``. This
-         set is kept in lock-step with ``POS Profile.applicable_for_users``
-         by ``ch_erp15.ch_erp15.pos_profile_sync``, but we compute here from
-         the scope directly so a user with a fresh scope-save sees the
-         update immediately (no need to wait for the async gate sync).
+      1. **System Manager / Administrator**: full list (bypass), matching the
+         bypass in ``scope_guard.assert_pos_executive``.
+      2. Any other authenticated user: profiles behind a store that is *both*
+         in the resolved store set of their ``CH User Scope`` **and** carries
+         an active ``POS Executive`` row for them. Scope alone is not enough
+         — one Companies row on a scope expands to every store in the company,
+         which is right for reports and would otherwise have offered a cashier
+         every till in the estate.
+         The scope half is kept in lock-step with
+         ``POS Profile.applicable_for_users`` by
+         ``ch_erp15.ch_erp15.pos_profile_sync``, but is computed here directly
+         so a fresh scope-save shows up at once, with no wait for the async
+         gate sync.
       3. Guest is refused. ``allow_guest`` was removed intentionally —
          kiosks running the queue page anonymously must switch to a
          service-account session (SAP dedicated dialog user pattern).
 
-    Result: a list of ``{name, company, warehouse, gofix_enabled}`` dicts,
-    ordered by ``name asc``, filtered to the entitled subset. Never raises when the
-    user has no scope; simply returns an empty list (fail-closed).
+    Result: a list of ``{name, company, warehouse, gofix_enabled, store,
+    store_name, label}`` dicts ordered by ``name asc``. Never raises for a
+    user with no scope or no till: returns an empty list (fail-closed), which
+    the caller is expected to explain rather than render as an empty picker.
     """
     if frappe.session.user == "Guest":
         frappe.throw(
@@ -2768,10 +2785,39 @@ def get_pos_profiles() -> list:
         return _annotate_store(_annotate_gofix_enabled(
             _ensure_result_limit(all_profiles, result_limit, _("POS profiles"))))
 
-    stores = scope.get("stores") or set()
+    stores = set(scope.get("stores") or ())
     if not stores:
         # Fail-closed: an authenticated non-bypass user with no scope sees
         # nothing. Admins provision access via CH User Scope.
+        return []
+
+    # Narrow the org axis to the operational one before offering a till.
+    #
+    # CH User Scope answers "whose data may this person see" — and a single
+    # Companies row on it expands to every store in the company (the
+    # company -> city -> zone -> store cascade in ch_erp15.ch_erp15.scope), which
+    # is correct for reports and list views. It is not what may be opened:
+    # ``open_session`` calls ``scope_guard.assert_pos_executive``, whose own
+    # rule is that org scope "must never, by itself, grant till access: a
+    # company-wide scope would open every store's POS".
+    #
+    # Offering the wider set did not widen what the server allowed, it just
+    # moved the refusal to the worst possible moment — after the cashier has
+    # picked a shop, counted the drawer and typed an emailed code. A picker
+    # that lists a till it cannot open is a picker that lies, so show exactly
+    # what both gates admit: scope AND an active POS Executive row there.
+    till_stores = {
+        row for row in frappe.get_all(
+            "POS Executive",
+            filters={"user": frappe.session.user, "is_active": 1},
+            pluck="store",
+            limit_page_length=result_limit + 1)
+        if row
+    }
+    stores &= till_stores
+    if not stores:
+        # Scoped for the back office, assigned to no till. Same fail-closed
+        # answer as no scope at all — and the caller says so in words.
         return []
 
     profile_names = frappe.get_all(
