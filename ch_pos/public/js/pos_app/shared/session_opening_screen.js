@@ -576,7 +576,7 @@ export class SessionOpeningScreen {
 				fieldtype: "Currency",
 				label: __("Opening Cash (₹)"),
 				reqd: 1,
-				description: __("Count the cash in the drawer and enter the total"),
+				description: __("Count the cash in the drawer and enter the total — 0 if it starts empty"),
 			},
 			{ fieldtype: "Section Break", label: __("Verify It Is You") },
 			{
@@ -848,7 +848,7 @@ export class SessionOpeningScreen {
 				fieldtype: "Currency",
 				label: __("Opening Cash (₹)"),
 				default: 0,
-				description: __("Count cash in drawer before starting"),
+				description: __("Count the cash in the drawer — 0 if it starts empty"),
 			},
 			{ fieldtype: "Section Break", label: __("Verify It Is You") },
 			{

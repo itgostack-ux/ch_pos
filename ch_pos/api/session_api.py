@@ -236,7 +236,20 @@ def open_session(pos_profile, opening_cash, session_grant=None, device=None,
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
     assert_pos_profile_scope(pos_profile)
+    # Validate before coercing: flt(None) is 0.0, so after this line "nothing
+    # was entered" and "the drawer is empty" are the same value. The control is
+    # that the cashier DECLARES the float, not that it is non-zero — SAP,
+    # Oracle Xstore and Odoo all record a declared opening float and accept
+    # zero; none of them accept a blank.
+    if opening_cash is None or str(opening_cash).strip() == "":
+        frappe.throw(
+            _("Count the cash in the drawer and enter the amount — enter 0 if "
+              "the drawer starts empty."),
+            title=_("Opening Float Required"))
     opening_cash = flt(opening_cash)
+    if opening_cash < 0:
+        frappe.throw(_("Opening cash cannot be negative."),
+                     title=_("Opening Float Required"))
 
     # Get store from POS Profile Extension
     store = frappe.db.get_value(
@@ -337,9 +350,6 @@ def open_session(pos_profile, opening_cash, session_grant=None, device=None,
                 ).format(business_date, store)
             )
 
-    # ── Mandatory validations ────────────────────────────────
-        if not opening_cash:
-            frappe.throw(_("Opening Cash is mandatory. Count the cash in the drawer before starting."), title=_("API Error"))
     # The opener proves their own identity with a code sent to their inbox, so
     # the session records who actually started it. A manager PIN could only ever
     # show that *a* manager approved — never which person was standing there.
