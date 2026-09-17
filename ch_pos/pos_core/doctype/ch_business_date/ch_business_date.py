@@ -20,7 +20,7 @@ class CHBusinessDate(Document):
 
 
 def advance_business_date(store, new_date, reason=None, manager_user=None,
-			  authorised=False):
+			  authorised=False, allow_rewind=False):
 	"""Advance the business date for a store.
 
 	`authorised=True` says the caller has already proved the right to roll the
@@ -37,6 +37,13 @@ def advance_business_date(store, new_date, reason=None, manager_user=None,
 	day-roll dialog (after the OTP was accepted) and the automatic advance at
 	end of day, which would have thrown inside `close_session` and rolled the
 	whole close back.
+
+	`allow_rewind=True` permits moving the date BACKWARDS. It is off by default
+	because this is called "advance" for a reason: the store's trading day only
+	ever moves forward. Only the future was blocked before, so an operator could
+	pick any earlier date in the day-roll dialog and every session opened
+	afterwards would be stamped with it. The one legitimate rewind is reopening
+	a closed session, which puts the store back on that session's own day.
 	"""
 	lock_key = f"bd_advance_{frappe.scrub(store)}"
 	lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 15)", (lock_key,))[0][0]
@@ -50,6 +57,19 @@ def advance_business_date(store, new_date, reason=None, manager_user=None,
 			frappe.throw(
 				_("Business date cannot be set in the future. Choose today or an earlier operational date."),
 				title=_("Invalid Business Date"),
+			)
+
+		# The trading day moves forward. Blocking only the future let an
+		# operator pick an earlier date and back-date everything opened after
+		# it — the server clock is authoritative for when a thing was entered,
+		# and the business date must not be usable to contradict it.
+		current = frappe.db.get_value("CH Business Date", store, "business_date")
+		if current and not allow_rewind and new_date < getdate(current):
+			frappe.throw(
+				_("Business date is already {0}. It cannot be moved back to {1} — "
+				  "the trading day only moves forward. Reopen the session for that "
+				  "day if you need to correct it.").format(getdate(current), new_date),
+				title=_("Cannot Back-Date"),
 			)
 		timestamp = now_datetime()
 		acting_user = manager_user or frappe.session.user

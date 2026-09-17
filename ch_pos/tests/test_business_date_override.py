@@ -26,7 +26,9 @@ import frappe
 
 from ch_pos.api import session_api
 from ch_pos.config import is_privileged_user
-from ch_pos.pos_core.doctype.ch_business_date.ch_business_date import advance_business_date
+from ch_pos.pos_core.doctype.ch_business_date.ch_business_date import (
+    advance_business_date,
+)
 
 
 def _plain_executive():
@@ -123,3 +125,72 @@ class TestOverrideContract(unittest.TestCase):
         src = inspect.getsource(session_api.override_business_date)
         tail = src[src.rindex("return {"):]
         self.assertNotIn("pin_result", tail)
+
+
+class TestTheTradingDayOnlyMovesForward(unittest.TestCase):
+    """A business date that can go backwards back-dates everything after it.
+
+    Only the future was blocked, so the day-roll dialog accepted any earlier
+    date — and every session opened afterwards carries it. The server clock is
+    authoritative for when something was entered; the business date must not be
+    usable to contradict it.
+
+    Reopening a closed session is the one legitimate rewind: it puts the store
+    back on that session's own day.
+    """
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    def _dated_store(self):
+        return frappe.db.sql(
+            """SELECT store, business_date FROM `tabCH Business Date`
+                WHERE IFNULL(business_date,'') <> '' LIMIT 1""", as_dict=True)
+
+    def test_a_backwards_date_is_refused(self):
+        row = self._dated_store()
+        if not row:
+            self.skipTest("no store has a business date")
+        store, current = row[0].store, row[0].business_date
+        with self.assertRaises(frappe.ValidationError) as caught:
+            advance_business_date(
+                store, frappe.utils.add_days(current, -1),
+                reason="regression: back-date", authorised=True)
+        self.assertIn("only moves forward", str(caught.exception))
+
+    def test_the_same_day_and_forward_are_fine(self):
+        row = self._dated_store()
+        if not row:
+            self.skipTest("no store has a business date")
+        store, current = row[0].store, row[0].business_date
+        same = advance_business_date(store, current, reason="same day", authorised=True)
+        self.assertEqual(str(same.get("business_date")), str(current))
+
+    def test_reopening_a_session_may_still_rewind(self):
+        """Blocking this outright would strand a reopened session on the wrong
+        day, which is worse than the problem being fixed."""
+        row = self._dated_store()
+        if not row:
+            self.skipTest("no store has a business date")
+        store, current = row[0].store, row[0].business_date
+        result = advance_business_date(
+            store, frappe.utils.add_days(current, -1), reason="reopen",
+            authorised=True, allow_rewind=True)
+        self.assertEqual(str(result.get("business_date")),
+                         str(frappe.utils.add_days(current, -1)))
+
+    def test_only_the_reopen_path_asks_for_a_rewind(self):
+        """A second caller quietly passing allow_rewind reopens the hole."""
+        import inspect
+
+        from ch_pos.api import session_api
+
+        src = inspect.getsource(session_api)
+        self.assertEqual(src.count("allow_rewind=True"), 1)
+
+    def test_the_default_is_closed(self):
+        import inspect
+
+        params = inspect.signature(advance_business_date).parameters
+        self.assertIn("allow_rewind", params)
+        self.assertIs(params["allow_rewind"].default, False)

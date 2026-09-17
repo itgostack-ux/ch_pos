@@ -744,7 +744,10 @@ def admin_reopen_session(session_name, reason) -> dict:
                     new_date=session_bd,
                     reason="Admin reopen of session {0}: {1}".format(session_name, reason),
                     manager_user=frappe.session.user,
-                    authorised=True)
+                    authorised=True,
+                    # The one legitimate rewind: putting the store back on the
+                    # reopened session's own day so its invoices post there.
+                    allow_rewind=True)
                 bd_rollback = {"from": str(current_bd), "to": str(session_bd)}
             elif current_bd_status == "Closed":
                 # Same business date — just demote the status because the
