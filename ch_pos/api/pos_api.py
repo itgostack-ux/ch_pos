@@ -17,6 +17,7 @@ from frappe.utils import (
     getdate,
     now_datetime,
     nowdate,
+    nowtime,
     validate_email_address)
 
 from ch_item_master.ch_item_master.utils import validate_indian_phone
@@ -36,6 +37,34 @@ from ch_pos.config import (
     require_privileged_user)
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
 from ch_pos.pos_core.doctype.pos_executive.pos_executive import assert_valid_sales_executive
+
+def _pos_posting_stamp(pos_profile):
+    """The trading day to post on, and the real moment it happened.
+
+    The store's business date is the posting DATE. A session opened before
+    midnight keeps billing on its own trading day, and that is already what the
+    settlement and reconciliation queries join on —
+    ``pi.posting_date = s.business_date`` in ch_pos_settlement and
+    session_vs_payment_reconciliation.
+
+    Nothing set ``set_posting_time``, so ERPNext's validate_posting_time
+    overwrote posting_date with the server's today (it rewrites both fields
+    unless that flag is on). Every invoice therefore carried the server date,
+    and those joins matched nothing the moment a session crossed midnight.
+
+    The TIME stays the server clock. Which trading day a sale belongs to is a
+    business decision; the moment it was entered is not, and must not be
+    movable — the business date itself can no longer be rolled backwards
+    (see ch_business_date.advance_business_date).
+
+    A till with no open session falls back to the server date rather than
+    guessing a day.
+    """
+    active = get_active_session(pos_profile) if pos_profile else None
+    business_date = (active or {}).get("business_date")
+    return (str(business_date) if business_date else nowdate()), nowtime()
+
+
 from ch_erp15.config import has_counter_staff_bypass
 
 
@@ -3108,9 +3137,8 @@ def create_pos_invoice(
     inv.currency = profile.currency or frappe.get_cached_value(
         "Company", profile.company, "default_currency")
     inv.warehouse = profile.warehouse
-    inv.posting_date = (
-        str(active.get("business_date"))
-        if active.get("business_date") else nowdate())
+    inv.posting_date, inv.posting_time = _pos_posting_stamp(pos_profile)
+    inv.set_posting_time = 1
     inv.is_pos = 1
     inv.is_created_using_pos = 1
     inv.update_stock = 1
@@ -6384,7 +6412,8 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
         or (orig.items[0].warehouse if orig.items else None)
         or frappe.get_cached_value("POS Profile", orig.pos_profile, "warehouse")
     )
-    ret.posting_date = str(_active.get("business_date")) if _active and _active.get("business_date") else nowdate()
+    ret.posting_date, ret.posting_time = _pos_posting_stamp(orig.pos_profile)
+    ret.set_posting_time = 1
     ret.is_pos = 1
     ret.is_created_using_pos = 1
     ret.is_return = 1
@@ -7854,7 +7883,11 @@ def collect_repair_payment(service_request, amount, mode_of_payment, pos_profile
     inv.selling_price_list = profile.selling_price_list
     inv.currency = profile.currency or frappe.get_cached_value("Company", profile.company, "default_currency")
     inv.warehouse = profile.warehouse
-    inv.posting_date = nowdate()
+    # Repair billing happens at the same till as retail, so it belongs to
+    # the same trading day — otherwise a repair taken after midnight lands
+    # on the next day's settlement while the sale beside it does not.
+    inv.posting_date, inv.posting_time = _pos_posting_stamp(pos_profile)
+    inv.set_posting_time = 1
     inv.is_pos = 1
     inv.is_created_using_pos = 1
     inv.update_stock = 0  # Service item — no stock movement
@@ -8297,7 +8330,11 @@ def close_repair_order(service_request, pos_profile, payments, qc_result,
     inv.currency = (profile.currency
                     or frappe.get_cached_value("Company", profile.company, "default_currency"))
     inv.warehouse = profile.warehouse
-    inv.posting_date = nowdate()
+    # Repair billing happens at the same till as retail, so it belongs to
+    # the same trading day — otherwise a repair taken after midnight lands
+    # on the next day's settlement while the sale beside it does not.
+    inv.posting_date, inv.posting_time = _pos_posting_stamp(pos_profile)
+    inv.set_posting_time = 1
     inv.is_pos = 1
     inv.is_created_using_pos = 1
     inv.update_stock = 0  # consumed spares already own submitted Stock Entries
