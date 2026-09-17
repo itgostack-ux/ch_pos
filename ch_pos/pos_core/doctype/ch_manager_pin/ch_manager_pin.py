@@ -76,6 +76,35 @@ def _read_pin_quietly(password_name):
             del frappe.local.message_log[mark:]
 
 
+#: Approvals that exist precisely because a second person has to agree.
+#:
+#: A supervisor override the operator can grant themselves is not an override;
+#: SAP Retail and Oracle Xstore both require a different operator ID for one,
+#: and this estate already applies the rule to Closure Exceptions ("HO Admin
+#: can approve but cannot self-approve their own CER").
+#:
+#: Opening a till and rolling the business date are deliberately absent. Those
+#: are self-service by design — the person doing it proves who they are with a
+#: code emailed to their own inbox — so requiring a second person there would
+#: strand a store at 9am for no gain in control.
+SECOND_PERSON_PERMISSIONS = {
+    "can_approve_discount",
+    "can_approve_return",
+    "can_approve_cash_drop",
+    "can_approve_closing",
+    "can_force_close_session",
+}
+
+#: What the cashier is actually trying to do, for a refusal that explains itself.
+_PERMISSION_LABELS = {
+    "can_approve_discount": "A discount",
+    "can_approve_return": "A return",
+    "can_approve_cash_drop": "A cash drop",
+    "can_approve_closing": "Closing the till",
+    "can_force_close_session": "Force-closing a session",
+}
+
+
 def verify_manager_pin(pin, store=None, permission=None):
     """Verify a manager PIN and return the manager's user if valid.
 
@@ -199,6 +228,31 @@ def verify_manager_pin(pin, store=None, permission=None):
 
     if len(matches) == 1:
         mgr, manager_store = matches[0]
+
+        # Segregation of duties. The PIN proves a manager is present; it cannot
+        # prove a SECOND person is present if the manager is the one asking.
+        #
+        # This is not folded into the "Invalid PIN" catch-all on purpose. That
+        # message is deliberately vague to stop a stranger enumerating which
+        # PINs exist — but you already know your own PIN, so vagueness buys
+        # nothing here and costs the cashier the one thing they need to know:
+        # fetch a colleague.
+        #
+        # No privileged exemption. is_privileged_user short-circuits most gates
+        # on this estate, and an administrator quietly approving their own cash
+        # drop is exactly the hole this closes.
+        if permission in SECOND_PERSON_PERMISSIONS and mgr.user == frappe.session.user:
+            log_privileged_bypass(
+                "manager_pin_self_approval_blocked",
+                user=mgr.user,
+                store=store,
+                remarks=f"refused self-approval of {permission}",
+            )
+            return {"valid": False, "message": _(
+                "{0} needs a second person to approve — this is your own PIN. "
+                "Ask a colleague with approval rights at this store."
+            ).format(_(_PERMISSION_LABELS.get(permission, "This action")))}
+
         _clear_pin_failures(attempt_key)
         if is_privileged_user(mgr.user):
             log_privileged_bypass(
