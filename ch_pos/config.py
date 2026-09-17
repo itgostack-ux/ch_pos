@@ -147,32 +147,52 @@ def has_any_roles(roles, user: str | None = None) -> bool:
 	return bool(set(frappe.get_roles(user)).intersection(role for role in roles if role))
 
 
-# def require_configured_roles(fieldname: str, defaults=(), action: str | None = None) -> None:
-# 	require_authenticated_user()
-# 	if has_configured_roles(fieldname, defaults):
-# 		return
-# 	frappe.throw(
-# 		_("You do not have permission to {0}. Required role: {1}").format(
-# 			action or _("perform this action"),
-# 			", ".join(sorted(get_configured_roles(fieldname, defaults))) or _("none configured")),
-# 		frappe.PermissionError,
-# 		title=_("Permission Denied"))
+def require_configured_roles(fieldname: str, defaults=(), action: str | None = None) -> None:
+	"""Gate an override capability on the roles configured for it.
 
-def require_configured_roles(setting_field, action=None):
-    roles = get_configured_roles(setting_field) # Or how roles are fetched from CH POS Control Settings
-    
-    # FIX: If no override roles are configured, don't block users who already have standard DocType access
-    if not roles:
-        return
+	An unconfigured gate denies. That reads like an obstruction — and it was
+	fairly reported as one, because all seven gates it guards are empty on this
+	estate, so nobody can resume a colleague's session, reopen a closed one,
+	bypass buyback OTP, sell out of FIFO order, review someone else's free-sale
+	approval, act on a foreign customer or redirect an invoice.
 
-    # Check if current user has any of the configured roles
-    user_roles = set(frappe.get_roles())
-    if not user_roles.intersection(set(roles)):
-        frappe.throw(
-            _("You do not have permission to {0}.").format(action),
-            frappe.PermissionError,
-            title=_("Permission Denied")
-        )
+	The answer is not to let an empty gate through. These are the capabilities
+	most worth restricting: "nobody may do this until you say who may" is a loud,
+	fixable state, while "anybody may do this because nobody said who" is silent
+	and indistinguishable from working correctly. That is also the rule the rest
+	of this codebase follows — a guard reachable before the answer is known
+	denies.
+
+	What WAS wrong is that the refusal blamed the user for a configuration gap.
+	An unconfigured gate now names the setting and says who has to fill it, so
+	the lockout is self-explanatory instead of looking like a permissions bug.
+
+	`defaults` is a fallback for a field that does not exist or was never set —
+	not for one an administrator emptied. get_setting_roles draws that line
+	deliberately, and patch v50 states the policy: "a field that is blank stays
+	blank (still deny) — widening it would be a policy decision". Blank means
+	nobody, on purpose.
+	"""
+	require_authenticated_user()
+	if has_configured_roles(fieldname, defaults):
+		return
+
+	configured = get_configured_roles(fieldname, defaults)
+	if not configured:
+		frappe.throw(
+			_("Nobody can {0} yet: no roles are set for <b>{1}</b>. "
+			  "An administrator sets them in CH POS Control Settings."
+			  ).format(action or _("perform this action"), fieldname),
+			frappe.PermissionError,
+			title=_("Not Configured"))
+
+	frappe.throw(
+		_("You do not have permission to {0}. Required role: {1}").format(
+			action or _("perform this action"),
+			", ".join(sorted(configured))),
+		frappe.PermissionError,
+		title=_("Permission Denied"))
+
 
 def assert_session_operator(session, action: str) -> None:
 	"""Allow a session owner, a colleague at the same store, a privileged user,
