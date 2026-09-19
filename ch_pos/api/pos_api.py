@@ -10839,7 +10839,7 @@ def create_store_transfer_request(from_warehouse, to_warehouse, items,
             "custom_serial_no": "\n".join(serials),
             "custom_scanned_qty": len(serials),
         })
-    mr.insert()
+    mr.insert(ignore_permissions=True)
     return {
         "name": mr.name,
         "status": mr.custom_approval_status,
