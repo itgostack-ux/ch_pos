@@ -208,9 +208,17 @@ export class CartPanel {
 		});
 	}
 
+	/** The Billed By bar, wherever it currently lives. Service Intake MOVES
+	 *  the whole bar out of the cart and into the intake form, so looking for
+	 *  it only inside the cart finds nothing while that screen is open. */
+	_exec_bar() {
+		const inside = this.wrapper.find(".ch-pos-executive-bar");
+		return inside.length ? inside : $(".ch-pos-executive-bar");
+	}
+
 	/** Populate the executive / company bar from PosState.executive_access */
 	_render_executive_bar() {
-		const bar = this.wrapper.find(".ch-pos-executive-bar");
+		const bar = this._exec_bar();
 		const access = PosState.executive_access;
 		if (!access || !access.companies || !access.companies.length) {
 			bar.hide();
@@ -231,7 +239,7 @@ export class CartPanel {
 
 	/** Populate the executive dropdown based on active_company */
 	_populate_executive_dropdown() {
-		const select = this.wrapper.find(".ch-pos-executive-select");
+		const select = this._exec_bar().find(".ch-pos-executive-select");
 		const access = PosState.executive_access;
 		if (!access) return;
 
@@ -930,8 +938,12 @@ export class CartPanel {
 			}
 		});
 
-		// Executive selector change
-		w.on("change", ".ch-pos-executive-select", (e) => {
+		// Executive selector change. Delegated from the document, not from the
+		// cart: Service Intake moves the Billed By bar into the intake form, and
+		// a handler delegated from the cart stops firing the moment the select
+		// leaves it -- the counter picked a name, nothing was recorded, and the
+		// ticket came back "Billed By Required".
+		$(document).off("change.ch_pos_exec").on("change.ch_pos_exec", ".ch-pos-executive-select", (e) => {
 			const val = $(e.currentTarget).val();
 			const access = PosState.executive_access;
 			const company = PosState.active_company;
