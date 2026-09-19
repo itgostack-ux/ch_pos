@@ -1,7 +1,7 @@
 frappe.pages["store-hub"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __("Store Hub"),
+		title: __("Shop Desk"),
 		single_column: true,
 	});
 	wrapper.store_hub = new StoreHub(page);

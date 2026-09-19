@@ -10,12 +10,22 @@
  "owner": "Administrator",
  "page_name": "store-hub",
  "roles": [
-  {"role": "System Manager"},
-  {"role": "Sales Manager"},
-  {"role": "Sales User"},
-  {"role": "Store Manager"},
-  {"role": "POS User"}
+  {
+   "role": "System Manager"
+  },
+  {
+   "role": "Sales Manager"
+  },
+  {
+   "role": "Sales User"
+  },
+  {
+   "role": "Store Manager"
+  },
+  {
+   "role": "POS User"
+  }
  ],
  "standard": "Yes",
- "title": "Store Hub"
+ "title": "Shop Desk"
 }
