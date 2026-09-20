@@ -311,7 +311,11 @@ def create_pr_from_po(po_name: str, pos_profile: str) -> dict:
     from ch_erp15.ch_erp15.custom.purchase_order import (
         make_purchase_receipt as _make_pr)
 
-    pr = _make_pr(po_name)
+    frappe.flags.ignore_permissions = True
+    try:
+        pr = _make_pr(po_name)
+    finally:
+        frappe.flags.ignore_permissions = False
 
     # Ensure the PR is anchored to the store warehouse — the vanilla mapper
     # copies whatever the PO had; we force alignment with the current store
@@ -478,6 +482,7 @@ def pos_pr_submit(pr_name: str, pos_profile: str) -> dict:
             )
         )
 
+    pr.flags.ignore_permissions = True
     pr.submit()
 
     return {"pr_name": pr.name, "docstatus": pr.docstatus}

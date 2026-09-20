@@ -32,7 +32,11 @@ def get_store_stock_report(pos_profile, only_due=0, class_filter=None) -> dict:
     warehouse = _resolve_warehouse(pos_profile)
 
     from ch_erp15.ch_erp15.doctype.ch_cycle_count.ch_cycle_count import get_store_stock
-    result = get_store_stock(warehouse, only_due=only_due, class_filter=class_filter)
+    frappe.flags.ignore_permissions = True
+    try:
+        result = get_store_stock(warehouse, only_due=only_due, class_filter=class_filter)
+    finally:
+        frappe.flags.ignore_permissions = False
     rows = result.get("items", [])  # Extract items from paginated response
     pagination = result.get("pagination", {})
 
