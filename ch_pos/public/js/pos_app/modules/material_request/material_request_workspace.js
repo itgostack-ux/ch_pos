@@ -13,6 +13,21 @@
 import { PosState, EventBus } from "../../state.js";
 import { format_number } from "../../shared/helpers.js";
 
+// Frappe marks any image over 200 KB for compression as it is picked, and
+// hiding the Optimize checkbox only removes the way to refuse — the squeezing
+// still happens. A store's photo of a cracked panel is evidence, so the flag
+// is cleared on every file the dialog takes while it is open.
+function _ch_keep_photos_unoptimized(uploader) {
+	const clear = () => (uploader.uploader?.files || []).forEach((f) => {
+		if (f.optimize) f.optimize = false;
+	});
+	const timer = setInterval(clear, 150);
+	const stop = () => clearInterval(timer);
+	uploader.dialog?.$wrapper?.on("hidden.bs.modal", stop);
+	// A dialog that is never closed cannot hold the timer for the session.
+	setTimeout(stop, 10 * 60 * 1000);
+}
+
 export class MaterialRequestWorkspace {
 	constructor() {
 		EventBus.on("workspace:render", (ctx) => {
@@ -365,9 +380,15 @@ export class MaterialRequestWorkspace {
 			this.request_items.splice(idx, 1);
 			this._render_items(panel);
 		});
-		panel.on("click", ".ch-mr-item-photo-btn, .ch-mr-item-photo-thumb", (e) => {
-			const idx = $(e.currentTarget).data("idx");
-			this._upload_item_photo(panel, idx);
+		panel.on("click", ".ch-mr-item-photo-btn", (e) => {
+			this._upload_item_photo(panel, $(e.currentTarget).data("idx"));
+		});
+		panel.on("click", ".ch-mr-item-photo-thumb", (e) => {
+			this._show_item_photos(panel, $(e.currentTarget).data("idx"));
+		});
+		panel.on("click", ".ch-mr-photo-clear", (e) => {
+			e.stopPropagation();
+			this._remove_item_photos(panel, $(e.currentTarget).data("idx"));
 		});
 		panel.on("click", ".ch-mr-view-detail", function () {
 			const name = $(this).data("name");
@@ -413,6 +434,7 @@ export class MaterialRequestWorkspace {
 							uom: d.stock_uom || "Nos",
 							qty,
 							photo: null,
+							photos: [],
 						});
 					},
 				});
@@ -504,10 +526,24 @@ export class MaterialRequestWorkspace {
 							<td class="text-center"><strong>${r.qty}</strong></td>
 							<td class="text-center" style="color:var(--pos-text-muted)">${frappe.utils.escape_html(r.uom)}</td>
 							<td class="text-center">
-								${r.photo
-									? `<img src="${frappe.utils.escape_html(r.photo)}" data-idx="${idx}" class="ch-mr-item-photo-thumb"
-										style="width:32px;height:32px;object-fit:cover;border-radius:4px;cursor:pointer" title="${__("Change photo")}">`
-									: `<button class="btn btn-xs btn-outline-secondary ch-mr-item-photo-btn" data-idx="${idx}" title="${__("Upload photo")}" style="padding:4px 8px">
+								${(r.photos || []).length
+									? `<span class="ch-mr-photo-set" style="display:inline-flex;align-items:center;gap:4px">
+										<img src="${frappe.utils.escape_html(r.photos[0])}" data-idx="${idx}" class="ch-mr-item-photo-thumb"
+											style="width:32px;height:32px;object-fit:cover;border-radius:4px;cursor:pointer"
+											title="${__("View photos")}">
+										${r.photos.length > 1
+											? `<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">+${r.photos.length - 1}</span>`
+											: ""}
+										<button class="btn btn-xs btn-outline-secondary ch-mr-item-photo-btn" data-idx="${idx}"
+											title="${__("Add more photos")}" style="padding:2px 6px">
+											<i class="fa fa-camera"></i>
+										</button>
+										<button class="btn btn-link text-danger ch-mr-photo-clear" data-idx="${idx}"
+											title="${__("Remove photos")}" style="padding:0 2px">
+											<i class="fa fa-times"></i>
+										</button>
+									</span>`
+									: `<button class="btn btn-xs btn-outline-secondary ch-mr-item-photo-btn" data-idx="${idx}" title="${__("Upload photos")}" style="padding:4px 8px">
 										<i class="fa fa-camera"></i>
 									</button>`
 								}
@@ -527,14 +563,99 @@ export class MaterialRequestWorkspace {
 	_upload_item_photo(panel, idx) {
 		const row = this.request_items[idx];
 		if (!row) return;
-		new frappe.ui.FileUploader({
-			allow_multiple: false,
+		const uploader = new frappe.ui.FileUploader({
+			// One picture rarely says it: the panel, the box label and the
+			// shelf it came off are three photos of the same request line.
+			allow_multiple: true,
+			upload_notes: __("Pick every photo for this item at once — you can select more than one."),
+			// The counter is not the place to be asked about compression.
+			allow_toggle_optimize: false,
 			restrictions: { allowed_file_types: ["image/*"] },
 			on_success: (file_doc) => {
-				row.photo = file_doc.file_url;
+				const url = file_doc && file_doc.file_url;
+				if (!url) return;
+				row.photos = row.photos || [];
+				// Frappe gives the same file_url to the same image however
+				// often it is uploaded, so two shots that happen to share a
+				// name stay separate while the identical one is not doubled.
+				if (row.photos.includes(url)) {
+					frappe.show_alert({
+						message: __("That photo is already on this line"), indicator: "orange" });
+					return;
+				}
+				row.photos.push(url);
+				row.photo = row.photos[0];
 				this._render_items(panel);
 			},
 		});
+		_ch_keep_photos_unoptimized(uploader);
+	}
+
+	// Thumbnails at 32px prove a photo was taken, not what it shows. Before
+	// the request goes off to a hub that cannot ask "which panel?", whoever
+	// took them gets to see them at a size worth checking — and drop the one
+	// that turned out to be a picture of the floor.
+	_show_item_photos(panel, idx) {
+		const row = this.request_items[idx];
+		if (!row) return;
+		if (!(row.photos || []).length) return this._upload_item_photo(panel, idx);
+		const esc = frappe.utils.escape_html;
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Photos — {0}", [row.item_name || row.item_code]),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "gallery" }],
+			primary_action_label: __("Add More"),
+			primary_action: () => {
+				dialog.hide();
+				this._upload_item_photo(panel, idx);
+			},
+		});
+
+		const draw = () => {
+			if (!row.photos.length) {
+				dialog.hide();
+				return;
+			}
+			dialog.fields_dict.gallery.$wrapper.html(`
+				<div style="display:flex;flex-wrap:wrap;gap:12px">
+					${row.photos.map((url, i) => `
+						<div style="position:relative;text-align:center">
+							<a href="${esc(url)}" target="_blank" rel="noopener"
+								title="${__("Open full size")}">
+								<img src="${esc(url)}" style="width:170px;height:170px;object-fit:cover;
+									border-radius:6px;border:1px solid var(--pos-border-light,#e5e7eb)">
+							</a>
+							<button class="btn btn-xs btn-danger ch-mr-photo-drop" data-i="${i}"
+								title="${__("Remove this photo")}"
+								style="position:absolute;top:6px;right:6px;padding:1px 7px;line-height:1.4">
+								&times;
+							</button>
+							<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:4px">
+								${__("Photo {0} of {1}", [i + 1, row.photos.length])}
+							</div>
+						</div>`).join("")}
+				</div>`);
+		};
+
+		dialog.$wrapper.on("click", ".ch-mr-photo-drop", (e) => {
+			const i = parseInt($(e.currentTarget).data("i"), 10);
+			row.photos.splice(i, 1);
+			row.photo = row.photos[0] || null;
+			this._render_items(panel);
+			draw();
+		});
+
+		draw();
+		dialog.show();
+	}
+
+	_remove_item_photos(panel, idx) {
+		const row = this.request_items[idx];
+		if (!row) return;
+		row.photos = [];
+		row.photo = null;
+		this._render_items(panel);
 	}
 
 	_submit_request(panel) {
