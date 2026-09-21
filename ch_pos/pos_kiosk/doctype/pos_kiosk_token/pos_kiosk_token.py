@@ -33,7 +33,7 @@ from ch_pos.config import get_control_setting
 # options, so a status added to the field cannot silently fall through the gaps.
 
 # A token can no longer move. Shared by the API layer, the tablet queue position
-# and the quick-intake job-card handoff.
+# and the POS repair intake's job-card handoff.
 TERMINAL_STATUSES = ("Completed", "Cancelled", "Converted", "Dropped", "Expired")
 
 # Still live: the customer is in the shop or waiting on us.
