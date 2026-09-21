@@ -8,6 +8,8 @@ from buyback.utils import validate_indian_phone
 from frappe import _
 from frappe.utils import cint, flt, now_datetime
 
+from ch_erp15.email_gate import essential_mail
+
 from ch_pos.api.scope_guard import assert_pos_profile_scope
 from ch_pos.config import get_control_setting, has_configured_roles, is_privileged_user
 
@@ -338,20 +340,23 @@ def request_session_open_otp(pos_profile: str) -> dict:
 
     otp = CHOTPLog.generate_otp(email=email, purpose=_SESSION_OTP_PURPOSE)
 
-    frappe.sendmail(
-        recipients=[email],
-        # The code stays out of the subject: subjects render in Windows toast
-        # popups, phone lock screens and Outlook's preview pane, so a subject
-        # carrying the code shows it to anyone walking past the counter.
-        subject=_("Your POS session code"),
-        message=_(
-            "<p>Use this code to open the till at <b>{store}</b>.</p>"
-            "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
-            "<p>It expires in 5 minutes and can be used once. "
-            "If you did not ask to open a till, tell your manager — someone has your login.</p>"
-        ).format(store=frappe.utils.escape_html(store), otp=otp),
-        now=True,
-    )
+    # Marked essential so the gate that stops an alert storm (ch_erp15.
+    # email_gate) can never stop a till from opening.
+    with essential_mail():
+        frappe.sendmail(
+            recipients=[email],
+            # The code stays out of the subject: subjects render in Windows toast
+            # popups, phone lock screens and Outlook's preview pane, so a subject
+            # carrying the code shows it to anyone walking past the counter.
+            subject=_("Your POS session code"),
+            message=_(
+                "<p>Use this code to open the till at <b>{store}</b>.</p>"
+                "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
+                "<p>It expires in 5 minutes and can be used once. "
+                "If you did not ask to open a till, tell your manager — someone has your login.</p>"
+            ).format(store=frappe.utils.escape_html(store), otp=otp),
+            now=True,
+        )
 
     return {
         "sent": True,
@@ -428,18 +433,20 @@ def request_action_otp(kind: str, store: str) -> dict:
         frappe.throw(_("Your account has no email address, so a code cannot be sent."))
 
     otp = CHOTPLog.generate_otp(email=email, purpose=purpose)
-    frappe.sendmail(
-        recipients=[email],
-        # Kept out of the subject for the same reason as the session code above.
-        subject=_("Your POS verification code"),
-        message=_(
-            "<p>Use this code to continue at <b>{store}</b>.</p>"
-            "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
-            "<p>It expires in 5 minutes and can be used once. If you did not ask "
-            "for it, tell your manager — someone has your login.</p>"
-        ).format(store=frappe.utils.escape_html(store), otp=otp),
-        now=True,
-    )
+    # Essential mail: see the session-open sender above.
+    with essential_mail():
+        frappe.sendmail(
+            recipients=[email],
+            # Kept out of the subject for the same reason as the session code above.
+            subject=_("Your POS verification code"),
+            message=_(
+                "<p>Use this code to continue at <b>{store}</b>.</p>"
+                "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
+                "<p>It expires in 5 minutes and can be used once. If you did not ask "
+                "for it, tell your manager — someone has your login.</p>"
+            ).format(store=frappe.utils.escape_html(store), otp=otp),
+            now=True,
+        )
     return {"sent": True, "sent_to": _mask_email(email), "expires_in": 300,
             "message": _("We sent a 6-digit code to {0}.").format(_mask_email(email))}
 
