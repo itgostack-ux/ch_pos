@@ -6381,3 +6381,52 @@ body > .desk-alert-container,
 .ch-q-context-due { font-weight: 600; }
 .ch-q-context-empty { color: var(--text-muted, #8d99a6); font-size: 12px; }
 .ch-q-links a { margin-right: 10px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   Blocked payment — say why, above the button that refused
+   A frappe.show_alert toast fades and renders in the desk's corner,
+   away from Confirm Payment, so a guard that stops the submit reads
+   as a dead button. This strip stays until the cause is fixed.
+   ═══════════════════════════════════════════════════════════════ */
+.ch-pay-block {
+  margin: 0 16px 8px;
+  padding: 10px 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border-radius: 10px;
+  border: 1px solid #fca5a5;
+  border-left: 4px solid #dc2626;
+  background: #fef2f2;
+  color: #7f1d1d;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.ch-pay-block[hidden] { display: none; }
+.ch-pay-block .fa { color: #dc2626; margin-top: 2px; flex: none; }
+
+@keyframes ch-pay-block-in {
+  0%   { transform: translateY(-4px); opacity: 0; }
+  60%  { transform: translateY(0);    opacity: 1; }
+  100% { transform: translateY(0);    opacity: 1; }
+}
+.ch-pay-block-flash { animation: ch-pay-block-in 0.32s ease-out 1; }
+
+/* The control actually at fault, flashed so the eye lands on it. */
+@keyframes ch-pos-attention {
+  0%   { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+  30%  { box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.30); }
+  70%  { box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.30); }
+  100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+}
+.ch-pos-needs-attention {
+  animation: ch-pos-attention 0.75s ease-in-out 2;
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ch-pay-block-flash,
+  .ch-pos-needs-attention { animation: none; }
+  .ch-pos-needs-attention { box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.35); }
+}

@@ -123,10 +123,16 @@ export class PaymentDialog {
 	show() {
 		if (!PosState.cart.length) {
 			frappe.show_alert({ message: __("Cart is empty"), indicator: "orange" });
+			$(".ch-pos-cart-panel").addClass("ch-pos-needs-attention");
+			setTimeout(() => $(".ch-pos-cart-panel").removeClass("ch-pos-needs-attention"), 2600);
 			return;
 		}
 		if (!PosState.customer) {
-			frappe.show_alert({ message: __("Please select a customer"), indicator: "orange" });
+			// PAY with no customer never opens this overlay, so there is no strip to
+			// pin the reason to — flash the customer box instead of failing silently.
+			frappe.show_alert({ message: __("Select a customer before taking payment"), indicator: "orange" });
+			$(".ch-pos-customer-bar").addClass("ch-pos-needs-attention");
+			setTimeout(() => $(".ch-pos-customer-bar").removeClass("ch-pos-needs-attention"), 2600);
 			return;
 		}
 
@@ -760,6 +766,16 @@ placeholder="${__("Enter code...")}">
 							<span>${__("Change to Return")}</span>
 							<b id="ch-pay-change" class="ch-pay-change-val">₹0</b>
 						</div>
+					</div>
+
+					<!-- Why the button did nothing. A frappe.show_alert toast fades in a
+					     few seconds and renders in the desk's corner, away from the button
+					     the cashier just pressed — so a blocked submit reads as "nothing
+					     happened" and the same wrong bill gets pushed again. This strip
+					     stays until the cause is fixed. -->
+					<div class="ch-pay-block" id="ch-pay-block" role="alert" aria-live="assertive" hidden>
+						<i class="fa fa-exclamation-triangle"></i>
+						<span id="ch-pay-block-msg"></span>
 					</div>
 
 					<!-- Submit -->
@@ -2820,10 +2836,52 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		return true;
 	}
 
+	/**
+	 * Refuse to submit, and say why where the cashier is looking.
+	 *
+	 * Every guard below used to call frappe.show_alert alone. That toast is
+	 * transient and renders outside this overlay, so the common failure — a
+	 * mandatory field nobody filled — looked like a dead button, and the same
+	 * bill got pushed again. This pins the reason directly above Confirm
+	 * Payment and flashes the control at fault.
+	 *
+	 * @param {string} msg        what is wrong, in the cashier's words
+	 * @param {string} [selector] control to flash, e.g. ".ch-pos-executive-select"
+	 * @param {string} [indicator="red"]
+	 * @returns {false} always, so a caller can `return this._block(...)`
+	 */
+	_block(msg, selector, indicator = "red") {
+		this._submitting = false;
+		frappe.show_alert({ message: msg, indicator });
+		const ov = this._overlay;
+		if (ov) {
+			const strip = ov.find("#ch-pay-block");
+			ov.find("#ch-pay-block-msg").text(msg);
+			strip.removeAttr("hidden").removeClass("ch-pay-block-flash");
+			if (strip[0]) void strip[0].offsetWidth;  // restart the flash on a repeat
+			strip.addClass("ch-pay-block-flash");
+			try { strip[0].scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) { /* ignore */ }
+		}
+		if (selector) {
+			const $t = $(selector);
+			$t.addClass("ch-pos-needs-attention");
+			setTimeout(() => $t.removeClass("ch-pos-needs-attention"), 2600);
+		}
+		return false;
+	}
+
+	/** Clear the refusal strip — a fresh attempt, or the cause was fixed. */
+	_clear_block() {
+		if (this._overlay) {
+			this._overlay.find("#ch-pay-block").attr("hidden", "hidden").removeClass("ch-pay-block-flash");
+		}
+	}
+
 	async _submit_invoice() {
 		if (this._submitting) return;
 		// POS-19 fix: Set submitting flag immediately to prevent double-submit race
 		this._submitting = true;
+		this._clear_block();
 		if (!(await this._validate_exception_requests_before_submit())) {
 			this._submitting = false;
 			return;
@@ -2831,34 +2889,29 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		// Sale type is mandatory before payment can proceed
 		if (!PosState.sale_type) {
-			frappe.show_alert({ message: __("Select a Sale Type (CS / FS / FREE / PB / SS) before confirming payment"), indicator: "red" });
-			this._submitting = false;
-			return;
+			return this._block(__("Select a Sale Type (CS / FS / FREE / PB / SS) before confirming payment"),
+				".ch-pos-cart-saletype");
 		}
 
 		// Billed By is mandatory: a shared till's login is not a person, and
 		// this name drives the incentive the sale pays out on. The server
 		// refuses an unattributed invoice too — this only saves the round trip.
 		if (!PosState.sales_executive) {
-			frappe.show_alert({ message: __("Select who is billing this sale (Billed By) before confirming payment"), indicator: "red" });
-			this._submitting = false;
-			return;
+			return this._block(__("Select who is billing this sale (Billed By) before confirming payment"),
+				".ch-pos-executive-select");
 		}
 
 		// Where several people work one till, an auto-filled default is not
 		// good enough — somebody has to say who actually served this customer.
 		const _company_execs = (PosState.executive_access?.store_executives || {})[PosState.active_company] || [];
 		if (_company_execs.length > 1 && !PosState.sales_executive_confirmed) {
-			frappe.show_alert({ message: __("Confirm who is billing this sale (Billed By) before confirming payment"), indicator: "orange" });
-			this._submitting = false;
-			return;
+			return this._block(__("Confirm who is billing this sale (Billed By) before confirming payment"),
+				".ch-pos-executive-select", "orange");
 		}
 
 		const gstin_check = this._validate_billing_gstin(PosState.billing_gstin);
 		if (!gstin_check.valid) {
-			frappe.show_alert({ message: gstin_check.message, indicator: "red" });
-			this._submitting = false;
-			return;
+			return this._block(gstin_check.message, ".ch-pos-gstin-input");
 		}
 		PosState.billing_gstin = gstin_check.gstin;
 
@@ -2870,22 +2923,17 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Free sale validations
 		if (this._is_free_sale) {
 			if (!this._free_sale_reason) {
-				frappe.show_alert({ message: __("Enter reason for free sale"), indicator: "orange" });
-				this._submitting = false;
-				return;
+				return this._block(__("Enter reason for free sale"), "#ch-pay-free-reason", "orange");
 			}
 			if (!this._free_sale_approved_by) {
-				frappe.show_alert({ message: __("Enter manager name who approved this free sale"), indicator: "orange" });
-				this._submitting = false;
-				return;
+				return this._block(__("Enter manager name who approved this free sale"), null, "orange");
 			}
 		}
 
 		// Normal/credit sale validations
 		if (!this._is_free_sale && !this._is_credit_sale && !this._is_finance_sale_type(PosState.sale_type) && balance > 0.005) {
-			frappe.show_alert({ message: __("Payment not complete — ₹{0} still due", [format_number(balance)]), indicator: "red" });
-			this._submitting = false;
-			return;
+			return this._block(__("Payment not complete — ₹{0} still due", [format_number(balance)]),
+				".ch-pay-mop-btns");
 		}
 
 		// Validate UPI, Card, and Finance references (mandatory for non-zero amounts)
@@ -2893,14 +2941,10 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			for (const p of this._payments) {
 				const type = this._mop_type(p.mode);
 				if (type === "upi" && flt(p.amount) > 0 && !p.upi_transaction_id) {
-					frappe.show_alert({ message: __("Enter UPI Transaction ID for {0}", [p.mode]), indicator: "orange" });
-					this._submitting = false;
-					return;
+					return this._block(__("Enter UPI Transaction ID for {0}", [p.mode]), null, "orange");
 				}
 				if (type === "card" && flt(p.amount) > 0 && !p.card_reference) {
-					frappe.show_alert({ message: __("Enter Card RRN for {0}", [p.mode]), indicator: "orange" });
-					this._submitting = false;
-					return;
+					return this._block(__("Enter Card RRN for {0}", [p.mode]), null, "orange");
 				}
 				if (type === "bank" && flt(p.amount) > 0 && !p.bank_reference) {
 					frappe.show_alert({ message: __("Enter Bank UTR/Reference for {0}", [p.mode]), indicator: "orange" });
