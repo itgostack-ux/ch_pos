@@ -650,7 +650,7 @@ export class RepairWorkspace {
 		// are listed rather than collapsed into a yes/no.
 		const describeCover = (value) => {
 			const v = (value || "").trim();
-			if (!v) { coverBox.html(""); return; }
+			if (!v) { coverBox.html(""); this._selected_cover = null; return; }
 			frappe.xcall("ch_pos.api.repair.get_device_coverage", {
 				serial_no: v, company: PosState.company || "",
 			}).then((res) => {
@@ -663,18 +663,52 @@ export class RepairWorkspace {
 					panel.find(".ch-rep-warranty").val(res.warranty_status || "No Warranty");
 					return;
 				}
-				const chip = (r) => {
+				// Each cover is selectable, not just readable. Showing them was
+				// only ever half the job: the ticket stores which one applies,
+				// and until it did, `_classify_coverage` saw no plan and filed
+				// every covered device as Non-Warranty. That is why a claim
+				// could not be traced back to the plan that should have paid
+				// for it — the link was on screen and never written down.
+				//
+				// Nothing is pre-selected when there is a choice to make. One
+				// cover is chosen for the counter; two is a decision about
+				// which policy to claim against, and guessing it bills the
+				// wrong one.
+				const selectable = rows.filter(
+					(r) => r.kind === "vas" ? r.active_plan : r.service_request);
+				const chip = (r, i) => {
 					const kind = r.kind === "vas" ? __("VAS Claim")
 						: r.kind === "spare_warranty" ? __("Part Warranty")
 						: __("Repair Warranty");
 					const bits = [frappe.utils.escape_html(r.label || "")];
 					if (r.expires_on) bits.push(__("until {0}", [frappe.datetime.str_to_user(r.expires_on)]));
 					if (r.claim_against) bits.push(__("settled by: {0}", [frappe.utils.escape_html(r.claim_against)]));
-					return `<div style="font-size:11px;padding:4px 8px;border-radius:6px;`
-						+ `background:var(--pos-success-light,#e8f5e9);margin-bottom:4px">`
-						+ `<b>${kind}</b> — ${bits.join(" · ")}</div>`;
+					const id = r.kind === "vas" ? r.active_plan : r.service_request;
+					const pick = id
+						? `<input type="radio" name="ch-rep-cover-pick" class="ch-rep-cover-pick"
+								data-kind="${frappe.utils.escape_html(r.kind)}"
+								data-id="${frappe.utils.escape_html(id)}"
+								${selectable.length === 1 ? "checked" : ""}
+								style="margin:0 6px 0 0;vertical-align:-1px">`
+						: "";
+					return `<label style="display:block;font-size:11px;padding:4px 8px;border-radius:6px;`
+						+ `background:var(--pos-success-light,#e8f5e9);margin-bottom:4px;cursor:${id ? "pointer" : "default"}">`
+						+ `${pick}<b>${kind}</b> — ${bits.join(" · ")}</label>`;
 				};
-				coverBox.html(rows.map(chip).join(""));
+				coverBox.html(rows.map(chip).join("")
+					+ (selectable.length > 1
+						? `<div class="text-muted" style="font-size:10.5px;margin-top:2px">`
+							+ __("Pick the cover this repair is claimed against.") + `</div>`
+						: ""));
+				this._selected_cover = selectable.length === 1
+					? { kind: selectable[0].kind,
+					    id: selectable[0].kind === "vas"
+						    ? selectable[0].active_plan : selectable[0].service_request }
+					: null;
+				coverBox.find(".ch-rep-cover-pick").on("change", (e) => {
+					const el = $(e.currentTarget);
+					this._selected_cover = { kind: el.data("kind"), id: el.data("id") };
+				});
 				// The chips above are ADVISORY — they show every cover found (a
 				// VAS plan, our prior workmanship, a fitted part still in window)
 				// so the counter can see a returning device might qualify for
@@ -693,7 +727,7 @@ export class RepairWorkspace {
 		let serialTimer = null;
 		const describeSerial = (value) => {
 			const v = (value || "").trim();
-			if (!v) { serialHint.html(""); coverBox.html(""); return; }
+			if (!v) { serialHint.html(""); coverBox.html(""); this._selected_cover = null; return; }
 			describeCover(v);
 			frappe.xcall("ch_pos.api.repair.describe_device_serial", { serial_no: v })
 				.then((info) => {
@@ -1098,11 +1132,26 @@ export class RepairWorkspace {
 			// Keep first category as primary issue_category for backward compat
 			const primary_issue = selected_issues.length ? selected_issues[0] : "";
 
+			// Whichever cover the counter picked goes with the ticket. A VAS
+			// plan sets active_warranty_plan, which is what moves the ticket
+			// into the VAS Claim bucket and makes the claim traceable back to
+			// the policy. Our own prior repair sets previous_service_request,
+			// which is the link the estimate needs before it will zero a
+			// rework — without it a returning customer is quoted again for a
+			// repair already paid for.
+			const picked = this._selected_cover || {};
+			const cover_fields = picked.id
+				? (picked.kind === "vas"
+					? { active_warranty_plan: picked.id }
+					: { previous_service_request: picked.id, is_repeat_complaint: 1 })
+				: {};
+
 			// Server API inserts AND submits — POS-raised requests must land as
 			// submitted docs so they show in Service Hub / GoFix Ops Hub.
 			frappe.xcall("ch_pos.api.repair.create_service_intake_from_pos", {
 				pos_profile: PosState.pos_profile,
 				data: {
+					...cover_fields,
 					customer: customer,
 					contact_number: phone,
 					device_item: device_item,

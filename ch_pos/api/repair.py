@@ -212,6 +212,15 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		"email", "alternate_contact", "password", "pattern",
 		"customer_remarks", "internal_remarks", "referral_code",
 		"advance_amount", "estimated_cost",
+		# What cover the counter found on the IMEI and which of it applies.
+		# _classify_coverage picks In-Warranty / VAS Claim / Non-Warranty from
+		# warranty_status and active_warranty_plan, and until now nothing at
+		# intake set the second -- so a device with a live plan was filed as
+		# Non-Warranty and the claim could never be traced back to the plan
+		# that should have paid for it. previous_service_request is the other
+		# half: warranty_rework_context only zeroes a return visit when the
+		# earlier ticket is actually linked, and nobody was linking it.
+		"active_warranty_plan", "previous_service_request", "is_repeat_complaint",
 		# How the device physically got here and how it goes home. Recorded at
 		# intake because that is the only moment the customer is standing there
 		# to be asked; leaving it to billing turns it into a phone call. The
