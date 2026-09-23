@@ -44,3 +44,30 @@ def test_approved_exception_remains_in_status_polling():
 
 	assert 'status === "Approved"' not in collector
 	assert 'status === "Auto-Approved"' not in collector
+
+
+def run():
+	"""Entry point for bench run-tests / bench execute.
+
+	Three module-level test_* functions with no TestCase around them, so
+	nothing collected them -- these guards over the POS exception-recovery
+	JS have never once run.
+	"""
+	checks = (
+		test_payment_revalidates_exception_immediately_before_submit,
+		test_invalid_exception_restores_cart_pricing,
+		test_approved_exception_remains_in_status_polling,
+	)
+	failed = 0
+	for fn in checks:
+		try:
+			fn()
+			print("  \u2705 %s" % fn.__name__)
+		except Exception as exc:
+			failed += 1
+			print("  \u274c %s: %s" % (fn.__name__, str(exc)[:200]))
+	print("  Total: %s, Failed: %s" % (len(checks), failed))
+	return failed
+
+
+run_all = run
