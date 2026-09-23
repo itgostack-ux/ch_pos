@@ -926,6 +926,62 @@ def after_install():
     _ensure_fifo_override_reasons()
 
 
+def ensure_pos_executive_sales_persons():
+    """Give every active POS Executive a Sales Person to attribute sales to.
+
+    Executive Incentive Statement builds its whole attribution from
+    POS Executive.sales_person. It was NULL on all 131 executives here, so the
+    report could name who was on the till but never pay anyone -- an incentive
+    scheme that cannot attribute a sale is not a scheme.
+
+    Idempotent: reuses a Sales Person of the same name, skips an executive that
+    already has one, and never disturbs one set by hand. Returns how many it
+    linked.
+    """
+    parent = _incentive_sales_person_root()
+    linked = 0
+    rows = frappe.get_all(
+        "POS Executive",
+        filters={"is_active": 1, "sales_person": ("in", ("", None))},
+        fields=["name", "executive_name", "user"],
+        limit_page_length=0,
+    )
+    for row in rows:
+        label = (row.executive_name or "").strip() or (row.user or "").split("@")[0]
+        if not label:
+            continue
+        sp = frappe.db.get_value("Sales Person", {"sales_person_name": label}, "name")
+        if not sp:
+            doc = frappe.new_doc("Sales Person")
+            doc.sales_person_name = label
+            doc.parent_sales_person = parent
+            doc.is_group = 0
+            if row.user and frappe.db.exists("Employee", {"user_id": row.user}):
+                doc.employee = frappe.db.get_value("Employee", {"user_id": row.user}, "name")
+            doc.flags.ignore_permissions = True
+            doc.insert(ignore_permissions=True)
+            sp = doc.name
+        frappe.db.set_value("POS Executive", row.name, "sales_person", sp,
+                            update_modified=False)
+        linked += 1
+    if linked:
+        frappe.db.commit()
+    return linked
+
+
+def _incentive_sales_person_root() -> str:
+    """The group every generated Sales Person hangs under."""
+    root = frappe.db.get_value("Sales Person", {"is_group": 1, "parent_sales_person": ("in", ("", None))}, "name")
+    if root:
+        return root
+    doc = frappe.new_doc("Sales Person")
+    doc.sales_person_name = "Sales Team"
+    doc.is_group = 1
+    doc.flags.ignore_permissions = True
+    doc.insert(ignore_permissions=True)
+    return doc.name
+
+
 def after_migrate():
     # POS creates the canonical Service Request directly; never recreate the
     # retired POS Repair Intake link from an older exported fixture.
@@ -949,6 +1005,7 @@ def after_migrate():
     _ensure_pos_control_defaults()
     _ensure_fifo_override_reasons()
     _ensure_repair_consumable_groups()
+    ensure_pos_executive_sales_persons()
     _seed_pos_profiles()
 
 
