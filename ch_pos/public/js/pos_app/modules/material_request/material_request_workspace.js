@@ -69,15 +69,7 @@ export class MaterialRequestWorkspace {
 					<span class="ch-mr-zone-text" style="font-size:var(--pos-fs-sm);color:#0369a1"></span>
 				</div>
 
-				<!-- Draft Requests Section -->
 				<div class="ch-mr-success-banner" style="display:none"></div>
-				<div class="ch-pos-section-card ch-mr-drafts-section" style="margin-bottom:var(--pos-space-md);display:none">
-					<div class="section-header"><i class="fa fa-pencil-square-o"></i> ${__("Draft Requests (add items before submitting)")}</div>
-					<div class="section-body" style="padding:0">
-						<div class="ch-mr-drafts-list"></div>
-					</div>
-				</div>
-
 				<!-- New Request Form -->
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md)">
 					<div class="section-header">
@@ -130,6 +122,14 @@ export class MaterialRequestWorkspace {
 								<i class="fa fa-paper-plane"></i> ${__("Create Request")}
 							</button>
 						</div>
+					</div>
+				</div>
+
+				<!-- Draft Requests: what this store started earlier -->
+				<div class="ch-pos-section-card ch-mr-drafts-section" style="margin-bottom:var(--pos-space-md);display:none">
+					<div class="section-header"><i class="fa fa-pencil-square-o"></i> ${__("Draft Requests (add items before submitting)")}</div>
+					<div class="section-body" style="padding:0">
+						<div class="ch-mr-drafts-list"></div>
 					</div>
 				</div>
 
