@@ -684,7 +684,11 @@ _render_dashboard(panel, data) {
 									background:var(--fg-color);transition:border-color 0.2s">
 									<i class="fa fa-camera" style="font-size:20px;color:var(--text-muted);margin-bottom:4px"></i>
 									<span style="font-size:11px;color:var(--text-muted)">${__(label)}</span>
-									<input type="file" accept="image/*" capture="environment" class="ch-claim-img-input"
+									<!-- No capture attribute on purpose. Six tiles cannot each
+									     carry two buttons, so the tile opens the platform chooser,
+									     which offers the camera AND the library. capture would
+									     force the camera and hide every photo already taken. -->
+									<input type="file" accept="image/*" class="ch-claim-img-input"
 										data-idx="${i}" data-label="${label}" style="display:none">
 									<img class="ch-claim-img-preview" style="display:none;max-width:100%;max-height:70px;
 										border-radius:4px;margin-top:4px;object-fit:cover">

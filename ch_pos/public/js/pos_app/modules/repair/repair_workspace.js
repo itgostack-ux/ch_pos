@@ -337,10 +337,21 @@ export class RepairWorkspace {
 									${__("Photograph the device as received — this is what settles a dispute later")}
 								</span>
 							</label>
-							<input type="file" class="ch-rep-photos" accept="image/*" capture="environment"
+							<!-- capture="environment" is not a hint: it sends the phone
+							     straight to the rear camera and removes the gallery, so a
+							     photo already taken could not be attached at all. Camera
+							     keeps capture; the library input must NOT have it. -->
+							<input type="file" class="ch-rep-photos ch-rep-photos-camera" accept="image/*"
+								capture="environment" multiple style="display:none">
+							<input type="file" class="ch-rep-photos ch-rep-photos-library" accept="image/*"
 								multiple style="display:none">
-							<button class="btn btn-sm btn-default ch-rep-photo-add" style="border-radius:var(--pos-radius-sm)">
-								<i class="fa fa-camera"></i> ${__("Add Photo")}
+							<button class="btn btn-sm btn-default ch-rep-photo-add" data-source="camera"
+								style="border-radius:var(--pos-radius-sm)">
+								<i class="fa fa-camera"></i> ${__("Take Photo")}
+							</button>
+							<button class="btn btn-sm btn-default ch-rep-photo-add" data-source="library"
+								style="border-radius:var(--pos-radius-sm);margin-left:6px">
+								<i class="fa fa-picture-o"></i> ${__("Choose Image")}
 							</button>
 							<div class="ch-rep-photo-strip" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div>
 						</div>
@@ -1390,7 +1401,8 @@ export class RepairWorkspace {
 
 		panel.on("click", ".ch-rep-photo-add", (e) => {
 			e.preventDefault();
-			panel.find(".ch-rep-photos").trigger("click");
+			const source = $(e.currentTarget).data("source") === "library" ? "library" : "camera";
+			panel.find(`.ch-rep-photos-${source}`).trigger("click");
 		});
 
 		panel.on("change", ".ch-rep-photos", (e) => {
