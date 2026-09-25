@@ -1895,6 +1895,21 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		return Array.from(providers);
 	}
 
+	/**
+	 * Does this row have a machine it can actually use?
+	 *
+	 * Two ways to have none, and they look identical at the counter: the store
+	 * has no terminal at all, or it has one that does not do this payment mode
+	 * (a UPI-only terminal and the customer hands over a card). Either way the
+	 * dropdown would be empty and Pay Now would refuse, so the row falls back
+	 * to keying the reference off the bank's slip -- which is how a shop
+	 * without a terminal has always taken a card.
+	 */
+	_manual_for(payment) {
+		if (this._payment_machine_data.manual_only) return true;
+		return this._machines_for_row(payment).length === 0;
+	}
+
 	_machines_for_row(payment) {
 		const target = this._normalize_gateway_mode(payment.mode);
 		return (this._payment_machine_data.machines || []).filter((machine) => {
@@ -2123,7 +2138,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			const type = this._mop_type(p.mode);
 			let ref_html = "";
 			if (type === "upi") {
-				if (this._payment_machine_data.manual_only) {
+				if (this._manual_for(p)) {
 					ref_html = `
 					<div class="ch-pay-gateway-refs mt-1">
 						<input type="text" class="form-control form-control-sm ch-pay-row-utr" data-idx="${idx}"
@@ -2153,7 +2168,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 					</div>`;
 				}
 			} else if (type === "card") {
-				if (this._payment_machine_data.manual_only) {
+				if (this._manual_for(p)) {
 					ref_html = `
 					<div class="ch-pay-card-refs mt-1">
 						<div class="ch-pay-gateway-grid ch-pay-gateway-grid-two">

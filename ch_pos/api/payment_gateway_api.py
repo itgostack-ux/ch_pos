@@ -318,6 +318,19 @@ def get_payment_machines(company=None, store=None, pos_profile=None, payment_mod
     return {
         "providers": providers,
         "machines": machines,
+        # No machine reachable from this till means there is nothing to route a
+        # card or UPI payment through -- and until now that produced an empty
+        # "Select Machine" dropdown and a Pay Now that refused, so the store
+        # could not take the payment at all. A shop without a terminal still
+        # takes cards; the cashier keys the RRN off the bank's own slip. The
+        # manual path already existed for the shadow-live pilot and is simply
+        # the honest answer here too: no machine attached, enter the reference.
+        #
+        # Deliberately decided by what this till can actually reach, after
+        # scope and profile filtering, not by whether any machine exists
+        # somewhere in the estate -- a terminal at another store is no more
+        # use to this counter than no terminal at all.
+        "manual_only": not machines,
     }
 
 
