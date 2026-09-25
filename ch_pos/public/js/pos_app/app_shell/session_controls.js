@@ -854,9 +854,26 @@ export class SessionControls {
 		// returns the plain formatted number, which is what a settlement row wants.
 		const money = (value) => format_currency(Number(value || 0));
 		const num = (value) => Number(value || 0);
+
+		// Tolerance bands and the blind-close decision come from the server
+		// (ch_pos.pos_core.variance_policy) with the X report. This file used to
+		// hard-code 100 in three places, so the limit a cashier was shown was
+		// free to drift from the limit the server actually enforced.
+		const policy = x_data.variance_policy || {};
+		const accept_limit = num(policy.accept_limit);
+		const approval_limit = num(policy.approval_limit);
+		// Blind close: the cashier counts without seeing what the drawer *should*
+		// hold. Showing the expected figure next to the count boxes turns the
+		// count into a number typed to match, which is why Xstore, SAP Retail and
+		// D365 Commerce all default this on. Masking only the total is not enough
+		// — opening + sales - outflows reconstructs it — so every cash line on
+		// this screen is sealed until the count is submitted.
+		const blind = policy.blind_close !== false;
+		const SEALED = '<span class="ch-settle-sealed" title="' + __("Revealed after you submit the count") + '">••••••</span>';
+		const cash_cell = (value) => (blind ? SEALED : money(value));
 		const tender_other = num(x_data.total_sales_wallet) + num(x_data.total_sales_bank);
 		const tender_cards = [
-			{ cls: "cash", icon: "fa-money", label: __("Cash"), value: x_data.total_sales_cash },
+			{ cls: "cash", icon: "fa-money", label: __("Cash"), value: x_data.total_sales_cash, seal: true },
 			{ cls: "upi", icon: "fa-qrcode", label: __("UPI"), value: x_data.total_sales_upi },
 			{ cls: "card", icon: "fa-credit-card", label: __("Card"), value: x_data.total_sales_card },
 			{ cls: "other", icon: "fa-university", label: __("Other"), value: tender_other },
@@ -865,7 +882,7 @@ export class SessionControls {
 				<div class="ch-settle-tender-icon"><i class="fa ${t.icon}"></i></div>
 				<div>
 					<div class="ch-settle-tender-label">${t.label}</div>
-					<div class="ch-settle-tender-value">${money(t.value)}</div>
+					<div class="ch-settle-tender-value">${t.seal ? cash_cell(t.value) : money(t.value)}</div>
 				</div>
 			</div>
 		`).join("");
@@ -948,15 +965,19 @@ export class SessionControls {
 									<span><i class="fa fa-calculator"></i> ${__("Cash Reconciliation")}</span>
 								</div>
 								<table class="table table-sm table-borderless ch-settle-table">
-									<tr><td>${__("Opening Cash")}</td><td class="text-right">${money(x_data.opening_cash)}</td></tr>
-									<tr><td>${__("Cash Sales")}</td><td class="text-right">${money(x_data.total_sales_cash)}</td></tr>
-									<tr><td>${__("Cash Returns / Refunds")}</td><td class="text-right">- ${money(x_data.refund_cash_out)}</td></tr>
-									<tr><td>${__("Cash Drops")}</td><td class="text-right">- ${money(x_data.total_cash_drops)}</td></tr>
-									<tr><td>${__("Buyback Cash Payout")}</td><td class="text-right">- ${money(x_data.buyback_cash_out)}</td></tr>
-									<tr><td>${__("Petty Cash Logged")}</td><td class="text-right">- ${money(x_data.petty_cash_out)}</td></tr>
+									<tr><td>${__("Opening Cash")}</td><td class="text-right">${cash_cell(x_data.opening_cash)}</td></tr>
+									<tr><td>${__("Cash Sales")}</td><td class="text-right">${cash_cell(x_data.total_sales_cash)}</td></tr>
+									<tr><td>${__("Cash Returns / Refunds")}</td><td class="text-right">${blind ? SEALED : "- " + money(x_data.refund_cash_out)}</td></tr>
+									<tr><td>${__("Cash Drops")}</td><td class="text-right">${blind ? SEALED : "- " + money(x_data.total_cash_drops)}</td></tr>
+									<tr><td>${__("Buyback Cash Payout")}</td><td class="text-right">${blind ? SEALED : "- " + money(x_data.buyback_cash_out)}</td></tr>
+									<tr><td>${__("Petty Cash Logged")}</td><td class="text-right">${blind ? SEALED : "- " + money(x_data.petty_cash_out)}</td></tr>
 									<tr><td>${__("New Petty Cash")}</td><td class="text-right">- <span class="ch-settle-new-petty-total">${money(0)}</span></td></tr>
-									<tr class="ch-settle-total-row"><td>${__("Expected Cash")}</td><td class="text-right ch-settle-expected-final">${money(x_data.cash_in_drawer)}</td></tr>
+									<tr class="ch-settle-total-row"><td>${__("Expected Cash")}</td><td class="text-right ch-settle-expected-final">${cash_cell(x_data.cash_in_drawer)}</td></tr>
 								</table>
+								${blind ? `<div class="ch-settle-blind-note text-muted small" style="padding:6px 8px">
+									<i class="fa fa-eye-slash"></i>
+									${__("Blind count. Count the drawer and enter what is actually there — the expected figure and your difference are shown once you submit.")}
+								</div>` : ""}
 							</div>
 							<div class="ch-settle-panel">
 								<div class="ch-settle-panel-head">
@@ -1016,9 +1037,23 @@ export class SessionControls {
 				},
 				{ fieldtype: "Section Break" },
 				{
+					fieldname: "count_mode",
+					fieldtype: "Select",
+					label: __("Count Method"),
+					options: [
+						{ value: "denomination", label: __("Count by denomination") },
+						{ value: "total", label: __("Enter counted total") },
+					],
+					default: "denomination",
+					description: __("A detailed count is the better evidence. Use the total when the drawer has already been counted on a note counter."),
+				},
+				{
 					fieldname: "actual_closing_cash",
 					fieldtype: "Currency",
 					label: __("Actual Closing Cash (₹)"),
+					// Editable only in "total" mode; the denomination grid drives it
+					// otherwise. Making this permanently read-only meant a drawer
+					// counted on a machine could not be settled at all.
 					read_only: 1,
 					default: 0,
 				},
@@ -1064,16 +1099,30 @@ export class SessionControls {
 				}
 				dlg.fields_dict.manager_pin.$wrapper.find(".ch-pin-inline-msg").remove();
 
+				// Only send a denomination breakdown when one was actually taken.
+				// The server cross-checks the breakdown against the declared total
+				// and refuses a mismatch, so sending an empty grid alongside a
+				// machine-counted total would reject a perfectly good count.
 				const denominations = [];
-				dlg.$wrapper.find(".ch-settle-denom").each(function () {
-					const count = parseInt($(this).val()) || 0;
-					if (count > 0) {
-						denominations.push({
-							denomination: parseInt($(this).data("denom")),
-							quantity: count,
+				if (dlg.get_value("count_mode") !== "total") {
+					dlg.$wrapper.find(".ch-settle-denom").each(function () {
+						const count = parseInt($(this).val()) || 0;
+						if (count > 0) {
+							denominations.push({
+								denomination: parseInt($(this).data("denom")),
+								quantity: count,
+							});
+						}
+					});
+					if (!denominations.length && !num(values.actual_closing_cash)) {
+						frappe.msgprint({
+							title: __("Nothing Counted"),
+							message: __("Enter the notes and coins in the drawer, or switch to \"Enter counted total\"."),
+							indicator: "orange",
 						});
+						return;
 					}
-				});
+				}
 
 				dlg.disable_primary_action();
 				frappe.call({
@@ -1093,12 +1142,28 @@ export class SessionControls {
 								PosState.session_status = "Pending Close";
 								this._update_info();
 							}
-							frappe.show_alert({
-								message: petty.rows.length
-									? __("Settlement submitted with petty cash logged. Session is now Pending Close.")
-									: __("Settlement submitted. Session is now Pending Close."),
-								indicator: "blue",
-							}, 6);
+							// The reveal. Under a blind count this is the first time
+							// the cashier sees expected cash and their difference, and
+							// it is the whole point of counting blind — so it is a
+							// dialog they must read, not a toast that slides away.
+							const variance = Number(r.message.variance || 0);
+							const abs_var = Math.abs(variance);
+							const indicator = abs_var <= accept_limit ? "green"
+								: abs_var <= approval_limit ? "orange" : "red";
+							frappe.msgprint({
+								title: __("Settlement Recorded"),
+								indicator: indicator,
+								message: `
+									<table class="table table-sm table-borderless" style="margin-bottom:8px">
+										<tr><td>${__("Expected Cash")}</td><td class="text-right"><b>${money(r.message.expected_closing_cash)}</b></td></tr>
+										<tr><td>${__("Counted Cash")}</td><td class="text-right"><b>${money(r.message.actual_closing_cash)}</b></td></tr>
+										<tr><td>${variance >= 0 ? __("Over") : __("Short")}</td>
+											<td class="text-right"><b style="color:var(--${indicator === "green" ? "dark-green" : indicator})">${money(abs_var)}</b></td></tr>
+									</table>
+									<div class="text-muted small">${petty.rows.length
+										? __("Petty cash logged. Session is now Pending Close.")
+										: __("Session is now Pending Close.")}</div>`,
+							});
 							if (!is_current_session) {
 								// This was the "settle your stale session first"
 								// flow (session:force_settle) — chain straight
@@ -1122,8 +1187,10 @@ export class SessionControls {
 
 		// Bind denomination inputs
 		setTimeout(() => {
+			const counting_by_denomination = () => dlg.get_value("count_mode") !== "total";
+
 			const refresh_totals = () => {
-				let total = 0;
+				let denom_total = 0;
 				dlg.$wrapper.find(".ch-settle-denom").each(function () {
 					const denom = parseInt($(this).data("denom"));
 					const count = Math.max(0, parseInt($(this).val()) || 0);
@@ -1131,23 +1198,42 @@ export class SessionControls {
 					dlg.$wrapper.find(`.ch-settle-denom-total[data-denom="${denom}"]`).text(
 						`₹${subtotal.toLocaleString("en-IN")}`
 					);
-					total += subtotal;
+					denom_total += subtotal;
 				});
-				dlg.$wrapper.find(".ch-settle-grand-total").text(`₹${total.toLocaleString("en-IN")}`);
-				dlg.set_value("actual_closing_cash", total);
+				dlg.$wrapper.find(".ch-settle-grand-total").text(`₹${denom_total.toLocaleString("en-IN")}`);
+
+				if (counting_by_denomination()) {
+					dlg.set_value("actual_closing_cash", denom_total);
+				}
+				const total = num(dlg.get_value("actual_closing_cash"));
 
 				const petty = this._read_settlement_petty_rows(dlg, true);
 				const new_petty_total = petty.rows.reduce((sum, row) => sum + num(row.amount), 0);
+				dlg.$wrapper.find(".ch-settle-new-petty-total").text(money(new_petty_total));
+
+				if (blind) {
+					// Nothing derived from expected cash may appear while counting —
+					// not the expected figure, not the variance, not a colour that
+					// hints at either.
+					dlg.$wrapper.find(".ch-settle-expected-final").html(SEALED);
+					dlg.$wrapper.find(".ch-settle-variance").html(`
+						<span class="text-muted">${__("Counted")}: <b>${money(total)}</b></span>
+					`);
+					return;
+				}
+
 				const expected = num(x_data.cash_in_drawer) - new_petty_total;
 				const variance = total - expected;
 				const abs_var = Math.abs(variance);
-				const color = abs_var === 0 ? "green" : abs_var <= 100 ? "orange" : "red";
-				dlg.$wrapper.find(".ch-settle-new-petty-total").text(money(new_petty_total));
+				const color = abs_var <= accept_limit ? "dark-green"
+					: abs_var <= approval_limit ? "orange" : "red";
+				const note = abs_var <= accept_limit ? ""
+					: abs_var <= approval_limit ? `<small>(${__("reason required")})</small>`
+					: `<small>(${__("manager approval needed")})</small>`;
 				dlg.$wrapper.find(".ch-settle-expected-final").text(money(expected));
 				dlg.$wrapper.find(".ch-settle-variance").html(`
-					<span style="color:var(--${color === "green" ? "dark-green" : color})">
-						${__("Variance")}: ₹${variance.toLocaleString("en-IN")}
-						${abs_var > 100 ? `<small>(${__("manager approval needed")})</small>` : ""}
+					<span style="color:var(--${color})">
+						${__("Variance")}: ${money(variance)} ${note}
 					</span>
 				`);
 			};
@@ -1155,6 +1241,21 @@ export class SessionControls {
 				dlg.$wrapper.find(".ch-settle-petty-body").append(petty_row_html(reason, amount, remarks));
 				refresh_totals();
 			};
+			const apply_count_mode = () => {
+				const by_denom = counting_by_denomination();
+				dlg.fields_dict.actual_closing_cash.df.read_only = by_denom ? 1 : 0;
+				dlg.fields_dict.actual_closing_cash.refresh();
+				dlg.fields_dict.denom_html.$wrapper.toggle(by_denom);
+				if (by_denom) refresh_totals();
+			};
+			dlg.fields_dict.count_mode.$input.on("change", () => {
+				apply_count_mode();
+				refresh_totals();
+			});
+			dlg.fields_dict.actual_closing_cash.$input.on("input change", () => {
+				if (!counting_by_denomination()) refresh_totals();
+			});
+			apply_count_mode();
 			dlg.$wrapper.find(".ch-settle-denom").on("input", refresh_totals);
 			dlg.$wrapper.on("input", ".ch-settle-petty-reason, .ch-settle-petty-amount, .ch-settle-petty-remarks", refresh_totals);
 			dlg.$wrapper.on("click", ".ch-settle-petty-add", () => add_petty_row());

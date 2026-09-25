@@ -66,6 +66,26 @@ def has_valid_settlement_signature(doc) -> bool:
 
 
 def build_settlement_snapshot(session):
+    """The one expected-cash calculation. Everything that reconciles a till
+    calls this — settlement validation, the X report, and the session's own
+    close.
+
+    It is scoped to **this session**, by ``Sales Invoice.custom_ch_pos_session``.
+
+    It used to be scoped to ``pos_profile + posting_date`` instead, while
+    ``CH POS Session._calculate_cash_variance`` was scoped to the session. Two
+    expected figures existed for the same till and they disagreed the moment a
+    profile saw more than one session in a trading day — a shift handover, a
+    re-open, an auto-close and a manual re-close. The cashier could then pass
+    settlement inside tolerance and be refused at close against a *different*
+    variance, demanding a reason and a manager PIN the settlement never
+    collected. A settlement already existed, so it could not be redone, and
+    ``reopen_settlement`` is not surfaced in the POS UI. The till was stuck
+    with no way out that a store could reach.
+
+    Session scope is the correct one: cash is counted per drawer per shift, not
+    per profile per day, and it is the scope the session close has always used.
+    """
     if isinstance(session, str):
         session = frappe.get_doc("CH POS Session", session)
 
@@ -74,13 +94,12 @@ def build_settlement_snapshot(session):
         FROM `tabSales Invoice` pi
         JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
-        WHERE pi.pos_profile = %(pp)s
+        WHERE pi.custom_ch_pos_session = %(session)s
           AND pi.docstatus = 1
           AND pi.is_consolidated = 0
-          AND pi.posting_date = %(bd)s
           AND pi.is_return = 0
         GROUP BY mop.type, sip.mode_of_payment
-    """, {"pp": session.pos_profile, "bd": session.business_date}, as_dict=True)
+    """, {"session": session.name}, as_dict=True)
 
     cash_total = 0
     card_total = 0
@@ -110,13 +129,12 @@ def build_settlement_snapshot(session):
         FROM `tabSales Invoice` pi
         JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         JOIN `tabMode of Payment` mop ON mop.name = sip.mode_of_payment
-        WHERE pi.pos_profile = %(pp)s
+        WHERE pi.custom_ch_pos_session = %(session)s
           AND pi.docstatus = 1
           AND pi.is_consolidated = 0
-          AND pi.posting_date = %(bd)s
           AND pi.is_return = 1
           AND mop.type = 'Cash'
-    """, {"pp": session.pos_profile, "bd": session.business_date})[0][0])
+    """, {"session": session.name})[0][0])
 
     movements = frappe.db.sql("""
         SELECT IFNULL(movement_type, 'Cash Drop') AS movement_type,
@@ -130,6 +148,14 @@ def build_settlement_snapshot(session):
     cash_drop_total = movement_map.get("Cash Drop", 0)
     petty_cash_out = movement_map.get("Petty Expense", 0)
     buyback_cash_out = movement_map.get("Buyback Cash Payout", 0)
+    # Any movement type added later must still leave the till. Naming the three
+    # known types and silently dropping a fourth would overstate expected cash
+    # by exactly the amount that was taken out of the drawer.
+    other_cash_out = sum(
+        amount
+        for movement_type, amount in movement_map.items()
+        if movement_type not in ("Cash Drop", "Petty Expense", "Buyback Cash Payout")
+    )
     refund_cash_out = abs(return_cash)
 
     expected_closing_cash = (
@@ -139,6 +165,7 @@ def build_settlement_snapshot(session):
         - cash_drop_total
         - petty_cash_out
         - buyback_cash_out
+        - other_cash_out
     )
 
     return {
@@ -158,7 +185,14 @@ def build_settlement_snapshot(session):
         "cash_drop_total": cash_drop_total,
         "petty_cash_out": petty_cash_out,
         "buyback_cash_out": buyback_cash_out,
+        "other_cash_out": other_cash_out,
         "expected_closing_cash": expected_closing_cash,
+        # Total cash accountability: what passed through the drawer, which is
+        # what the percentage tolerance bands are measured against. Cash that
+        # was dropped to the safe during the day is still cash the cashier was
+        # responsible for, so it belongs in the basis even though it is not in
+        # the expected closing balance.
+        "cash_basis": flt(session.opening_cash) + cash_total,
     }
 
 
@@ -449,26 +483,41 @@ class CHPOSSettlement(Document):
             )
 
     def _validate_variance_approval(self):
-        """Manager approval needed if variance exceeds threshold."""
-        threshold = flt(frappe.db.get_single_value("CH POS Control Settings", "variance_approval_threshold") or 100)
-        if abs(flt(self.variance_amount)) > threshold:
-            if not self.variance_reason:
-                frappe.throw(
-                    _("Variance is ₹{0}. Reason is mandatory when variance exceeds ₹{1}.").format(
-                        abs(flt(self.variance_amount)), threshold
-                    )
-                )
+        """Apply the over/short bands from ch_pos.pos_core.variance_policy.
+
+        Three outcomes rather than two: inside the accept band the close is
+        frictionless, the middle band asks only for a reason, and a manager is
+        involved only for genuine money. The old single Rs 100 line put a
+        manager in the loop for a rounding difference on a till that had taken
+        six figures.
+        """
+        from ch_pos.pos_core.variance_policy import classify_variance, variance_band_message
+
+        verdict = classify_variance(self.variance_amount, self.cash_basis_for_variance())
+        if not verdict["requires_reason"]:
+            return
+
+        if not self.variance_reason:
+            frappe.throw(variance_band_message(verdict), title=_("Variance Reason Required"))
+        if verdict["requires_approval"]:
             if not self.signoff_by_manager:
                 frappe.throw(
-                    _("Variance ₹{0} exceeds threshold ₹{1}. Manager sign-off required.").format(
-                        abs(flt(self.variance_amount)), threshold
-                    )
+                    variance_band_message(verdict), title=_("Manager Approval Required")
                 )
             if not has_valid_settlement_signature(self):
                 frappe.throw(
                     _("Settlement manager approval evidence is invalid."),
                     frappe.PermissionError,
                 )
+
+    def cash_basis_for_variance(self):
+        """Cash the drawer was accountable for — opening float plus cash sales.
+
+        Stored on the settlement so the band applied at submission can be
+        reconstructed later from the record itself, rather than re-derived from
+        transactions that may since have been amended.
+        """
+        return flt(self.opening_balance) + flt(self.total_sales_cash)
 
     def calculate_from_transactions(self):
         """Pull actual tender-wise totals from POS invoices for this session."""

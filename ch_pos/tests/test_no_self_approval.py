@@ -56,10 +56,24 @@ class TestSecondPersonRule(unittest.TestCase):
 
     def test_the_refusal_says_what_to_do(self):
         """Not folded into the Invalid PIN catch-all: that vagueness exists to
-        stop PIN enumeration, and you already know your own PIN."""
+        stop PIN enumeration, and you already know your own PIN.
+
+        "Ask a colleague" was the original wording and is no longer enough on
+        its own — at a one-person store there is no colleague, so it sent the
+        only member of staff round a loop of retries until the rate limit shut
+        the till's approvals for fifteen minutes. The refusal now either names
+        who can approve, or says plainly that nobody here can and that the fix
+        is configuration rather than another attempt.
+        """
         src = inspect.getsource(verify_manager_pin)
         self.assertIn("needs a second person to approve", src)
-        self.assertIn("Ask a colleague", src)
+        self.assertIn(
+            "_other_eligible_approvers", src,
+            "The refusal must name who can actually approve here.")
+        self.assertIn(
+            "no one else is set up", src,
+            "A store with no second approver must be told that, not told to find "
+            "a colleague who does not exist.")
 
     def test_the_refusal_is_audited(self):
         src = inspect.getsource(verify_manager_pin)

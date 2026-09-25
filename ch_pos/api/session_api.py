@@ -12,7 +12,7 @@ They integrate with:
 
 import frappe
 from frappe import _
-from frappe.utils import flt, cint, nowdate, now_datetime, getdate, add_days
+from frappe.utils import flt, cint, nowdate, now_datetime, getdate, get_datetime, add_days
 
 from ch_pos.api.scope_guard import (
     assert_pos_profile_scope,
@@ -30,6 +30,7 @@ from ch_pos.api.manager_approval import (
 from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import is_session_stale
 from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import build_settlement_snapshot
+from ch_pos.pos_core.variance_policy import get_variance_policy
 from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import (
     get_active_session,
     get_store_business_date)
@@ -425,6 +426,13 @@ def open_session(pos_profile, opening_cash, session_grant=None, device=None,
             "pos_profile": pos_profile,
             "company": company,
             "user": frappe.session.user,
+            # MUST be the wall clock, not the business date. ERPNext's
+            # Sales Invoice.validate_pos_opening_entry refuses to create any POS
+            # invoice unless the open entry's period_start_date falls on
+            # *today* — so back-dating this field to the trading day stops the
+            # till billing altogether on exactly the stores whose business date
+            # has slipped. The closing entry's invoice scope is fixed in
+            # CH POS Session._scope_closing_entry_to_session instead.
             "period_start_date": now_datetime(),
             "balance_details": balance_details,
         })
@@ -1184,6 +1192,11 @@ def get_x_report(session_name) -> dict:
             "actual_closing_cash": flt(settlement.actual_closing_cash),
             "variance_amount": flt(settlement.variance_amount),
         } if settlement else None,
+        # The till UI must never carry its own copy of these numbers. It used to
+        # hard-code Rs 100 in two dialogs, so the figure a cashier was shown and
+        # the figure the server enforced were free to drift apart.
+        "variance_policy": get_variance_policy(snapshot["cash_basis"]),
+        "cash_basis": snapshot["cash_basis"],
     }
 
 
@@ -1352,6 +1365,22 @@ def _auto_advance_business_date_after_eod(store, closed_business_date):
             "next_business_date": next_bd,
         }
 
+    # Catch up in one move rather than one day per close.
+    #
+    # Advancing strictly day-by-day assumed a store always closes the day it
+    # traded. Once the EDC gate had frozen every business date, stores were 2 to
+    # 24 days behind — and a till whose business date is behind the calendar is
+    # refused all POS work by assert_pos_profile_scope. Day-by-day recovery
+    # would have meant 24 open/close cycles before that store could sell
+    # anything, which is not a recovery procedure anyone would follow.
+    #
+    # Skipping the intervening dates loses nothing. A session can only ever be
+    # opened on the store's *current* business date, so a date the store never
+    # reached has no sessions, no invoices and no cash against it. There is no
+    # trading day being skipped — only a counter catching up with the calendar.
+    skipped = (getdate(nowdate()) - next_bd).days
+    next_bd = getdate(nowdate())
+
     from ch_pos.pos_core.doctype.ch_business_date.ch_business_date import advance_business_date
 
     advance_business_date(
@@ -1367,19 +1396,37 @@ def _auto_advance_business_date_after_eod(store, closed_business_date):
     return {
         "advanced": True,
         "next_business_date": next_bd,
-        "message": _("Business date advanced to {0}.").format(next_bd),
+        "message": (
+            _("Business date advanced to {0}, catching up {1} day(s) this store had "
+              "fallen behind.").format(next_bd, skipped)
+            if skipped else _("Business date advanced to {0}.").format(next_bd)
+        ),
     }
 
 
 def _is_settlement_complete_for_store(store, business_date):
-    """Check if settlement is complete for a store/date before date advancement.
+    """Decide whether the store's trading day may roll forward.
 
-    Rule:
-    - If no card/bank POS receipts exist, settlement is considered complete.
-    - If card/bank receipts exist, POS EDC Settlement (Matched, submitted) must
-      cover the card receipt total for that store/date.
+    **The card/EDC reconciliation is no longer a gate.** It used to be: the day
+    could not advance unless a submitted, ``Matched`` POS EDC Settlement covered
+    the day's card receipts. There have never been any POS EDC Settlement rows
+    on this estate — not one, since go-live — so the condition was unsatisfiable
+    and no store could ever roll its business date. Every active store drifted
+    2 to 24 days behind, which in turn broke the POS Closing Entry window and
+    silently zeroed the day's takings.
+
+    It was also the wrong control. An acquirer settlement file arrives T+1 or
+    T+2; it does not exist at the moment the cashier closes the till. Oracle
+    Xstore, SAP Retail and Dynamics 365 Commerce all close the store day on the
+    store's own tender declaration and reconcile card receipts against the
+    acquirer file asynchronously, raising an exception when they disagree. That
+    is what happens here now: unmatched card receipts create a durable
+    reconciliation item for back office instead of holding the shop floor
+    hostage.
+
+    ``block_business_date_on_edc_mismatch`` restores the old blocking behaviour
+    for anyone who wants it. It is off by default, deliberately.
     """
-    # Pre-fetch pos_profiles for this store/date to avoid nested subquery
     report_limit = _session_report_limit()
     profiles = frappe.get_all(
         "CH POS Session",
@@ -1412,28 +1459,100 @@ def _is_settlement_complete_for_store(store, business_date):
         return True, _("Settlement complete (no card/bank receipts for the day).")
 
     store_warehouse = frappe.db.get_value("CH Store", store, "warehouse")
-    if not store_warehouse:
-        return False, _("Business date not advanced: card receipts exist but store warehouse mapping is missing for EDC settlement validation.")
+    matched_settlement_total = 0.0
+    if store_warehouse:
+        matched_settlement_total = flt(
+            frappe.db.sql("""
+                SELECT COALESCE(SUM(matched_amount), 0)
+                FROM `tabPOS EDC Settlement`
+                WHERE docstatus = 1
+                  AND status = 'Matched'
+                  AND settlement_date = %(bd)s
+                  AND store = %(warehouse)s
+            """, {"bd": business_date, "warehouse": store_warehouse})[0][0]
+        )
 
-    matched_settlement_total = flt(
-        frappe.db.sql("""
-            SELECT COALESCE(SUM(matched_amount), 0)
-            FROM `tabPOS EDC Settlement`
-            WHERE docstatus = 1
-              AND status = 'Matched'
-              AND settlement_date = %(bd)s
-              AND store = %(warehouse)s
-        """, {"bd": business_date, "warehouse": store_warehouse})[0][0]
-    )
+    shortfall = card_total - matched_settlement_total
+    if shortfall <= 0.01:
+        return True, _("Settlement complete.")
 
-    if matched_settlement_total + 0.01 < card_total:
+    _raise_edc_reconciliation_item(
+        store=store,
+        store_warehouse=store_warehouse,
+        business_date=business_date,
+        card_total=card_total,
+        matched_total=matched_settlement_total)
+
+    if cint(get_control_setting("block_business_date_on_edc_mismatch", 0)):
         return (
             False,
             _("Business date not advanced: EDC settlement pending. Card receipts: ₹{0}, Matched settlement: ₹{1}.").format(
                 card_total, matched_settlement_total
             ))
 
-    return True, _("Settlement complete.")
+    return (
+        True,
+        _("Card receipts of ₹{0} are awaiting acquirer reconciliation. "
+          "A reconciliation item has been raised for back office; the trading day is not held for it.").format(
+            shortfall),
+    )
+
+
+def _raise_edc_reconciliation_item(store, store_warehouse, business_date,
+                                   card_total, matched_total):
+    """Record unmatched card receipts as a durable, workable item.
+
+    A toast at the counter reaches the one person who cannot act on it. This
+    leaves a Draft POS EDC Settlement carrying the day's figures, which is what
+    back office actually works from when the acquirer file lands.
+
+    Never allowed to raise: this runs inside a till close, and a store must not
+    be unable to shut because a reconciliation record could not be written.
+    """
+    if not store_warehouse:
+        frappe.log_error(
+            f"Store {store} has no warehouse mapping; unmatched card receipts of "
+            f"{card_total} on {business_date} could not raise an EDC reconciliation item.",
+            "POS EDC Reconciliation")
+        return
+
+    try:
+        existing = frappe.db.get_value(
+            "POS EDC Settlement",
+            {"store": store_warehouse, "settlement_date": business_date, "docstatus": 0},
+            "name")
+        remarks = _(
+            "Raised automatically at store close on {0}. Card/bank receipts {1}, "
+            "matched against acquirer settlement {2}. Reconcile when the acquirer "
+            "file for this date is available."
+        ).format(business_date, card_total, matched_total)
+        values = {
+            "total_amount": card_total,
+            "matched_amount": matched_total,
+            "unmatched_amount": card_total - matched_total,
+            "match_rate": (matched_total / card_total * 100.0) if card_total else 0,
+            "variance": matched_total - card_total,
+            "remarks": remarks,
+        }
+        if existing:
+            frappe.db.set_value("POS EDC Settlement", existing, values)
+            return
+
+        company = frappe.db.get_value("CH Store", store, "company")
+        doc = frappe.get_doc({
+            "doctype": "POS EDC Settlement",
+            "company": company,
+            "store": store_warehouse,
+            "settlement_date": business_date,
+            "status": "Draft",
+            **values,
+        })
+        doc.flags.ignore_permissions = True
+        doc.insert(ignore_permissions=True)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"EDC reconciliation item failed for {store} on {business_date}")
 
 
 def _is_settlement_required():

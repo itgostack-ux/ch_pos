@@ -36,6 +36,26 @@ def _unused_profile():
     return rows[0] if rows else None
 
 
+def _set_store_business_date(store, business_date):
+    """Point a store at a trading day, for the length of a rolled-back test.
+
+    Written straight to the row rather than through advance_business_date: that
+    helper refuses to move a date backwards, which is correct for the shop floor
+    and useless for a test that needs yesterday.
+    """
+    name = frappe.db.get_value("CH Business Date", {"store": store, "is_active": 1}, "name")
+    if name:
+        frappe.db.set_value("CH Business Date", name, "business_date", business_date,
+                            update_modified=False)
+        return
+    doc = frappe.get_doc({
+        "doctype": "CH Business Date", "store": store,
+        "business_date": business_date, "status": "Open", "is_active": 1})
+    doc.flags.ignore_permissions = True
+    doc.flags.ignore_mandatory = True
+    doc.insert(ignore_permissions=True)
+
+
 class TestPostingStamp(unittest.TestCase):
     def tearDown(self):
         frappe.db.rollback()
@@ -49,15 +69,29 @@ class TestPostingStamp(unittest.TestCase):
         if not profile:
             self.skipTest("every profile already has an open session")
         yesterday = add_days(nowdate(), -1)
+
+        # The trading day is set on the STORE, and CH POS Session.before_insert
+        # overwrites whatever business_date a caller supplies with
+        # get_store_business_date(self.store). That is deliberate — a session
+        # must not be able to declare a trading day of its own — so this test
+        # used to assert a value the controller had already discarded, and
+        # failed against whatever the store's real date happened to be.
+        # Move the store's date, which is the only thing that can move it.
+        _set_store_business_date(profile.store, yesterday)
+
         session = frappe.get_doc({
             "doctype": "CH POS Session", "pos_profile": profile.pos_profile,
             "store": profile.store, "company": profile.company, "user": "Administrator",
-            "business_date": yesterday, "status": "Open", "opening_cash": 0})
+            "status": "Open", "opening_cash": 0})
         session.flags.ignore_permissions = True
         session.flags.ignore_mandatory = True
         session.insert(ignore_permissions=True)
         session.db_set("docstatus", 1)
         session.db_set("status", "Open")
+
+        self.assertEqual(
+            str(session.business_date), str(yesterday),
+            "the session did not inherit the store's trading day")
 
         date, time_ = _pos_posting_stamp(profile.pos_profile)
         self.assertEqual(date, str(yesterday), "the trading day did not reach the stamp")

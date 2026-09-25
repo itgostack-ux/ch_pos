@@ -4,9 +4,13 @@
  * Full-screen closing experience:
  * 1. Shows X Report summary (sales, payments, drops)
  * 2. Denomination-wise cash counting
- * 3. Variance display with auto-allow < ₹100
- * 4. Manager PIN for variance > ₹100
+ * 3. Variance against the server's tolerance bands (ch_pos.pos_core.variance_policy)
+ * 4. Manager PIN only for the approval band
  * 5. Reason entry for discrepancies
+ *
+ * Every threshold here arrives with the X report. Nothing in this file decides
+ * what "too much" means — it used to hard-code ₹100 while the server read a
+ * configurable setting, so the two could disagree without anyone noticing.
  */
 import { PosState, EventBus } from "../state.js";
 
@@ -69,7 +73,7 @@ export class SessionClosingDashboard {
 					fieldname: "variance_reason",
 					fieldtype: "Small Text",
 					label: __("Variance Reason"),
-					description: __("Required if variance > ₹100"),
+					description: __("Required once the difference is above the auto-accept limit for this till."),
 				},
 				{ fieldtype: "Column Break" },
 				{
@@ -77,7 +81,7 @@ export class SessionClosingDashboard {
 					fieldtype: "Data",
 					label: __("Manager PIN"),
 					options: "",
-					description: __("Required if variance > ₹100"),
+					description: __("Required only when the difference is above the approval limit for this till."),
 				},
 			],
 			primary_action_label: __("Close Session"),
@@ -89,6 +93,15 @@ export class SessionClosingDashboard {
 
 		// Bind denomination counting
 		setTimeout(() => this._bind_denomination_inputs(dlg, data), 100);
+	}
+
+	/** Blind close is a server decision, delivered with the X report. */
+	_blind(d) {
+		return ((d || this._data || {}).variance_policy || {}).blind_close !== false;
+	}
+
+	_sealed() {
+		return `<span class="ch-settle-sealed" title="${__("Revealed after you submit the count")}">••••••</span>`;
 	}
 
 	_build_summary_html(d) {
@@ -118,7 +131,7 @@ export class SessionClosingDashboard {
 					<tr><td class="text-muted">${__("Cashier")}</td><td>${frappe.utils.escape_html(d.cashier)}</td></tr>
 					<tr><td class="text-muted">${__("Shift Start")}</td><td>${d.shift_start}</td></tr>
 					<tr><td class="text-muted">${__("Store")}</td><td>${frappe.utils.escape_html(d.store)}</td></tr>
-					<tr><td class="text-muted">${__("Opening Cash")}</td><td>${format_currency(d.opening_cash)}</td></tr>
+					<tr><td class="text-muted">${__("Opening Cash")}</td><td>${this._blind(d) ? this._sealed() : format_currency(d.opening_cash)}</td></tr>
 				</table>
 			</div>
 			<div class="col-md-4">
@@ -138,8 +151,8 @@ export class SessionClosingDashboard {
 				</table>
 				<hr>
 				<table class="table table-sm table-borderless">
-					<tr><td class="text-muted">${__("Cash Drops")}</td><td>${format_currency(d.total_cash_drops)}</td></tr>
-					<tr><td class="text-muted"><b>${__("Cash in Drawer")}</b></td><td><b>${format_currency(d.cash_in_drawer)}</b></td></tr>
+					<tr><td class="text-muted">${__("Cash Drops")}</td><td>${this._blind(d) ? this._sealed() : format_currency(d.total_cash_drops)}</td></tr>
+					<tr><td class="text-muted"><b>${__("Cash in Drawer")}</b></td><td><b>${this._blind(d) ? this._sealed() : format_currency(d.cash_in_drawer)}</b></td></tr>
 				</table>
 			</div>
 		</div>
@@ -189,17 +202,31 @@ export class SessionClosingDashboard {
 			wrapper.find(".ch-denom-grand-total").text(`₹${total.toLocaleString("en-IN")}`);
 			dlg.set_value("closing_cash", total);
 
-			// Show variance
+			if (this._blind(data)) {
+				wrapper.find(".ch-variance-display").html(
+					`<span class="text-muted">${__("Counted")}: <b>${format_currency(total)}</b></span>`
+				);
+				return;
+			}
+
+			const policy = data.variance_policy || {};
+			const accept_limit = Number(policy.accept_limit || 0);
+			const approval_limit = Number(policy.approval_limit || 0);
 			const expected = data.cash_in_drawer || 0;
 			const variance = total - expected;
 			const abs_var = Math.abs(variance);
-			const color = abs_var === 0 ? "green" : abs_var <= 100 ? "orange" : "red";
-			const icon = abs_var === 0 ? "✓" : abs_var <= 100 ? "⚠" : "✗";
+			const within_accept = abs_var <= accept_limit;
+			const within_approval = abs_var <= approval_limit;
+			const color = within_accept ? "dark-green" : within_approval ? "orange" : "red";
+			const icon = within_accept ? "✓" : within_approval ? "⚠" : "✗";
+			const note = within_accept
+				? (abs_var > 0 ? `<small>(${__("within tolerance")})</small>` : "")
+				: within_approval
+					? `<small>(${__("reason required")})</small>`
+					: `<small>(${__("manager approval needed")})</small>`;
 			wrapper.find(".ch-variance-display").html(`
-				<span style="color:var(--${color === "green" ? "dark-green" : color})">
-					${icon} ${__("Variance")}: ₹${variance.toLocaleString("en-IN")}
-					${abs_var <= 100 && abs_var > 0 ? `<small>(${__("auto-allowed")})</small>` : ""}
-					${abs_var > 100 ? `<small>(${__("manager approval needed")})</small>` : ""}
+				<span style="color:var(--${color})">
+					${icon} ${__("Variance")}: ${format_currency(variance)} ${note}
 				</span>
 			`);
 		});

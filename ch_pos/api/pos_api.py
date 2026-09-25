@@ -12160,6 +12160,16 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             return round(max_device_price * flt(pct) / 100.0, 2)
         return flt(fixed_price or 0)
 
+    # One lookup per distinct company, not one per plan row. This was a
+    # frappe.db.get_value inside the row loop — an N+1 on a list the cashier
+    # waits for at the counter, and the only database call left in any of the
+    # interactive list builders.
+    _company_default_device_item: dict[str, str | None] = {}
+    for _company in {row.get("company") for row in plan_rows if row.get("company")}:
+        _company_default_device_item[_company] = frappe.get_cached_value(
+            "Company", _company, "ch_default_external_device_item"
+        )
+
     plans: list[frappe._dict] = []
     for row in plan_rows:
         plans.append(frappe._dict({
@@ -12191,9 +12201,7 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
             "allow_external_device": cint(row.get("allow_external_device")),
             "external_device_item": (
                 row.get("external_device_item")
-                or frappe.db.get_value(
-                    "Company", row.get("company"), "ch_default_external_device_item"
-                )
+                or _company_default_device_item.get(row.get("company"))
             ),
             "valid_from": row.get("valid_from"),
             "valid_to": row.get("valid_to"),

@@ -105,6 +105,26 @@ _PERMISSION_LABELS = {
 }
 
 
+def _other_eligible_approvers(managers, permission) -> list[str]:
+    """Who else, by name, could approve this here.
+
+    A refusal that does not say who to fetch is a refusal the person cannot
+    act on. Names are not secret — staff on a shop floor know each other — and
+    nothing here confirms or reveals a PIN. Oracle Xstore shows an approver
+    list at the same point for the same reason.
+    """
+    names = []
+    for mgr in managers:
+        if mgr.user == frappe.session.user:
+            continue
+        if permission and not cint(mgr.get("requested_permission")):
+            continue
+        label = (mgr.get("employee_name") or "").strip() or mgr.user
+        if label not in names:
+            names.append(label)
+    return names[:5]
+
+
 def verify_manager_pin(pin, store=None, permission=None):
     """Verify a manager PIN and return the manager's user if valid.
 
@@ -186,6 +206,14 @@ def verify_manager_pin(pin, store=None, permission=None):
 
     matches = []
     undecryptable = []
+    # Candidates that actually reached the decryption step. Comparing the
+    # unreadable count against the whole candidate list was wrong: a candidate
+    # dropped earlier on store scope or on the requested permission never had
+    # its PIN read, so it belongs in neither tally. One surviving readable row
+    # anywhere in the list was enough to suppress the "PINs cannot be read"
+    # message and hand the cashier a bare "Invalid PIN" for a PIN that was
+    # correct. On this estate 108 of 109 active PIN rows are unreadable.
+    considered = 0
     for mgr in managers:
         manager_is_privileged = is_privileged_user(mgr.user)
         manager_store = mgr.get("store") if has_store_field else None
@@ -208,6 +236,7 @@ def verify_manager_pin(pin, store=None, permission=None):
         # Decryption fails for every row encrypted under a different
         # site_config `encryption_key` — the usual cause is a database restored
         # from another site without its key.
+        considered += 1
         stored_pin, readable = _read_pin_quietly(mgr.name)
         if not readable:
             undecryptable.append(mgr.name)
@@ -248,10 +277,23 @@ def verify_manager_pin(pin, store=None, permission=None):
                 store=store,
                 remarks=f"refused self-approval of {permission}",
             )
+            action = _(_PERMISSION_LABELS.get(permission, "This action"))
+            others = _other_eligible_approvers(managers, permission)
+            if others:
+                return {"valid": False, "message": _(
+                    "{0} needs a second person to approve — this is your own PIN. "
+                    "Ask one of: {1}."
+                ).format(action, ", ".join(others))}
+            # Nobody else can approve here. Saying "ask a colleague" to the only
+            # person in the shop is a dead end: they will retry, burn the rate
+            # limit and then call support. Name the gap instead, because the
+            # remedy is configuration, not another attempt.
             return {"valid": False, "message": _(
-                "{0} needs a second person to approve — this is your own PIN. "
-                "Ask a colleague with approval rights at this store."
-            ).format(_(_PERMISSION_LABELS.get(permission, "This action")))}
+                "{0} needs a second person to approve, and no one else is set up "
+                "to approve it at this store — your own PIN cannot approve your "
+                "own close. Ask your area manager to be given approval rights "
+                "here, or to approve it themselves."
+            ).format(action)}
 
         _clear_pin_failures(attempt_key)
         if is_privileged_user(mgr.user):
@@ -284,11 +326,32 @@ def verify_manager_pin(pin, store=None, permission=None):
             "encryption_key, or have these managers set a new PIN:\n"
             + "\n".join(undecryptable),
             "CH POS Password decryption failed")
-        if not managers or len(undecryptable) == len(managers):
+        if not considered or len(undecryptable) == considered:
+            # Not one PIN here could be compared, so this attempt says nothing
+            # about whether the PIN was right. Refunding the attempt matters:
+            # a manager who is told "Invalid PIN" will retry, and five retries
+            # lock the till's approvals for fifteen minutes on top of a fault
+            # they did not cause and cannot see. Nothing is weakened — while
+            # every candidate is unreadable no PIN can succeed, so unlimited
+            # attempts buy an attacker nothing.
+            _clear_pin_failures(attempt_key)
             return {"valid": False, "message": _(
-                "Manager PINs cannot be read on this site — none are stored "
-                "under the current encryption key. Ask an administrator to "
-                "restore the original encryption key or reset the PINs."
+                "Manager PINs cannot be read on this site — none of the PINs "
+                "that could approve this are stored under the current "
+                "encryption key. Ask an administrator to restore the original "
+                "encryption key or reset the PINs."
             )}
+
+        # Some PINs here are readable and some are not. "Invalid PIN" is a
+        # deliberate catch-all so a stranger cannot enumerate which PINs exist,
+        # and that stays. But a correct PIN failing because of a server-side
+        # key fault is indistinguishable from a wrong one, and the operator
+        # needs to know an administrator can help. This names no manager and
+        # confirms no PIN — it reports the state of the site.
+        return {"valid": False, "message": _(
+            "Invalid PIN. Note that some manager PINs on this site cannot be "
+            "read under the current encryption key — if you are sure the PIN "
+            "is correct, ask an administrator to check it."
+        )}
 
     return {"valid": False, "message": _("Invalid PIN")}

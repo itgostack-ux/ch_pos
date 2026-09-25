@@ -1576,14 +1576,20 @@ export class StockTransferWorkspace {
                             return;
                         }
 
+                        // Second duplicate check, on the serial the SERVER
+                        // resolved rather than on what was typed. A barcode and
+                        // an IMEI can both resolve to one serial, so the
+                        // pre-flight check on the raw scan cannot catch it —
+                        // `returned_already` is that case, distinct from the
+                        // in-flight guard above.
                         const ret_sn  = String(res.serial_no || "").trim();
                         const ret_key = ret_sn.toLowerCase();
-                        const exists  = (this.transfer_items || []).some(
+                        const returned_already = (this.transfer_items || []).some(
                             item => (item.serial_nos || []).some(
                                 s => String(s).trim().toLowerCase() === ret_key
                             )
                         );
-                        if (!ret_sn || exists) {
+                        if (!ret_sn || returned_already) {
                             this._scan_feedback(
                                 body, "warn",
                                 __("{0} already scanned",

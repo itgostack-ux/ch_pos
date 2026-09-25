@@ -79,7 +79,21 @@ class TestFinalResidualBlockers(TestCase):
 		self.assertIn('"manager_pin_candidate_limit"', source)
 		self.assertIn("JOIN `tabUser`", source)
 		self.assertIn("LIMIT %(limit)s", source)
-		self.assertLess(source.index("assert_store_scope"), source.index("get_decrypted_password"))
+		# The control is that a candidate is rejected on store scope BEFORE its
+		# PIN is decrypted — decryption is the expensive, log-noisy step and it
+		# must not run for managers who could not approve here anyway.
+		#
+		# The names moved: assert_store_scope became the non-throwing predicate
+		# has_store_scope (a throw also appends to frappe.message_log, so the
+		# cashier got one "not entitled to this store" popup per skipped
+		# manager), and get_decrypted_password moved behind _read_pin_quietly.
+		# Assert the ordering, not the old spelling.
+		self.assertLess(source.index("has_store_scope"), source.index("_read_pin_quietly"))
+		self.assertIn(
+			"get_decrypted_password",
+			inspect.getsource(ch_manager_pin._read_pin_quietly),
+			"_read_pin_quietly is the only place a stored PIN is decrypted; if that "
+			"moved, the ordering assertion above no longer proves anything.")
 
 	def test_company_modes_use_explicit_capabilities_not_legal_names(self):
 		self.assertEqual(
@@ -228,11 +242,33 @@ class TestFinalResidualBlockers(TestCase):
 		self.assertFalse(any(isinstance(node, ast.Pass) for node in ast.walk(tree)))
 
 	def test_model_comparison_has_role_permission_and_profile_scope(self):
+		# As with pos_ai_roles: model_comparison_roles is a retired, hidden field
+		# and the gate is now native DocPerm plus POS profile scope.
 		source = inspect.getsource(pos_api._require_model_comparison_access)
-		self.assertIn('"model_comparison_roles"', source)
 		self.assertIn('has_permission("Item"', source)
 		self.assertIn('has_permission("POS Profile"', source)
 		self.assertIn("assert_pos_profile_scope", source)
+		self._assert_role_gate_is_retired("model_comparison_roles")
+
+	def _assert_role_gate_is_retired(self, fieldname):
+		"""A gate nothing reads must be visibly retired, not quietly ignored.
+
+		A configurable role list that no code consults is the worst of both
+		worlds: an operator fills it in and believes they have restricted
+		something. Keeping the field (rows exist on live sites) is fine —
+		leaving it editable and unmarked is not.
+		"""
+		path = Path(pos_api.__file__).parents[1] / "pos_core/doctype/ch_pos_control_settings/ch_pos_control_settings.json"
+		field = next(
+			row for row in json.loads(path.read_text())["fields"]
+			if row["fieldname"] == fieldname)
+		self.assertTrue(
+			field.get("hidden"),
+			f"{fieldname} is no longer enforced, so it must not stay visible for an "
+			"operator to configure and trust.")
+		self.assertIn(
+			"Retired", field.get("description", ""),
+			f"{fieldname} must say it is retired and what enforces the gate instead.")
 
 	def test_model_comparison_loop_has_no_database_calls(self):
 		tree = ast.parse(inspect.getsource(pos_api.get_model_comparison))
@@ -247,10 +283,20 @@ class TestFinalResidualBlockers(TestCase):
 		self.assertFalse(any(call.startswith("frappe.db.") for call in calls))
 
 	def test_ai_authorization_is_role_scoped_and_rate_limited(self):
+		# pos_ai_roles was retired on purpose — the settings field is hidden and
+		# labelled "Retired. This gate is now enforced by Role Permission Manager
+		# (document permissions)", which is the tier-1 rule this estate follows.
+		# So the gate is native DocPerm plus profile scope plus the per-profile
+		# feature flag, and the test asserts the gate that actually exists.
 		source = inspect.getsource(ai._authorize_ai)
-		self.assertIn('"pos_ai_roles"', source)
+		self.assertIn('has_permission("Item"', source)
+		self.assertIn('has_permission("POS Profile"', source)
 		self.assertIn("assert_pos_profile_scope", source)
 		self.assertIn("_enforce_ai_rate_limit", source)
+		self.assertIn(
+			"feature_field", source,
+			"POS AI must still honour the per-profile enable flag on POS Profile Extension.")
+		self._assert_role_gate_is_retired("pos_ai_roles")
 
 	def test_free_sale_get_only_renders_confirmation(self):
 		preview_source = inspect.getsource(free_sale_api.preview_approval)
@@ -418,8 +464,28 @@ class TestFinalResidualBlockers(TestCase):
 		doc = MagicMock()
 		doc.previous_date = "2026-07-20"
 		doc.business_date = "2026-07-20"
+		# Dispatch on what is being asked rather than on call order. The previous
+		# form was a positional side_effect list, so adding any query to
+		# advance_business_date — the back-dating guard did exactly that —
+		# exhausted the iterator and failed with StopIteration instead of
+		# telling anyone what had actually changed.
+		def _sql(query, *args, **kwargs):
+			text = query if isinstance(query, str) else str(query)
+			if "GET_LOCK" in text:
+				return [(1,)]
+			if "RELEASE_LOCK" in text:
+				return []
+			raise AssertionError(
+				"advance_business_date issued an unexpected raw query while its lock "
+				f"was held; this test only models the two advisory-lock calls:\n{text}")
+
 		with (
-			patch.object(ch_business_date.frappe.db, "sql", side_effect=[[(1,)], []]) as sql,
+			patch.object(ch_business_date.frappe.db, "sql", side_effect=_sql) as sql,
+			# The back-dating guard reads the store's current business date.
+			# Mocked at get_value rather than at sql: a mocked sql turns the
+			# query builder's own DocType meta load into a tuple it cannot
+			# parse, which fails the test somewhere unrelated to the control.
+			patch.object(ch_business_date.frappe.db, "get_value", return_value="2026-07-20"),
 			patch.object(ch_business_date.frappe.db, "exists", return_value=True),
 			patch.object(ch_business_date.frappe.db, "commit") as commit,
 			patch.object(ch_business_date.frappe, "get_doc", return_value=doc),
@@ -436,12 +502,17 @@ class TestFinalResidualBlockers(TestCase):
 		self.assertIn("RELEASE_LOCK", sql.call_args_list[-1].args[0])
 
 	def test_token_sequence_is_atomic_seeded_and_retry_safe(self):
+		# _next_daily_seq also asks how many tokens were actually issued today,
+		# via frappe.db.count. That goes through the query builder, which needs
+		# real DocType meta — so it has to be mocked in its own right rather
+		# than left to consume entries from the sql side_effect list.
 		with (
 			patch.object(
 				token_api.frappe.db,
 				"sql",
 				side_effect=[[(12,)], None, [(12,)], None],
 			) as sql,
+			patch.object(token_api.frappe.db, "count", return_value=12) as count,
 			patch.object(token_api.frappe.utils, "today", return_value="2026-07-22"),
 			patch.object(token_api, "getseries", side_effect=["0000000013", "0000000014"]),
 		):
@@ -450,6 +521,11 @@ class TestFinalResidualBlockers(TestCase):
 		self.assertIn("MAX(CAST(SUBSTRING_INDEX", sql.call_args_list[0].args[0])
 		self.assertIn("ON DUPLICATE KEY UPDATE", sql.call_args_list[1].args[0])
 		self.assertNotIn("COUNT(*) + 1", inspect.getsource(token_api._next_daily_seq))
+		self.assertTrue(
+			count.called,
+			"The allocator resets only when NO token was actually issued today. "
+			"Without that check it carries burnt numbers forward and the first "
+			"customer of the day is not 001.")
 		for function in (token_api.create_token, token_api.quick_walkin, token_api.log_counter_walkin):
 			source = inspect.getsource(function)
 			self.assertIn("_generate_token_display", source)

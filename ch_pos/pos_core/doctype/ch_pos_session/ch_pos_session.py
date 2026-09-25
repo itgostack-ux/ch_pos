@@ -26,20 +26,10 @@ from ch_pos.config import get_control_setting, is_privileged_user
 from ch_pos.audit import log_privileged_bypass
 
 
-VARIANCE_AUTO_ALLOW = 100  # ₹100 default threshold
-
-
-def _get_variance_threshold():
-    """Get variance threshold from control settings, or default."""
-    try:
-        cached = frappe.cache().get_value("ch_pos_variance_threshold")
-        if cached is not None:
-            return flt(cached)
-        threshold = flt(frappe.db.get_single_value("CH POS Control Settings", "variance_approval_threshold")) or VARIANCE_AUTO_ALLOW
-        frappe.cache().set_value("ch_pos_variance_threshold", threshold, expires_in_sec=3600)
-        return threshold
-    except Exception:
-        return VARIANCE_AUTO_ALLOW
+# The flat Rs 100 threshold and its one-hour cache both lived here. The bands
+# now come from ch_pos.pos_core.variance_policy, uncached: a control setting
+# that takes an hour to take effect is a setting nobody trusts, and every
+# support call during that hour is spent arguing about whether it was saved.
 
 
 class CHPOSSession(Document):
@@ -391,57 +381,57 @@ class CHPOSSession(Document):
             })
 
     def _calculate_cash_variance(self):
-        """Compute expected closing cash and variance."""
-        # Cash expected = opening + cash sales - cash returns - cash drops
-        cash_expected = flt(self.opening_cash)
+        """Expected closing cash and variance — delegated, never recomputed.
 
-        mode_names = sorted({row.mode_of_payment for row in (self.payment_details or []) if row.mode_of_payment})
-        cash_modes = {
-            row.name
-            for row in frappe.get_all(
-                "Mode of Payment",
-                filters={"name": ("in", mode_names), "type": "Cash"},
-                fields=["name"],
-                limit_page_length=len(mode_names),
-            )
-        } if mode_names else set()
+        This used to build its own expected figure from ``payment_details`` and
+        a bare ``SUM(amount)`` over CH Cash Drop, while CH POS Settlement built
+        a second one from a different query with a different scope. The two
+        disagreed, and the cashier met the disagreement as an unexplainable
+        refusal *after* settlement had already been submitted and locked.
 
-        for row in (self.payment_details or []):
-            if row.mode_of_payment in cash_modes:
-                cash_expected += flt(row.expected_amount)
+        There is now exactly one calculation, in
+        ``ch_pos_settlement.build_settlement_snapshot``. If it is wrong it is
+        wrong in one place and for everybody, which is the property that makes
+        a cash difference investigable.
+        """
+        from ch_pos.pos_core.doctype.ch_pos_settlement.ch_pos_settlement import (
+            build_settlement_snapshot,
+        )
 
-        # Subtract cash drops
-        total_drops = flt(frappe.db.sql("""
-            SELECT COALESCE(SUM(amount), 0)
-            FROM `tabCH Cash Drop`
-            WHERE session = %s AND docstatus = 1
-        """, self.name)[0][0])
-        self.total_cash_drops = total_drops
-        cash_expected -= total_drops
+        snapshot = build_settlement_snapshot(self)
 
-        self.closing_cash_expected = cash_expected
-        self.cash_variance = flt(self.closing_cash_actual) - cash_expected
+        self.total_cash_drops = (
+            flt(snapshot["cash_drop_total"])
+            + flt(snapshot["petty_cash_out"])
+            + flt(snapshot["buyback_cash_out"])
+            + flt(snapshot["other_cash_out"])
+        )
+        self.closing_cash_expected = flt(snapshot["expected_closing_cash"])
+        self.cash_variance = flt(self.closing_cash_actual) - self.closing_cash_expected
+        # Kept on the instance for _validate_variance; the percentage bands are
+        # measured against cash handled, not against the closing balance.
+        self._cash_basis = flt(snapshot["cash_basis"])
 
     def _validate_variance(self):
-        """Enforce variance rules using configurable threshold."""
+        """Enforce the over/short bands from ch_pos.pos_core.variance_policy."""
         # Auto-close bypasses manager approval — variance is logged but not blocked.
         if getattr(self, "auto_closed", 0):
             return
-        threshold = _get_variance_threshold()
-        variance = abs(flt(self.cash_variance))
-        if variance > threshold:
-            if not self.variance_reason:
-                frappe.throw(
-                    _("Cash variance is ₹{0}. Reason is mandatory for variance above ₹{1}.").format(
-                        variance, threshold
-                    )
-                )
-            if not self.closing_approved_by:
-                frappe.throw(
-                    _("Cash variance ₹{0} exceeds ₹{1}. Manager approval required.").format(
-                        variance, threshold
-                    )
-                )
+
+        from ch_pos.pos_core.variance_policy import classify_variance, variance_band_message
+
+        verdict = classify_variance(self.cash_variance, getattr(self, "_cash_basis", 0))
+        if not verdict["requires_reason"]:
+            return
+
+        if not self.variance_reason:
+            frappe.throw(
+                variance_band_message(verdict), title=frappe._("Variance Reason Required")
+            )
+        if verdict["requires_approval"] and not self.closing_approved_by:
+            frappe.throw(
+                variance_band_message(verdict), title=frappe._("Manager Approval Required")
+            )
 
     def lock_session(self):
         """Lock screen — temporary pause, no financial impact."""
@@ -602,6 +592,7 @@ class CHPOSSession(Document):
         )
 
         closing = make_closing_entry_from_opening(opening)
+        self._scope_closing_entry_to_session(closing)
         opening_by_mode = {
             row.mode_of_payment: flt(row.opening_amount) for row in opening.balance_details
         }
@@ -635,6 +626,94 @@ class CHPOSSession(Document):
         if frappe.db.get_value("POS Opening Entry", entry, "pos_closing_entry") != closing.name:
             closing.update_opening_entry()
         return entry
+
+    def _scope_closing_entry_to_session(self, closing):
+        """Put THIS session's invoices on the closing entry, by session link.
+
+        ERPNext builds the entry by scanning a time window
+        ``period_start_date .. now`` (``make_closing_entry_from_opening`` →
+        ``build_invoice_query``) and comparing it against
+        ``Timestamp(posting_date, posting_time)``. That comparison cannot work
+        here: POS invoices are stamped ``posting_date = the store's business
+        date`` with ``posting_time = the server clock``
+        (``pos_api._pos_posting_stamp``), so the moment a store's business date
+        fell behind the calendar every invoice timestamped *before* the window
+        opened and the entry swept nothing — 42 of the 43 submitted closing
+        entries on this bench carry a grand_total of 0.00.
+
+        Widening ``period_start_date`` to the trading day is not available as a
+        fix: ERPNext's ``Sales Invoice.validate_pos_opening_entry`` refuses to
+        create a POS invoice unless the open entry starts *today*, so back-dating
+        it stops the till billing instead.
+
+        So the window is not used. ``custom_ch_pos_session`` already records
+        exactly which invoices belong to this till and this shift — it is what
+        ``_calculate_totals`` and ``build_settlement_snapshot`` both count — and
+        it needs no clock arithmetic to be right.
+        """
+        from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import get_payments
+
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters={
+                "custom_ch_pos_session": self.name,
+                "docstatus": 1,
+                "is_pos": 1,
+                "is_created_using_pos": 1,
+                "pos_closing_entry": ("in", ("", None)),
+            },
+            fields=[
+                "name", "owner", "posting_date", "customer", "grand_total",
+                "net_total", "total_qty", "total_taxes_and_charges",
+                "is_return", "return_against", "change_amount",
+                "account_for_change_amount",
+            ],
+            limit_page_length=0,
+        )
+
+        # ERPNext's own validate_sales_invoices refuses any row whose owner is
+        # not the closing entry's user, so an invoice billed under a different
+        # login cannot go on this voucher. Leaving it out silently is how money
+        # goes missing, so name it in the Error Log instead.
+        mine = [row for row in rows if row.owner == closing.user]
+        foreign = [row.name for row in rows if row.owner != closing.user]
+        if foreign:
+            frappe.log_error(
+                f"Session {self.name} has invoices billed under a different login "
+                f"than the POS Opening Entry user ({closing.user}). ERPNext will not "
+                "accept them on this closing entry, so they remain unconsolidated:\n"
+                + "\n".join(foreign),
+                "POS closing entry — invoices left unconsolidated")
+
+        closing.set("pos_invoices", [])
+        closing.set("sales_invoices", [
+            {
+                "sales_invoice": row.name,
+                "posting_date": row.posting_date,
+                "customer": row.customer,
+                "grand_total": row.grand_total,
+                "is_return": row.is_return,
+                "return_against": row.return_against,
+            }
+            for row in mine
+        ])
+        closing.update({
+            "grand_total": sum(flt(row.grand_total) for row in mine),
+            "net_total": sum(flt(row.net_total) for row in mine),
+            "total_quantity": sum(flt(row.total_qty) for row in mine),
+            "total_taxes_and_charges": sum(flt(row.total_taxes_and_charges) for row in mine),
+        })
+        # Reuse ERPNext's aggregation rather than reimplementing it: it nets
+        # change_amount off the tender that gave the change, and getting that
+        # subtly wrong would leave a permanent phantom difference on the cash line.
+        closing.set("payment_reconciliation", [
+            {
+                "mode_of_payment": payment.mode_of_payment,
+                "opening_amount": 0,
+                "expected_amount": flt(payment.amount),
+            }
+            for payment in get_payments([frappe._dict(row) for row in mine])
+        ])
 
     def _log_close_event(self):
         try:

@@ -6430,3 +6430,25 @@ body > .desk-alert-container,
   .ch-pos-needs-attention { animation: none; }
   .ch-pos-needs-attention { box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.35); }
 }
+
+/* ── Blind close ────────────────────────────────────────────────────────────
+   A sealed figure is one the cashier must not see until the count is in.
+   It is rendered as a deliberate, obviously-masked placeholder rather than a
+   blank cell: a blank reads as "nothing here" and prompts a support call,
+   whereas a mask reads as "withheld on purpose", which is what it is. */
+.ch-settle-sealed {
+	display: inline-block;
+	min-width: 68px;
+	letter-spacing: 2px;
+	color: var(--text-muted);
+	background: var(--bg-color, var(--control-bg));
+	border-radius: 4px;
+	padding: 0 6px;
+	cursor: help;
+	user-select: none;
+}
+
+.ch-settle-blind-note {
+	border-top: 1px dashed var(--border-color);
+	margin-top: 4px;
+}

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 import frappe
 from frappe import _
 
@@ -186,10 +184,16 @@ def require_configured_roles(fieldname: str, defaults=(), action: str | None = N
 			frappe.PermissionError,
 			title=_("Not Configured"))
 
+	# Name the setting here too, not only in the unconfigured branch. A store
+	# manager told "Required role: Stock Manager" still has to work out who can
+	# grant it and where; naming the field turns the refusal into something an
+	# administrator can act on without a support ticket.
 	frappe.throw(
-		_("You do not have permission to {0}. Required role: {1}").format(
+		_("You do not have permission to {0}. Required role: {1} "
+		  "(set in <b>{2}</b>, CH POS Control Settings)").format(
 			action or _("perform this action"),
-			", ".join(sorted(configured))),
+			", ".join(sorted(configured)),
+			fieldname),
 		frappe.PermissionError,
 		title=_("Permission Denied"))
 

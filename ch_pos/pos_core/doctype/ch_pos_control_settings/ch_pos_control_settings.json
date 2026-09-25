@@ -7,6 +7,11 @@
   "tab_session_till",
   "sb_session_till_session_controls",
   "variance_approval_threshold",
+  "variance_accept_amount",
+  "variance_accept_percent",
+  "variance_approval_percent",
+  "blind_close",
+  "block_business_date_on_edc_mismatch",
   "allow_resume_open_session",
   "require_manager_on_opening_balance_above",
   "require_manager_on_cash_drop_above",
@@ -209,11 +214,46 @@
    "collapsible": 0
   },
   {
-   "default": "100",
+   "default": "1000",
    "fieldname": "variance_approval_threshold",
    "fieldtype": "Currency",
-   "label": "Variance Approval Threshold (₹)",
-   "description": "Manager approval required if cash variance exceeds this amount"
+   "label": "Variance Approval Amount (₹)",
+   "description": "Floor for the manager-approval band. The limit actually applied is whichever is greater: this amount or the approval percentage below."
+  },
+  {
+   "default": "200",
+   "fieldname": "variance_accept_amount",
+   "fieldtype": "Currency",
+   "label": "Variance Auto-Accept Amount (₹)",
+   "description": "Cash over/short at or below this is accepted with no reason and no approval. Whichever is greater, this or the percentage below, is the limit applied."
+  },
+  {
+   "default": "0.5",
+   "fieldname": "variance_accept_percent",
+   "fieldtype": "Percent",
+   "label": "Variance Auto-Accept (% of cash handled)",
+   "description": "Percentage of opening float plus cash sales. Keeps the tolerance proportional on a high-turnover till."
+  },
+  {
+   "default": "2",
+   "fieldname": "variance_approval_percent",
+   "fieldtype": "Percent",
+   "label": "Variance Approval (% of cash handled)",
+   "description": "Above whichever is greater, this or the approval amount, a manager must approve the close."
+  },
+  {
+   "default": "1",
+   "fieldname": "blind_close",
+   "fieldtype": "Check",
+   "label": "Blind Close (hide expected cash while counting)",
+   "description": "Market standard (Oracle Xstore, SAP Retail, Dynamics 365 Commerce). The cashier counts without seeing the expected figure or a live variance; both are revealed after the count is submitted. Untick only if you accept that the counted figure stops being evidence."
+  },
+  {
+   "default": "0",
+   "fieldname": "block_business_date_on_edc_mismatch",
+   "fieldtype": "Check",
+   "label": "Block Business Date Advance On Unmatched Card Receipts",
+   "description": "Off by default and intentionally so. Acquirer settlement files arrive T+1/T+2, so a card reconciliation cannot exist at the moment the store closes. With this on, no store can roll its trading day until someone reconciles EDC by hand — which is what stranded every store on this estate. Leave off; unmatched card receipts raise an exception for back office instead."
   },
   {
    "default": "1",

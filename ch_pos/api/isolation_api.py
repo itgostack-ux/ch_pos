@@ -499,21 +499,22 @@ def create_settlement(session_name, actual_closing_cash, denominations=None,
     snapshot = build_settlement_snapshot(session)
     expected_after_petty = flt(snapshot["expected_closing_cash"]) - petty_total
     variance_after_petty = flt(actual_closing_cash) - expected_after_petty
-    threshold = flt(frappe.db.get_single_value("CH POS Control Settings", "variance_approval_threshold") or 100)
-    needs_closing_approval = abs(variance_after_petty) > threshold
+    from ch_pos.pos_core.variance_policy import classify_variance, variance_band_message
+
+    verdict = classify_variance(variance_after_petty, snapshot["cash_basis"])
+    needs_closing_approval = verdict["requires_approval"]
 
     # Manager PIN for variance / petty-cash approval.
     manager_user = None
     manager_name = None
     petty_manager_user = None
     petty_manager_name = None
+    if verdict["requires_reason"] and not (variance_reason or "").strip():
+        frappe.throw(variance_band_message(verdict), title=_("Variance Reason Required"))
+
     if needs_closing_approval:
         if not manager_pin:
-            frappe.throw(
-                _("Manager PIN is required because variance is ₹{0}, above the ₹{1} threshold.").format(
-                    abs(variance_after_petty), threshold
-                ),
-                title=_("Settlement Error"))
+            frappe.throw(variance_band_message(verdict), title=_("Manager Approval Required"))
         from ch_pos.pos_core.doctype.ch_manager_pin.ch_manager_pin import verify_manager_pin
         pin_result = verify_manager_pin(manager_pin, store=session.store, permission="can_approve_closing")
         if not pin_result.get("valid"):
