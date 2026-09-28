@@ -2280,6 +2280,39 @@ def lookup_walkin_customer(phone: str, pos_profile: str = None) -> dict:
     """
     _ensure_can_view_tokens()
     frappe.has_permission("Customer", "read", throw=True)
+
+    # --- FIX: Auto-detect POS Profile if not passed from frontend ---
+    if not pos_profile:
+        # 1. Check if user has an active open shift
+        pos_profile = frappe.db.get_value(
+            "POS Opening Entry",
+            {"user": frappe.session.user, "status": "Open", "docstatus": 1},
+            "pos_profile",
+            order_by="creation desc"
+        )
+
+    if not pos_profile:
+        user_warehouses = frappe.get_all(
+            "User Permission",
+            filters={"user": frappe.session.user, "allow": "Warehouse"},
+            pluck="for_value"
+        )
+        if user_warehouses:
+            # Find the active POS Profile using one of these permitted warehouses
+            pos_profile = frappe.db.get_value(
+                "POS Profile",
+                {"warehouse": ["in", user_warehouses], "disabled": 0},
+                "name"
+            )
+
+    if not pos_profile:
+        # 3. Fallback to POS Profile User
+        pos_profile = frappe.db.get_value(
+            "POS Profile User",
+            {"user": frappe.session.user, "default": 1},
+            "parent"
+        )
+
     if pos_profile:
         _assert_pos_profile_scope(pos_profile)
 

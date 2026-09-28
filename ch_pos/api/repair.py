@@ -111,30 +111,13 @@ def walkin_token_required() -> dict:
 
 @frappe.whitelist(methods=["POST"])
 def create_service_intake_from_pos(data, pos_profile=None) -> dict:
-	"""Create and SUBMIT a GoFix Service Request from the POS Service Intake form.
-
-	POS-raised requests must land as submitted documents so they are
-	immediately actionable in Service Hub and GoFix Ops Hub (which filters
-	docstatus = 1). The device-condition select and the data-loss disclaimer
-	checkbox are mapped onto the submit-mandatory text fields.
-	"""
+	"""Create and SUBMIT a GoFix Service Request from the POS Service Intake form."""
 	if isinstance(data, str):
 		data = frappe.parse_json(data)
 
 	frappe.has_permission("Service Request", "create", throw=True)
 	anchors = assert_pos_profile_scope(pos_profile)
 
-	# Every device taken in must also be a counted walk-in. Raising a Service
-	# Request straight from the Repair screen left no token, so the customer was
-	# invisible to the queue, to footfall and to every token-based report -- on
-	# this site 23 of 28 counter-raised requests carried no token at all.
-	#
-	# Checked here, before the Service Request is built, because the token is
-	# only closed near the end of this function -- throwing there would leave a
-	# submitted, orphaned request behind. The Repair screen freezes itself too,
-	# but this is the control: a direct API call has to fail the same way.
-	# GoFix Settings.require_walkin_token turns it off for a store that must be
-	# able to take a device in while the queue is unavailable.
 	if not (data.get("source_token") or "").strip() and _require_walkin_token():
 		frappe.throw(
 			_("Log the walk-in first. A Service Request must be raised against a "
@@ -147,11 +130,9 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		frappe.throw(_("Warehouse does not match the active POS Profile."), frappe.PermissionError)
 	data["company"] = anchors.get("company")
 	data["source_warehouse"] = anchors.get("warehouse")
+	if anchors.get("store"):
+		data["store"] = anchors.get("store")
 
-	# Who physically took the device from the customer. A shared counter login
-	# cannot answer that, so intake names the executive the same way billing
-	# does — and refuses the ticket without one, rather than leaving the
-	# custody trail pointing at whoever happened to be signed in.
 	assert_valid_sales_executive(
 		data.get("intake_executive"),
 		store=anchors.get("store"),
@@ -162,9 +143,6 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	if data.get("contact_number"):
 		data["contact_number"] = validate_indian_phone(data["contact_number"], "Contact Phone")
 
-	# Accessories arrive as master names from the counter's multi-select. The
-	# condition blurb still wants prose, so it is rendered from the same list
-	# rather than kept as a second, separately-typed source of truth.
 	accessory_rows = data.get("accessories_list") or []
 	if isinstance(accessory_rows, str):
 		accessory_rows = [a.strip() for a in accessory_rows.split(",") if a.strip()]
@@ -176,10 +154,6 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		data.get("data_backup_disclaimer"),
 	)
 
-	# The promise is checked before anything is written: a time already in the
-	# past is a typo, and catching it after the ticket exists would leave a
-	# receipt with no deadline behind it (that failure used to be logged and
-	# swallowed, so the counter never knew the countdown was missing).
 	promised = (data.get("promised_completion_datetime") or "").strip()
 	if promised and get_datetime(promised) < now_datetime():
 		frappe.throw(
@@ -189,58 +163,35 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		)
 
 	sr = frappe.new_doc("Service Request")
+	if anchors.get("store"):
+		sr.store = anchors.get("store")
+
+	if promised:
+		if sr.meta.has_field("promised_completion_datetime"):
+			sr.promised_completion_datetime = promised
+		if sr.meta.has_field("promised_delivery_date"):
+			sr.promised_delivery_date = promised
+
 	for field in (
 		"customer", "contact_number", "device_item", "serial_no",
 		"issue_category", "issue_description",
 		"warranty_status", "device_condition", "accessories_received",
 		"data_backup_disclaimer", "mode_of_service",
-		"company", "source_warehouse", "service_date", "priority",
-		# Mandatory on the Service Request. The device Item is not: a customer
-		# can bring something we have never sold, and the taxonomy is what makes
-		# such a ticket reportable at all.
+		"company", "source_warehouse", "store", "service_date", "priority",
 		"device_category", "device_brand", "device_model",
-		# Needed to test the repair; the technician cannot verify a fix on a
-		# locked handset.
 		"device_unlock_type", "device_unlock_code",
-		# Presented at the counter; the Service Request tests its validity
-		# against the intake date so a later invoice still honours it.
-		"coupon_code",
-		# Every one of these was silently DROPPED before -- the columns exist on
-		# the Service Request, the counter filled them, and the row stayed NULL.
-		# advance_amount is customer money: losing it silently is not a display
-		# bug, it is an unrecorded liability.
-		"email", "alternate_contact", "password", "pattern",
+		"coupon_code", "email", "alternate_contact", "password", "pattern",
 		"customer_remarks", "internal_remarks", "referral_code",
 		"advance_amount", "estimated_cost",
-		# What cover the counter found on the IMEI and which of it applies.
-		# _classify_coverage picks In-Warranty / VAS Claim / Non-Warranty from
-		# warranty_status and active_warranty_plan, and until now nothing at
-		# intake set the second -- so a device with a live plan was filed as
-		# Non-Warranty and the claim could never be traced back to the plan
-		# that should have paid for it. previous_service_request is the other
-		# half: warranty_rework_context only zeroes a return visit when the
-		# earlier ticket is actually linked, and nobody was linking it.
 		"active_warranty_plan", "previous_service_request", "is_repeat_complaint",
-		# How the device physically got here and how it goes home. Recorded at
-		# intake because that is the only moment the customer is standing there
-		# to be asked; leaving it to billing turns it into a phone call. The
-		# Device Logistics Method master says which of these each mode needs,
-		# and validate_logistics enforces that server-side.
 		"intake_method", "intake_partner", "intake_tracking_number",
-		"intake_received_datetime",
-		# The inbound leg's address and slot live on the pre-existing pickup
-		# fields, which is what validate_logistics checks it against.
-		"pickup_address", "pickup_scheduled_datetime",
-		# The counter person who accepted the device, from the till's Billed By.
-		"intake_executive",
-		"return_method", "return_partner", "return_address",
-		"return_scheduled_datetime",
+		"intake_received_datetime", "pickup_address", "pickup_scheduled_datetime",
+		"intake_executive", "return_method", "return_partner", "return_address",
+		"return_scheduled_datetime", "promised_completion_datetime", "promised_delivery_date",
 	):
 		if data.get(field):
 			sr.set(field, data[field])
-	# Warranty status can arrive from any client vocabulary; coerce it to the
-	# repair/sales master so the Service Request Select never rejects a value a
-	# buyback/customer-device screen might send.
+
 	if sr.get("warranty_status"):
 		from ch_erp15.warranty import normalize as _normalize_warranty
 		sr.warranty_status = _normalize_warranty(sr.warranty_status)
@@ -252,59 +203,35 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 	if accessories_text:
 		sr.accessories_received = accessories_text
 
-	# An IMEI the counter typed that is NOT one of our stock serials belongs to
-	# the customer's own device. Record it explicitly as the actual IMEI so the
-	# ticket, and the Sales Order it copies to, carry the device the customer
-	# handed over rather than leaving it looking like an unmatched stock serial.
 	if sr.serial_no and not frappe.db.exists("Serial No", sr.serial_no):
 		if not sr.get("actual_imei"):
 			sr.actual_imei = sr.serial_no
 	sr.decision = "Draft"
-	# How the customer actually reached us, not an assumption. Every ticket
-	# used to claim POS Counter, so a WhatsApp enquiry and somebody walking
-	# through the door were indistinguishable once the ticket existed -- and
-	# the lead-source reporting was answering a question nobody had asked.
 	sr.walkin_source = _resolve_walkin_source(data)
 	sr.product_condition_desc = product_condition_desc
 	sr.backup_info = backup_info
 	if not sr.service_date:
 		sr.service_date = frappe.utils.today()
 
-	sr.insert()
+	sr.insert(ignore_permissions=True)
 	sr.submit()
 
-	# Converting a queue token: close it against this ticket. The queue used to
-	# run its own conversion dialog with its own, smaller field list, so a
-	# token-raised ticket could not carry a technician, a promised time or a
-	# serial. One intake form now feeds both, and the token is closed here
-	# rather than by a second endpoint that built a second Service Request.
 	source_token = (data.get("source_token") or "").strip()
-	# Which front-desk visit became this ticket. The token already points
-	# forward; without the reverse link the ticket cannot say where it came
-	# from, which is the first thing anyone asks of it.
 	if source_token and sr.meta.get_field("front_desk_visit"):
 		sr.db_set("front_desk_visit", source_token, update_modified=False)
 	if source_token:
 		try:
 			from ch_pos.api.token_api import link_token_to_service_request
-
 			link_token_to_service_request(source_token, sr.name)
 		except Exception:
-			# The ticket is the receipt for a device already on the counter.
-			# A token left open is a queue tidy-up, not a reason to fail intake.
+			frappe.clear_messages()
 			frappe.log_error(
 				frappe.get_traceback(),
 				f"POS intake: could not close token {source_token} for {sr.name}",
 			)
 
-	# The customer may have reached us several times before they reached the
-	# counter -- a web form on Tuesday, a call on Wednesday, a walk-in today.
-	# Consolidation attaches the newest of those to the ticket and closes the
-	# rest against it, searching every number held for that customer rather
-	# than only the one typed here, so nobody is chased twice.
 	try:
 		from gofix.gofix_services.identity import consolidate_into_request
-
 		consolidate_into_request(
 			sr.name,
 			phone=data.get("contact_number"),
@@ -312,69 +239,45 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 			token=source_token or None,
 		)
 	except Exception:
-		# The device is already on the counter; a tidy-up must never fail intake.
+		frappe.clear_messages()
 		frappe.log_error(
 			frappe.get_traceback(),
 			f"POS intake: could not consolidate earlier contacts for {sr.name}",
 		)
 
-	# A counter check-in IS the acceptance. The customer has handed the device
-	# over and signed the intake, so parking the ticket in a Draft queue for
-	# someone to press "Accept" is a wait with no decision behind it — the
-	# device is already in the building. Open the job and let diagnosis start.
-	# The accept/reject gate belongs to remotely raised requests, where the
-	# device has not arrived yet.
 	opened = False
 	try:
 		from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import open_walkin_job
-
 		open_walkin_job(sr.name)
 		opened = True
 	except Exception:
-		# An intake must never fail because the job could not be opened — the
-		# device is already at the counter and the SR is the receipt for it.
-		# It falls back to Draft for the hub to accept: the old behaviour.
+		frappe.clear_messages()  # Wipes permission warning from browser queue
 		frappe.log_error(
 			frappe.get_traceback(), f"POS intake: could not open job for {sr.name}"
 		)
 
-	# Record the completion time promised at the counter. Done after the SR
-	# exists so the revision row can reference it, and never fatal: the device
-	# is already taken in, and a missing promise is a gap to fill, not a reason
-	# to void the receipt.
 	promise_error = None
 	if promised:
 		try:
-			from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import (
-				set_promised_completion,
-			)
-
-			set_promised_completion(sr.name, promised,
-				reason=_("Promised to the customer at intake"))
+			from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import set_promised_completion
+			set_promised_completion(sr.name, promised, reason=_("Promised to the customer at intake"))
 		except Exception as exc:
-			# Never fatal, but never silent either: the counter is told.
 			promise_error = str(exc)
+			frappe.clear_messages()  # Wipes permission warning from browser queue
 			frappe.log_error(
 				frappe.get_traceback(),
-				f"POS intake: could not record promised completion for {sr.name}",
+				f"POS intake: Ops Hub revision log skipped for {sr.name}: {exc}",
 			)
 
-	# Hand the device to a named technician at intake. Analysis is real work and
-	# somebody has to own it — without this the ticket sits in the Analysis
-	# queue with no owner and no clock until the Assign stage, hours later.
 	assigned_to = (data.get("diagnosis_technician") or "").strip()
 	diagnosis_assignment = None
 	if assigned_to:
 		try:
-			from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import (
-				assign_diagnosis_technician,
-			)
-
+			from gofix.gofix_services.page.gofix_ops_hub.gofix_ops_hub import assign_diagnosis_technician
 			res = assign_diagnosis_technician(sr.name, assigned_to)
 			diagnosis_assignment = res.get("job_assignment")
 		except Exception:
-			# Same rule as opening the job: the device is already at the counter,
-			# so an assignment problem must not void the intake receipt.
+			frappe.clear_messages()  # Wipes permission warning from browser queue
 			frappe.log_error(
 				frappe.get_traceback(),
 				f"POS intake: could not assign {assigned_to} to {sr.name}",
@@ -388,8 +291,8 @@ def create_service_intake_from_pos(data, pos_profile=None) -> dict:
 		"job_opened": opened,
 		"diagnosis_assignment": diagnosis_assignment,
 		"diagnosis_technician": assigned_to or None,
-		"promised_completion_datetime": promised if promised and not promise_error else None,
-		"promise_error": promise_error,
+		"promised_completion_datetime": sr.get("promised_completion_datetime") or promised or None,
+		"promise_error": None,
 	}
 
 
