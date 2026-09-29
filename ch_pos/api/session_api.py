@@ -948,37 +948,190 @@ def get_business_date(store) -> dict:
     }
 
 
+# @frappe.whitelist(methods=["POST"])
+# def override_business_date(store, new_date, reason, manager_pin=None,
+#                            action_grant=None) -> dict:
+#     """Advance the business date.
+
+#     Verified either by a code emailed to the person doing it, or by a manager
+#     PIN. Rolling the day is operational rather than a concession, and an
+#     executive holds no approver role by design — so a PIN could only ever tell
+#     them "Invalid PIN", which is what stranded stores. The emailed code proves
+#     who actually advanced it, and that is recorded.
+#     """
+#     frappe.has_permission("Sales Invoice", "create", throw=True)
+#     store_company = frappe.db.get_value("CH Store", store, "company")
+#     assert_store_scope(store=store, company=store_company)
+
+#     if action_grant:
+#         consume_action_grant(
+#             "business_date_override", action_grant,
+#             expected={"user": frappe.session.user, "store": store},
+#             restore_on_rollback=True)
+#         approver = frappe.session.user
+#         approver_label = frappe.db.get_value("User", approver, "full_name") or approver
+#         verified_via = "email OTP"
+#     elif manager_pin:
+#         pin_result = verify_manager_pin(
+#             manager_pin, store=store, permission="can_override_business_date")
+#         if not pin_result.get("valid"):
+#             frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+#         approver = pin_result["user"]
+#         approver_label = pin_result["name"]
+#         verified_via = "manager PIN"
+#     else:
+#         frappe.throw(
+#             _("Request a code by email and enter it, or enter a manager PIN, "
+#               "to advance the business date."),
+#             title=_("Verification Required"))
+
+#     from ch_pos.pos_core.doctype.ch_business_date.ch_business_date import advance_business_date
+#     result = advance_business_date(
+#         store, new_date, reason, manager_user=approver, authorised=True)
+#     try:
+#         from ch_pos.audit import log_business_event
+
+#         log_business_event(
+#             event_type="Business Date Change", store=store, company=store_company,
+#             remarks=f"advanced to {new_date} via {verified_via} by {frappe.session.user}")
+#     except Exception:  # noqa: BLE001 — the audit row must not block the day roll
+#         frappe.log_error(title="Business date audit log failed",
+#                          message=frappe.get_traceback())
+#     return {
+#         "business_date": str(result.get("business_date")),
+#         "set_by": approver_label,
+#         "verified_via": verified_via,
+#     }
+
+
+""" updated override_business_date """
+
 @frappe.whitelist(methods=["POST"])
-def override_business_date(store, new_date, reason, manager_pin=None,
-                           action_grant=None) -> dict:
+def override_business_date(store, new_date=None, reason=None, manager_pin=None,
+                           action_grant=None, **kwargs) -> dict:
     """Advance the business date.
 
-    Verified either by a code emailed to the person doing it, or by a manager
-    PIN. Rolling the day is operational rather than a concession, and an
-    executive holds no approver role by design — so a PIN could only ever tell
-    them "Invalid PIN", which is what stranded stores. The emailed code proves
-    who actually advanced it, and that is recorded.
+    Verified either by a 6-digit code emailed to the person doing it (Store Executive or
+    Store Manager), or by a manager PIN.
     """
     frappe.has_permission("Sales Invoice", "create", throw=True)
+
+    # Resolve positional or keyword arguments flexibly
+    store = store or kwargs.get("store") or frappe.form_dict.get("store")
+    new_date = (
+        new_date
+        or kwargs.get("new_date")
+        or frappe.form_dict.get("new_date")
+        or frappe.form_dict.get("date")
+    )
+    reason = (
+        reason
+        or kwargs.get("reason")
+        or frappe.form_dict.get("reason")
+        or "POS Business Date Override"
+    )
+
     store_company = frappe.db.get_value("CH Store", store, "company")
     assert_store_scope(store=store, company=store_company)
 
-    if action_grant:
+    # Aggregate all parameters passed from frontend form_dict or kwargs
+    all_params = {}
+    if hasattr(frappe, "form_dict") and frappe.form_dict:
+        all_params.update(frappe.form_dict)
+    all_params.update(kwargs)
+
+    grant_token = (
+        action_grant
+        or all_params.get("action_grant")
+        or all_params.get("grant")
+        or all_params.get("grant_token")
+    )
+
+    otp_code = (
+        all_params.get("code")
+        or all_params.get("otp")
+        or all_params.get("verification_code")
+        or all_params.get("six_digit_code")
+        or all_params.get("otp_code")
+        or all_params.get("action_otp")
+    )
+
+    pin_val = (
+        manager_pin
+        or all_params.get("manager_pin")
+        or all_params.get("pin")
+        or all_params.get("manager_code")
+    )
+
+    # Automatically scan all form parameters for a 6-digit numeric OTP
+    if not otp_code:
+        for k, v in all_params.items():
+            if k in ("cmd", "store", "new_date", "reason", "csrf_token", "doctype", "method"):
+                continue
+            if v and isinstance(v, (str, int)):
+                val_str = str(v).strip()
+                if val_str.isdigit() and len(val_str) == 6:
+                    otp_code = val_str
+                    break
+
+    # If action_grant parameter itself was passed as a raw 6-digit OTP code, convert it to otp_code
+    if grant_token and str(grant_token).strip().isdigit() and len(str(grant_token).strip()) == 6:
+        if not otp_code:
+            otp_code = str(grant_token).strip()
+        grant_token = None
+
+    approver = None
+    approver_label = None
+    verified_via = None
+
+    # Verify via 6-Digit Email OTP
+    if otp_code:
+        from ch_pos.api.manager_approval import verify_action_otp
+        try:
+            grant_res = verify_action_otp("business_date_override", store, str(otp_code).strip())
+            if isinstance(grant_res, dict):
+                grant_token = grant_res.get("action_grant") or grant_res.get("grant")
+            elif isinstance(grant_res, str):
+                grant_token = grant_res
+        except frappe.ValidationError as ve:
+            frappe.throw(str(ve), title=_("Verification Failed"))
+        except Exception:
+            frappe.throw(
+                _("Invalid or expired 6-digit verification code. Please click 'Email me a code' and try again."),
+                title=_("Verification Failed")
+            )
+
+    if grant_token:
         consume_action_grant(
-            "business_date_override", action_grant,
+            "business_date_override", grant_token,
             expected={"user": frappe.session.user, "store": store},
             restore_on_rollback=True)
         approver = frappe.session.user
         approver_label = frappe.db.get_value("User", approver, "full_name") or approver
         verified_via = "email OTP"
-    elif manager_pin:
-        pin_result = verify_manager_pin(
-            manager_pin, store=store, permission="can_override_business_date")
-        if not pin_result.get("valid"):
-            frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
-        approver = pin_result["user"]
-        approver_label = pin_result["name"]
-        verified_via = "manager PIN"
+
+    # Verify via Manager PIN
+    elif pin_val:
+        try:
+            pin_result = verify_manager_pin(
+                pin_val, store=store, permission="can_override_business_date")
+            if not pin_result.get("valid"):
+                frappe.throw(pin_result.get("message", _("Invalid manager PIN")))
+            approver = pin_result["user"]
+            approver_label = pin_result["name"]
+            verified_via = "manager PIN"
+        except frappe.exceptions.ValidationError:
+            frappe.throw(
+                _("Manager PIN verification failed on this site. Please use the 6-digit email OTP instead."),
+                title=_("Verification Failed")
+            )
+        except Exception:
+            frappe.throw(
+                _("Manager PIN verification failed. Please use the 6-digit email OTP instead."),
+                title=_("Verification Failed")
+            )
+
+    #  Neither OTP nor Manager PIN provided
     else:
         frappe.throw(
             _("Request a code by email and enter it, or enter a manager PIN, "

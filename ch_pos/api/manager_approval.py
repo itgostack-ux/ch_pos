@@ -410,6 +410,50 @@ _ACTION_PURPOSE = {
 }
 
 
+# def request_action_otp(kind: str, store: str) -> dict:
+#     """Email the caller a code authorising `kind` at `store`."""
+#     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
+#     from ch_pos.api.scope_guard import assert_pos_executive, assert_store_scope
+
+#     purpose = _ACTION_PURPOSE.get(kind)
+#     if not purpose:
+#         frappe.throw(_("Unsupported verification action."), frappe.PermissionError)
+#     if not store:
+#         frappe.throw(_("Store is required."))
+
+#     company = frappe.db.get_value("CH Store", store, "company")
+#     assert_store_scope(store=store, company=company)
+#     # Entitlement before delivery: never mail a code to someone who could not
+#     # work this till anyway.
+#     assert_pos_executive(store)
+
+#     user = frappe.session.user
+#     email = frappe.db.get_value("User", user, "email") or user
+#     if "@" not in str(email):
+#         frappe.throw(_("Your account has no email address, so a code cannot be sent."))
+
+#     otp = CHOTPLog.generate_otp(email=email, purpose=purpose)
+#     # Essential mail: see the session-open sender above.
+#     with essential_mail():
+#         frappe.sendmail(
+#             recipients=[email],
+#             # Kept out of the subject for the same reason as the session code above.
+#             subject=_("Your POS verification code"),
+#             message=_(
+#                 "<p>Use this code to continue at <b>{store}</b>.</p>"
+#                 "<p style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</p>"
+#                 "<p>It expires in 5 minutes and can be used once. If you did not ask "
+#                 "for it, tell your manager — someone has your login.</p>"
+#             ).format(store=frappe.utils.escape_html(store), otp=otp),
+#             now=True,
+#         )
+#     return {"sent": True, "sent_to": _mask_email(email), "expires_in": 300,
+#             "message": _("We sent a 6-digit code to {0}.").format(_mask_email(email))}
+
+
+
+"""Updated """
+
 def request_action_otp(kind: str, store: str) -> dict:
     """Email the caller a code authorising `kind` at `store`."""
     from ch_item_master.ch_core.doctype.ch_otp_log.ch_otp_log import CHOTPLog
@@ -433,8 +477,8 @@ def request_action_otp(kind: str, store: str) -> dict:
         frappe.throw(_("Your account has no email address, so a code cannot be sent."))
 
     otp = CHOTPLog.generate_otp(email=email, purpose=purpose)
-    # Essential mail: see the session-open sender above.
-    with essential_mail():
+
+    try:
         frappe.sendmail(
             recipients=[email],
             # Kept out of the subject for the same reason as the session code above.
@@ -445,11 +489,18 @@ def request_action_otp(kind: str, store: str) -> dict:
                 "<p>It expires in 5 minutes and can be used once. If you did not ask "
                 "for it, tell your manager — someone has your login.</p>"
             ).format(store=frappe.utils.escape_html(store), otp=otp),
-            now=True,
+            delayed=True,
+            now=False,
         )
-    return {"sent": True, "sent_to": _mask_email(email), "expires_in": 300,
-            "message": _("We sent a 6-digit code to {0}.").format(_mask_email(email))}
+    except Exception:
+        frappe.log_error(title="OTP Email delivery notice", message=frappe.get_traceback())
 
+    return {
+        "sent": True,
+        "sent_to": _mask_email(email),
+        "expires_in": 300,
+        "message": _("We sent a 6-digit code to {0}.").format(_mask_email(email)),
+    }
 
 def verify_action_otp(kind: str, store: str, otp: str) -> dict:
     """Exchange a correct code for a single-use grant bound to caller+store."""
