@@ -201,7 +201,7 @@ export class StockTransferWorkspace {
                         if (!r.message) return;
                         frappe.show_alert({
                             message: __(
-                                "Handover complete — {0} is now Pending With Goods",
+                                "Handover complete — {0} is now Stock Outward",
                                 [name]
                             ),
                             indicator: "orange",
@@ -295,6 +295,8 @@ export class StockTransferWorkspace {
 
         const STATUS_COLOR = {
             "Draft":                 "ch-pos-badge-muted",
+            "Pending Approval":      "ch-pos-badge-warning",
+            "Approved":              "ch-pos-badge-info",
             "Pending With Goods":    "ch-pos-badge-warning",
             "Partially Packed":      "ch-pos-badge-warning",
             "Packed":                "ch-pos-badge-info",
@@ -309,16 +311,15 @@ export class StockTransferWorkspace {
 
         // A fresh transfer's custom_status is blank at the DB level, not
         // literally "Draft" — falls through to the docstatus-based label
-        // below. Relabeled the same way as the desk form/list view
-        // (custom/stock_entry.js, custom/stock_entry_list.js) so "Draft"
-        // never surfaces to the user here either — it reads as an ERP
-        // document state, not what's actually happening (stock about to
-        // move out of the store).
+        // below. "Stock Outward" is the name of the Pending With Goods state
+        // (translated, same as the desk form and list view); it used to be
+        // pinned to Draft here as well, which made two different states read
+        // as the same thing on this screen.
         const raw_status_label = cs
             || (se.docstatus === 0 ? "Draft"
                 : se.docstatus === 1 ? "Submitted"
                 : "Cancelled");
-        const status_label = __(raw_status_label === "Draft" ? "Stock Outward" : raw_status_label);
+        const status_label = __(raw_status_label);
         const status_cls = STATUS_COLOR[cs]
             || (raw_status_label === "Draft" ? "ch-pos-badge-muted"
                 : se.docstatus === 1 ? "ch-pos-badge-success" : "ch-pos-badge-muted");

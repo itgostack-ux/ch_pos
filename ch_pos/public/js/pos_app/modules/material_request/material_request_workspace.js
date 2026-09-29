@@ -96,6 +96,16 @@ export class MaterialRequestWorkspace {
 								<input type="time" class="form-control ch-mr-needed-time" style="border-radius:var(--pos-radius-sm);height:36px">
 							</div>
 						</div>
+						<!-- Where it is to be delivered. Almost always this shop, so it
+						     starts there and says so plainly when it is changed. -->
+						<div style="margin-bottom:12px">
+							<div class="ch-pos-field-group">
+								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Delivery Location")}</label>
+								<select class="form-control ch-mr-delivery-store" style="border-radius:var(--pos-radius-sm);height:36px"></select>
+								<div class="ch-mr-delivery-note" style="font-size:var(--pos-fs-2xs);color:var(--pos-text-secondary);margin-top:4px">${
+									__("Delivered to this store unless you pick another one")}</div>
+							</div>
+						</div>
 						<!-- Item + qty row -->
 						<div class="ch-mr-add-row" style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
 							<div class="ch-mr-item-field" style="flex:2"></div>
@@ -335,6 +345,7 @@ export class MaterialRequestWorkspace {
 	}
 
 	_load_zone_info(panel) {
+		this._load_delivery_locations(panel);
 		frappe.call({
 			method: "ch_pos.api.pos_api.get_store_zone_info",
 			args: { pos_profile: PosState.pos_profile },
@@ -362,7 +373,53 @@ export class MaterialRequestWorkspace {
 		});
 	}
 
+	_load_delivery_locations(panel) {
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_delivery_locations",
+			args: { pos_profile: PosState.pos_profile },
+			callback: (r) => {
+				const out = r.message || {};
+				this.delivery_default = out.default || "";
+				this.delivery_locations = out.locations || [];
+				const found = this.delivery_locations.find(
+					(l) => l.warehouse === this.delivery_default);
+				this.delivery_default_label = (found && found.label) || this.delivery_default;
+				const select = panel.find(".ch-mr-delivery-store");
+				select.html(
+					this.delivery_locations
+						.map((l) => `<option value="${frappe.utils.escape_html(l.warehouse)}" ${
+							l.warehouse === this.delivery_default ? "selected" : ""
+						}>${frappe.utils.escape_html(l.label)}</option>`)
+						.join("")
+				);
+				this._on_delivery_store_change(panel);
+			},
+		});
+	}
+
+	_on_delivery_store_change(panel) {
+		const chosen = panel.find(".ch-mr-delivery-store").val() || "";
+		const note = panel.find(".ch-mr-delivery-note");
+		if (!chosen || chosen === this.delivery_default) {
+			note.css("color", "var(--pos-text-secondary)").text(
+				__("Delivered to this store unless you pick another one"));
+			return;
+		}
+		// Saying where it moved to, rather than only that it moved: the whole
+		// point of the message is that somebody reads the name and notices if
+		// it is the wrong one.
+		const picked = (this.delivery_locations || []).find((l) => l.warehouse === chosen);
+		note.css("color", "#b45309").text(
+			__("Delivery location changed — these goods will be delivered to {0}, not {1}",
+				[(picked && picked.label) || chosen, this.delivery_default_label]));
+		frappe.show_alert({
+			message: __("Delivering to {0}", [(picked && picked.label) || chosen]),
+			indicator: "orange",
+		});
+	}
+
 	_bind(panel) {
+		panel.on("change", ".ch-mr-delivery-store", () => this._on_delivery_store_change(panel));
 		panel.on("change", ".ch-mr-urgency", (e) => this._on_urgency_change(panel, $(e.currentTarget)));
 		this.needed_date_field.$input.on("change", () => this._on_needed_date_change(panel));
 		panel.on("change", ".ch-mr-needed-time", (e) => this._on_needed_time_change(panel, $(e.currentTarget)));
@@ -727,6 +784,7 @@ export class MaterialRequestWorkspace {
 				required_by_date,
 				required_by_time,
 				notes: notes || undefined,
+				delivery_store: panel.find(".ch-mr-delivery-store").val() || undefined,
 			},
 			freeze: true,
 			freeze_message: __("Creating Material Request..."),
@@ -812,9 +870,6 @@ export class MaterialRequestWorkspace {
 				this._mr_lookup = this._mr_lookup || {};
 				drafts.forEach((d) => { this._mr_lookup[d.name] = d; });
 				list.html(drafts.map((d) => {
-					const items_text = (d.items || []).map(i =>
-						`${frappe.utils.escape_html(i.item_name || i.item_code)} x${i.qty}`
-					).join(", ");
 					const time = d.request_datetime
 						? frappe.datetime.prettyDate(d.request_datetime)
 						: frappe.datetime.prettyDate(d.creation);
@@ -833,7 +888,7 @@ export class MaterialRequestWorkspace {
 									<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${d.priority}</span>
 								</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-									${d.item_count} ${__("items")} · ${items_text}
+									${d.item_count} ${__("items")}
 								</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${time}</div>
 							</div>
@@ -855,40 +910,95 @@ export class MaterialRequestWorkspace {
 	}
 
 	_show_mr_detail_popup(name) {
-		const d = (this._mr_lookup || {})[name];
-		if (!d) return;
+		// Fetched rather than read from the list: the list carries what a shop
+		// needs to SPOT a request, and this is what it needs once it opens
+		// one — who raised it, where it is going, and line by line what was
+		// granted, what was refused and where the goods have got to.
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_material_request_detail",
+			args: { pos_profile: PosState.pos_profile, material_request: name },
+			freeze: true,
+			callback: (r) => {
+				if (!r.message) return;
+				this._render_mr_detail_popup(r.message);
+			},
+		});
+	}
+
+	_render_mr_detail_popup(d) {
 		const esc = frappe.utils.escape_html;
-		const priority = esc(d.priority || "");
+		const when = (v) => (v ? frappe.datetime.str_to_user(v) : "—");
+		const fact = (label, value) => `
+			<div style="display:flex;gap:8px;padding:3px 0">
+				<div style="min-width:132px;color:var(--pos-text-secondary);font-size:var(--pos-fs-2xs);
+						font-weight:700;text-transform:uppercase">${label}</div>
+				<div style="font-size:var(--pos-fs-xs)">${value || "—"}</div>
+			</div>`;
+
+		// A quantity nobody has ruled on yet is not a refusal, so it is left
+		// blank rather than shown as a zero.
+		const qty = (v) => (v === null || v === undefined ? "—" : format_number(flt(v)));
 		const rows = (d.items || []).length
-			? d.items.map(it => `
+			? d.items.map((it) => `
 				<tr>
 					<td>
 						<div style="font-weight:600">${esc(it.item_name || it.item_code)}</div>
 						<div style="font-size:11px;color:var(--pos-text-muted)">${esc(it.item_code)}</div>
 					</td>
 					<td class="text-center" style="font-weight:600">${flt(it.qty)} ${esc(it.uom || "")}</td>
-					<td class="text-center">${priority}</td>
-					<td class="text-center">
-						${it.photo
-							? `<img src="${esc(it.photo)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px">`
-							: ""}
-					</td>
+					<td class="text-center">${qty(it.approved_qty)}</td>
+					<td class="text-center">${flt(it.rejected_qty)
+						? `<span style="color:#b91c1c">${qty(it.rejected_qty)}</span>${
+							it.rejection_reason
+								? `<div style="font-size:10px;color:var(--pos-text-muted)">${
+									esc(it.rejection_reason)}</div>` : ""}`
+						: "—"}</td>
+					<td class="text-center">${flt(it.transfer_qty)
+						? format_number(flt(it.transfer_qty)) : "—"}</td>
+					<td class="text-center">${esc(it.transfer_status || "—")}</td>
+					<td class="text-center">${flt(it.purchase_qty)
+						? format_number(flt(it.purchase_qty)) : "—"}</td>
+					<td class="text-center">${esc(it.purchase_status || "—")}</td>
 				</tr>`).join("")
-			: `<tr><td colspan="4" style="text-align:center;color:var(--pos-text-muted)">${__("No items found")}</td></tr>`;
+			: `<tr><td colspan="8" style="text-align:center;color:var(--pos-text-muted)">${
+				__("No items found")}</td></tr>`;
 
 		const dialog = new frappe.ui.Dialog({
-			title: __("{0} details", [name]),
+			title: __("{0} details", [d.name]),
+			size: "extra-large",
 			fields: [{
 				fieldtype: "HTML",
 				fieldname: "draft_detail_html",
 				options: `
+					<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 24px;
+							margin-bottom:14px">
+						<div>
+							${fact(__("Created"), esc(when(d.created_on)))}
+							${fact(__("Raised By"), esc(d.raised_by || ""))}
+							${fact(__("Required By"), esc(when(d.required_by)))}
+							${fact(__("Request Type"), esc(d.priority || ""))}
+						</div>
+						<div>
+							${fact(__("Requested Branch"), esc(d.requested_branch || ""))}
+							${fact(__("Delivery Location"), esc(d.delivery_location || ""))}
+							${fact(__("Approval"), esc(d.approval_status || ""))}
+							${fact(__("Status"), esc(d.status || ""))}
+						</div>
+					</div>
+					${d.notes
+						? `<div style="margin-bottom:12px;font-size:var(--pos-fs-xs)">
+							<b>${__("Notes")}:</b> ${esc(d.notes)}</div>` : ""}
 					<table class="table table-bordered" style="margin-bottom:0">
 						<thead>
 							<tr>
 								<th>${__("Item")}</th>
-								<th class="text-center" style="width:100px">${__("Qty")}</th>
-								<th class="text-center" style="width:120px">${__("Request Type")}</th>
-								<th class="text-center" style="width:60px">${__("Photo")}</th>
+								<th class="text-center" style="width:88px">${__("Qty")}</th>
+								<th class="text-center" style="width:88px">${__("Approved")}</th>
+								<th class="text-center" style="width:100px">${__("Rejected")}</th>
+								<th class="text-center" style="width:88px">${__("Transferred")}</th>
+								<th class="text-center" style="width:124px">${__("Transfer Status")}</th>
+								<th class="text-center" style="width:88px">${__("Purchased")}</th>
+								<th class="text-center" style="width:124px">${__("Purchase Status")}</th>
 							</tr>
 						</thead>
 						<tbody>${rows}</tbody>

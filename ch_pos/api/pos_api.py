@@ -9815,7 +9815,8 @@ def _format_delay_minutes(minutes):
 
 @frappe.whitelist(methods=["POST"])
 def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None,
-                            required_by_date=None, required_by_time=None) -> dict:
+                            required_by_date=None, required_by_time=None,
+                            delivery_store=None) -> dict:
     """Create a Store Material Request from POS for stock replenishment.
 
     Source warehouse is auto-resolved from the store's zone if not provided.
@@ -9835,7 +9836,8 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
         notes=notes or None,
         required_by_date=required_by_date,
         required_by_datetime=due_dt,
-        preferred_source_warehouse=source_warehouse or None)
+        preferred_source_warehouse=source_warehouse or None,
+        delivery_store=delivery_store or None)
 
 
 @frappe.whitelist()
@@ -9872,6 +9874,28 @@ def check_material_request_capacity(pos_profile, items) -> dict:
 
 
 @frappe.whitelist()
+def get_delivery_locations(pos_profile) -> dict:
+    """Places this request could be delivered to, and the one to start with.
+
+    Warehouses, not stores: the hubs goods are sent back to are warehouses and
+    have no CH Store record at all, so a store-based list could never offer
+    them. Where a warehouse is a shop's, the shop's name is what gets shown —
+    "GF-AMBATTUR" means more on a counter than "GF-AMBATTUR-Sellable - GF".
+    The shops and the hubs are the whole list: the damaged, buyback, demo and
+    customer-device bins each shop also owns are not places a van unloads.
+    """
+    assert_pos_profile_scope(pos_profile)
+    profile = frappe.db.get_value(
+        "POS Profile", pos_profile, ["company", "warehouse"], as_dict=True) or {}
+    from ch_erp15.ch_erp15.store_request_api import delivery_locations
+
+    return {
+        "default": profile.get("warehouse"),
+        "locations": delivery_locations(profile.get("company")),
+    }
+
+
+@frappe.whitelist()
 def get_store_zone_info(pos_profile) -> dict:
     """Get zone and source warehouse info for the POS store."""
     assert_pos_profile_scope(pos_profile)
@@ -9905,6 +9929,94 @@ def get_transfer_warehouse_scope(pos_profile) -> dict:
         "zone": zone_info.get("zone"),
         "target_warehouses": target_warehouses,
         "restricted": bool(target_warehouses),
+    }
+
+
+@frappe.whitelist()
+def get_material_request_detail(pos_profile, material_request) -> dict:
+    """Everything a store asks about one of its own requests.
+
+    The list gives a shop enough to spot a request; this is what it needs when
+    it opens one and wants to know where the thing has got to — who raised it
+    and when, where it is meant to land, and line by line how much was granted,
+    how much refused, and whether the goods are being bought or moved.
+    """
+    assert_pos_profile_scope(pos_profile)
+    doc = frappe.get_doc("Material Request", material_request)
+    doc.check_permission("read")
+
+    from ch_erp15.ch_erp15.custom.material_request import line_fulfilment
+    from ch_erp15.ch_erp15.request_fulfilment import _status_display
+
+    cover = line_fulfilment(material_request) or {}
+
+    # Transfer documents arrive carrying their status; purchase ones do not —
+    # line_fulfilment hands those out as doctype/name/qty only, which is why
+    # the Purchase Status column read blank however much had been purchased.
+    # Looked up here, once for the whole request.
+    purchase_status = {}
+    wanted = {}
+    for entry in cover.values():
+        for d in entry.get("purchase_docs") or []:
+            wanted.setdefault(d["doctype"], set()).add(d["name"])
+    for doctype, names in wanted.items():
+        for row in frappe.get_all(doctype, filters={"name": ("in", list(names))},
+                                  fields=["name", "status"], limit_page_length=0):
+            purchase_status[(doctype, row.name)] = row.status or ""
+
+    def _documents(entry, key):
+        """The step those documents have reached, said once."""
+        docs = (entry or {}).get(key) or []
+        labels, seen = [], set()
+        for d in docs:
+            raw = d.get("status") or purchase_status.get((d.get("doctype"), d.get("name"))) or ""
+            label = _status_display(raw) or raw
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+        return ", ".join(labels)
+
+    items = []
+    for row in doc.items:
+        entry = cover.get(row.name) or {}
+        approved = flt(row.get("custom_accepted_qty"))
+        items.append({
+            "item_code": row.item_code,
+            "item_name": row.item_name or row.item_code,
+            "qty": flt(row.qty),
+            "uom": row.uom or row.stock_uom,
+            # Before anyone has decided, "approved 0" would read as a refusal;
+            # it is simply not decided yet.
+            "approved_qty": approved if doc.docstatus == 1 else None,
+            "rejected_qty": flt(row.get("custom_rejected_qty")),
+            "rejection_reason": row.get("custom_rejection_reason") or "",
+            # The quantities behind each status: how much is being moved from
+            # stock, how much is being bought. Both come from the documents
+            # themselves, since a store request is never linked to a Purchase
+            # Order directly — the buying goes through a Purchase Request that
+            # consolidates several stores.
+            "transfer_qty": flt((entry or {}).get("transfer_qty")),
+            "purchase_qty": flt((entry or {}).get("purchase_qty")),
+            "transfer_status": _documents(entry, "transfer_docs"),
+            "purchase_status": _documents(entry, "purchase_docs"),
+            "photo": row.get("custom_item_photo") or None,
+        })
+
+    delivery = doc.get("custom_delivery_warehouse") or doc.get("set_warehouse")
+    delivery_store = frappe.db.get_value("CH Store", {"warehouse": delivery}, "name") if delivery else None
+
+    return {
+        "name": doc.name,
+        "created_on": str(doc.creation) if doc.creation else None,
+        "raised_by": frappe.db.get_value("User", doc.owner, "full_name") or doc.owner,
+        "required_by": str(doc.get("custom_sla_breach_date") or doc.schedule_date or ""),
+        "requested_branch": doc.get("custom_store") or "",
+        "delivery_location": delivery_store or delivery or "",
+        "priority": doc.get("custom_priority") or "",
+        "status": doc.status,
+        "approval_status": doc.get("custom_approval_status") or "",
+        "notes": (doc.get("custom_request_notes") or "").strip(),
+        "items": items,
     }
 
 
