@@ -153,16 +153,73 @@ export class StockTransferWorkspace {
             });
         });
 
+        // One challan per dispatch, not per transfer. Printing the Stock
+        // Entry itself would always produce a single document covering the
+        // whole thing — which is what it used to do, and why a transfer sent
+        // in two goes still printed one challan for everything. The issued
+        // documents are printed instead; the transfer is only the route.
         panel.on("click.chStockTransfer", ".ch-st-delivery-challan-btn", (e) => {
             const name = $(e.currentTarget).data("name");
-            const params = new URLSearchParams({
-                doctype: "Stock Entry",
-                name,
-                format: "CH Delivery Challan",
-                trigger_print: "0",
-                _lang: frappe.boot.lang || "en",
+            const print_one = (challan) => {
+                const params = new URLSearchParams({
+                    doctype: "CH Delivery Challan",
+                    name: challan,
+                    format: "CH Delivery Challan Document",
+                    trigger_print: "0",
+                    _lang: frappe.boot.lang || "en",
+                });
+                window.open("/printview?" + params.toString(), "_blank");
+            };
+            frappe.call({
+                method: "frappe.client.get_list",
+                args: {
+                    doctype: "CH Delivery Challan",
+                    filters: { stock_entry: name },
+                    fields: ["name", "posting_date", "total_qty"],
+                    order_by: "creation asc",
+                    limit_page_length: 0,
+                },
+            }).then((r) => {
+                const challans = (r && r.message) || [];
+                if (!challans.length) {
+                    frappe.msgprint({
+                        title: __("No Delivery Challan Yet"),
+                        indicator: "orange",
+                        message: __("A challan is raised when the goods leave — "
+                            + "hand this transfer over and it will be here, covering "
+                            + "exactly what was scanned onto that dispatch."),
+                    });
+                    return;
+                }
+                if (challans.length === 1) {
+                    print_one(challans[0].name);
+                    return;
+                }
+                const esc = (s) => frappe.utils.escape_html(s || "");
+                const d = new frappe.ui.Dialog({
+                    title: __("Delivery Challans for {0}", [name]),
+                    fields: [{ fieldtype: "HTML", fieldname: "list" }],
+                });
+                d.fields_dict.list.$wrapper.html(`
+                    <p class="text-muted small">${__(
+                        "This transfer went out in more than one dispatch. Each challan "
+                        + "covers what left on its own trip.")}</p>
+                    <table class="table table-bordered table-condensed">
+                        <thead><tr><th>${__("Challan")}</th><th>${__("Date")}</th>
+                            <th class="text-right">${__("Qty")}</th><th></th></tr></thead>
+                        <tbody>${challans.map((c) => `<tr>
+                            <td>${esc(c.name)}</td>
+                            <td>${c.posting_date ? frappe.datetime.str_to_user(c.posting_date) : ""}</td>
+                            <td class="text-right">${flt(c.total_qty) || 0}</td>
+                            <td class="text-right"><button class="btn btn-xs btn-primary ch-dc-print"
+                                data-name="${esc(c.name)}">${__("Print")}</button></td>
+                        </tr>`).join("")}</tbody>
+                    </table>`);
+                d.$wrapper.find(".ch-dc-print").on("click", (ev) => {
+                    print_one($(ev.currentTarget).data("name"));
+                });
+                d.show();
             });
-            window.open("/printview?" + params.toString(), "_blank");
         });
 
         panel.on("click.chStockTransfer", ".ch-st-boxlabel-btn", (e) => {
@@ -199,13 +256,13 @@ export class StockTransferWorkspace {
                     freeze_message: __("Moving stock to transit..."),
                     callback: (r) => {
                         if (!r.message) return;
+                        const partial = r.message.fully_dispatched === false;
                         frappe.show_alert({
-                            message: __(
-                                "Handover complete — {0} is now Stock Outward",
-                                [name]
-                            ),
-                            indicator: "orange",
-                        });
+                            message: partial
+                                ? __("Sent what was scanned — the rest of {0} is still here. Scan it and hand over again.", [name])
+                                : __("Handover complete — {0} is now Stock Outward", [name]),
+                            indicator: partial ? "orange" : "green",
+                        }, 6);
                         this._load_tab(panel, "outgoing");
                     },
                 })
@@ -297,6 +354,7 @@ export class StockTransferWorkspace {
             "Draft":                 "ch-pos-badge-muted",
             "Pending Approval":      "ch-pos-badge-warning",
             "Approved":              "ch-pos-badge-info",
+            "Partially Stock Outward": "ch-pos-badge-warning",
             "Pending With Goods":    "ch-pos-badge-warning",
             "Partially Packed":      "ch-pos-badge-warning",
             "Packed":                "ch-pos-badge-info",
@@ -354,15 +412,20 @@ export class StockTransferWorkspace {
                 <i class="fa fa-barcode"></i> ${__("Scan & Receive")}
             </button>` : "";
 
+        // A transfer goes out in as many batches as it takes, so handover is
+        // offered again while one is still partly here. Deleting it is not:
+        // the cancel button below is a hard delete, and stock has already
+        // moved by then — that has to go back through Revert Goods.
         const can_handover = tab === "outgoing"
-            && se.docstatus === 0 && !cs;
+            && se.docstatus === 0 && (!cs || cs === "Partially Stock Outward");
+        const can_cancel = tab === "outgoing" && se.docstatus === 0 && !cs;
         const handover_btn = can_handover ? `
             <button class="btn btn-xs btn-warning ch-st-handover-btn"
                     data-name="${esc(se.name)}"
                     style="border-radius:var(--pos-radius-sm)">
                 <i class="fa fa-sign-out"></i> ${__("Pending With Goods")}
             </button>` : "";
-        const cancel_btn = can_handover ? `
+        const cancel_btn = can_cancel ? `
             <button class="btn btn-xs btn-danger ch-st-cancel-btn"
                     data-name="${esc(se.name)}"
                     style="border-radius:var(--pos-radius-sm)">
@@ -374,7 +437,7 @@ export class StockTransferWorkspace {
         // outgoing card walks through Pending With Goods → Pack Box →
         // Mark as Packed without ever leaving POS.
         const pack_box_btn = (tab === "outgoing"
-            && ["Pending With Goods", "Partially Packed"].includes(cs)) ? `
+            && ["Partially Stock Outward", "Pending With Goods", "Partially Packed"].includes(cs)) ? `
             <button class="btn btn-xs btn-outline-primary ch-st-packbox-btn"
                     data-name="${esc(se.name)}"
                     style="border-radius:var(--pos-radius-sm)">
@@ -401,7 +464,7 @@ export class StockTransferWorkspace {
         // Packed" onward (as the backend form's own button once did too)
         // made it unreachable until Mark as Packed was already clicked —
         // exactly backwards from what this button is for.
-        const box_label_statuses = ["Pending With Goods", "Partially Packed", "Packed", "Ready For Pickup",
+        const box_label_statuses = ["Partially Stock Outward", "Pending With Goods", "Partially Packed", "Packed", "Ready For Pickup",
             "Assigned", "In Transit", "Ready For Receive", "Receive At Transit", "Transferred"];
         const print_box_label_btn = (tab === "outgoing"
             && se.has_packages && box_label_statuses.includes(cs)) ? `

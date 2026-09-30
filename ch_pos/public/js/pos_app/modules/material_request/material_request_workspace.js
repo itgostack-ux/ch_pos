@@ -137,7 +137,7 @@ export class MaterialRequestWorkspace {
 
 				<!-- Draft Requests: what this store started earlier -->
 				<div class="ch-pos-section-card ch-mr-drafts-section" style="margin-bottom:var(--pos-space-md);display:none">
-					<div class="section-header"><i class="fa fa-pencil-square-o"></i> ${__("Draft Requests (add items before submitting)")}</div>
+					<div class="section-header ch-mr-head-draft"><i class="fa fa-pencil-square-o"></i> ${__("Draft Requests (add items before submitting)")}</div>
 					<div class="section-body" style="padding:0">
 						<div class="ch-mr-drafts-list"></div>
 					</div>
@@ -145,7 +145,7 @@ export class MaterialRequestWorkspace {
 
 				<!-- Pending Requests -->
 				<div class="ch-pos-section-card">
-					<div class="section-header"><i class="fa fa-clock-o"></i> ${__("Submitted Requests")}</div>
+					<div class="section-header ch-mr-head-submitted"><i class="fa fa-clock-o"></i> ${__("Submitted Requests")}</div>
 					<div class="section-body" style="padding:0">
 						<div class="ch-mr-pending-loading" style="padding:24px;text-align:center">
 							<i class="fa fa-spinner fa-spin" style="opacity:0.3"></i>

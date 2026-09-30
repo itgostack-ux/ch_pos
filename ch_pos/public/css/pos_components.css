@@ -6430,3 +6430,17 @@ body > .desk-alert-container,
   .ch-pos-needs-attention { animation: none; }
   .ch-pos-needs-attention { box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.35); }
 }
+
+/* Request Stock: the two lists are read at a glance from across a counter,
+   so each header carries its own colour — blue for what is still being
+   written, red for what has gone and is now waiting on somebody else. */
+.ch-pos-section-card .section-header.ch-mr-head-draft {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-bottom-color: #bfdbfe;
+}
+.ch-pos-section-card .section-header.ch-mr-head-submitted {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-bottom-color: #fecaca;
+}

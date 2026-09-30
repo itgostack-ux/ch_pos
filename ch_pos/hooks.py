@@ -60,12 +60,14 @@ app_include_js = [
 app_include_css = [
     "/assets/ch_pos/css/pos_variables.css",
     "/assets/ch_pos/css/pos_layout.css",
-    "/assets/ch_pos/css/pos_components.css",
     # Versioned because these assets are served straight off the symlink with
     # no build hash -- editing a stylesheet in place leaves every till on the
     # copy its browser already cached. Bump the version when one changes.
+    # pos_components.css had no version at all, which is why the Request
+    # Stock header colours landed in the file and nowhere else.
+    "/assets/ch_pos/css/pos_components.css?v=2",
     "/assets/ch_pos/css/front_desk.css?v=7",
-    "/assets/ch_pos/css/stock_transfer.css",
+    "/assets/ch_pos/css/stock_transfer.css?v=2",
 ]
 
 # Session events
