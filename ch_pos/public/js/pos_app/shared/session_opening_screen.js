@@ -16,15 +16,43 @@ export class SessionOpeningScreen {
 	constructor() {
 		this._dialog = null;
 		this._pending_promise = null;
+		this._resend_timer = null;
 		this._bind_restart();
 	}
 
 	/** Dismiss any open dialog so a new one can take focus. */
 	_dismiss_dialog() {
+		this._clear_resend_timer();
 		if (this._dialog) {
 			try { this._dialog.hide(); } catch (e) { /* ignore */ }
 			this._dialog = null;
 		}
+	}
+
+	_clear_resend_timer() {
+		if (this._resend_timer) {
+			clearInterval(this._resend_timer);
+			this._resend_timer = null;
+		}	
+	}
+
+	_start_btn_countdown(dlg, fieldname) {
+		this._clear_resend_timer();
+		const btn = dlg.fields_dict[fieldname] && dlg.fields_dict[fieldname].$input;
+		if (!btn) return;
+
+		let seconds_left = 120;
+		btn.prop("disabled", true).text(__("Resend in {0}s", [seconds_left]));
+
+		this._resend_timer = setInterval(() => {
+			seconds_left--;
+			if (seconds_left > 0) {
+				btn.text(__("Resend in {0}s", [seconds_left]));
+			} else {
+				this._clear_resend_timer();
+				btn.prop("disabled", false).text(__("Resend OTP"));
+			}
+		}, 1000);
 	}
 
 	_bind_restart() {
@@ -679,11 +707,10 @@ export class SessionOpeningScreen {
 				frappe.show_alert({ message: r.message, indicator: "green" });
 				dlg.fields_dict.otp && dlg.fields_dict.otp.$input &&
 					dlg.fields_dict.otp.$input.focus();
+				this._start_btn_countdown(dlg, "send_otp");
 			})
 			.catch(() => {
 				// The server has already explained why; let them retry.
-			})
-			.finally(() => {
 				if (btn) btn.prop("disabled", false).text(__("Email me a code"));
 			});
 	}
@@ -717,9 +744,9 @@ export class SessionOpeningScreen {
 							.catch(() => { this._action_grant = null; });
 					});
 				}
+				this._start_btn_countdown(dlg, "send_otp");
 			})
-			.catch(() => {})
-			.finally(() => {
+			.catch(() => {
 				if (btn) btn.prop("disabled", false).text(__("Email me a code"));
 			});
 	}
