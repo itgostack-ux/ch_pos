@@ -9983,11 +9983,17 @@ def get_material_request_detail(pos_profile, material_request) -> dict:
         items.append({
             "item_code": row.item_code,
             "item_name": row.item_name or row.item_code,
-            "qty": flt(row.qty),
+            # What the store asked for. Approval lowers the line's own qty to
+            # what was granted and keeps the ask in custom_requested_qty, so
+            # reading qty here showed the approved figure under "Qty" and the
+            # store lost sight of how much it had asked for.
+            "qty": flt(row.get("custom_requested_qty")) or flt(row.qty),
             "uom": row.uom or row.stock_uom,
             # Before anyone has decided, "approved 0" would read as a refusal;
             # it is simply not decided yet.
             "approved_qty": approved if doc.docstatus == 1 else None,
+            # Asked for but not yet decided — approvable later.
+            "pending_qty": flt(row.get("custom_pending_qty")) if doc.docstatus == 1 else None,
             "rejected_qty": flt(row.get("custom_rejected_qty")),
             "rejection_reason": row.get("custom_rejection_reason") or "",
             # The quantities behind each status: how much is being moved from
@@ -10079,6 +10085,7 @@ def get_pending_material_requests(pos_profile) -> list:
             "transaction_date": str(sla_due_by or req.get("required_by_date") or req.get("creation")),
             "status": req.get("status"),
             "display_status": req.get("display_status") or req.get("status"),
+            "purchase_rejection_reason": req.get("purchase_rejection_reason") or "",
             "approval_status": req.get("approval_status", ""),
             "priority": req.get("priority", ""),
             "sla_breached": req.get("sla_breached", 0),

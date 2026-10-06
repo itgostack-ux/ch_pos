@@ -686,15 +686,26 @@ export class BuybackIntake {
 			silent: true,
 			args: { doctype: "Customer", filters: { mobile_no: m }, fields: ["name", "customer_name"], limit_page_length: 1 },
 			callback: (r) => {
+				// The number may have changed while this was in flight.
+				if (this.data.mobile_no !== m) return;
 				const hit = (r.message || [])[0];
 				this.data.customer = hit ? hit.name : null;
 				if (!hit) {
 					return $hit.html(`<div style="font-size:12px;opacity:.7">
-						<i class="fa fa-user-plus"></i> ${__("New customer — will be linked by mobile")}</div>`);
+						<i class="fa fa-user-plus"></i> ${__("New customer — enter their name below")}</div>`);
 				}
-				this.data.customer_name = this.data.customer_name || hit.customer_name;
+				// A walk-in saved without a name carries its mobile number as
+				// the name; that is not a name to show or pre-fill.
+				const known = (hit.customer_name || "").trim();
+				const real_name = known && known !== m ? known : "";
+				if (real_name && !(this.data.customer_name || "").trim()) {
+					this.data.customer_name = real_name;
+					this.$host.find(".ch-bbi-cname").val(real_name);
+				}
 				$hit.html(`<div style="font-size:13px;font-weight:650;color:var(--green-600,#16a34a)">
-					<i class="fa fa-check-circle"></i> ${esc(hit.customer_name)}</div>`);
+					<i class="fa fa-check-circle"></i> ${__("Existing customer")}${real_name
+						? ` · ${esc(real_name)}`
+						: ` <span style="font-weight:500;opacity:.75">· ${__("no name on file, add it below")}</span>`}</div>`);
 			},
 		});
 	}
@@ -921,6 +932,7 @@ export class BuybackIntake {
 			diagnostics: JSON.stringify(Object.entries(d.diagnostics).map(([t, v]) => ({ test: t, result: v }))),
 			answers: JSON.stringify(Object.entries(d.answers).map(([q, v]) => ({ question: q, answer: v }))),
 			remarks: d.remarks || null,
+			customer_name: (d.customer_name || "").trim() || null,
 		}).then((res) => {
 			frappe.dom.unfreeze();
 			this.busy = false;

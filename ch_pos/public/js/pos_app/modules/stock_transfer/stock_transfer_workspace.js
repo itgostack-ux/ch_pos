@@ -256,13 +256,18 @@ export class StockTransferWorkspace {
                     freeze_message: __("Moving stock to transit..."),
                     callback: (r) => {
                         if (!r.message) return;
-                        const partial = r.message.fully_dispatched === false;
+                        // Each transfer carries one dispatch: what was not
+                        // handed over continues as a new transfer of its own.
+                        const out = r.message;
+                        const rest = out.remainder;
                         frappe.show_alert({
-                            message: partial
-                                ? __("Sent what was scanned — the rest of {0} is still here. Scan it and hand over again.", [name])
-                                : __("Handover complete — {0} is now Stock Outward", [name]),
-                            indicator: partial ? "orange" : "green",
-                        }, 6);
+                            message: rest
+                                ? __("Sent what was scanned on {0}. The rest continues as {1} — scan it there and hand over again.", [out.transfer || name, rest])
+                                : out.split_from
+                                    ? __("Handover complete — sent as {0}.", [out.transfer])
+                                    : __("Handover complete — {0} is now Stock Outward", [name]),
+                            indicator: rest ? "orange" : "green",
+                        }, 8);
                         this._load_tab(panel, "outgoing");
                     },
                 })

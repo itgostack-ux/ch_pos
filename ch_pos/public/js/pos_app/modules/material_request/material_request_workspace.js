@@ -28,6 +28,13 @@ function _ch_keep_photos_unoptimized(uploader) {
 	setTimeout(stop, 10 * 60 * 1000);
 }
 
+// The name each photo was picked under, per request line: {file url: name}.
+// Kept beside the rows rather than on them — the rows are posted to the server
+// as they are, and this is only for refusing a second photo of the same name.
+const CH_MR_PHOTO_NAMES = new WeakMap();
+
+const _ch_photo_key = (name) => String(name || "").split(/[\\/]/).pop().trim().toLowerCase();
+
 export class MaterialRequestWorkspace {
 	constructor() {
 		EventBus.on("workspace:render", (ctx) => {
@@ -434,8 +441,18 @@ export class MaterialRequestWorkspace {
 			panel.trigger("mr:remove", [idx]);
 		});
 		panel.on("mr:remove", (e, idx) => {
-			this.request_items.splice(idx, 1);
-			this._render_items(panel);
+			const row = this.request_items[idx];
+			if (!row) return;
+			frappe.confirm(
+				__("Remove {0} from this request?", [`<b>${frappe.utils.escape_html(row.item_name || row.item_code)}</b>`]),
+				() => {
+					// The list may have changed while the dialog was open.
+					const at = this.request_items.indexOf(row);
+					if (at === -1) return;
+					this.request_items.splice(at, 1);
+					this._render_items(panel);
+				}
+			);
 		});
 		panel.on("click", ".ch-mr-item-photo-btn", (e) => {
 			this._upload_item_photo(panel, $(e.currentTarget).data("idx"));
@@ -632,14 +649,32 @@ export class MaterialRequestWorkspace {
 				const url = file_doc && file_doc.file_url;
 				if (!url) return;
 				row.photos = row.photos || [];
+				// One name, one photo per line. The server renames a second
+				// file of the same name to keep both, so the name it reports
+				// cannot be compared; the name the file was picked under is
+				// read off the uploader's own list instead.
+				const picked = (uploader.uploader?.files || [])
+					.find((f) => f.doc && f.doc.name === file_doc.name);
+				const picked_name = (picked && picked.name) || file_doc.file_name || url;
+				const names = CH_MR_PHOTO_NAMES.get(row) || {};
+				const taken = row.photos.map((u) => _ch_photo_key(names[u] || u));
+				if (taken.includes(_ch_photo_key(picked_name))) {
+					frappe.show_alert({
+						message: __("A photo named {0} is already on this line. Rename it or pick a different photo.",
+							[frappe.utils.escape_html(String(picked_name).split(/[\\/]/).pop())]),
+						indicator: "orange" }, 7);
+					return;
+				}
 				// Frappe gives the same file_url to the same image however
-				// often it is uploaded, so two shots that happen to share a
-				// name stay separate while the identical one is not doubled.
+				// often it is uploaded, so the identical picture under a new
+				// name is not doubled either.
 				if (row.photos.includes(url)) {
 					frappe.show_alert({
 						message: __("That photo is already on this line"), indicator: "orange" });
 					return;
 				}
+				names[url] = picked_name;
+				CH_MR_PHOTO_NAMES.set(row, names);
 				row.photos.push(url);
 				row.photo = row.photos[0];
 				this._render_items(panel);
@@ -695,12 +730,26 @@ export class MaterialRequestWorkspace {
 				</div>`);
 		};
 
+		// A photo is evidence for the hub and cannot be brought back once
+		// dropped — the file is gone from the line — so a stray tap on the
+		// small red cross asks before it removes anything.
 		dialog.$wrapper.on("click", ".ch-mr-photo-drop", (e) => {
 			const i = parseInt($(e.currentTarget).data("i"), 10);
-			row.photos.splice(i, 1);
-			row.photo = row.photos[0] || null;
-			this._render_items(panel);
-			draw();
+			const url = row.photos[i];
+			if (!url) return;
+			frappe.confirm(
+				__("Remove photo {0} of {1} from {2}?",
+					[i + 1, row.photos.length, row.item_name || row.item_code]),
+				() => {
+					// By url, not position: the list may have changed while
+					// the question was on screen.
+					const at = row.photos.indexOf(url);
+					if (at < 0) return;
+					row.photos.splice(at, 1);
+					row.photo = row.photos[0] || null;
+					this._render_items(panel);
+					draw();
+				});
 		});
 
 		draw();
@@ -709,10 +758,17 @@ export class MaterialRequestWorkspace {
 
 	_remove_item_photos(panel, idx) {
 		const row = this.request_items[idx];
-		if (!row) return;
-		row.photos = [];
-		row.photo = null;
-		this._render_items(panel);
+		if (!row || !(row.photos || []).length) return;
+		const count = row.photos.length;
+		frappe.confirm(
+			count > 1
+				? __("Remove all {0} photos from {1}?", [count, row.item_name || row.item_code])
+				: __("Remove the photo from {0}?", [row.item_name || row.item_code]),
+			() => {
+				row.photos = [];
+				row.photo = null;
+				this._render_items(panel);
+			});
 	}
 
 	_submit_request(panel) {
@@ -947,6 +1003,9 @@ export class MaterialRequestWorkspace {
 					</td>
 					<td class="text-center" style="font-weight:600">${flt(it.qty)} ${esc(it.uom || "")}</td>
 					<td class="text-center">${qty(it.approved_qty)}</td>
+					<td class="text-center">${flt(it.pending_qty)
+						? `<span style="color:#b45309;font-weight:600">${qty(it.pending_qty)}</span>`
+						: "—"}</td>
 					<td class="text-center">${flt(it.rejected_qty)
 						? `<span style="color:#b91c1c">${qty(it.rejected_qty)}</span>${
 							it.rejection_reason
@@ -960,7 +1019,7 @@ export class MaterialRequestWorkspace {
 						? format_number(flt(it.purchase_qty)) : "—"}</td>
 					<td class="text-center">${esc(it.purchase_status || "—")}</td>
 				</tr>`).join("")
-			: `<tr><td colspan="8" style="text-align:center;color:var(--pos-text-muted)">${
+			: `<tr><td colspan="9" style="text-align:center;color:var(--pos-text-muted)">${
 				__("No items found")}</td></tr>`;
 
 		const dialog = new frappe.ui.Dialog({
@@ -994,6 +1053,7 @@ export class MaterialRequestWorkspace {
 								<th>${__("Item")}</th>
 								<th class="text-center" style="width:88px">${__("Qty")}</th>
 								<th class="text-center" style="width:88px">${__("Approved")}</th>
+								<th class="text-center" style="width:88px">${__("Pending")}</th>
 								<th class="text-center" style="width:100px">${__("Rejected")}</th>
 								<th class="text-center" style="width:88px">${__("Transferred")}</th>
 								<th class="text-center" style="width:124px">${__("Transfer Status")}</th>
@@ -1069,7 +1129,8 @@ export class MaterialRequestWorkspace {
 					// states (Stopped / Received / Transferred / Issued / short-
 					// closed) render as a single friendly "Completed" badge.
 					const shown_status = mr.display_status || mr.status;
-					const status_cls = shown_status === "Completed" ? "ch-pos-badge-success"
+					const status_cls = ["Rejected", "Purchase Rejected"].includes(shown_status) ? "badge-danger"
+						: shown_status === "Completed" ? "ch-pos-badge-success"
 						: ["Draft", "Pending"].includes(shown_status) ? "ch-pos-badge-warning"
 						: ["Ordered", "Partially Ordered", "Partially Received"].includes(shown_status) ? "ch-pos-badge-info"
 						: ["Received", "Transferred"].includes(shown_status) ? "ch-pos-badge-success"
@@ -1099,6 +1160,10 @@ export class MaterialRequestWorkspace {
 									${dueText} · ${mr.item_count} ${__("items")}
 								</div>
 								${delayText ? `<div style="margin-top:4px">${delayText}</div>` : ""}
+								${mr.purchase_rejection_reason
+									? `<div style="margin-top:4px;color:#b91c1c;font-size:var(--pos-fs-2xs);font-weight:600">
+										<i class="fa fa-ban"></i> ${__("Reason")}: ${frappe.utils.escape_html(mr.purchase_rejection_reason)}</div>`
+									: ""}
 							</div>
 							<div style="display:flex;gap:8px;align-items:center">
 								<span class="ch-pos-badge ${status_cls}">${frappe.utils.escape_html(shown_status)}</span>
