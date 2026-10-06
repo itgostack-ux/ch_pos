@@ -10099,6 +10099,9 @@ def get_pending_material_requests(pos_profile) -> list:
             "stock_entries": req.get("stock_entries", []),
             "per_ordered": req.get("per_ordered", 0),
             "per_received": req.get("per_received", 0),
+            # The rejected request this one was re-raised from, shown beside
+            # its ID; the old request itself is no longer listed.
+            "replaces": req.get("replaces") or "",
         }
         out.append(entry)
     return out

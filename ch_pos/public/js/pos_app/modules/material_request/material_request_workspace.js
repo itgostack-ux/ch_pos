@@ -939,7 +939,9 @@ export class MaterialRequestWorkspace {
 								<div style="display:flex;align-items:center;gap:8px">
 									<span class="ch-mr-id-link" data-name="${frappe.utils.escape_html(d.name)}"
 										style="font-weight:700;font-size:var(--pos-fs-sm);cursor:pointer;text-decoration:underline dotted"
-										title="${__("View details")}">${frappe.utils.escape_html(d.name)}</span>
+										title="${__("View details")}">${frappe.utils.escape_html(d.name)}</span>${
+										d.replaces ? `<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">(${
+											__("Replaced {0}", [frappe.utils.escape_html(d.replaces)])})</span>` : ""}
 									<span class="ch-pos-badge ch-pos-badge-warning" style="font-size:10px">${__("Draft")}</span>
 									<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${d.priority}</span>
 								</div>
@@ -1012,12 +1014,12 @@ export class MaterialRequestWorkspace {
 								? `<div style="font-size:10px;color:var(--pos-text-muted)">${
 									esc(it.rejection_reason)}</div>` : ""}`
 						: "—"}</td>
-					<td class="text-center">${flt(it.transfer_qty)
-						? format_number(flt(it.transfer_qty)) : "—"}</td>
-					<td class="text-center">${esc(it.transfer_status || "—")}</td>
 					<td class="text-center">${flt(it.purchase_qty)
 						? format_number(flt(it.purchase_qty)) : "—"}</td>
 					<td class="text-center">${esc(it.purchase_status || "—")}</td>
+					<td class="text-center">${flt(it.transfer_qty)
+						? format_number(flt(it.transfer_qty)) : "—"}</td>
+					<td class="text-center">${esc(it.transfer_status || "—")}</td>
 				</tr>`).join("")
 			: `<tr><td colspan="9" style="text-align:center;color:var(--pos-text-muted)">${
 				__("No items found")}</td></tr>`;
@@ -1055,10 +1057,10 @@ export class MaterialRequestWorkspace {
 								<th class="text-center" style="width:88px">${__("Approved")}</th>
 								<th class="text-center" style="width:88px">${__("Pending")}</th>
 								<th class="text-center" style="width:100px">${__("Rejected")}</th>
-								<th class="text-center" style="width:88px">${__("Transferred")}</th>
-								<th class="text-center" style="width:124px">${__("Transfer Status")}</th>
 								<th class="text-center" style="width:88px">${__("Purchased")}</th>
 								<th class="text-center" style="width:124px">${__("Purchase Status")}</th>
+								<th class="text-center" style="width:88px">${__("Transferred")}</th>
+								<th class="text-center" style="width:124px">${__("Transfer Status")}</th>
 							</tr>
 						</thead>
 						<tbody>${rows}</tbody>
@@ -1153,7 +1155,9 @@ export class MaterialRequestWorkspace {
 								<div style="display:flex;align-items:center;gap:8px">
 									<span class="ch-mr-id-link" data-name="${frappe.utils.escape_html(mr.name)}"
 										style="font-weight:700;font-size:var(--pos-fs-sm);cursor:pointer;text-decoration:underline dotted"
-										title="${__("View details")}">${frappe.utils.escape_html(mr.name)}</span>${sla_warn}
+										title="${__("View details")}">${frappe.utils.escape_html(mr.name)}</span>${
+										mr.replaces ? `<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">(${
+											__("Replaced {0}", [frappe.utils.escape_html(mr.replaces)])})</span>` : ""}${sla_warn}
 									<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${frappe.utils.escape_html(priority)}</span>
 								</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
