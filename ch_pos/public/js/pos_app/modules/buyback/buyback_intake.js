@@ -65,6 +65,38 @@ function _group_by_category(rows) {
 	return out;
 }
 
+/**
+ * What the server said when it refused a call, as plain text.
+ *
+ * A refusal raised with frappe.throw arrives as `_server_messages` (a JSON
+ * list of JSON messages). An unexpected failure has only `exception` — the
+ * last line of the traceback. A permission refusal may carry just a type.
+ * Empty when the server never answered (offline, timed out), so the caller's
+ * own wording is used.
+ */
+function server_error_message(r) {
+	if (!r) return "";
+	const parts = [];
+	try {
+		for (const raw of JSON.parse(r._server_messages || "[]")) {
+			let item = raw;
+			try { item = JSON.parse(raw); } catch (e) { /* already plain text */ }
+			const text = item && typeof item === "object" ? item.message : item;
+			if (text) parts.push(String(text));
+		}
+	} catch (e) { /* not JSON — fall through to the other fields */ }
+	if (!parts.length && r.exception) {
+		// "frappe.exceptions.ValidationError: No Grade D price…" -> the sentence
+		parts.push(String(r.exception).replace(/^[\w.]+(Error|Exception)?:\s*/, ""));
+	}
+	if (!parts.length && r.exc_type === "PermissionError") {
+		parts.push(__("You do not have permission for this. Ask your manager to check your role."));
+	}
+	if (!parts.length && r.exc_type) parts.push(String(r.exc_type));
+	if (!parts.length && typeof r.message === "string") parts.push(r.message);
+	return [...new Set(parts)].join(" ");
+}
+
 export class BuybackIntake {
 	constructor({ store, on_created, on_cancel }) {
 		this.store = store || "";
@@ -233,9 +265,23 @@ export class BuybackIntake {
 	}
 
 	/** Keep server failures owned by this full-screen form. Without silent mode,
-	 * Frappe opens its global error dialog before our inline catch handler. */
+	 * Frappe opens its global error dialog before our inline catch handler.
+	 *
+	 * frappe.xcall rejects with the reply's `message`, which a failed call does
+	 * not have — so every refusal, whatever the server said, reached the catch
+	 * handlers as nothing and was shown as "Please retry.". The reason is on
+	 * the reply all the same (see server_error_message); this hands it on. */
 	_xcall(method, args) {
-		return frappe.xcall(method, args, undefined, { silent: true });
+		return new Promise((resolve, reject) => {
+			frappe.call({
+				method,
+				args,
+				type: "POST",
+				silent: true,
+				callback: (r) => resolve(r.message),
+				error: (r) => reject({ message: server_error_message(r), response: r }),
+			});
+		});
 	}
 
 	_html_head(step) {
