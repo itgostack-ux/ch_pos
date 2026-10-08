@@ -40,7 +40,7 @@ export class InboundReceiveWorkspace {
 						<span class="mode-icon" style="background:#dbeafe;color:#1d4ed8">
 							<i class="fa fa-inbox"></i>
 						</span>
-						${__("Inbound Receive")}
+						${__("Purchase Receipt Receive")}
 					</h4>
 					<span class="ch-mode-hint">${__("Complete stock-team GRN steps for goods arriving at this store")}</span>
 				</div>

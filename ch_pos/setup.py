@@ -4,6 +4,23 @@ from textwrap import dedent
 
 
 CUSTOM_FIELDS = {
+    # A transfer asked for from a store's own POS (Transfers > New Transfer).
+    # The store's Transfers screen keeps those under Outgoing from the start;
+    # a transfer raised anywhere else — the back office, another store — is a
+    # request made OF the store and waits under "Requested by Others" until it
+    # is approved (see pos_api.get_stock_transfers).
+    "Stock Entry": [
+        {
+            "fieldname": "custom_raised_in_pos",
+            "fieldtype": "Check",
+            "label": "Raised In POS",
+            "insert_after": "custom_transfer_type",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
+            "module": "POS Core",
+        },
+    ],
     "Accounts Settings": [
         {
             "fieldname": "ch_daily_cash_receipt_limit",

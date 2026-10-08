@@ -54,6 +54,8 @@ export class StockTransferWorkspace {
                     <button class="ch-pos-category-chip" data-tab="outgoing">
                         <i class="fa fa-arrow-up"></i> ${__("Outgoing")}
                     </button>
+                    <!-- What other stores have asked this store for has its
+                         own list now: Transfers > By Others in the sidebar. -->
                     <button class="ch-pos-category-chip" data-tab="new">
                         <i class="fa fa-plus"></i> ${__("New Transfer")}
                     </button>
@@ -89,9 +91,12 @@ export class StockTransferWorkspace {
                 panel.find(".ch-st-tabs .ch-pos-category-chip")
                      .removeClass("active");
                 $(e.currentTarget).addClass("active");
-                tab === "new"
-                    ? this._render_new_transfer(panel)
-                    : this._load_tab(panel, tab);
+                if (tab === "new") {
+                    this._tab = "new";
+                    this._render_new_transfer(panel);
+                } else {
+                    this._load_tab(panel, tab);
+                }
             }
         );
 
@@ -145,7 +150,7 @@ export class StockTransferWorkspace {
                 callback: (r) => {
                     if (!r.message) return;
                     frappe.show_alert({
-                        message:   __("{0} marked as Packed.", [name]),
+                        message:   __("{0} marked as Packed.", [this._shown_id(name)]),
                         indicator: "green",
                     });
                     this._load_tab(panel, "outgoing");
@@ -197,7 +202,7 @@ export class StockTransferWorkspace {
                 }
                 const esc = (s) => frappe.utils.escape_html(s || "");
                 const d = new frappe.ui.Dialog({
-                    title: __("Delivery Challans for {0}", [name]),
+                    title: __("Delivery Challans for {0}", [this._shown_id(name)]),
                     fields: [{ fieldtype: "HTML", fieldname: "list" }],
                 });
                 d.fields_dict.list.$wrapper.html(`
@@ -242,12 +247,17 @@ export class StockTransferWorkspace {
             this._accept_transfer(panel, name)
         );
 
+        panel.on("click.chStockTransfer", ".ch-st-create-challan-btn", (e) => {
+            e.stopPropagation();
+            this._open_create_challan_dialog(panel, $(e.currentTarget).data("name"));
+        });
+
         panel.on("click.chStockTransfer", ".ch-st-handover-btn", (e) => {
             const name = $(e.currentTarget).data("name");
             frappe.confirm(
                 __(
                     "Confirm handover of {0}? This will move stock to the transit warehouse.",
-                    [name]
+                    [this._shown_id(name)]
                 ),
                 () => frappe.call({
                     method: "ch_erp15.ch_erp15.custom.stock_entry.set_pending_qty",
@@ -265,7 +275,7 @@ export class StockTransferWorkspace {
                                 ? __("Sent what was scanned on {0}. The rest continues as {1} — scan it there and hand over again.", [out.transfer || name, rest])
                                 : out.split_from
                                     ? __("Handover complete — sent as {0}.", [out.transfer])
-                                    : __("Handover complete — {0} is now Stock Outward", [name]),
+                                    : __("Handover complete — {0} is now Stock Outward", [this._shown_id(name)]),
                             indicator: rest ? "orange" : "green",
                         }, 8);
                         this._load_tab(panel, "outgoing");
@@ -279,7 +289,7 @@ export class StockTransferWorkspace {
             frappe.confirm(
                 __(
                     "Cancel transfer {0}? This will delete the draft Stock Entry.",
-                    [name]
+                    [this._shown_id(name)]
                 ),
                 () => frappe.call({
                     method: "frappe.client.delete",
@@ -287,7 +297,7 @@ export class StockTransferWorkspace {
                     freeze: true,
                     callback: () => {
                         frappe.show_alert({
-                            message:   __("Transfer {0} cancelled", [name]),
+                            message:   __("Transfer {0} cancelled", [this._shown_id(name)]),
                             indicator: "red",
                         });
                         this._load_tab(panel, "outgoing");
@@ -301,11 +311,45 @@ export class StockTransferWorkspace {
     // Tab loader (incoming / outgoing)
     // ════════════════════════════════════════════════════════════════════════
 
-    _load_tab(panel, tab) {
+    // What a card shows that can change behind the store's back: an approval,
+    // a challan raised, a driver's pickup or delivery.
+    _list_signature(entries) {
+        return JSON.stringify((entries || []).map(se => [
+            se.name, se.docstatus, se.custom_status, se.custom_logistics_status,
+            se.custom_delivery_challan, se.has_packages,
+        ]));
+    }
+
+    // The Incoming / Outgoing list refreshes itself, so an approval given in
+    // the back office shows here without anyone reloading: the card moves to
+    // Approved and its Create Delivery Challan button appears. It only
+    // redraws when something actually changed, and never while a dialog is
+    // open or the New Transfer form is in use.
+    _watch_list(panel) {
+        clearInterval(this._watch_timer);
+        this._watch_timer = setInterval(() => {
+            const here = panel && panel[0] && document.contains(panel[0])
+                && panel.find(".ch-st-tabs").length;
+            if (!here) {
+                clearInterval(this._watch_timer);
+                return;
+            }
+            if (!["incoming", "outgoing", "requested"].includes(this._tab)) return;
+            if (document.hidden || $(".modal.show").length) return;
+            this._load_tab(panel, this._tab, true);
+        }, 15000);
+    }
+
+    _load_tab(panel, tab, silent = false) {
         const loading = panel.find(".ch-st-loading");
         const body    = panel.find(".ch-st-body");
-        loading.show();
-        body.empty();
+        this._tab = tab;
+        if (!silent) {
+            loading.show();
+            body.empty();
+            this._list_sig = null;
+            this._watch_list(panel);
+        }
 
         frappe.call({
             method: "ch_pos.api.pos_api.get_stock_transfers",
@@ -314,8 +358,24 @@ export class StockTransferWorkspace {
                 direction:   tab,
             },
             callback: (r) => {
-                loading.hide();
                 const entries = r.message || [];
+                // A reply for a tab the user has since left, or a refresh
+                // that found nothing new, changes nothing on screen.
+                if (this._tab !== tab) return;
+                const signature = this._list_signature(entries);
+                if (silent && signature === this._list_sig) return;
+                this._list_sig = signature;
+                loading.hide();
+                // The number the store knows a transfer by is its Delivery
+                // Challan — it is on the box and the paperwork — so that is
+                // what every card and dialog here shows. The transfer's own
+                // ID still drives every action behind the buttons.
+                this._challan_of = this._challan_of || {};
+                entries.forEach((se) => {
+                    if (se.custom_delivery_challan) {
+                        this._challan_of[se.name] = se.custom_delivery_challan;
+                    }
+                });
                 if (!entries.length) {
                     body.html(this._empty_state_html(tab));
                     return;
@@ -338,10 +398,14 @@ export class StockTransferWorkspace {
                     <i class="fa fa-${icon}"></i>
                 </div>
                 <div class="empty-title">
-                    ${__("No {0} transfers", [tab])}
+                    ${tab === "requested"
+                        ? __("No requests from other stores")
+                        : __("No {0} transfers", [tab])}
                 </div>
                 <div class="empty-subtitle">
-                    ${__("No recent stock movements found")}
+                    ${tab === "requested"
+                        ? __("A transfer another store asks this store for waits here until it is approved")
+                        : __("No recent stock movements found")}
                 </div>
             </div>`;
     }
@@ -421,8 +485,21 @@ export class StockTransferWorkspace {
         // offered again while one is still partly here. Deleting it is not:
         // the cancel button below is a hard delete, and stock has already
         // moved by then — that has to go back through Revert Goods.
+        // An approved transfer is sent out through Create Delivery Challan
+        // below, which takes the IMEI scans; this older one-press handover is
+        // kept only for a transfer that never carried a status at all.
         const can_handover = tab === "outgoing"
-            && se.docstatus === 0 && (!cs || cs === "Partially Stock Outward");
+            && se.docstatus === 0 && !cs;
+        // Approved, nothing scanned yet: scanning the devices and raising the
+        // challan are one step. A transfer sent in part comes back here for
+        // what is left.
+        const create_challan_btn = (tab === "outgoing" && se.docstatus === 0
+            && ["Approved", "Partially Stock Outward"].includes(cs)) ? `
+            <button class="btn btn-xs btn-primary ch-st-create-challan-btn"
+                    data-name="${esc(se.name)}"
+                    style="border-radius:var(--pos-radius-sm)">
+                <i class="fa fa-file-text-o"></i> ${__("Create Delivery Challan")}
+            </button>` : "";
         const can_cancel = tab === "outgoing" && se.docstatus === 0 && !cs;
         const handover_btn = can_handover ? `
             <button class="btn btn-xs btn-warning ch-st-handover-btn"
@@ -566,7 +643,7 @@ export class StockTransferWorkspace {
                                         font-size:var(--pos-fs-sm);
                                         cursor:pointer;
                                         color:var(--pos-primary,inherit)">
-                                ${esc(se.name)}
+                                ${esc(se.custom_delivery_challan || se.name)}
                             </div>
                             <div style="font-size:var(--pos-fs-2xs);
                                         color:var(--pos-text-muted)">
@@ -582,6 +659,7 @@ export class StockTransferWorkspace {
                             </span>
                             ${logistics_badge}
                             ${accept_btn}
+                            ${create_challan_btn}
                             ${handover_btn}
                             ${pack_box_btn}
                             ${mark_packed_btn}
@@ -638,6 +716,205 @@ export class StockTransferWorkspace {
     // browser at all, so this fetches the full line list on demand).
     // ════════════════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════
+    // Create Delivery Challan — scan the devices of an approved transfer
+    //
+    // The request named items and quantities only. Here the store scans the
+    // IMEIs that are actually going; confirming sends the transfer out
+    // (stock moves to transit) and the server raises the Delivery Challan.
+    // ═══════════════════════════════════════════════════════════════
+
+    _open_create_challan_dialog(panel, se_name) {
+        frappe.call({
+            method: "ch_pos.api.pos_api.get_transfer_dispatch_lines",
+            args:   { stock_entry: se_name },
+            freeze: true,
+            callback: (r) => {
+                const info = r && r.message;
+                if (!info) return;
+                if (!(info.lines || []).length) {
+                    frappe.msgprint(__("Nothing is left to send on this transfer."));
+                    return;
+                }
+                this._render_create_challan_dialog(panel, se_name, info);
+            },
+        });
+    }
+
+    _render_create_challan_dialog(panel, se_name, info) {
+        const esc   = s => frappe.utils.escape_html(s || "");
+        const lines = info.lines.map(l => Object.assign({ scanned: [] }, l));
+        const needs_scan = lines.some(l => l.serialized);
+        const in_flight  = new Set();
+
+        const dialog = new frappe.ui.Dialog({
+            title: __("Create Delivery Challan — {0}", [se_name]),
+            size:  "large",
+            fields: [
+                { fieldtype: "HTML", fieldname: "scan_html" },
+                { fieldtype: "HTML", fieldname: "lines_html" },
+            ],
+            primary_action_label: __("Create Delivery Challan"),
+            primary_action: () => {
+                const short = lines.filter(l => l.serialized && l.scanned.length < l.qty);
+                if (short.length) {
+                    frappe.msgprint(__("Scan every unit first. Still to scan: {0}",
+                        [short.map(l => `${esc(l.item_name)} × ${l.qty - l.scanned.length}`).join(", ")]));
+                    return;
+                }
+                frappe.call({
+                    method: "ch_pos.api.pos_api.create_transfer_delivery_challan",
+                    args: {
+                        stock_entry: se_name,
+                        serials: lines.reduce((all, l) => all.concat(l.scanned), []),
+                    },
+                    freeze: true,
+                    freeze_message: __("Creating Delivery Challan…"),
+                    callback: (res) => {
+                        const out = res && res.message;
+                        if (!out) return;
+                        dialog.hide();
+                        if (out.delivery_challan) {
+                            this._challan_of = this._challan_of || {};
+                            this._challan_of[out.name] = out.delivery_challan;
+                        }
+                        frappe.show_alert({
+                            message: out.delivery_challan
+                                ? __("Delivery Challan {0} created", [out.delivery_challan])
+                                : __("Transfer sent out"),
+                            indicator: "green",
+                        }, 6);
+                        this._load_tab(panel, "outgoing");
+                    },
+                });
+            },
+        });
+
+        const $scan  = dialog.fields_dict.scan_html.$wrapper;
+        const $lines = dialog.fields_dict.lines_html.$wrapper;
+
+        const draw = () => {
+            $lines.html(`
+                <table class="table table-bordered" style="font-size:13px;margin-top:10px">
+                    <thead><tr>
+                        <th>${__("Item")}</th>
+                        <th class="text-center" style="width:90px">${__("To Send")}</th>
+                        <th class="text-center" style="width:90px">${__("Scanned")}</th>
+                    </tr></thead>
+                    <tbody>${lines.map((l, idx) => `
+                        <tr>
+                            <td>
+                                <div style="font-weight:600">${esc(l.item_name)}</div>
+                                <div style="font-size:11px;color:var(--pos-text-muted)">${esc(l.item_code)}</div>
+                                <div style="margin-top:4px">${l.scanned.map(sn => `
+                                    <span class="ch-st-chip" style="display:inline-flex;align-items:center;gap:4px;
+                                          margin:2px 4px 2px 0;padding:2px 6px;border-radius:10px;
+                                          background:var(--pos-surface-sunken,#f1f5f9);font-size:11px">
+                                        <i class="fa fa-barcode"></i> ${esc(sn)}
+                                        <a href="#" class="ch-st-unscan" data-idx="${idx}"
+                                           data-serial="${esc(sn)}" title="${__("Remove")}">
+                                            <i class="fa fa-times"></i></a>
+                                    </span>`).join("")}</div>
+                            </td>
+                            <td class="text-center" style="font-weight:600">${l.qty}</td>
+                            <td class="text-center" style="font-weight:600;color:${
+                                !l.serialized || l.scanned.length >= l.qty
+                                    ? "var(--pos-success,#16a34a)" : "var(--pos-danger,#dc2626)"}">
+                                ${l.serialized ? l.scanned.length : __("No scan")}
+                            </td>
+                        </tr>`).join("")}
+                    </tbody>
+                </table>`);
+        };
+
+        const say = (kind, message) => {
+            const color = { ok: "#16a34a", warn: "#b45309", error: "#dc2626" }[kind] || "#dc2626";
+            $scan.find(".ch-st-challan-fb").css("color", color).text(message);
+        };
+
+        $scan.html(needs_scan ? `
+            <input type="text" class="form-control ch-st-challan-scan"
+                   placeholder="${__("Scan or type IMEI / Serial and press Enter")}"
+                   autocomplete="off" spellcheck="false">
+            <div class="ch-st-challan-fb" style="min-height:18px;font-size:12px;margin-top:4px"></div>`
+            : `<div class="text-muted">${__("These items carry no IMEI — nothing to scan.")}</div>`);
+
+        $scan.on("keydown", ".ch-st-challan-scan", (e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            const $inp    = $(e.currentTarget);
+            const barcode = ($inp.val() || "").trim();
+            if (!barcode) return;
+            const key = barcode.toLowerCase();
+            const seen = lines.some(l => l.scanned.some(s => String(s).toLowerCase() === key));
+            if (seen || in_flight.has(key)) {
+                $inp.val("");
+                say("warn", __("{0} already scanned", [barcode]));
+                return;
+            }
+            in_flight.add(key);
+            $inp.prop("disabled", true);
+            frappe.call({
+                method: "ch_pos.api.pos_api.scan_for_stock_transfer",
+                args:   { barcode, from_warehouse: info.from_warehouse },
+                callback: (res) => {
+                    in_flight.delete(key);
+                    $inp.prop("disabled", false).val("").trigger("focus");
+                    const out = res && res.message;
+                    if (!out || !out.ok) {
+                        say("error", (out && out.message) || __("Scan failed"));
+                        return;
+                    }
+                    const serial = String(out.serial_no || "").trim();
+                    if (lines.some(l => l.scanned.includes(serial))) {
+                        say("warn", __("{0} already scanned", [serial]));
+                        return;
+                    }
+                    const on_transfer = lines.filter(l => l.serialized && l.item_code === out.item_code);
+                    if (!on_transfer.length) {
+                        say("error", __("{0} is {1} — that item is not on this transfer",
+                            [serial, out.item_name || out.item_code]));
+                        return;
+                    }
+                    const line = on_transfer.find(l => l.scanned.length < l.qty);
+                    if (!line) {
+                        say("error", __("All {0} of {1} are already scanned",
+                            [on_transfer[0].qty, on_transfer[0].item_name]));
+                        return;
+                    }
+                    line.scanned.push(serial);
+                    say("ok", __("{0} added", [serial]));
+                    draw();
+                },
+                error: () => {
+                    in_flight.delete(key);
+                    $inp.prop("disabled", false).trigger("focus");
+                    say("error", __("Scan failed — try again"));
+                },
+            });
+        });
+
+        $lines.on("click", ".ch-st-unscan", (e) => {
+            e.preventDefault();
+            const $a   = $(e.currentTarget);
+            const line = lines[parseInt($a.data("idx"), 10)];
+            if (!line) return;
+            const serial = String($a.data("serial"));
+            line.scanned = line.scanned.filter(s => String(s) !== serial);
+            draw();
+        });
+
+        draw();
+        dialog.show();
+        setTimeout(() => $scan.find(".ch-st-challan-scan").trigger("focus"), 200);
+    }
+
+    /** The ID shown for a transfer: its Delivery Challan, or its own number
+     *  while no challan has been raised for it yet. */
+    _shown_id(se_name) {
+        return (this._challan_of && this._challan_of[se_name]) || se_name;
+    }
+
     _show_item_list_popup(se_name) {
         frappe.call({
             method: "ch_pos.api.pos_api.get_stock_transfer_items",
@@ -669,7 +946,7 @@ export class StockTransferWorkspace {
                            ${__("No items found")}</td></tr>`;
 
                 const dialog = new frappe.ui.Dialog({
-                    title: __("Items in {0}", [se_name]),
+                    title: __("Items in {0}", [this._shown_id(se_name)]),
                     fields: [{
                         fieldtype: "HTML",
                         fieldname: "items_html",
@@ -803,7 +1080,7 @@ export class StockTransferWorkspace {
         };
 
         const d = new frappe.ui.Dialog({
-            title: __("Pack Box — {0}", [se_name]),
+            title: __("Pack Box — {0}", [this._shown_id(se_name)]),
             fields: [
                 {
                     fieldname: "packed_qty", fieldtype: "Int", label: __("Packed Qty"), reqd: 1,
@@ -877,7 +1154,7 @@ export class StockTransferWorkspace {
                     if (remaining_total <= 0) {
                         frappe.show_alert({
                             message: __("{0} fully packed across {1} box(es).",
-                                [se_name, boxes_this_session.length]),
+                                [this._shown_id(se_name), boxes_this_session.length]),
                             indicator: "green",
                         }, 6);
                         d.hide();
@@ -1092,24 +1369,47 @@ export class StockTransferWorkspace {
                     <div class="ch-st-wh-alert" style="display:none">
                         <i class="fa fa-exclamation-triangle"></i>
                         <span class="ch-st-wh-alert-msg">
-                            ${__("Pick source and destination warehouses to begin scanning")}
+                            ${__("Pick source and destination warehouses to add items")}
                         </span>
                     </div>
 
-                    <div class="ch-st-scan-row">
-                        <i class="fa fa-barcode ch-st-scan-icon"></i>
-                        <input type="text"
-                               class="form-control ch-st-scan-input"
-                               placeholder="${__("Scan or type IMEI / Serial and press Enter")}"
-                               autocomplete="off"
-                               inputmode="text"
-                               spellcheck="false">
-                        <div class="ch-st-scan-feedback"
-                             aria-live="polite"></div>
-                        <div class="ch-st-scan-hint">
-                            <i class="fa fa-info-circle"></i>
-                            ${__("Each scan is tracked end-to-end in IMEI Tracker")}
+                    <div class="ch-st-pick-row"
+                         style="display:grid;grid-template-columns:1fr 120px auto;
+                                gap:10px;align-items:end;margin-bottom:6px">
+                        <div style="position:relative">
+                            <label class="ch-st-label">
+                                ${__("Item Name")}
+                                <span class="ch-st-req">*</span>
+                            </label>
+                            <input type="text"
+                                   class="form-control ch-st-item-search"
+                                   placeholder="${__("Type an item name or code")}"
+                                   autocomplete="off" spellcheck="false">
+                            <div class="ch-st-item-results"
+                                 style="display:none;position:absolute;z-index:20;
+                                        left:0;right:0;top:100%;max-height:260px;
+                                        overflow:auto;background:var(--pos-surface,#fff);
+                                        border:1px solid var(--pos-border-light,#e5e7eb);
+                                        border-radius:var(--pos-radius-sm);
+                                        box-shadow:0 8px 24px rgba(0,0,0,.12)"></div>
                         </div>
+                        <div>
+                            <label class="ch-st-label">
+                                ${__("Quantity")}
+                                <span class="ch-st-req">*</span>
+                            </label>
+                            <input type="number" min="0" step="1" value="0"
+                                   class="form-control ch-st-item-qty">
+                        </div>
+                        <button class="btn btn-primary ch-st-add-item"
+                                style="border-radius:var(--pos-radius-sm);height:36px">
+                            <i class="fa fa-plus"></i> ${__("Add")}
+                        </button>
+                    </div>
+                    <div class="ch-st-scan-feedback" aria-live="polite"></div>
+                    <div class="ch-st-scan-hint" style="margin-bottom:10px">
+                        <i class="fa fa-info-circle"></i>
+                        ${__("IMEIs are scanned later, when the approved transfer is sent out")}
                     </div>
 
                     <div class="ch-st-counter-strip">
@@ -1121,77 +1421,9 @@ export class StockTransferWorkspace {
                             <span class="ch-st-counter-label">${__("Total Qty")}</span>
                             <span class="ch-st-counter-value ch-st-c-qty">0</span>
                         </div>
-                        <div class="ch-st-counter">
-                            <span class="ch-st-counter-label">${__("Scanned Serials")}</span>
-                            <span class="ch-st-counter-value ch-st-c-serials">0</span>
-                        </div>
                     </div>
 
                     <div class="ch-st-items-table"></div>
-
-                    <div class="ch-st-courier-section"
-                         style="display:none;margin-top:16px;padding-top:14px;
-                                border-top:1px solid var(--pos-border-light)">
-                        <div style="font-weight:700;font-size:var(--pos-fs-sm);
-                                    margin-bottom:10px;
-                                    color:var(--pos-text-secondary)">
-                            <i class="fa fa-truck"></i>
-                            ${__("Courier Hand-over")}
-                        </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;
-                                    gap:10px;margin-bottom:10px">
-                            <div>
-                                <label style="font-size:var(--pos-fs-2xs);
-                                              font-weight:600;
-                                              color:var(--pos-text-muted)">
-                                    ${__("Courier / Agent Name")}
-                                </label>
-                                <input type="text"
-                                       class="form-control ch-st-courier-name"
-                                       placeholder="${__("e.g. BlueDart, Delhivery")}"
-                                       style="border-radius:var(--pos-radius-sm);
-                                              height:36px">
-                            </div>
-                            <div>
-                                <label style="font-size:var(--pos-fs-2xs);
-                                              font-weight:600;
-                                              color:var(--pos-text-muted)">
-                                    ${__("Tracking / AWB No")}
-                                </label>
-                                <input type="text"
-                                       class="form-control ch-st-courier-tracking"
-                                       placeholder="${__("Tracking number")}"
-                                       style="border-radius:var(--pos-radius-sm);
-                                              height:36px">
-                            </div>
-                        </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;
-                                    gap:10px">
-                            <div>
-                                <label style="font-size:var(--pos-fs-2xs);
-                                              font-weight:600;
-                                              color:var(--pos-text-muted)">
-                                    ${__("Expected Delivery Date")}
-                                </label>
-                                <input type="date"
-                                       class="form-control ch-st-delivery-date"
-                                       style="border-radius:var(--pos-radius-sm);
-                                              height:36px">
-                            </div>
-                            <div>
-                                <label style="font-size:var(--pos-fs-2xs);
-                                              font-weight:600;
-                                              color:var(--pos-text-muted)">
-                                    ${__("Handover Notes")}
-                                </label>
-                                <input type="text"
-                                       class="form-control ch-st-handover-notes"
-                                       placeholder="${__("Special instructions…")}"
-                                       style="border-radius:var(--pos-radius-sm);
-                                              height:36px">
-                            </div>
-                        </div>
-                    </div>
 
                     <div class="ch-st-new-actions"
                          style="display:none;text-align:right;padding-top:12px;
@@ -1210,7 +1442,7 @@ export class StockTransferWorkspace {
         // ── Wire up controls ────────────────────────────────────────────────
         const source_wh = this._init_from_wh_field(body);
         this._load_target_warehouses(panel, body, source_wh);
-        this._bind_scanner(panel, body);
+        this._bind_item_picker(panel, body);
         this._bind_item_actions(panel, body);
 
         // Reload target list if source changes (rare — usually locked)
@@ -1228,7 +1460,7 @@ export class StockTransferWorkspace {
 
         this._render_transfer_items(body);
         setTimeout(
-            () => body.find(".ch-st-scan-input").trigger("focus"),
+            () => body.find(".ch-st-item-search").trigger("focus"),
             150
         );
     }
@@ -1583,116 +1815,117 @@ export class StockTransferWorkspace {
     // Scanner
     // ════════════════════════════════════════════════════════════════════════
 
-    _bind_scanner(panel, body) {
-        body.on(
-            "keydown.chStockTransferNew",
-            ".ch-st-scan-input",
-            (e) => {
-                if (e.key !== "Enter") return;
-                e.preventDefault();
+    // A transfer is asked for by item and quantity. Which devices go is
+    // settled when the approved request is sent out (Create Delivery
+    // Challan on the Outgoing card), so nothing is scanned here.
+    _bind_item_picker(panel, body) {
+        const esc = s => frappe.utils.escape_html(s || "");
+        let picked = null;
+        let timer  = null;
+        this._pick_options = {};
 
-                const $inp    = $(e.currentTarget);
-                const barcode = ($inp.val() || "").trim();
-                if (!barcode) return;
+        const source = () => this.from_wh_field && this.from_wh_field.get_value();
+        const warehouses_ok = () => {
+            const from_wh = source();
+            const to_wh   = this.to_wh_field && this.to_wh_field.get_value();
+            return from_wh && to_wh && from_wh !== to_wh;
+        };
 
-                const from_wh = this.from_wh_field
-                    && this.from_wh_field.get_value();
-                const to_wh   = this.to_wh_field
-                    && this.to_wh_field.get_value();
+        const search = () => {
+            const from_wh = source();
+            if (!from_wh) return;
+            const txt = (body.find(".ch-st-item-search").val() || "").trim();
+            frappe.call({
+                method: "ch_pos.api.pos_api.search_transfer_items",
+                args:   { from_warehouse: from_wh, txt },
+                callback: (r) => {
+                    const rows = (r && r.message) || [];
+                    this._pick_options = {};
+                    rows.forEach((row) => { this._pick_options[row.item_code] = row; });
+                    body.find(".ch-st-item-results").html(rows.length
+                        ? rows.map(row => `
+                            <div class="ch-st-item-option"
+                                 data-item="${esc(row.item_code)}"
+                                 style="padding:8px 12px;cursor:pointer;
+                                        border-bottom:1px solid var(--pos-border-light,#f1f5f9)">
+                                <div style="font-weight:600">${esc(row.item_name)}</div>
+                                <div style="font-size:11px;color:var(--pos-text-muted)">
+                                    ${esc(row.item_code)} · ${__("In stock: {0}", [flt(row.available)])}
+                                </div>
+                            </div>`).join("")
+                        : `<div style="padding:10px 12px;color:var(--pos-text-muted)">
+                               ${__("Nothing in stock here matches")}</div>`
+                    ).show();
+                },
+            });
+        };
 
-                if (!from_wh || !to_wh || from_wh === to_wh) {
-                    this._scan_feedback(
-                        body, "error",
-                        __("Pick valid source and destination warehouses first")
-                    );
-                    return;
-                }
+        body.on("input.chStockTransferNew focus.chStockTransferNew",
+            ".ch-st-item-search", () => {
+                picked = null;
+                clearTimeout(timer);
+                timer = setTimeout(search, 220);
+            });
+        body.on("blur.chStockTransferNew", ".ch-st-item-search", () => {
+            setTimeout(() => body.find(".ch-st-item-results").hide(), 180);
+        });
+        // mousedown, not click: the list closes on the input's blur.
+        body.on("mousedown.chStockTransferNew", ".ch-st-item-option", (e) => {
+            e.preventDefault();
+            picked = this._pick_options[String($(e.currentTarget).data("item"))] || null;
+            if (!picked) return;
+            body.find(".ch-st-item-search").val(picked.item_name);
+            body.find(".ch-st-item-results").hide();
+            body.find(".ch-st-item-qty").trigger("focus").trigger("select");
+        });
 
-                const scan_key = barcode.toLowerCase();
-                const already  = (this.transfer_items || []).some(r =>
-                    (r.serial_nos || []).some(
-                        s => String(s).trim().toLowerCase() === scan_key
-                    )
-                );
-                if (already
-                    || this._transfer_scans_in_flight.has(scan_key)) {
-                    $inp.val("");
-                    this._scan_feedback(
-                        body, "warn",
-                        __("{0} already scanned", [barcode])
-                    );
-                    return;
-                }
-
-                this._transfer_scans_in_flight.add(scan_key);
-                $inp.prop("disabled", true);
-
-                frappe.call({
-                    method: "ch_pos.api.pos_api.scan_for_stock_transfer",
-                    args:   { barcode, from_warehouse: from_wh },
-                    callback: (r) => {
-                        this._transfer_scans_in_flight.delete(scan_key);
-                        $inp.prop("disabled", false)
-                            .val("")
-                            .trigger("focus");
-
-                        const res = r && r.message;
-                        if (!res || !res.ok) {
-                            this._scan_feedback(
-                                body, "error",
-                                (res && res.message) || __("Scan failed")
-                            );
-                            return;
-                        }
-
-                        const ret_sn  = String(res.serial_no || "").trim();
-                        const ret_key = ret_sn.toLowerCase();
-                        const exists  = (this.transfer_items || []).some(
-                            item => (item.serial_nos || []).some(
-                                s => String(s).trim().toLowerCase() === ret_key
-                            )
-                        );
-                        if (!ret_sn || exists) {
-                            this._scan_feedback(
-                                body, "warn",
-                                __("{0} already scanned",
-                                   [ret_sn || barcode])
-                            );
-                            return;
-                        }
-
-                        const line = this.transfer_items.find(
-                            x => x.item_code === res.item_code
-                        );
-                        if (line) {
-                            line.serial_nos.push(res.serial_no);
-                            line.qty = line.serial_nos.length;
-                        } else {
-                            this.transfer_items.push({
-                                item_code:  res.item_code,
-                                item_name:  res.item_name,
-                                uom:        res.uom || "Nos",
-                                qty:        1,
-                                serial_nos: [res.serial_no],
-                            });
-                        }
-                        this._scan_feedback(
-                            body, "ok",
-                            __("{0} added", [res.serial_no])
-                        );
-                        this._render_transfer_items(body);
-                    },
-                    error: () => {
-                        this._transfer_scans_in_flight.delete(scan_key);
-                        $inp.prop("disabled", false).trigger("focus");
-                        this._scan_feedback(
-                            body, "error",
-                            __("Scan failed — try again")
-                        );
-                    },
+        const add = () => {
+            if (!warehouses_ok()) {
+                this._scan_feedback(body, "error",
+                    __("Pick valid source and destination warehouses first"));
+                return;
+            }
+            if (!picked) {
+                this._scan_feedback(body, "error", __("Choose an item from the list"));
+                return;
+            }
+            const qty = parseInt(body.find(".ch-st-item-qty").val(), 10) || 0;
+            if (qty <= 0) {
+                this._scan_feedback(body, "error", __("Type the quantity to send"));
+                return;
+            }
+            const line     = this.transfer_items.find(x => x.item_code === picked.item_code);
+            const asked    = (line ? flt(line.qty) : 0) + qty;
+            const in_stock = flt(picked.available);
+            if (asked > in_stock) {
+                this._scan_feedback(body, "error",
+                    __("Only {0} in stock for {1}", [in_stock, picked.item_name]));
+                return;
+            }
+            if (line) {
+                line.qty = asked;
+            } else {
+                this.transfer_items.push({
+                    item_code: picked.item_code,
+                    item_name: picked.item_name,
+                    uom:       picked.uom || "Nos",
+                    qty,
+                    available: in_stock,
                 });
             }
-        );
+            this._scan_feedback(body, "ok", __("{0} × {1} added", [picked.item_name, qty]));
+            picked = null;
+            body.find(".ch-st-item-search").val("").trigger("focus");
+            body.find(".ch-st-item-qty").val(0);
+            this._render_transfer_items(body);
+        };
+
+        body.on("click.chStockTransferNew", ".ch-st-add-item", add);
+        body.on("keydown.chStockTransferNew", ".ch-st-item-qty", (e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            add();
+        });
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -1711,26 +1944,35 @@ export class StockTransferWorkspace {
             }
         );
         panel.on("st:removeline.chStockTransferNew", (e, idx) => {
-            this.transfer_items.splice(idx, 1);
-            this._render_transfer_items(body);
+            const line = this.transfer_items[idx];
+            if (!line) return;
+            frappe.confirm(
+                __("Are you sure you want to delete {0} from this transfer?",
+                    [frappe.utils.escape_html(line.item_name || line.item_code)]),
+                () => {
+                    // By item, not position: the list may have changed while
+                    // the question was on screen.
+                    this.transfer_items = this.transfer_items
+                        .filter(x => x.item_code !== line.item_code);
+                    this._render_transfer_items(body);
+                }
+            );
         });
 
-        body.on(
-            "click.chStockTransferNew",
-            ".ch-st-remove-serial",
-            (e) => {
-                const $btn   = $(e.currentTarget);
-                const idx    = parseInt($btn.data("idx"), 10);
-                const serial = String($btn.data("serial"));
-                const line   = this.transfer_items[idx];
-                if (!line) return;
-                line.serial_nos = (line.serial_nos || [])
-                    .filter(s => s !== serial);
-                line.qty = line.serial_nos.length;
-                if (line.qty === 0) this.transfer_items.splice(idx, 1);
-                this._render_transfer_items(body);
+        body.on("change.chStockTransferNew", ".ch-st-line-qty", (e) => {
+            const $inp = $(e.currentTarget);
+            const line = this.transfer_items[parseInt($inp.data("idx"), 10)];
+            if (!line) return;
+            let qty = parseInt($inp.val(), 10) || 0;
+            if (qty <= 0) qty = 1;
+            if (qty > flt(line.available)) {
+                qty = flt(line.available);
+                this._scan_feedback(body, "warn",
+                    __("Only {0} in stock for {1}", [qty, line.item_name]));
             }
-        );
+            line.qty = qty;
+            this._render_transfer_items(body);
+        });
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -1771,20 +2013,16 @@ export class StockTransferWorkspace {
     // ════════════════════════════════════════════════════════════════════════
 
     _render_transfer_items(container) {
-        const table          = container.find(".ch-st-items-table");
-        const actions        = container.find(".ch-st-new-actions");
-        const courier_section = container.find(".ch-st-courier-section");
-        const esc             = s => frappe.utils.escape_html(s || "");
+        const table   = container.find(".ch-st-items-table");
+        const actions = container.find(".ch-st-new-actions");
+        const esc     = s => frappe.utils.escape_html(s || "");
 
         const lines   = (this.transfer_items || []).length;
         const tot_qty = (this.transfer_items || [])
             .reduce((a, r) => a + (parseFloat(r.qty) || 0), 0);
-        const tot_sn  = (this.transfer_items || [])
-            .reduce((a, r) => a + ((r.serial_nos || []).length), 0);
 
         container.find(".ch-st-c-lines").text(lines);
         container.find(".ch-st-c-qty").text(tot_qty);
-        container.find(".ch-st-c-serials").text(tot_sn);
 
         if (!lines) {
             table.html(`
@@ -1794,61 +2032,31 @@ export class StockTransferWorkspace {
                         ${__("No items added yet")}
                     </div>
                     <div class="ch-st-empty-hint">
-                        ${__("Scan an IMEI / Serial above")}
+                        ${__("Choose an item and a quantity above")}
                     </div>
                 </div>
             `);
             actions.hide();
-            courier_section.hide();
             return;
         }
 
         actions.show();
-        courier_section.show();
 
-        const row_html = (r, idx) => {
-            const has_sn   = (r.serial_nos || []).length > 0;
-            const qty_cell = has_sn
-                ? `<div class="ch-st-qty-tracked">
-                       <i class="fa fa-link"></i> ${r.qty}
-                   </div>`
-                : `<strong>${r.qty}</strong>`;
-
-            const chips = (r.serial_nos || []).map(sn => `
-                <span class="ch-st-chip" title="${esc(sn)}">
-                    <i class="fa fa-barcode"></i>
-                    <span class="ch-st-chip-text">${esc(sn)}</span>
-                    <button class="ch-st-remove-serial"
-                            data-idx="${idx}"
-                            data-serial="${esc(sn)}"
-                            title="${__("Remove this serial")}">
-                        <i class="fa fa-times"></i>
-                    </button>
-                </span>
-            `).join("");
-
-            const chips_row = has_sn ? `
-                <tr class="ch-st-chips-row">
-                    <td colspan="4">
-                        <div class="ch-st-chips">${chips}</div>
-                    </td>
-                </tr>` : "";
-
-            return `
-                <tr class="ch-st-item-row
-                    ${has_sn ? " ch-st-item-row--tracked" : ""}">
+        const row_html = (r, idx) => `
+                <tr class="ch-st-item-row">
                     <td>
                         <div class="ch-st-item-name">${esc(r.item_name)}</div>
                         <div class="ch-st-item-code">
                             ${esc(r.item_code)}
-                            ${has_sn
-                                ? `· <span class="ch-st-track-tag">
-                                       ${__("IMEI-tracked")}
-                                   </span>`
-                                : ""}
+                            · ${__("In stock: {0}", [flt(r.available)])}
                         </div>
                     </td>
-                    <td class="text-center">${qty_cell}</td>
+                    <td class="text-center">
+                        <input type="number" min="1" step="1"
+                               class="form-control ch-st-line-qty"
+                               data-idx="${idx}" value="${flt(r.qty)}"
+                               style="width:80px;margin:0 auto;text-align:center;height:32px">
+                    </td>
                     <td class="text-center ch-st-uom">${esc(r.uom)}</td>
                     <td class="text-center">
                         <button class="btn btn-link text-danger
@@ -1858,16 +2066,14 @@ export class StockTransferWorkspace {
                             <i class="fa fa-trash-o"></i>
                         </button>
                     </td>
-                </tr>
-                ${chips_row}`;
-        };
+                </tr>`;
 
         table.html(`
             <table class="ch-st-table">
                 <thead><tr>
                     <th>${__("Item")}</th>
                     <th class="text-center"
-                        style="width:90px">${__("Qty")}</th>
+                        style="width:110px">${__("Qty")}</th>
                     <th class="text-center"
                         style="width:80px">${__("UOM")}</th>
                     <th style="width:48px"></th>
@@ -1926,30 +2132,15 @@ export class StockTransferWorkspace {
         }
         if (!(this.transfer_items || []).length) return;
 
-        const courier_name     = body.find(".ch-st-courier-name").val()     || "";
-        const courier_tracking = body.find(".ch-st-courier-tracking").val() || "";
-        const delivery_date    = body.find(".ch-st-delivery-date").val()    || "";
-        const handover_notes   = body.find(".ch-st-handover-notes").val()   || "";
-
-        const notes = [
-            handover_notes,
-            courier_name     ? `Courier: ${courier_name}`      : "",
-            courier_tracking ? `Tracking: ${courier_tracking}` : "",
-        ].filter(Boolean).join(" | ") || undefined;
-
         frappe.call({
-            method: "ch_pos.api.pos_api.create_store_transfer_request",
+            method: "ch_pos.api.pos_api.create_store_transfer",
             args: {
-                from_warehouse:         from_wh,
-                to_warehouse:           to_wh,
+                from_warehouse: from_wh,
+                to_warehouse:   to_wh,
                 items: this.transfer_items.map(r => ({
                     item_code: r.item_code,
                     qty:       r.qty,
-                    uom:       r.uom,
-                    serial_no: (r.serial_nos || []).join("\n"),
                 })),
-                notes,
-                expected_delivery_date: delivery_date || undefined,
             },
             freeze:         true,
             freeze_message: __("Submitting transfer request for approval…"),
@@ -1957,7 +2148,7 @@ export class StockTransferWorkspace {
                 if (!r.message) return;
                 frappe.show_alert({
                     message: __(
-                        "Transfer {0} submitted for approval",
+                        "Transfer Request {0} submitted for approval",
                         [r.message.name]
                     ),
                     indicator: "orange",
@@ -2031,7 +2222,7 @@ export class StockTransferWorkspace {
             recv_state.every(s => s.received >= s.qty);
 
         const dialog = new frappe.ui.Dialog({
-            title:  __("Scan & Receive — {0}", [se_name]),
+            title:  __("Scan & Receive — {0}", [this._shown_id(se_name)]),
             size:   "large",
             fields: [
                 {
@@ -2099,9 +2290,9 @@ export class StockTransferWorkspace {
                         frappe.show_alert({
                             message: r.message.partial
                                 ? __("Transfer {0} partially received",
-                                     [se_name])
+                                     [this._shown_id(se_name)])
                                 : __("Transfer {0} received in full",
-                                     [se_name]),
+                                     [this._shown_id(se_name)]),
                             indicator: "green",
                         });
                         this._load_tab(panel, "incoming");
