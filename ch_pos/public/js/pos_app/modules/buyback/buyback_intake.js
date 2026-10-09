@@ -378,19 +378,18 @@ export class BuybackIntake {
 	_html_imei_note() {
 		const o = this.data.imei_info;
 		if (!o) return "";
-		// A phone already in an open assessment cannot start another: said
-		// here, as the IMEI is entered, not at the end when it is saved.
-		if (o.active_assessment) {
-			return `<div class="ch-bbi-note stop">
-				<i class="fa fa-ban"></i>
-				<span>${esc(o.active_assessment.message)}</span></div>`;
-		}
+		// A phone may be assessed again while an earlier assessment is open;
+		// the executive is told, not stopped.
+		const open_one = o.active_assessment
+			? `<div class="ch-bbi-note warn"><i class="fa fa-exclamation-triangle"></i>
+				<span>${esc(o.active_assessment.message)}</span></div>`
+			: "";
 		if (o.origin === "external") {
 			return `<div class="ch-bbi-note ext">
 				<i class="fa fa-info-circle"></i>
-				<span>${__("Not sold by us — external device.")}</span></div>`;
+				<span>${__("Not sold by us — external device.")}</span></div>${open_one}`;
 		}
-		if (o.origin !== "ours") return "";
+		if (o.origin !== "ours") return open_one;
 		const bits = [];
 		if (o.last_sold_on) {
 			bits.push(__("Sold by us on {0}", [frappe.datetime.str_to_user(o.last_sold_on).split(" ")[0]]));
@@ -403,7 +402,7 @@ export class BuybackIntake {
 				<span>${__("Traded in before ({0}x) — status {1}", [o.buyback_count, o.buyback_status || "—"])}</span></div>`
 			: "";
 		return `<div class="ch-bbi-note ours"><i class="fa fa-check-circle"></i>
-			<span>${bits.join(" · ")}</span></div>${prior}`;
+			<span>${bits.join(" · ")}</span></div>${prior}${open_one}`;
 	}
 
 	/** A device with no Buyback Price Master cannot be quoted at all. The engine
@@ -852,10 +851,6 @@ export class BuybackIntake {
 			if (!d.item) return this._show_form_error(__("Select the device"));
 			if (!d.is_phone_dead && !d.imei_serial) {
 				return this._show_form_error(__("Enter the IMEI/serial, or check \"Phone does not switch on\""));
-			}
-			if (d.imei_serial && d.imei_info && d.imei_info.active_assessment
-					&& this._imei_looked_up === d.imei_serial.trim()) {
-				return this._show_form_error(d.imei_info.active_assessment.message);
 			}
 			if (!d.quotable) {
 				this._check_quotable();
