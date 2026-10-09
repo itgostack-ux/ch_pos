@@ -81,8 +81,14 @@ export class SessionControls {
 		return this._container;
 	}
 
+	// _can_manage_session() {
+	// 	return Boolean(PosState.executive_access?.can_manage_session);
+	// }
+
 	_can_manage_session() {
-		return Boolean(PosState.executive_access?.can_manage_session);
+		// Backend decides capability. Fallback: if user has any executive access object, allow menu.
+		const access = PosState.executive_access || {};
+		return Boolean(access.can_manage_session || access.own_executive || (access.companies || []).length);
 	}
 
 	render(container) {

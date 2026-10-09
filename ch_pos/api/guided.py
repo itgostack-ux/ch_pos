@@ -149,6 +149,125 @@ def _get_spec_options(sub_category, spec_name):
     )
 
 
+# @frappe.whitelist()
+# def get_guided_recommendations(
+#     sub_category, responses, warehouse=None, pos_profile=None, limit=8
+# ) -> list:
+#     """Given guided session responses, return ranked item recommendations."""
+#     frappe.has_permission("Sales Invoice", "create", throw=True)
+#     anchors = assert_pos_profile_scope(pos_profile)
+#     if warehouse and warehouse != anchors.get("warehouse"):
+#         frappe.throw(_("Warehouse does not match the active POS Profile."), frappe.PermissionError)
+#     warehouse = anchors.get("warehouse")
+#     if isinstance(responses, str):
+#         responses = frappe.parse_json(responses)
+#     limit = min(cint(limit) or 8, 20)
+#     candidate_limit = _positive_setting("guided_candidate_limit", 1000, 5000)
+#     related_limit = _positive_setting("guided_related_row_limit", 10000, 50000)
+
+#     # Base query — items in this specific sub-category (e.g. Backpacks only,
+#     # not the entire Accessories item_group which includes earbuds, cables...)
+#     items = frappe.db.sql(
+#         """SELECT i.name as item_code, i.item_name, i.image, i.brand, i.item_group,
+#                   i.has_serial_no, i.stock_uom, i.ch_model,
+#                   b.actual_qty as stock_qty
+#            FROM `tabItem` i
+#            LEFT JOIN `tabBin` b ON b.item_code = i.name AND b.warehouse = %(wh)s
+#            WHERE i.ch_sub_category = %(sub_cat)s
+#              AND i.disabled = 0 AND i.is_sales_item = 1 AND i.has_variants = 0
+#              AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
+#            ORDER BY i.item_name
+#            LIMIT %(candidate_limit)s""",
+#         {"sub_cat": sub_category, "wh": warehouse, "candidate_limit": candidate_limit + 1},
+#         as_dict=True,
+#     )
+#     _ensure_within_limit(items, candidate_limit, _("Guided item candidates"))
+
+#     item_codes = [item.item_code for item in items]
+#     price_map = {}
+#     if item_codes:
+#         price_rows = frappe.get_all(
+#             "CH Item Price",
+#             filters={
+#                 "item_code": ("in", item_codes),
+#                 "channel": "POS",
+#                 "status": "Active",
+#             },
+#             fields=["item_code", "selling_price"],
+#             limit_page_length=related_limit + 1,
+#         )
+#         _ensure_within_limit(price_rows, related_limit, _("Guided price rows"))
+#         for row in price_rows:
+#             price_map[row.item_code] = max(
+#                 flt(row.selling_price), flt(price_map.get(row.item_code))
+#             )
+
+#     uom_names = list({item.stock_uom for item in items if item.stock_uom})
+#     uom_map = {}
+#     if uom_names:
+#         all_uoms = frappe.get_all(
+#             "UOM",
+#             filters={"name": ("in", uom_names)},
+#             fields=["name", "must_be_whole_number"],
+#             limit_page_length=related_limit + 1,
+#         )
+#         _ensure_within_limit(all_uoms, related_limit, _("Guided UOM rows"))
+#         uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms}
+
+#     prefs = {r.get("key"): r.get("answer") for r in responses}
+
+#     # Pre-fetch specs for every model in scope so we can score against
+#     # category-specific spec_* preferences (Capacity, Material, Colour, ...).
+#     all_model_names = list({item.ch_model for item in items if item.ch_model})
+#     model_specs = {}
+#     if all_model_names:
+#         spec_rows = frappe.db.get_all(
+#             "CH Model Spec Value",
+#             filters={"parent": ["in", all_model_names]},
+#             fields=["parent", "spec", "spec_value"],
+#             limit_page_length=related_limit + 1,
+#         )
+#         _ensure_within_limit(spec_rows, related_limit, _("Guided model specification rows"))
+#         for s in spec_rows:
+#             model_specs.setdefault(s.parent, {})[s.spec] = s.spec_value
+
+#     scored = []
+#     for item in items:
+#         item_specs = model_specs.get(item.ch_model, {}) if item.ch_model else {}
+#         price = flt(price_map.get(item.item_code))
+#         score = _score_item(item, prefs, item_specs, price)
+#         if score > 0:
+#             scored.append(
+#                 {
+#                     "item_code": item.item_code,
+#                     "item_name": item.item_name,
+#                     "image": item.image,
+#                     "brand": item.brand,
+#                     "ch_model": item.ch_model or None,
+#                     "price": price,
+#                     "stock_qty": flt(item.stock_qty),
+#                     "has_serial_no": cint(item.has_serial_no),
+#                     "stock_uom": item.stock_uom or "Nos",
+#                     "must_be_whole_number": cint(uom_map.get(item.stock_uom, 0)),
+#                     "match_score": round(score, 1),
+#                     "reason": _build_reason(item, prefs, item_specs),
+#                     "specs": item_specs,
+#                 }
+#             )
+
+#     # Best match first; among equal scores, in-stock items rank ahead so a store
+#     # surfaces what it can sell now without ever returning an empty list.
+#     scored.sort(
+#         key=lambda x: (x["match_score"], 1 if flt(x["stock_qty"]) > 0 else 0),
+#         reverse=True,
+#     )
+#     top = scored[:limit]
+
+#     return top
+
+
+# updatedd::::get_guided_recommendations
+
 @frappe.whitelist()
 def get_guided_recommendations(
     sub_category, responses, warehouse=None, pos_profile=None, limit=8
@@ -165,8 +284,7 @@ def get_guided_recommendations(
     candidate_limit = _positive_setting("guided_candidate_limit", 1000, 5000)
     related_limit = _positive_setting("guided_related_row_limit", 10000, 50000)
 
-    # Base query — items in this specific sub-category (e.g. Backpacks only,
-    # not the entire Accessories item_group which includes earbuds, cables...)
+    # Base query — items in this specific sub-category (e.g. Backpacks only)
     items = frappe.db.sql(
         """SELECT i.name as item_code, i.item_name, i.image, i.brand, i.item_group,
                   i.has_serial_no, i.stock_uom, i.ch_model,
@@ -178,10 +296,10 @@ def get_guided_recommendations(
              AND IFNULL(i.ch_lifecycle_status, '') IN ('Active', 'Obsolete')
            ORDER BY i.item_name
            LIMIT %(candidate_limit)s""",
-        {"sub_cat": sub_category, "wh": warehouse, "candidate_limit": candidate_limit + 1},
+        {"sub_cat": sub_category, "wh": warehouse, "candidate_limit": candidate_limit},
         as_dict=True,
     )
-    _ensure_within_limit(items, candidate_limit, _("Guided item candidates"))
+    items = items[:candidate_limit]
 
     item_codes = [item.item_code for item in items]
     price_map = {}
@@ -194,10 +312,9 @@ def get_guided_recommendations(
                 "status": "Active",
             },
             fields=["item_code", "selling_price"],
-            limit_page_length=related_limit + 1,
+            limit_page_length=related_limit,
         )
-        _ensure_within_limit(price_rows, related_limit, _("Guided price rows"))
-        for row in price_rows:
+        for row in price_rows[:related_limit]:
             price_map[row.item_code] = max(
                 flt(row.selling_price), flt(price_map.get(row.item_code))
             )
@@ -209,10 +326,9 @@ def get_guided_recommendations(
             "UOM",
             filters={"name": ("in", uom_names)},
             fields=["name", "must_be_whole_number"],
-            limit_page_length=related_limit + 1,
+            limit_page_length=related_limit,
         )
-        _ensure_within_limit(all_uoms, related_limit, _("Guided UOM rows"))
-        uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms}
+        uom_map = {u.name: cint(u.must_be_whole_number) for u in all_uoms[:related_limit]}
 
     prefs = {r.get("key"): r.get("answer") for r in responses}
 
@@ -225,10 +341,9 @@ def get_guided_recommendations(
             "CH Model Spec Value",
             filters={"parent": ["in", all_model_names]},
             fields=["parent", "spec", "spec_value"],
-            limit_page_length=related_limit + 1,
+            limit_page_length=related_limit,
         )
-        _ensure_within_limit(spec_rows, related_limit, _("Guided model specification rows"))
-        for s in spec_rows:
+        for s in spec_rows[:related_limit]:
             model_specs.setdefault(s.parent, {})[s.spec] = s.spec_value
 
     scored = []

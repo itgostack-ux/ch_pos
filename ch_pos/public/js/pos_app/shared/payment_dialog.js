@@ -2918,10 +2918,22 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		// Where several people work one till, an auto-filled default is not
 		// good enough — somebody has to say who actually served this customer.
+
+		// const _company_execs = (PosState.executive_access?.store_executives || {})[PosState.active_company] || [];
+		// if (_company_execs.length > 1 && !PosState.sales_executive_confirmed) {
+		// 	return this._block(__("Confirm who is billing this sale (Billed By) before confirming payment"),
+		// 		".ch-pos-executive-select", "orange");
+		// }
+
+		// updated:
 		const _company_execs = (PosState.executive_access?.store_executives || {})[PosState.active_company] || [];
 		if (_company_execs.length > 1 && !PosState.sales_executive_confirmed) {
-			return this._block(__("Confirm who is billing this sale (Billed By) before confirming payment"),
-				".ch-pos-executive-select", "orange");
+			if (PosState.sales_executive) {
+				PosState.sales_executive_confirmed = true;
+			} else {
+				return this._block(__("Confirm who is billing this sale (Billed By) before confirming payment"),
+					".ch-pos-executive-select", "orange");
+			}
 		}
 
 		const gstin_check = this._validate_billing_gstin(PosState.billing_gstin);

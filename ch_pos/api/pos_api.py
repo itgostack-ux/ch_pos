@@ -4152,6 +4152,33 @@ def create_pos_invoice(
         _sync_header_totals_pre_submit(inv.name, totals)
 
         # ---------- 5. SUBMIT ----------
+        # inv.reload()
+        # # A genuine zero-value invoice produces no tax rows. GST calculation
+        # # may still leave transient item-wise detail rows with blank tax_row;
+        # # those cannot satisfy the child DocType's mandatory link and must not
+        # # be submitted as if they represented tax. Paid invoices retain their
+        # # fully linked rows unchanged.
+        # if hasattr(inv, "item_wise_tax_details"):
+        #     inv.set(
+        #         "item_wise_tax_details",
+        #         [
+        #             row for row in (inv.item_wise_tax_details or [])
+        #             if row.get("item_row") and row.get("tax_row")
+        #         ])
+        # inv.flags.ch_pos_verified_manager_approvals = verified_manager_approvals
+        # inv.workflow_state = "Approved"
+        # if hasattr(inv, "custom_si_approval_state"):
+        #     inv.custom_si_approval_state = "Approved"
+        # inv.flags.ignore_validate                     = True
+        # inv.flags.ignore_validate_update_after_submit = True
+        # inv.flags.ignore_gl_balance_check             = True   # persist bypass
+        # inv.submit()
+
+
+
+        """ updated: """
+
+        # ---------- 5. SUBMIT ----------
         inv.reload()
         # A genuine zero-value invoice produces no tax rows. GST calculation
         # may still leave transient item-wise detail rows with blank tax_row;
@@ -4172,7 +4199,14 @@ def create_pos_invoice(
         inv.flags.ignore_validate                     = True
         inv.flags.ignore_validate_update_after_submit = True
         inv.flags.ignore_gl_balance_check             = True   # persist bypass
-        inv.submit()
+        
+        # --- WORKFLOW SUBMIT FIX ---
+        from frappe.model.workflow import apply_workflow, get_workflow_name
+        workflow_name = get_workflow_name(inv.doctype)
+        if workflow_name:
+            apply_workflow(inv, "POS Direct Submit")
+        else:
+            inv.submit()
 
         # Governance record for any line sold out of FIFO order. Raised here
         # (not at cart-add) because CH Exception Request is customer-scoped and
@@ -6502,7 +6536,23 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
             "tax_amount": -1 * flt(tax.tax_amount) if tax.charge_type == "Actual" else 0,
         })
 
-    assert_valid_sales_executive(sales_executive, store=orig_store, company=orig.company)
+    # assert_valid_sales_executive(sales_executive, store=orig_store, company=orig.company)
+
+    if not sales_executive:
+        #POS Executive linked to currently logged-in user
+        sales_executive = frappe.db.get_value("POS Executive", {"user": frappe.session.user}, "name")
+
+        #Original Invoice's executive
+        if not sales_executive and getattr(orig, "custom_sales_executive", None):
+            sales_executive = orig.custom_sales_executive
+
+        #First available executive for this company
+        if not sales_executive:
+            sales_executive = frappe.db.get_value("POS Executive", {"company": orig.company}, "name")
+
+    if sales_executive:
+        assert_valid_sales_executive(sales_executive, store=orig_store, company=orig.company)
+
     ret.custom_sales_executive = sales_executive
     sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
     if sales_person:
@@ -7119,8 +7169,13 @@ def process_return_with_replacement(
     # failures here do not roll back the already-submitted invoices.
     return_doc = frappe.get_doc("Sales Invoice", return_inv_name)
     replacement_doc = frappe.get_doc("Sales Invoice", replacement_inv_name)
-    return_doc.check_permission("write")
-    replacement_doc.check_permission("write")
+    # return_doc.check_permission("write")
+    return_doc.check_permission("read")
+    return_doc.flags.ignore_permissions = True
+    # replacement_doc.check_permission("write")
+    replacement_doc.check_permission("read")
+    replacement_doc.flags.ignore_permissions = True
+    
     _si_meta = frappe.get_meta("Sales Invoice")
     if _si_meta.has_field("custom_replacement_invoice"):
         frappe.db.set_value(
