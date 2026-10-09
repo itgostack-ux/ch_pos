@@ -232,7 +232,9 @@ export class StockTransferWorkspace {
             const params = new URLSearchParams({
                 doctype: "Stock Entry",
                 name,
-                format: "CH Stock Entry Box Label",
+                // The 100x50 roll sticker, one page per box. The A4 sheet
+                // version (CH Stock Entry Box Label) is still installed.
+                format: "TSC Stock Entry Box Label 100x50",
                 trigger_print: "0",
                 _lang: frappe.boot.lang || "en",
             });
