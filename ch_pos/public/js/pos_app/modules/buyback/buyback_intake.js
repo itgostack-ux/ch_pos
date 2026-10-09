@@ -378,6 +378,13 @@ export class BuybackIntake {
 	_html_imei_note() {
 		const o = this.data.imei_info;
 		if (!o) return "";
+		// A phone already in an open assessment cannot start another: said
+		// here, as the IMEI is entered, not at the end when it is saved.
+		if (o.active_assessment) {
+			return `<div class="ch-bbi-note stop">
+				<i class="fa fa-ban"></i>
+				<span>${esc(o.active_assessment.message)}</span></div>`;
+		}
 		if (o.origin === "external") {
 			return `<div class="ch-bbi-note ext">
 				<i class="fa fa-info-circle"></i>
@@ -845,6 +852,10 @@ export class BuybackIntake {
 			if (!d.item) return this._show_form_error(__("Select the device"));
 			if (!d.is_phone_dead && !d.imei_serial) {
 				return this._show_form_error(__("Enter the IMEI/serial, or check \"Phone does not switch on\""));
+			}
+			if (d.imei_serial && d.imei_info && d.imei_info.active_assessment
+					&& this._imei_looked_up === d.imei_serial.trim()) {
+				return this._show_form_error(d.imei_info.active_assessment.message);
 			}
 			if (!d.quotable) {
 				this._check_quotable();
