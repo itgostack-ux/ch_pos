@@ -64,7 +64,12 @@ class TestStockTransferType(unittest.TestCase):
                 }
             ])
 
-    def test_workspace_guards_duplicate_scan_events_and_callbacks(self):
+    def test_workspace_guards_duplicate_events_and_item_picker(self):
+        # The New Transfer tab builds a transfer from an item picker + quantity
+        # (no IMEI scan step), so the guards are: event handlers are not bound
+        # twice, and the picker refuses no item, a zero quantity, and more
+        # than is in stock. The duplicate-serial check lives on the server
+        # (test_server_rejects_duplicate_serial_in_payload).
         source = (
             Path(frappe.get_app_path("ch_pos"))
             / "public/js/pos_app/modules/stock_transfer/stock_transfer_workspace.js"
@@ -73,7 +78,8 @@ class TestStockTransferType(unittest.TestCase):
             'panel.off(".chStockTransfer")',
             'body.off(".chStockTransferNew")',
             "this._transfer_scans_in_flight = new Set()",
-            "this._transfer_scans_in_flight.has(scan_key)",
-            "returned_already",
+            "Choose an item from the list",
+            "Type the quantity to send",
+            "Only {0} in stock for {1}",
         ):
             self.assertIn(marker, source)
