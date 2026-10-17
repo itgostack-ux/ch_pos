@@ -40,7 +40,7 @@ export class CartPanel {
 			<div class="ch-pos-executive-bar" style="display:none">
 				<div class="ch-pos-company-switcher"></div>
 				<div class="ch-pos-executive-select-wrapper">
-					<label class="ch-pos-exec-label"><i class="fa fa-id-badge"></i> ${__("Billed By")}</label>
+					<label class="ch-pos-exec-label"><i class="fa fa-id-badge"></i> ${__("Sales By")}</label>
 					<select class="form-control ch-pos-executive-select"></select>
 				</div>
 			</div>
@@ -137,7 +137,7 @@ export class CartPanel {
 					<span class="ch-held-count" style="display:none"></span>
 				</button>
 				<button class="btn btn-xs btn-default ch-pos-btn-reprint-cart" title="${__("Reprint today\'s invoices")}">
-					<i class="fa fa-print"></i> ${__("Reprint")}
+					<i class="fa fa-print"></i> ${__("Sales Invoice View")}
 				</button>
 				<button class="btn btn-xs btn-default ch-pos-btn-sell-vas" title="${__("Sell a Value Added Service — incl. for a phone bought elsewhere (external IMEI)")}">
 					<i class="fa fa-shield"></i> ${__("Sell VAS")}
@@ -199,13 +199,33 @@ export class CartPanel {
 				);
 				pill.on("click", () => {
 					PosState.sale_type = r.sale_type_name;
-					pills.find(".ch-pos-cart-saletype-btn").removeClass("active");
-					pill.addClass("active");
+					this._sync_sale_type_ui();
 					EventBus.emit("sale_type:changed", { sale_type: r.sale_type_name });
 				});
 				pills.append(pill);
 			}
+			this._sync_sale_type_ui();
 		});
+		this._sync_sale_type_ui();
+	}
+
+	/** Keep the Sale Type chips and PAY on PosState.sale_type, the value the
+	 *  pay check reads. The chips used to be coloured only when drawn, so a
+	 *  reset that cleared the value left DS lit while PAY refused "select a
+	 *  Sale Type". Now PAY stays disabled until a Sale Type is picked. */
+	_sync_sale_type_ui() {
+		const current = PosState.sale_type || "";
+		$(".ch-pos-cart-saletype-btn").each((_, el) => {
+			$(el).toggleClass("active", !!current && $(el).attr("data-name") === current);
+		});
+		// PAY waits for a customer and a Sale Type -- the payment screen
+		// refuses to open without either, so a live-looking button only misled.
+		const missing = [];
+		if (!PosState.customer) missing.push(__("a customer"));
+		if (!current) missing.push(__("a Sale Type"));
+		$(".ch-pos-btn-pay")
+			.prop("disabled", missing.length > 0)
+			.attr("title", missing.length ? __("Select {0} first", [missing.join(__(" and "))]) : "");
 	}
 
 	/** The Billed By bar, wherever it currently lives. Service Intake MOVES
@@ -261,29 +281,14 @@ export class CartPanel {
 
 		select.html(options);
 
-		// Default only to the cashier's OWN record — never to a stranger's.
-		// Picking execs[0] used to bill an arbitrary colleague whenever the
-		// signed-in user had no record of their own, which is precisely the
-		// misattribution Billed By exists to prevent. With no own-record match
-		// the field stays empty and checkout blocks until someone chooses.
+		// Sales By is never pre-filled -- not even with the cashier's own
+		// record. It opens on "Select who is billing" and stays there until
+		// someone picks who actually served the customer; a choice already made
+		// in this session is kept while it is still in the list.
 		if (!PosState.sales_executive || !execs.find((e) => e.name === PosState.sales_executive)) {
-			const comp_exec = (access.own_by_company || {})[company];
-			const own = comp_exec || access.own_executive;
-			const cashier = PosState.pos_cashier || frappe.session.user;
-			const own_match =
-				(own && execs.find((e) => e.name === own.name)) ||
-				execs.find((e) => e.user === cashier);
-
-			if (own_match) {
-				select.val(own_match.name);
-				PosState.sales_executive = own_match.name;
-				PosState.sales_executive_name = own_match.executive_name;
-			} else {
-				select.val("");
-				PosState.sales_executive = "";
-				PosState.sales_executive_name = "";
-			}
-			// An auto-filled default is a suggestion, not a confirmation.
+			select.val("");
+			PosState.sales_executive = "";
+			PosState.sales_executive_name = "";
 			PosState.sales_executive_confirmed = false;
 		}
 	}
@@ -1149,7 +1154,15 @@ export class CartPanel {
 			this.wrapper.find(".ch-pos-credit-warning").hide();
 			// Reset sale type to default
 			PosState.sale_type = null;
+			this._sync_sale_type_ui();
 		});
+
+		// Sale Type can change outside these chips (payment dialog pills, held
+		// bill resume, cart restore, pickup) -- follow it.
+		EventBus.on("sale_type:changed", () => this._sync_sale_type_ui());
+		EventBus.on("cart:updated", () => this._sync_sale_type_ui());
+		EventBus.on("customer:changed", () => this._sync_sale_type_ui());
+		EventBus.on("customer:set", () => setTimeout(() => this._sync_sale_type_ui(), 0));
 
 		// Re-render executive bar when access data arrives or company changes
 		EventBus.on("executive_access:loaded", () => this._render_executive_bar());

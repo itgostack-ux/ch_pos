@@ -47,7 +47,7 @@ export class ContextualToolbar {
 						<span>${__("In Stock")}</span>
 					</label>
 					<button class="btn btn-default ch-pos-btn-reprint" title="${__("Reprint today\'s invoices")}">
-						<i class="fa fa-print"></i> ${__("Reprint")}
+						<i class="fa fa-print"></i> ${__("Sales Invoice View")}
 					</button>
 					<button class="btn btn-default ch-pos-btn-redeem-gift" title="${__("Redeem a spin-wheel gift code")}">
 						<i class="fa fa-gift"></i> ${__("Redeem Gift")}

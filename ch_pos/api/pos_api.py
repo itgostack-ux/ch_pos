@@ -2031,6 +2031,37 @@ def _get_item_total_gst_rate(item_code, item_tax_template, fallback_rate):
     _GST_RATE_CACHE[cache_key] = rate
     return rate
 
+def _spread_header_discount(inv, discount):
+    """Lower each paid line's rate by its share of a bill-level ``discount``
+    (by line value; the last line takes the rounding remainder) and clear the
+    header discount, so ERPNext does not take it off a second time."""
+    rows = [
+        row for row in (inv.items or [])
+        if not cint(row.get("is_free_item")) and flt(row.rate) * flt(row.qty) > 0
+    ]
+    base = sum(flt(row.rate) * flt(row.qty) for row in rows)
+    if not rows or base <= 0:
+        return
+    discount = min(flt(discount, 2), flt(base, 2))
+    remaining = discount
+    for index, row in enumerate(rows):
+        qty = flt(row.qty) or 1.0
+        line = flt(row.rate) * qty
+        share = remaining if index == len(rows) - 1 else flt(discount * line / base, 2)
+        share = min(share, line)
+        remaining = flt(remaining - share, 2)
+        row.rate = flt((line - share) / qty, 2)
+        # The commercial-policy check (overrides.discount_control) judges a
+        # line at its price before this share: the bill discount was already
+        # authorised as a bill discount, not as a per-item price cut.
+        row.flags.ch_header_discount_per_unit = flt(share / qty, 6)
+        if flt(row.price_list_rate) > 0:
+            row.discount_amount = flt(max(0, flt(row.price_list_rate) - row.rate), 2)
+            row.discount_percentage = flt(row.discount_amount / flt(row.price_list_rate) * 100, 6)
+    inv.additional_discount_percentage = 0
+    inv.discount_amount = 0
+
+
 def _write_item_calculations(si_name):
     """Calculate inclusive item values from configured item and header tax rates."""
     if not frappe.db.exists("Sales Invoice", si_name):
@@ -4045,11 +4076,32 @@ def create_pos_invoice(
         inv.loyalty_points = cint(loyalty_points)
         inv.loyalty_amount = flt(loyalty_amount)
 
-    assert_valid_sales_executive(
-        sales_executive, store=profile_anchors.get("store"), company=profile.company
-    )
-    inv.custom_sales_executive = sales_executive
-    sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
+    # Billed By is a POS Executive, or -- with no POS Executive behind them --
+    # a Sales Person of this store (a salesman with no login) or a POS Promoter
+    # of this store (a brand promoter).
+    from ch_pos.pos_core.doctype.pos_executive.pos_executive import (
+        billed_by_promoter, billed_by_sales_person)
+    billed_sp = billed_by_sales_person(
+        sales_executive, store=profile_anchors.get("store"), company=profile.company)
+    billed_promoter = billed_by_promoter(
+        sales_executive, store=profile_anchors.get("store"), company=profile.company)
+    if billed_sp:
+        inv.custom_sales_executive = None
+        if inv.meta.has_field("custom_billed_by_sales_person"):
+            inv.custom_billed_by_sales_person = billed_sp
+        sales_person = billed_sp
+    elif billed_promoter:
+        # No Sales Person behind a promoter, so no Sales Team row.
+        inv.custom_sales_executive = None
+        if inv.meta.has_field("custom_billed_by_promoter"):
+            inv.custom_billed_by_promoter = billed_promoter
+        sales_person = None
+    else:
+        assert_valid_sales_executive(
+            sales_executive, store=profile_anchors.get("store"), company=profile.company
+        )
+        inv.custom_sales_executive = sales_executive
+        sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
     if sales_person:
         inv.append("sales_team", {
             "sales_person": sales_person,
@@ -4074,6 +4126,17 @@ def create_pos_invoice(
 
     if client_request_id:
         inv.custom_client_request_id = str(client_request_id)[:140]
+
+    # A bill-level discount (Discount %, amount, coupon, voucher, bank offer)
+    # is spread over the lines here and taken off the header, so the line
+    # amounts carry it. _write_item_calculations totals the lines alone, so a
+    # discount left on the header was never in the invoice total ("Payments
+    # do not add up"), and GST and income were booked on the undiscounted
+    # value.
+    header_discount = flt(requested_discount + promotion_discount, 2)
+    if header_discount > 0.005:
+        inv.flags.ch_header_discount_pct = additional_pct
+        _spread_header_discount(inv, header_discount)
 
     # ---------- 0b. Customer-advance allocation (down-payment clearing) ----
     allocated_advance_total = _allocate_customer_advances(
@@ -4119,18 +4182,22 @@ def create_pos_invoice(
             total_paid = sum(flt(p.amount) for p in inv.payments)
             # Advances reduce what the payment rows must carry — never
             # stuff the advance gap into a cash/card row as money that was
-            # never received.
-            expected_paid = round(rt) - flt(allocated_advance_total)
+            # never received. Redeemed loyalty does too: ERPNext settles it
+            # as loyalty_amount beside the payments (paid + loyalty = total),
+            # and the till already took it off the amount due.
+            redeemed_loyalty = flt(inv.loyalty_amount) if cint(inv.redeem_loyalty_points) else 0
+            expected_paid = round(rt) - flt(allocated_advance_total) - redeemed_loyalty
             rounding_diff = expected_paid - total_paid
 
             # A genuine rounding gap is < 1 currency unit. Anything larger
             # is a payment mismatch and must fail loudly, not be absorbed.
             if abs(rounding_diff) > 1.0:
                 frappe.throw(
-                    _("Payments {0} + advances {1} do not add up to the "
-                      "invoice total {2}.").format(
+                    _("Payments {0} + advances {1} + loyalty {2} do not add up to the "
+                      "invoice total {3}.").format(
                         fmt_money(total_paid),
                         fmt_money(allocated_advance_total),
+                        fmt_money(redeemed_loyalty),
                         fmt_money(rt)),
                     title=_("Payment Mismatch"))
 
@@ -4722,11 +4789,14 @@ def create_pos_invoice(
     incentive_total = 0
     incentive_warning = ""
     try:
-        incentive_total = _create_incentive_entries(
+        # POS incentive ledger is per POS Executive; a Sales Person bill earns
+        # through its Sales Team row instead, and a promoter earns none here.
+        no_executive = bool(billed_sp or billed_promoter)
+        incentive_total = 0 if no_executive else _create_incentive_entries(
             invoice=inv,
             pos_executive=sales_executive,
             transaction_type="Sale")
-        if _missing_incentive_setup(inv, sales_executive):
+        if not no_executive and _missing_incentive_setup(inv, sales_executive):
             incentive_warning = frappe._(
                 "Incentive setup missing for this executive/company. "
                 "Please configure active POS Incentive Slabs."
@@ -6502,6 +6572,8 @@ def create_pos_return(original_invoice, return_items, sales_executive=None,
             "tax_amount": -1 * flt(tax.tax_amount) if tax.charge_type == "Actual" else 0,
         })
 
+    # A Sales Person bills sales only; a return is handled by a POS Executive
+    # (assert_valid_sales_executive says so for an "SP:" value).
     assert_valid_sales_executive(sales_executive, store=orig_store, company=orig.company)
     ret.custom_sales_executive = sales_executive
     sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
@@ -13488,6 +13560,59 @@ def _get_executive_access(user, warehouse):
             "max_discount_pct": e.max_discount_pct,
         })
 
+    # Sales Persons of these stores join the Billed By list: a salesman with no
+    # login or POS Executive, set up on Sales Person with a Store (its company
+    # follows the store). Anyone already listed through a POS Executive at the
+    # store is not listed twice. Prefixed so the server can tell the two apart
+    # (pos_executive.billed_by_sales_person).
+    sp_meta = frappe.get_meta("Sales Person")
+    if stores and sp_meta.has_field("custom_store") and sp_meta.has_field("custom_company"):
+        from ch_pos.pos_core.doctype.pos_executive.pos_executive import SALES_PERSON_PREFIX
+        listed = {(e.store, e.sales_person) for e in all_execs if e.get("sales_person")}
+        for sp in frappe.get_all(
+            "Sales Person",
+            filters={"custom_store": ("in", stores), "enabled": 1, "is_group": 0},
+            fields=["name", "sales_person_name", "custom_store", "custom_company"],
+            order_by="sales_person_name asc",
+            limit_page_length=row_limit,
+        ):
+            if not sp.custom_company or sp.custom_company not in accessible_companies:
+                continue
+            if (sp.custom_store, sp.name) in listed:
+                continue
+            store_execs_by_company.setdefault(sp.custom_company, []).append({
+                "name": SALES_PERSON_PREFIX + sp.name,
+                "executive_name": sp.sales_person_name or sp.name,
+                "user": None,
+                "role": "Sales Person",
+                "can_give_discount": 0,
+                "max_discount_pct": 0,
+                "is_sales_person": 1,
+            })
+
+    # Brand promoters of these stores (POS Promoter) join the list the same
+    # way: no login or POS Executive, prefixed for billed_by_promoter.
+    if stores and frappe.db.table_exists("POS Promoter"):
+        from ch_pos.pos_core.doctype.pos_executive.pos_executive import PROMOTER_PREFIX
+        for pr in frappe.get_all(
+            "POS Promoter",
+            filters={"store": ("in", stores), "enabled": 1},
+            fields=["name", "promoter_name", "brand", "company"],
+            order_by="promoter_name asc",
+            limit_page_length=row_limit,
+        ):
+            if not pr.company or pr.company not in accessible_companies:
+                continue
+            store_execs_by_company.setdefault(pr.company, []).append({
+                "name": PROMOTER_PREFIX + pr.name,
+                "executive_name": pr.promoter_name + (f" ({pr.brand})" if pr.brand else ""),
+                "user": None,
+                "role": "Promoter",
+                "can_give_discount": 0,
+                "max_discount_pct": 0,
+                "is_promoter": 1,
+            })
+
     # Determine user's own executive records — one per company
     own_default = None
     own_by_company = {}
@@ -16589,7 +16714,121 @@ def _stamp_sales_invoice_print_metadata(rows, company=None):
         else:
             row["__print_format"] = "Custom Sales Invoice"
             row["__no_letterhead"] = 0
+    _stamp_billed_by(rows)
+    _stamp_invoice_view_totals(rows)
     return rows
+
+
+def _stamp_invoice_view_totals(rows):
+    """Sales Invoice View columns: sub type, the customer's phone / email, and
+    per-invoice sums of the line tax split (exempted, taxable, CGST, SGST,
+    IGST) plus the Sales Order(s) the lines came from. Exempted value is
+    stored per unit on the line, so it is multiplied by qty."""
+    names = [r.get("name") for r in rows if r.get("name")]
+    if not names:
+        return
+    item_cols = {c for c in frappe.db.get_table_columns("Sales Invoice Item")}
+    exempt = "ifnull(sii.custom_exempted_value, 0) * sii.qty" if "custom_exempted_value" in item_cols else "0"
+    taxable = "ifnull(sii.taxable_value, sii.net_amount)" if "taxable_value" in item_cols else "sii.net_amount"
+    tax = {k: (f"ifnull(sii.{k}, 0)" if k in item_cols else "0") for k in ("cgst_amount", "sgst_amount", "igst_amount")}
+    sums = {
+        r.parent: r for r in frappe.db.sql(f"""
+            select sii.parent,
+                   sum({exempt}) as total_exempted, sum({taxable}) as total_taxable,
+                   sum({tax['cgst_amount']}) as total_cgst, sum({tax['sgst_amount']}) as total_sgst,
+                   sum({tax['igst_amount']}) as total_igst,
+                   group_concat(distinct nullif(sii.sales_order, '') separator ', ') as order_ids
+              from `tabSales Invoice Item` sii
+             where sii.parent in %(names)s
+             group by sii.parent""", {"names": names}, as_dict=True)
+    }
+    head_fields = ["name", "customer", "contact_mobile", "contact_email"]
+    if frappe.get_meta("Sales Invoice").has_field("custom_ch_sale_sub_type"):
+        head_fields.append("custom_ch_sale_sub_type")
+    heads = {r.name: r for r in frappe.get_all(
+        "Sales Invoice", filters={"name": ("in", names)}, fields=head_fields)}
+    customers = list({h.customer for h in heads.values() if h.customer})
+    cust = {c.name: c for c in frappe.get_all(
+        "Customer", filters={"name": ("in", customers)}, fields=["name", "mobile_no", "email_id"])} if customers else {}
+    for row in rows:
+        h = heads.get(row.get("name")) or frappe._dict()
+        c = cust.get(h.get("customer")) or frappe._dict()
+        t = sums.get(row.get("name")) or frappe._dict()
+        row["sale_sub_type"] = h.get("custom_ch_sale_sub_type") or ""
+        row["phone"] = h.get("contact_mobile") or c.get("mobile_no") or ""
+        row["email"] = h.get("contact_email") or c.get("email_id") or ""
+        for key in ("total_exempted", "total_taxable", "total_cgst", "total_sgst", "total_igst"):
+            row[key] = flt(t.get(key), 2)
+        row["order_ids"] = t.get("order_ids") or ""
+
+
+@frappe.whitelist()
+def get_invoice_item_breakdown(invoice_name, pos_profile):
+    """Line-wise tax split of one POS invoice for the Sales Invoice View pop-up."""
+    anchors = assert_pos_profile_scope(pos_profile)
+    inv = frappe.db.get_value("Sales Invoice", invoice_name, ["name", "company", "pos_profile"], as_dict=True)
+    if not inv or inv.company != anchors.get("company") or inv.pos_profile != pos_profile:
+        frappe.throw(_("Invoice {0} is not from this POS.").format(invoice_name), frappe.PermissionError)
+    frappe.has_permission("Sales Invoice", "read", doc=invoice_name, throw=True)
+    item_cols = {c for c in frappe.db.get_table_columns("Sales Invoice Item")}
+    lines = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": invoice_name, "parenttype": "Sales Invoice"},
+        fields=["item_name", "item_code", "serial_no", "qty", "amount", "net_amount"]
+        + [c for c in ("custom_exempted_value", "taxable_value", "cgst_amount", "sgst_amount", "igst_amount") if c in item_cols],
+        order_by="idx asc")
+    out = []
+    for ln in lines:
+        out.append({
+            "item_name": ln.item_name or ln.item_code,
+            "serial_no": ", ".join(s.strip() for s in (ln.serial_no or "").split("\n") if s.strip()),
+            "qty": flt(ln.qty),
+            "exempted": flt(flt(ln.get("custom_exempted_value")) * flt(ln.qty), 2),
+            "taxable": flt(ln.get("taxable_value") if ln.get("taxable_value") is not None else ln.net_amount, 2),
+            "cgst": flt(ln.get("cgst_amount"), 2),
+            "sgst": flt(ln.get("sgst_amount"), 2),
+            "igst": flt(ln.get("igst_amount"), 2),
+            "total": flt(ln.amount, 2),
+        })
+    return out
+
+
+def _stamp_billed_by(rows):
+    """Add ``billed_by`` -- the person's name -- to Sales Invoice rows: the POS
+    Executive, or with none behind the bill, the Sales Person or Promoter."""
+    names = [r.get("name") for r in rows if r.get("name")]
+    if not names:
+        return
+    meta = frappe.get_meta("Sales Invoice")
+    fields = ["name"] + [f for f in ("custom_sales_executive", "custom_billed_by_sales_person",
+                                     "custom_billed_by_promoter") if meta.has_field(f)]
+    if len(fields) == 1:
+        return
+    inv = {r.name: r for r in frappe.get_all(
+        "Sales Invoice", filters={"name": ("in", names)}, fields=fields)}
+
+    def _labels(doctype, label_field, values):
+        values = list({v for v in values if v})
+        if not values or not frappe.db.table_exists(doctype):
+            return {}
+        return dict(frappe.get_all(doctype, filters={"name": ("in", values)},
+                                   fields=["name", label_field], as_list=True))
+
+    execs = _labels("POS Executive", "executive_name",
+                    [i.get("custom_sales_executive") for i in inv.values()])
+    sps = _labels("Sales Person", "sales_person_name",
+                  [i.get("custom_billed_by_sales_person") for i in inv.values()])
+    promoters = _labels("POS Promoter", "promoter_name",
+                        [i.get("custom_billed_by_promoter") for i in inv.values()])
+    for row in rows:
+        i = inv.get(row.get("name")) or {}
+        ex, sp, pr = (i.get("custom_sales_executive"), i.get("custom_billed_by_sales_person"),
+                      i.get("custom_billed_by_promoter"))
+        row["billed_by"] = (
+            (ex and (execs.get(ex) or ex))
+            or (sp and (sps.get(sp) or sp))
+            or (pr and (promoters.get(pr) or pr))
+            or "")
 
 
 @frappe.whitelist()
@@ -16654,8 +16893,10 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
                 pi.is_return,
                 pi.status,
                 pi.custom_ch_sale_type,
+                pi.total_qty,
                 GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
-                GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+                (SELECT GROUP_CONCAT(sii.item_name ORDER BY sii.idx SEPARATOR '\\n')
+                   FROM `tabSales Invoice Item` sii WHERE sii.parent = pi.name) AS items_summary
             FROM `tabSales Invoice` pi
             LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
@@ -16693,8 +16934,10 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
                 pi.is_return,
                 pi.status,
                 pi.custom_ch_sale_type,
+                pi.total_qty,
                 GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
-                GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+                (SELECT GROUP_CONCAT(sii.item_name ORDER BY sii.idx SEPARATOR '\\n')
+                   FROM `tabSales Invoice Item` sii WHERE sii.parent = pi.name) AS items_summary
             FROM `tabSales Invoice` pi
             LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
@@ -16723,8 +16966,10 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
             pi.is_return,
             pi.status,
             pi.custom_ch_sale_type,
+            pi.total_qty,
             GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
-            GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+            (SELECT GROUP_CONCAT(sii.item_name ORDER BY sii.idx SEPARATOR '\\n')
+                   FROM `tabSales Invoice Item` sii WHERE sii.parent = pi.name) AS items_summary
         FROM `tabSales Invoice` pi
         LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
@@ -16761,7 +17006,7 @@ def _get_prebooking_advance_receipts(
         NULL AS custom_ch_sale_type,
         pe.mode_of_payment,
         GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS linked_sales_orders,
-        GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS items_summary,
+        GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR '\\n') AS items_summary,
         'Payment Entry' AS __doctype,
         'Pre-Booking Advance Receipt' AS __print_format,
         1 AS __no_letterhead,
@@ -16854,13 +17099,14 @@ def _get_proforma_quotations(
         q.party_name AS customer,
         q.customer_name,
         q.grand_total,
+        q.total_qty,
         q.transaction_date AS posting_date,
         NULL AS posting_time,
         0 AS is_return,
         q.status,
         NULL AS custom_ch_sale_type,
         NULL AS mode_of_payment,
-        GROUP_CONCAT(qi.item_name ORDER BY qi.idx SEPARATOR ', ') AS items_summary,
+        GROUP_CONCAT(qi.item_name ORDER BY qi.idx SEPARATOR '\\n') AS items_summary,
         'Quotation' AS __doctype,
         'Proforma Invoice' AS __print_format
     """
@@ -17059,6 +17305,25 @@ def get_fifo_override_reasons(company=None) -> list:
     for row in rows:
         row["allowed"] = True if not cint(row.requires_approval) else can_approve
     return rows
+
+
+@frappe.whitelist()
+def get_exception_reasons_for_pos(exception_type, pos_profile=None) -> list:
+    """Reason dropdown feed for the POS exception form: the enabled CH Exception
+    Reason rows of ``exception_type`` (this company's and all-company rows), in
+    display order. An empty list means none are set up; the form then takes a
+    typed reason."""
+    if not exception_type or not frappe.db.exists("DocType", "CH Exception Reason"):
+        return []
+    company = assert_pos_profile_scope(pos_profile).get("company") if pos_profile else None
+    rows = frappe.get_all(
+        "CH Exception Reason",
+        filters={"enabled": 1, "exception_type": exception_type},
+        fields=["reason_name", "requires_remarks", "description", "company"],
+        order_by="sort_order asc, reason_name asc",
+        ignore_permissions=True)
+    # A blank company means every company.
+    return [r for r in rows if not r.company or not company or r.company == company]
 
 
 def _assert_fifo_override_allowed(reason, remarks, company=None):

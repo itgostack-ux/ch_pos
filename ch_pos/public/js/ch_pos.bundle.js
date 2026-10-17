@@ -308,13 +308,7 @@ ch_pos.PosApp = class PosApp {
 						PosState.active_company = chosen.company;
 						PosState.active_company_type = chosen.company_type || null;
 
-						// Default sales executive to own record for the chosen company
-						const comp_exec = (access.own_by_company || {})[chosen.company];
-						const own = comp_exec || access.own_executive;
-						if (own) {
-							PosState.sales_executive = own.name;
-							PosState.sales_executive_name = own.executive_name;
-						}
+						// Sales By is not pre-filled: it opens on "Select who is billing".
 					} else {
 						PosState.active_company = d.company;
 						PosState.active_company_type = null;

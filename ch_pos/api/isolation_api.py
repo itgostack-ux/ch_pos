@@ -138,12 +138,32 @@ def get_pos_context(all_companies=0) -> dict:
     frappe.has_permission("Sales Invoice", "read", throw=True)
     user = frappe.session.user
 
-    # Get user's POS Executive record (primary source of truth)
-    exec_record = frappe.db.get_value(
-        "POS Executive",
-        {"user": user, "is_active": 1},
-        ["name", "company", "store"],
-        as_dict=True)
+    # The company picked in the Desk switcher (top right). Switching it
+    # reloads the page, and the POS has to come back up for that company —
+    # its store, profile and executives — not for whichever one it had before.
+    # Only the user's own pick counts here: the site-wide default company is
+    # not a choice anyone made, and steering everyone who never touched the
+    # switcher to it would move them off the till they always open.
+    picked_company = _picked_company(user)
+    active_company = get_active_company(user)
+
+    # Get user's POS Executive record (primary source of truth). A person can
+    # hold one per company (GoFix and Bestbuy at the same shop); take the
+    # record for the active company, and only fall back to any record when
+    # they have none there.
+    exec_record = None
+    if picked_company:
+        exec_record = frappe.db.get_value(
+            "POS Executive",
+            {"user": user, "is_active": 1, "company": picked_company},
+            ["name", "company", "store"],
+            as_dict=True)
+    if not exec_record:
+        exec_record = frappe.db.get_value(
+            "POS Executive",
+            {"user": user, "is_active": 1},
+            ["name", "company", "store"],
+            as_dict=True)
 
     # System Managers / Administrators always get a store picker — UNLESS
     # they already have exactly one valid (today's business date, not
@@ -163,6 +183,11 @@ def get_pos_context(all_companies=0) -> dict:
             },
             fields=["name", "store", "pos_profile", "status", "opening_cash", "company", "device", "business_date"],
         )
+        # Resume only a session of the company picked in the Desk switcher;
+        # one open on the other company stays open, and the picker below
+        # offers this company's stores instead.
+        if picked_company and not cint(all_companies):
+            own_sessions = [s for s in own_sessions if s.company == picked_company]
         if len(own_sessions) == 1:
             session = own_sessions[0]
             return {
@@ -183,7 +208,7 @@ def get_pos_context(all_companies=0) -> dict:
                 },
             }
 
-        active_company = "" if cint(all_companies) else get_active_company(user)
+        active_company = "" if cint(all_companies) else active_company
         stores = _get_all_active_stores(company=active_company)
         # An active company with no stores of its own would strand the admin on
         # an empty picker, so fall back to the full list and say why.
@@ -338,6 +363,16 @@ def get_pos_context_for_store(store) -> dict:
         "existing_session": None,
         "admin_override": True,
     }
+
+
+def _picked_company(user) -> str:
+    """The company this user chose in the Desk switcher, or "" if they never
+    chose one (get_active_company falls back to the site-wide default)."""
+    return frappe.db.get_value(
+        "DefaultValue",
+        {"parent": user, "defkey": ("in", ["company", "Company"])},
+        "defvalue",
+    ) or ""
 
 
 def get_active_company(user=None) -> str:

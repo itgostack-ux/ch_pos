@@ -68,6 +68,8 @@ export class ExceptionWorkspace {
 		`);
 
 		this._bind(panel);
+		this._reasons = [];
+		this._render_reasons(panel);
 		this._apply_open_context(panel);
 		this._load_exception_types(panel);
 		this._load_my_requests(panel);
@@ -93,7 +95,12 @@ export class ExceptionWorkspace {
 				</div>
 				<div class="col-sm-6" style="margin-top:8px">
 					<label class="control-label">${__("Requested Value")}</label>
-					<input type="number" class="form-control ch-exc-requested" placeholder="Requested price / amount" step="any">
+					<input type="number" class="form-control ch-exc-requested" placeholder="${__("Amount to reduce, e.g. 500")}" step="any" min="0">
+				</div>
+				<div class="col-sm-6" style="margin-top:8px">
+					<label class="control-label">${__("After Exception")}</label>
+					<input type="text" class="form-control ch-exc-after" placeholder="${__("Original Value − Requested Value")}" readonly
+						style="font-weight:600">
 				</div>
 				<div class="col-sm-6" style="margin-top:8px">
 					<label class="control-label">${__("Serial / IMEI")}</label>
@@ -106,7 +113,12 @@ export class ExceptionWorkspace {
 				<div class="col-sm-12" style="margin-top:8px">
 					<div class="small text-muted ch-exc-context-display"
 						style="display:none;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:8px 10px;margin-bottom:8px"></div>
-					<label class="control-label">${__("Reason")} *</label>
+					<div class="ch-exc-reason-pick-wrap" style="display:none;margin-bottom:8px">
+						<label class="control-label">${__("Reason")} *</label>
+						<select class="form-control ch-exc-reason-pick"></select>
+						<div class="small text-muted ch-exc-reason-hint" style="margin-top:3px"></div>
+					</div>
+					<label class="control-label ch-exc-reason-label">${__("Reason")} *</label>
 					<textarea class="form-control ch-exc-reason" rows="2"
 						placeholder="${__("Why is this exception needed?")}"></textarea>
 				</div>
@@ -120,15 +132,16 @@ export class ExceptionWorkspace {
 	}
 
 	_bind(panel) {
+		// After Exception = Original Value − Requested Value, kept live.
+		panel.on("input change", ".ch-exc-requested, .ch-exc-original", () => this._update_after_exception(panel));
+
 		// Submit request
 		panel.on("click", ".ch-exc-submit", () => this._submit_request(panel));
 		panel.on("click", ".ch-exc-refresh", () => this._load_my_requests(panel));
 
-		// Detail view
-		panel.on("click", ".ch-exc-view", (e) => {
-			const name = $(e.currentTarget).data("name");
-			if (name) frappe.set_route("Form", "CH Exception Request", name);
-		});
+		// Reasons follow the exception type picked.
+		panel.on("change", ".ch-exc-type", () => this._load_reasons(panel));
+		panel.on("change", ".ch-exc-reason-pick", () => this._sync_reason_remarks(panel));
 
 		// Apply Approved exception to current cart and switch to Sell mode
 		// (Oracle Retail / SAP CAR pattern: surface the override directly in the
@@ -266,8 +279,8 @@ export class ExceptionWorkspace {
 		if (original_value > 0) original_input.val(original_value);
 		serial_input.val(ctx.serial_no || "");
 
-		const item_label = [ctx.item_name || "", ctx.item_code || ""].filter(Boolean).join(" (") + (ctx.item_name && ctx.item_code ? ")" : "");
-		if (item_label) item_display.text(item_label).show();
+		// The Item box already shows the item; nothing more to add under it.
+		item_display.hide().text("");
 
 		if (ctx.lock_serial) serial_input.prop("readonly", true);
 		if (ctx.lock_customer && this._customer_control?.$input) {
@@ -279,10 +292,7 @@ export class ExceptionWorkspace {
 				if (!resolved?.item_code) return;
 				this._set_item_prefill(resolved.item_code);
 				if (this._locked_form_context) this._locked_form_context.item_code = resolved.item_code;
-				const label = [resolved.item_name || ctx.item_name || "", resolved.item_code]
-					.filter(Boolean)
-					.join(" (") + ((resolved.item_name || ctx.item_name) ? ")" : "");
-				if (label) item_display.text(label).show();
+				item_display.hide().text("");
 			}).catch(() => {});
 		}
 
@@ -344,9 +354,53 @@ export class ExceptionWorkspace {
 
 	_submit_request(panel) {
 		const exception_type = panel.find(".ch-exc-type").val();
-		const reason = panel.find(".ch-exc-reason").val().trim();
-		const requested_value = parseFloat(panel.find(".ch-exc-requested").val()) || 0;
+		const remarks = panel.find(".ch-exc-reason").val().trim();
+		const picked = this._reasons?.length ? (panel.find(".ch-exc-reason-pick").val() || "") : "";
+		if (this._reasons?.length && !picked) {
+			frappe.show_alert({ message: __("Select a reason"), indicator: "orange" });
+			return;
+		}
+		const picked_row = (this._reasons || []).find((r) => r.reason_name === picked);
+		if (picked_row && cint(picked_row.requires_remarks) && !remarks) {
+			frappe.show_alert({ message: __("Remarks are required for this reason"), indicator: "orange" });
+			return;
+		}
+		const reason = picked ? (remarks ? `${picked} — ${remarks}` : picked) : remarks;
+		const requested_reduction = parseFloat(panel.find(".ch-exc-requested").val()) || 0;
 		const original_value = parseFloat(panel.find(".ch-exc-original").val()) || 0;
+		// The cashier types the reduction; the request carries the price after
+		// it (requested_value is a price everywhere downstream: approval, email,
+		// cart line rate). With no Original Value the typed value goes as is.
+		if (requested_reduction < 0) {
+			frappe.show_alert({ message: __("Requested Value cannot be negative"), indicator: "orange" });
+			return;
+		}
+		if (original_value > 0 && requested_reduction > original_value) {
+			frappe.show_alert({ message: __("Requested Value cannot be more than the Original Value"), indicator: "orange" });
+			return;
+		}
+		if (original_value > 0 && requested_reduction <= 0) {
+			// Nothing taken off: the price is what it already is.
+			frappe.msgprint({
+				title: __("No Exception Needed"),
+				message: __("Requested Value is 0, so the price stays ₹{0}. No exception is needed.", [format_number(original_value)]),
+				indicator: "orange",
+			});
+			return;
+		}
+		if (original_value > 0 && requested_reduction >= original_value && exception_type !== "Free Accessory") {
+			// The whole value taken off makes the item free -- that is a Free
+			// Accessory request, not a price reduction.
+			frappe.msgprint({
+				title: __("Item Would Be Free"),
+				message: __("Requested Value equals the Original Value (₹{0}), so the item would be free. Raise a Free Accessory exception instead.", [format_number(original_value)]),
+				indicator: "orange",
+			});
+			return;
+		}
+		const requested_value = original_value > 0
+			? flt(original_value - requested_reduction, 2)
+			: requested_reduction;
 		const locked_ctx = this._locked_form_context || null;
 		const serial_no = (locked_ctx?.serial_no || panel.find(".ch-exc-serial").val() || "").trim();
 		const item_code = (locked_ctx?.item_code || (this._item_control ? this._item_control.get_value() : "") || "").trim();
@@ -442,7 +496,9 @@ export class ExceptionWorkspace {
 			// Clear form
 			panel.find(".ch-exc-type").val("");
 			panel.find(".ch-exc-reason").val("");
-			panel.find(".ch-exc-requested, .ch-exc-original, .ch-exc-serial").val("");
+			this._reasons = [];
+			this._render_reasons(panel);
+			panel.find(".ch-exc-requested, .ch-exc-original, .ch-exc-serial, .ch-exc-after").val("");
 			panel.find(".ch-exc-item-display").hide().text("");
 			panel.find(".ch-exc-context-display").hide().text("");
 			if (this._item_control) this._item_control.set_value("");
@@ -506,7 +562,9 @@ export class ExceptionWorkspace {
 					<th>${__("ID")}</th>
 					<th>${__("Type")}</th>
 					<th>${__("Item")}</th>
-					<th style="text-align:right">${__("Requested")}</th>
+					<th style="text-align:right">${__("Original Value")}</th>
+					<th style="text-align:right">${__("Requested Value")}</th>
+					<th style="text-align:right">${__("After Exception")}</th>
 					<th>${__("Status")}</th>
 					<th>${__("Raised")}</th>
 					<th></th>
@@ -520,10 +578,10 @@ export class ExceptionWorkspace {
 				}[r.status] || "default";
 
 				html += `<tr>
-					<td><a class="ch-exc-view" data-name="${frappe.utils.escape_html(r.name)}" style="cursor:pointer;color:var(--primary)">${frappe.utils.escape_html(r.name)}</a></td>
+					<td style="font-weight:600;white-space:nowrap">${frappe.utils.escape_html(r.name)}</td>
 					<td>${frappe.utils.escape_html(r.exception_type || "")}</td>
 					<td>${frappe.utils.escape_html(r.item_code || "—")}</td>
-					<td style="text-align:right">${r.requested_value ? format_currency(r.requested_value) : "—"}</td>
+					${this._value_cells(r)}
 					<td><span class="badge badge-${status_cls}">${frappe.utils.escape_html(r.status || "")}</span></td>
 					<td>${r.raised_at ? frappe.datetime.prettyDate(r.raised_at) : "—"}</td>
 					<td>
@@ -539,6 +597,96 @@ export class ExceptionWorkspace {
 		});
 	}
 }
+
+// Reason dropdown: the CH Exception Reason rows of the chosen type. With none
+// set up for that type, the free-text box is the reason, as before.
+ExceptionWorkspace.prototype._load_reasons = function (panel) {
+	const exception_type = panel.find(".ch-exc-type").val();
+	this._reasons = [];
+	this._render_reasons(panel);
+	if (!exception_type) return;
+	frappe.xcall("ch_pos.api.pos_api.get_exception_reasons_for_pos", {
+		exception_type,
+		pos_profile: PosState.pos_profile || null,
+	}).then((rows) => {
+		if (panel.find(".ch-exc-type").val() !== exception_type) return;
+		this._reasons = rows || [];
+		this._render_reasons(panel);
+	}).catch(() => {});
+};
+
+ExceptionWorkspace.prototype._render_reasons = function (panel) {
+	const rows = this._reasons || [];
+	const $wrap = panel.find(".ch-exc-reason-pick-wrap");
+	const $pick = panel.find(".ch-exc-reason-pick");
+	// No type yet: show the dropdown, waiting for one.
+	if (!panel.find(".ch-exc-type").val()) {
+		$pick.prop("disabled", true).empty()
+			.append(`<option value="">${__("Select an exception type first")}</option>`);
+		panel.find(".ch-exc-reason-hint").text("");
+		$wrap.show();
+		panel.find(".ch-exc-reason-label").text(__("Remarks"));
+		panel.find(".ch-exc-reason").attr("placeholder", __("Optional details"));
+		return;
+	}
+	$pick.prop("disabled", false);
+	if (!rows.length) {
+		$wrap.hide();
+		$pick.empty();
+		panel.find(".ch-exc-reason-label").text(`${__("Reason")} *`);
+		panel.find(".ch-exc-reason").attr("placeholder", __("Why is this exception needed?"));
+		return;
+	}
+	$pick.empty().append(`<option value="">${__("Select reason...")}</option>`);
+	rows.forEach((r) => {
+		$pick.append(`<option value="${frappe.utils.escape_html(r.reason_name)}">${frappe.utils.escape_html(r.reason_name)}</option>`);
+	});
+	$wrap.show();
+	this._sync_reason_remarks(panel);
+};
+
+// Remarks are optional unless the chosen reason requires them ("Other").
+ExceptionWorkspace.prototype._sync_reason_remarks = function (panel) {
+	const picked = panel.find(".ch-exc-reason-pick").val() || "";
+	const row = (this._reasons || []).find((r) => r.reason_name === picked);
+	const required = row && cint(row.requires_remarks);
+	panel.find(".ch-exc-reason-hint").text(row?.description || "");
+	panel.find(".ch-exc-reason-label").text(required ? `${__("Remarks")} *` : __("Remarks"));
+	panel.find(".ch-exc-reason").attr("placeholder",
+		required ? __("Explain the reason") : __("Optional details"));
+};
+
+// After Exception (the price) from Original Value and the typed reduction.
+ExceptionWorkspace.prototype._update_after_exception = function (panel) {
+	const original = parseFloat(panel.find(".ch-exc-original").val()) || 0;
+	const raw = panel.find(".ch-exc-requested").val();
+	const reduction = parseFloat(raw) || 0;
+	const $after = panel.find(".ch-exc-after");
+	if (!original || raw === "" || raw == null) {
+		$after.val("").css("color", "");
+		return;
+	}
+	const after = flt(original - reduction, 2);
+	$after.val(format_number(after)).css("color", after < 0 ? "var(--red-600, #dc2626)" : "");
+};
+
+// Original / Requested (the reduction) / After Exception cells for a request.
+// requested_value is stored as the price after the exception; an approved
+// request's resolution_value is the price actually granted.
+ExceptionWorkspace.prototype._value_cells = function (r) {
+	const original = flt(r.original_value);
+	const approved = r.status === "Approved" || r.status === "Auto-Approved";
+	const has_resolution = r.resolution_value != null && r.resolution_value !== ""
+		&& (approved || flt(r.resolution_value) !== 0);
+	const after = has_resolution ? flt(r.resolution_value) : flt(r.requested_value);
+	const cell = (v) => `<td style="text-align:right;white-space:nowrap">${v}</td>`;
+	if (!original) {
+		return cell("—") + cell(r.requested_value ? format_currency(r.requested_value) : "—") + cell("—");
+	}
+	return cell(format_currency(original))
+		+ cell(format_currency(Math.max(0, original - after)))
+		+ cell(`<b>${format_currency(after)}</b>`);
+};
 
 // Exposed as instance method via prototype assignment so it can use PosState/EventBus.
 ExceptionWorkspace.prototype._is_appliable = function (r) {

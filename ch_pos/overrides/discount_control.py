@@ -62,7 +62,9 @@ def validate_pos_commercial_policy(doc, method=None):
 			frappe.log_error(frappe.get_traceback(), "POS exception request lookup failed")
 
 	for item in doc.items:
-		rate = flt(item.rate)
+		# A bill-level discount spread onto the line (pos_api._spread_header_discount)
+		# was authorised as a bill discount; judge the line at its price before it.
+		rate = flt(item.rate) + flt((item.flags or {}).get("ch_header_discount_per_unit"))
 		item_code = item.item_code
 		if not item_code or rate <= 0:
 			continue
@@ -220,14 +222,16 @@ def validate_pos_commercial_policy(doc, method=None):
 					title=_("Unauthorized Manager Override"))
 
 		# ── Below-margin check (#5): warn when selling below cost ─────
-		if rate > 0:
+		# On the actual selling price, bill discount included.
+		selling_rate = flt(item.rate)
+		if selling_rate > 0:
 			incoming = _get_item_valuation(item_code, item.warehouse or doc.set_warehouse)
-			if incoming and incoming > 0 and rate < incoming:
+			if incoming and incoming > 0 and selling_rate < incoming:
 				_log_exception_request(
 					exception_type="Below Margin Sale",
 					company=company,
-					reason=f"Selling at {rate} below cost {incoming}",
-					requested_value=flt(incoming - rate),
+					reason=f"Selling at {selling_rate} below cost {incoming}",
+					requested_value=flt(incoming - selling_rate),
 					original_value=incoming,
 					item_code=item_code,
 					serial_no=(item.serial_no or "").split("\n")[0] if item.serial_no else None,
@@ -239,13 +243,16 @@ def validate_pos_commercial_policy(doc, method=None):
 					approver=item.get("custom_manager_user"))
 
 	# ── Additional discount at document level ─────────────────────────
-	if flt(doc.additional_discount_percentage) > 0 or flt(doc.discount_amount) > 0:
+	# A POS bill discount is spread onto the lines before save; its
+	# percentage travels on doc.flags (pos_api._spread_header_discount).
+	header_pct = flt(doc.additional_discount_percentage) or flt(doc.flags.get("ch_header_discount_pct"))
+	if header_pct > 0 or flt(doc.discount_amount) > 0:
 		if policy:
 			max_pct = flt(policy.max_discount_without_approval)
-			if max_pct > 0 and flt(doc.additional_discount_percentage) > max_pct:
+			if max_pct > 0 and header_pct > max_pct:
 				frappe.throw(
 					_("Additional discount of {0}% exceeds maximum allowed {1}%").format(
-						doc.additional_discount_percentage, max_pct
+						header_pct, max_pct
 					),
 					title=_("Commercial Policy Violation"))
 
