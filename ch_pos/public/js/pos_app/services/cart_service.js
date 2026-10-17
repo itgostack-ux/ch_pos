@@ -298,6 +298,13 @@ export class CartService {
 				PosState.cart = PosState.cart.filter((row) => {
 					if (!row || !row.warranty_plan) return true;
 					if (!row.plan_type) {
+						// Sell VAS lines saved before plan_type was stored: the
+						// Sell VAS catalogue only offers VAS / Protection plans,
+						// so a line it flagged is_vas is one -- keep it.
+						if (row.is_vas && !row.is_warranty) {
+							row.plan_type = "Value Added Service";
+							return true;
+						}
 						unclassifiable += 1;
 						return false;
 					}
@@ -2738,9 +2745,28 @@ export class CartService {
 		// Catalog plans expose external_price/internal_price, while the direct
 		// service-item lookup exposes external_device_price/price. Preserve a
 		// configured numeric zero in either shape.
-		const authoritative_rate = external_intent
+		let authoritative_rate = external_intent
 			? flt(plan.external_price ?? plan.external_device_price ?? plan.price)
 			: flt(plan.internal_price ?? plan.price);
+		// A percentage plan is priced on the device it covers -- the one chosen
+		// here, when it is in this cart -- not the costliest device in the cart
+		// the catalogue was priced on. The server prices it the same way
+		// (free_sale_api.canonicalize_cart_items).
+		if (!external_intent && plan.pricing_mode === "Percentage of Device Price"
+				&& flt(plan.percentage_value) > 0) {
+			const devices = PosState.cart.filter((c) => !c.warranty_plan && flt(c.rate) > 0);
+			const serials = (c) => String(c.serial_no || "").split(/[\n,]/).map((x) => x.trim());
+			const by_serial = for_serial_no
+				? devices.find((c) => serials(c).includes(String(for_serial_no).trim()))
+				: null;
+			const by_item = devices.filter((c) => c.item_code === for_item_code);
+			const device_rate = by_serial
+				? flt(by_serial.rate)
+				: (by_item.length ? Math.max(...by_item.map((c) => flt(c.rate))) : 0);
+			if (device_rate > 0) {
+				authoritative_rate = Math.round(device_rate * flt(plan.percentage_value)) / 100;
+			}
+		}
 		dialog.hide();
 		PosState.cart.push({
 			item_code: plan.service_item || plan.name,
@@ -2760,8 +2786,11 @@ export class CartService {
 			customer_imei: external_intent ? for_serial_no : null,
 			external_device_model_item,
 			original_invoice,
-			is_warranty: false,
-			is_vas: true,
+			// Persisted so _restore_active_cart can re-derive the flags after a
+			// refresh; without it the restore dropped the line as unclassifiable.
+			plan_type: plan.plan_type || "Value Added Service",
+			is_warranty: ["Own Warranty", "Extended Warranty", "Post-Repair Warranty"].includes(plan.plan_type),
+			is_vas: !plan.plan_type || ["Value Added Service", "Protection Plan"].includes(plan.plan_type),
 		});
 		EventBus.emit("cart:updated");
 		frappe.show_alert({ message: __("{0} added", [plan.plan_name]), indicator: "green" });
@@ -2878,6 +2907,11 @@ export class CartService {
 				const data = {
 					note: note || (PosState.customer || __("Held Bill")),
 					customer: PosState.customer,
+					// Shown in the Held Bills list so the right bill can be found.
+					customer_name: (PosState.customer_info && PosState.customer_info.customer_name) || "",
+					customer_phone: (PosState.customer_info && PosState.customer_info.mobile_no) || "",
+					sales_executive: PosState.sales_executive || "",
+					sales_executive_name: PosState.sales_executive_name || "",
 					cart: JSON.parse(JSON.stringify(PosState.cart)),
 					additional_discount_pct: PosState.additional_discount_pct,
 					additional_discount_amt: PosState.additional_discount_amt,
@@ -2951,22 +2985,61 @@ export class CartService {
 			return;
 		}
 
+		// One detail card per held bill: who, what and when, then its items.
+		const esc = (v) => frappe.utils.escape_html(v == null ? "" : String(v));
 		const rows_html = bills.map((b, idx) => {
-			const items_count = (b.cart || []).length;
-			const total = (b.cart || []).reduce((s, c) => s + flt(c.qty) * flt(c.rate), 0);
-			const time_str = b.timestamp ? b.timestamp.split(" ")[1]?.substring(0, 5) : "";
+			const cart = b.cart || [];
+			const total = cart.reduce((s, c) => s + flt(c.qty) * flt(c.rate), 0);
+			const qty = cart.reduce((s, c) => s + flt(c.qty), 0);
+			const [date_part, time_part] = (b.timestamp || "").split(" ");
+			const when = `${date_part ? frappe.datetime.str_to_user(date_part) : ""} ${(time_part || "").substring(0, 5)}`.trim();
+			const name = b.customer_name || b.customer || __("Walk-in");
+			const meta = [
+				b.customer_phone ? `<i class="fa fa-phone"></i> ${esc(b.customer_phone)}` : "",
+				b.sales_executive_name ? `${__("Sales By")}: <b>${esc(b.sales_executive_name)}</b>` : "",
+				b.sale_type ? `${__("Sale Type")}: ${esc(b.sale_type)}` : "",
+				`<i class="fa fa-clock-o"></i> ${esc(when)}`,
+			].filter(Boolean).join(" &nbsp;·&nbsp; ");
+			const note = b.note && b.note !== b.customer && b.note !== name
+				? `<div style="font-size:12px;margin-top:2px"><i class="fa fa-sticky-note-o"></i> ${esc(b.note)}</div>` : "";
+			const td = "padding:5px 8px;border-top:1px solid var(--border-color);vertical-align:top";
+			const items = cart.map((c, i) => {
+				const serial = c.serial_no ? `<div class="text-muted" style="font-size:11px">${esc(String(c.serial_no).split("\n").join(", "))}</div>` : "";
+				return `<tr>
+					<td style="${td};width:28px;color:var(--text-muted)">${i + 1}</td>
+					<td style="${td}">${esc(c.item_name || c.item_code)}${serial}</td>
+					<td style="${td};text-align:right;white-space:nowrap">${format_number(flt(c.qty), null, 0)}</td>
+					<td style="${td};text-align:right;white-space:nowrap">₹${format_number(flt(c.qty) * flt(c.rate))}</td>
+				</tr>`;
+			}).join("");
+			const th = "padding:5px 8px;font-size:11px;text-transform:uppercase;color:var(--text-muted);text-align:left";
 			return `
-			<div class="ch-held-row" data-idx="${idx}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-color);cursor:pointer;transition:background .15s">
-				<div style="flex:1">
-					<div style="font-weight:600">${frappe.utils.escape_html(b.note || b.customer || __("Held Bill"))}</div>
-					<div class="text-muted" style="font-size:12px">${items_count} ${__("item(s)")} · ₹${format_number(total)} · ${frappe.utils.escape_html(time_str)}</div>
+			<div class="ch-held-row" data-idx="${idx}" style="padding:12px;border-bottom:6px solid var(--subtle-fg,#f1f5f9)">
+				<div style="display:flex;align-items:flex-start;gap:10px">
+					<div style="flex:1;min-width:0">
+						<div style="font-weight:700;font-size:14px">${esc(name)}</div>
+						<div class="text-muted" style="font-size:12px;margin-top:2px">${meta}</div>
+						${note}
+					</div>
+					<button class="btn btn-sm btn-success ch-held-retrieve" data-idx="${idx}" style="white-space:nowrap">
+						<i class="fa fa-play-circle"></i> ${__("Retrieve")}
+					</button>
+					<button class="btn btn-sm btn-default ch-held-discard" data-idx="${idx}" title="${__("Discard")}">
+						<i class="fa fa-trash"></i>
+					</button>
 				</div>
-				<button class="btn btn-xs btn-success ch-held-retrieve" data-idx="${idx}">
-					<i class="fa fa-play-circle"></i> ${__("Retrieve")}
-				</button>
-				<button class="btn btn-xs btn-default ch-held-discard" data-idx="${idx}" title="${__("Discard")}">
-					<i class="fa fa-trash"></i>
-				</button>
+				<table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px;border:1px solid var(--border-color);border-radius:6px">
+					<thead><tr>
+						<th style="${th}">#</th><th style="${th}">${__("Item Name")}</th>
+						<th style="${th};text-align:right">${__("Qty")}</th><th style="${th};text-align:right">${__("Amount")}</th>
+					</tr></thead>
+					<tbody>${items}</tbody>
+					<tfoot><tr>
+						<td style="${td};font-weight:700" colspan="2">${__("Total")} · ${cart.length} ${cart.length === 1 ? __("item") : __("items")}</td>
+						<td style="${td};text-align:right;font-weight:700">${format_number(qty, null, 0)}</td>
+						<td style="${td};text-align:right;font-weight:700;white-space:nowrap">₹${format_number(total)}</td>
+					</tr></tfoot>
+				</table>
 			</div>`;
 		}).join("");
 
@@ -2976,7 +3049,7 @@ export class CartService {
 				{
 					fieldname: "bills_html",
 					fieldtype: "HTML",
-					options: `<div class="ch-held-list" style="max-height:360px;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${rows_html}</div>`,
+					options: `<div class="ch-held-list" style="max-height:65vh;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${rows_html}</div>`,
 				},
 			],
 			size: "large",
@@ -3040,6 +3113,13 @@ export class CartService {
 		PosState.exchange_assessment = bill.exchange_assessment || null;
 		PosState.exchange_amount = bill.exchange_amount || 0;
 		PosState.sale_type = bill.sale_type || null;
+		// Sales By held with the bill (the cart bar drops it if no longer listed).
+		if (bill.sales_executive) {
+			PosState.sales_executive = bill.sales_executive;
+			PosState.sales_executive_name = bill.sales_executive_name || "";
+			PosState.sales_executive_confirmed = true;
+			$(".ch-pos-executive-select").val(bill.sales_executive);
+		}
 		// Restore payment state
 		PosState.is_credit_sale = bill.is_credit_sale || false;
 		PosState.is_free_sale = bill.is_free_sale || false;
@@ -3078,69 +3158,268 @@ export class CartService {
 			else if (phone) args.phone = phone;
 			else args.date = date;
 			frappe.xcall("ch_pos.api.pos_api.get_todays_invoices", args).then((invoices) => {
-				if (!invoices || !invoices.length) {
-					const noun = is_proforma ? __("proformas")
-						: (is_receipt ? __("advance receipts") : __("invoices"));
-					const msg = invoice_no
-						? __("No {0} found for this number", [noun])
-						: (phone ? __("No {0} found for this phone number", [noun])
-							: __("No {0} for this date", [noun]));
-					container.html(`<div class="text-center text-muted" style="padding:20px">${msg}</div>`);
-					return;
-				}
-				const rows = invoices.map(inv => {
-					const is_ret = inv.is_return ? `<span class="badge badge-warning">${__("Return")}</span>` : "";
-					const type_tag = is_proforma
-						? `<span class="badge badge-info">${__("Proforma")}</span>`
-						: (is_receipt
-							? `<span class="badge" style="background:#dbeafe;color:#1d4ed8;">${__("Advance Receipt")}</span>`
-							: "");
-					const sign = inv.is_return ? "-" : "";
-					const sale_type = frappe.utils.escape_html(inv.custom_ch_sale_type || "");
-					const mop = frappe.utils.escape_html(inv.mode_of_payment || "");
-					const customer = frappe.utils.escape_html(inv.customer_name || inv.customer || "");
-					const receipt_state = frappe.utils.escape_html(inv.receipt_state || "");
-					const receipt_badge = is_receipt
-						? `<span class="badge" style="background:${inv.__docstatus === 1 ? "#dcfce7" : "#fef3c7"};color:${inv.__docstatus === 1 ? "#166534" : "#92400e"};margin-left:6px;">${inv.__docstatus === 1 ? __("Receipt Final") : __("Receipt Draft")}</span>`
-						: "";
-					const meta_line = is_proforma
-						? `${__("Status")}: ${frappe.utils.escape_html(inv.status || "-")}`
-						: (is_receipt
-							? `${__("State")}: ${receipt_state || "-"} · ${__("MOP")}: ${mop || "-"} · ${__("Sales Order")}: ${frappe.utils.escape_html(inv.linked_sales_orders || "-")}`
-							: `${__("Sale Type")}: ${sale_type || "-"} · ${__("MOP")}: ${mop || "-"}`);
-					const dt = frappe.utils.escape_html(inv.__doctype || "Sales Invoice");
-					const fmt = frappe.utils.escape_html(inv.__print_format || "");
-					const no_letterhead = cint(inv.__no_letterhead || 0);
-					return `<div class="ch-reprint-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-color)">
-						<div style="flex:1">
-							<div style="font-weight:600">${frappe.utils.escape_html(inv.name)} ${type_tag} ${receipt_badge} ${is_ret}</div>
-							<div class="text-muted" style="font-size:12px">${customer} · ${sign}₹${format_number(flt(inv.grand_total))} · ${frappe.utils.escape_html(inv.posting_date || "")} ${frappe.utils.escape_html((inv.posting_time || "").substring(0, 5))}</div>
-							<div class="text-muted" style="font-size:11px">${meta_line}</div>
-							${inv.items_summary ? `<div class="text-muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">${frappe.utils.escape_html(inv.items_summary)}</div>` : ""}
-						</div>
-							<button class="btn btn-xs btn-default ch-reprint-btn"
-						        data-name="${frappe.utils.escape_html(inv.name)}"
-						        data-doctype="${dt}" data-format="${fmt}" data-no-letterhead="${no_letterhead}">
-							<i class="fa fa-print"></i> ${__("Print")}
-						</button>
-					</div>`;
-				}).join("");
-				container.html(`<div class="ch-reprint-list" style="max-height:380px;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${rows}</div>`);
+				last_loaded = { invoices: invoices || [], doc_type, date, phone, invoice_no };
+				refresh_billed_by_options();
+				render_invoice_list(container);
 			}).catch(() => {
 				container.html(`<div class="text-danger text-center" style="padding:12px">${__("Failed to load")}</div>`);
 			});
 		};
 
+		// Last fetched list; the Billed By filter narrows it without a refetch.
+		let last_loaded = null;
+		const billed_by_filter = () => (current_doc_type() === "Invoice" ? (dlg.get_value("billed_by") || "") : "");
+
+		const refresh_billed_by_options = () => {
+			const field = dlg.fields_dict.billed_by;
+			if (!field || !last_loaded) return;
+			const people = [...new Set(last_loaded.invoices.map((inv) => inv.billed_by).filter(Boolean))].sort();
+			const keep = people.includes(dlg.get_value("billed_by")) ? dlg.get_value("billed_by") : "";
+			field.df.options = [{ value: "", label: __("All") }, ...people.map((p) => ({ value: p, label: p }))];
+			field.refresh();
+			field.set_input(keep);
+		};
+
+		// Shared narrow-screen card layout for the list tables below.
+		const responsive_list_css = `<style>
+			@media (max-width: 900px) {
+				.ch-reprint-table thead { display: none; }
+				.ch-reprint-table, .ch-reprint-table tbody, .ch-reprint-table tfoot,
+				.ch-reprint-table tr, .ch-reprint-table td { display: block; width: 100%; }
+				.ch-reprint-table tr.ch-reprint-row { border-bottom: 6px solid var(--subtle-fg, #f1f5f9); padding: 4px 0; }
+				.ch-reprint-table td { display: flex !important; justify-content: space-between; align-items: flex-start;
+					gap: 12px; text-align: right !important; border-bottom: 0 !important; padding: 4px 12px !important; }
+				.ch-reprint-table td::before { content: attr(data-label); flex: 0 0 auto; text-align: left;
+					font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); padding-top: 2px; }
+				.ch-reprint-table td.ch-rp-action::before, .ch-reprint-table td.ch-rp-empty { display: none !important; }
+				.ch-reprint-table td.ch-rp-action .btn { width: 100%; padding: 8px; font-size: 13px; }
+				.ch-reprint-table tr.ch-rp-foot td { position: static !important; }
+			}
+		</style>`;
+
+		// Sales Invoice View: one row per invoice with its tax split; the
+		// invoice number opens the line-wise breakdown.
+		const render_sales_invoice_view = (container, invoices, who, esc) => {
+			const money = (v) => format_number(flt(v), null, 2);
+			const nowrap = (v) => `<span style="white-space:nowrap">${v}</span>`;
+			const signed = (inv, v) => (inv.is_return ? -1 : 1) * Math.abs(flt(v));
+			const num = (key) => (inv) => nowrap(`${inv.is_return ? "-" : ""}${money(inv[key])}`);
+			const cols = [
+				{ label: __("Date"), cell: (inv) => nowrap(esc(inv.posting_date ? frappe.datetime.str_to_user(inv.posting_date) : "")) },
+				{ label: __("Time"), cell: (inv) => nowrap(esc((inv.posting_time || "").substring(0, 5))) },
+				{ label: __("Invoice No"), cell: (inv) => `<a class="ch-inv-open" data-name="${esc(inv.name)}" style="font-weight:600;white-space:nowrap;cursor:pointer;color:var(--primary)">${esc(inv.name)}</a>${inv.is_return ? ` <span class="badge badge-warning">${__("Return")}</span>` : ""}` },
+				{ label: __("Sales Type"), cell: (inv) => nowrap(esc(inv.custom_ch_sale_type || "-")) },
+				// Only Finance (the finance partner) and Online sales carry a sub type.
+				{ label: __("Sub Sales Type"), cell: (inv) => {
+					const type = String(inv.custom_ch_sale_type || "").toLowerCase();
+					const has_sub = type.includes("finance") || type.includes("online") || type.includes("emi");
+					return has_sub ? nowrap(esc(inv.sale_sub_type || "-")) : "";
+				} },
+				{ label: __("Customer Name"), cell: (inv) => esc(inv.customer_name || inv.customer || "") },
+				{ label: __("Phone No"), cell: (inv) => nowrap(esc(inv.phone || "-")) },
+				{ label: __("Email Id"), cell: (inv) => esc(inv.email || "-") },
+				{ label: __("Billed Qty"), num: true, sum: "total_qty", cell: (inv) => `${inv.is_return ? "-" : ""}${format_number(Math.abs(flt(inv.total_qty)), null, 0)}` },
+				{ label: __("Total Exempted Amount"), num: true, sum: "total_exempted", cell: num("total_exempted") },
+				{ label: __("Total Taxable Amount"), num: true, sum: "total_taxable", cell: num("total_taxable") },
+				{ label: __("Total CGST"), num: true, sum: "total_cgst", cell: num("total_cgst") },
+				{ label: __("Total SGST"), num: true, sum: "total_sgst", cell: num("total_sgst") },
+				{ label: __("Total IGST"), num: true, sum: "total_igst", cell: num("total_igst") },
+				{ label: __("Total Invoice Amount"), num: true, sum: "grand_total", cell: (inv) => `<b>${num("grand_total")(inv)}</b>` },
+				{ label: __("Order Id"), cell: (inv) => nowrap(esc(inv.order_ids || "-")) },
+				{ label: __("Sales Man"), cell: (inv) => nowrap(esc(inv.billed_by || "-")) },
+				{ label: "", action: true, cell: (inv) => `<button class="btn btn-xs btn-default ch-reprint-btn" style="white-space:nowrap"
+					data-name="${esc(inv.name)}" data-doctype="${esc(inv.__doctype || "Sales Invoice")}" data-format="${esc(inv.__print_format || "")}"
+					data-no-letterhead="${cint(inv.__no_letterhead || 0)}"><i class="fa fa-print"></i>&nbsp;${__("Print")}</button>` },
+			];
+			const th = "padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--text-muted);background:var(--subtle-fg,#f8fafc);position:sticky;top:0;z-index:1;white-space:nowrap;border-bottom:1px solid var(--border-color)";
+			const td = "padding:8px 10px;vertical-align:middle;border-bottom:1px solid var(--border-color)";
+			const head = cols.map((c) => `<th style="${th};text-align:${c.num ? "right" : "left"}">${c.label}</th>`).join("");
+			const rows = invoices.map((inv) => `<tr class="ch-reprint-row">${cols.map((c) =>
+				`<td data-label="${esc(c.label)}" class="${c.action ? "ch-rp-action" : ""}" style="${td};text-align:${c.num || c.action ? "right" : "left"}">${c.cell(inv)}</td>`).join("")}</tr>`).join("");
+			const foot_style = "padding:8px 10px;font-weight:700;background:var(--subtle-fg,#f8fafc);position:sticky;bottom:0;border-top:2px solid var(--border-color);white-space:nowrap";
+			const first_num = cols.findIndex((c) => c.num);
+			const foot = `<tr class="ch-rp-foot"><td style="${foot_style}" colspan="${first_num}">${__("Total")} · ${invoices.length} ${invoices.length === 1 ? __("invoice") : __("invoices")}${who ? ` · ${esc(who)}` : ""}</td>`
+				+ cols.slice(first_num).map((c) => {
+					if (!c.sum) return `<td class="ch-rp-empty" style="${foot_style}"></td>`;
+					const total = invoices.reduce((t, inv) => t + signed(inv, inv[c.sum]), 0);
+					const shown = c.sum === "total_qty" ? format_number(total, null, 0) : money(total);
+					return `<td data-label="${esc(c.label)}" style="${foot_style};text-align:right">${shown}</td>`;
+				}).join("") + `</tr>`;
+			container.html(`${responsive_list_css}<div class="ch-reprint-list" style="max-height:60vh;overflow:auto;border:1px solid var(--border-color);border-radius:6px">
+				<table class="ch-reprint-table" style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody><tfoot>${foot}</tfoot></table>
+			</div>`);
+		};
+
+		// Invoice No pop-up: the invoice's lines with their tax split.
+		const show_invoice_breakdown = (invoice_name) => {
+			frappe.xcall("ch_pos.api.pos_api.get_invoice_item_breakdown", {
+				invoice_name, pos_profile: PosState.pos_profile,
+			}).then((lines) => {
+				const esc = (v) => frappe.utils.escape_html(v == null ? "" : String(v));
+				const money = (v) => format_number(flt(v), null, 2);
+				const keys = ["qty", "exempted", "taxable", "cgst", "sgst", "igst", "total"];
+				const tot = Object.fromEntries(keys.map((k) => [k, (lines || []).reduce((t, l) => t + flt(l[k]), 0)]));
+				const th = "padding:7px 9px;font-size:11px;text-transform:uppercase;color:var(--text-muted);background:var(--subtle-fg,#f8fafc);white-space:nowrap;border-bottom:1px solid var(--border-color)";
+				const td = "padding:7px 9px;border-bottom:1px solid var(--border-color);vertical-align:top";
+				const r = ";text-align:right;white-space:nowrap";
+				const body = (lines || []).map((l) => `<tr>
+					<td style="${td}">${esc(l.item_name)}</td>
+					<td style="${td};font-size:11px">${esc(l.serial_no || "-")}</td>
+					<td style="${td}${r}">${format_number(l.qty, null, 0)}</td>
+					<td style="${td}${r}">${money(l.exempted)}</td>
+					<td style="${td}${r}">${money(l.taxable)}</td>
+					<td style="${td}${r}">${money(l.cgst)}</td>
+					<td style="${td}${r}">${money(l.sgst)}</td>
+					<td style="${td}${r}">${money(l.igst)}</td>
+					<td style="${td}${r};font-weight:600">${money(l.total)}</td>
+				</tr>`).join("");
+				const fs = "padding:7px 9px;font-weight:700;background:var(--subtle-fg,#f8fafc);border-top:2px solid var(--border-color);text-align:right;white-space:nowrap";
+				const html = `<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
+					<thead><tr>
+						<th style="${th}">${__("Item Name")}</th><th style="${th}">${__("Serial No")}</th>
+						<th style="${th}${r}">${__("Qty")}</th><th style="${th}${r}">${__("Exempted Amount")}</th>
+						<th style="${th}${r}">${__("Taxable Amount")}</th><th style="${th}${r}">${__("CGST")}</th>
+						<th style="${th}${r}">${__("SGST")}</th><th style="${th}${r}">${__("IGST")}</th>
+						<th style="${th}${r}">${__("Total Amount")}</th>
+					</tr></thead>
+					<tbody>${body}</tbody>
+					<tfoot><tr>
+						<td style="${fs};text-align:left" colspan="2">${__("Total")}</td>
+						<td style="${fs}">${format_number(tot.qty, null, 0)}</td><td style="${fs}">${money(tot.exempted)}</td>
+						<td style="${fs}">${money(tot.taxable)}</td><td style="${fs}">${money(tot.cgst)}</td>
+						<td style="${fs}">${money(tot.sgst)}</td><td style="${fs}">${money(tot.igst)}</td>
+						<td style="${fs}">${money(tot.total)}</td>
+					</tr></tfoot></table></div>`;
+				const d = new frappe.ui.Dialog({
+					title: __("Invoice {0}", [invoice_name]),
+					size: "extra-large",
+					fields: [{ fieldtype: "HTML", fieldname: "lines", options: html }],
+				});
+				d.show();
+			});
+		};
+
+		const render_invoice_list = (container) => {
+			if (!last_loaded) return;
+			const { doc_type, phone, invoice_no } = last_loaded;
+			const is_proforma = doc_type === "Proforma";
+			const is_receipt = doc_type === "Advance Receipt";
+			const who = billed_by_filter();
+			const invoices = who
+				? last_loaded.invoices.filter((inv) => inv.billed_by === who)
+				: last_loaded.invoices;
+			if (!invoices.length) {
+				const noun = is_proforma ? __("proformas")
+					: (is_receipt ? __("advance receipts") : __("invoices"));
+				const msg = who
+					? __("No {0} billed by {1}", [noun, frappe.utils.escape_html(who)])
+					: (invoice_no
+						? __("No {0} found for this number", [noun])
+						: (phone ? __("No {0} found for this phone number", [noun])
+							: __("No {0} for this date", [noun])));
+				container.html(`<div class="text-center text-muted" style="padding:20px">${msg}</div>`);
+				return;
+			}
+			// One table; its columns follow the Document Type picked.
+			const esc = (v) => frappe.utils.escape_html(v == null ? "" : String(v));
+			if (!is_proforma && !is_receipt) {
+				render_sales_invoice_view(container, invoices, who, esc);
+				return;
+			}
+			const has_qty = !is_receipt;
+			const cols = is_proforma
+				? [__("Proforma No."), __("Date"), __("Customer"), __("Items"), __("Total Qty"), __("Total Amount"), __("Status"), ""]
+				: (is_receipt
+					? [__("Receipt No."), __("Date"), __("Customer"), __("Items"), __("Total Amount"), __("State"), __("MOP"), __("Sales Order"), ""]
+					: [__("Invoice No."), __("Date"), __("Customer"), __("Items"), __("Total Qty"), __("Total Amount"), __("Sale Type"), __("MOP"), __("Sales By"), ""]);
+			const QTY_COL = has_qty ? 4 : -1;
+			const AMOUNT_COL = has_qty ? 5 : 4;
+			const right = (i) => i === QTY_COL || i === AMOUNT_COL;
+			const th = "padding:8px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);background:var(--subtle-fg,#f8fafc);position:sticky;top:0;z-index:1;white-space:nowrap;border-bottom:1px solid var(--border-color)";
+			const td = "padding:8px 10px;vertical-align:middle;border-bottom:1px solid var(--border-color)";
+			const head = cols.map((c, i) => `<th style="${th}${right(i) ? ";text-align:right" : ""}">${c}</th>`).join("");
+			const rows = invoices.map(inv => {
+				const is_ret = inv.is_return ? ` <span class="badge badge-warning">${__("Return")}</span>` : "";
+				const receipt_badge = is_receipt
+					? ` <span class="badge" style="background:${inv.__docstatus === 1 ? "#dcfce7" : "#fef3c7"};color:${inv.__docstatus === 1 ? "#166534" : "#92400e"};">${inv.__docstatus === 1 ? __("Final") : __("Draft")}</span>`
+					: "";
+				const sign = inv.is_return ? "-" : "";
+				const dt = esc(inv.__doctype || "Sales Invoice");
+				const fmt = esc(inv.__print_format || "");
+				const no_letterhead = cint(inv.__no_letterhead || 0);
+				const when = `<div style="white-space:nowrap">${esc(inv.posting_date ? frappe.datetime.str_to_user(inv.posting_date) : "")}</div>`
+					+ `<div class="text-muted" style="font-size:11px">${esc((inv.posting_time || "").substring(0, 5))}</div>`;
+				// Payment modes as small tags that wrap as whole words.
+				const mop_tags = (inv.mode_of_payment || "").split(",").map((m) => m.trim()).filter(Boolean)
+					.map((m) => `<span style="display:inline-block;white-space:nowrap;padding:1px 7px;margin:1px 3px 1px 0;border-radius:10px;background:var(--subtle-fg,#f1f5f9);font-size:11px">${esc(m)}</span>`)
+					.join("") || "-";
+				const nowrap = (v) => `<span style="white-space:nowrap">${v}</span>`;
+				const number = `<div style="font-weight:600;white-space:nowrap">${esc(inv.name)}${is_ret}${receipt_badge}</div>`;
+				// Items: one per line, the first three shown; hover for the full list.
+				const item_names = (inv.items_summary || "").split("\n").map((x) => x.trim()).filter(Boolean);
+				const items = item_names.length
+					? `<div title="${esc(item_names.join("\n"))}" style="font-size:12px;line-height:1.35;min-width:200px;max-width:320px">`
+						+ item_names.slice(0, 3).map((n) => `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(n)}</div>`).join("")
+						+ (item_names.length > 3 ? `<div class="text-muted" style="font-size:11px">+${item_names.length - 3} ${__("more")}</div>` : "")
+						+ `</div>`
+					: `<span class="text-muted">-</span>`;
+				const qty = `${sign}${format_number(Math.abs(flt(inv.total_qty)), null, 0)}`;
+				const amount = `<span style="white-space:nowrap">${sign}₹${format_number(flt(inv.grand_total))}</span>`;
+				const print = `<button class="btn btn-xs btn-default ch-reprint-btn" style="white-space:nowrap"
+					data-name="${esc(inv.name)}" data-doctype="${dt}" data-format="${fmt}" data-no-letterhead="${no_letterhead}">
+					<i class="fa fa-print"></i>&nbsp;${__("Print")}</button>`;
+				const customer = esc(inv.customer_name || inv.customer || "");
+				const cells = is_proforma
+					? [number, when, customer, items, qty, amount, esc(inv.status || "-"), print]
+					: (is_receipt
+						? [number, when, customer, items, amount, nowrap(esc(inv.receipt_state || "-")),
+							mop_tags, nowrap(esc(inv.linked_sales_orders || "-")), print]
+						: [number, when, customer, items, qty, amount, nowrap(esc(inv.custom_ch_sale_type || "-")),
+							mop_tags, nowrap(esc(inv.billed_by || "-")), print]);
+				return `<tr class="ch-reprint-row">${cells.map((c, i) =>
+					`<td data-label="${esc(cols[i])}" class="${i === 0 ? "ch-rp-first" : (i === cells.length - 1 ? "ch-rp-action" : "")}" style="${td}${right(i) || i === cells.length - 1 ? ";text-align:right" : ""}">${c}</td>`).join("")}</tr>`;
+			}).join("");
+			// Totals of the listed documents; returns count against them.
+			const signed = (inv, v) => (inv.is_return ? -1 : 1) * Math.abs(flt(v));
+			const total = invoices.reduce((sum, inv) => sum + signed(inv, inv.grand_total), 0);
+			const total_qty = invoices.reduce((sum, inv) => sum + signed(inv, inv.total_qty), 0);
+			const foot_style = "padding:8px 10px;font-weight:700;background:var(--subtle-fg,#f8fafc);position:sticky;bottom:0;border-top:2px solid var(--border-color)";
+			const first_num_col = has_qty ? QTY_COL : AMOUNT_COL;
+			const foot = `<tr class="ch-rp-foot">
+				<td style="${foot_style}" colspan="${first_num_col}">${__("Total")} · ${invoices.length} ${invoices.length === 1 ? __("document") : __("documents")}${who ? ` · ${esc(who)}` : ""}</td>
+				${has_qty ? `<td data-label="${__("Total Qty")}" style="${foot_style};text-align:right;white-space:nowrap">${format_number(total_qty, null, 0)}</td>` : ""}
+				<td data-label="${__("Total Amount")}" style="${foot_style};text-align:right;white-space:nowrap">${total < 0 ? "-" : ""}₹${format_number(Math.abs(total))}</td>
+				<td class="ch-rp-empty" style="${foot_style}" colspan="${cols.length - AMOUNT_COL - 1}"></td>
+			</tr>`;
+			// Narrow screens (tablet / phone): each bill becomes a card of
+			// "label  value" lines, the number on top and Print at the bottom.
+			const responsive_css = `<style>
+				@media (max-width: 900px) {
+					.ch-reprint-table thead { display: none; }
+					.ch-reprint-table, .ch-reprint-table tbody, .ch-reprint-table tfoot,
+					.ch-reprint-table tr, .ch-reprint-table td { display: block; width: 100%; }
+					.ch-reprint-table tr.ch-reprint-row { border-bottom: 6px solid var(--subtle-fg, #f1f5f9); padding: 4px 0; }
+					.ch-reprint-table td { display: flex !important; justify-content: space-between; align-items: flex-start;
+						gap: 12px; text-align: right !important; border-bottom: 0 !important; padding: 4px 12px !important; }
+					.ch-reprint-table td::before { content: attr(data-label); flex: 0 0 auto; text-align: left;
+						font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); padding-top: 2px; }
+					.ch-reprint-table td.ch-rp-first { font-size: 14px; padding-top: 10px !important; }
+					.ch-reprint-table td.ch-rp-action::before, .ch-reprint-table td.ch-rp-empty { display: none !important; }
+					.ch-reprint-table td.ch-rp-action { justify-content: flex-end; padding-bottom: 10px !important; }
+					.ch-reprint-table td.ch-rp-action .btn { width: 100%; padding: 8px; font-size: 13px; }
+					.ch-reprint-table td > div[title] { max-width: 60% !important; min-width: 0 !important; text-align: right; }
+					.ch-reprint-table tr.ch-rp-foot td { position: static !important; }
+					.ch-reprint-table tr.ch-rp-foot td:first-child::before { display: none; }
+				}
+			</style>`;
+			container.html(`${responsive_css}<div class="ch-reprint-list" style="max-height:60vh;overflow:auto;border:1px solid var(--border-color);border-radius:6px">
+				<table class="ch-reprint-table" style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody><tfoot>${foot}</tfoot></table>
+			</div>`);
+		};
+
 		const dlg = new frappe.ui.Dialog({
-			title: __("Reprint Invoice / Proforma / Advance Receipt"),
+			title: __("Sales Invoice View"),
 			fields: [
-				{
-					fieldname: "doc_type",
-					fieldtype: "Select",
-					label: __("Document Type"),
-					options: "Invoice\nProforma\nAdvance Receipt",
-					default: "Invoice",
-				},
 				{
 					fieldname: "search_by",
 					fieldtype: "Select",
@@ -3170,17 +3449,25 @@ export class CartService {
 					description: __("Enter full or partial document number"),
 				},
 				{
+					fieldname: "billed_by",
+					fieldtype: "Select",
+					label: __("Sales By"),
+					options: [{ value: "", label: __("All") }],
+					description: __("Show only the bills of one person"),
+				},
+				{
 					fieldname: "invoices_html",
 					fieldtype: "HTML",
 					options: `<div class="ch-reprint-container"></div>`,
 				},
 			],
-			size: "large",
+			size: "extra-large",
 		});
 
 		dlg.show();
 
-		const current_doc_type = () => (dlg.get_value("doc_type") || "Invoice");
+		// Sales Invoice View lists invoices only (no Proforma / Advance Receipt).
+		const current_doc_type = () => "Invoice";
 		const reload_by_mode = () => {
 			const mode = dlg.get_value("search_by");
 			const dt = current_doc_type();
@@ -3202,8 +3489,6 @@ export class CartService {
 		const container = dlg.$wrapper.find(".ch-reprint-container");
 		build_invoice_list(today, null, null, container, "Invoice");
 
-		// Reload when doc type changes (re-runs the active search)
-		dlg.fields_dict.doc_type.$input.on("change", reload_by_mode);
 
 		// Reload when date changes
 		dlg.fields_dict.date.$input.on("change", () => {
@@ -3241,13 +3526,23 @@ export class CartService {
 		// Clear results when switching search mode
 		dlg.fields_dict.search_by.$input.on("change", reload_by_mode);
 
+		// Invoice No opens its line-wise breakdown.
+		dlg.$wrapper.on("click", ".ch-inv-open", (e) => {
+			e.preventDefault();
+			const name = $(e.currentTarget).data("name");
+			if (name) show_invoice_breakdown(name);
+		});
+
+		// Billed By narrows the loaded list in place.
+		dlg.fields_dict.billed_by.$input.on("change", () => render_invoice_list(container));
+
 		// Print button — uses doctype + print format stamped on the row by the API
 		dlg.$wrapper.on("click", ".ch-reprint-btn", (e) => {
 			const $btn = $(e.currentTarget);
 			const name = $btn.data("name");
 			const dt = $btn.data("doctype") || "Sales Invoice";
 			let fmt = $btn.data("format") || "";
-			const opts = { doctype: dt };
+			const opts = { doctype: dt, new_tab: true };
 			if ($btn.attr("data-no-letterhead") !== undefined) {
 				opts.no_letterhead = cint($btn.data("no-letterhead") || 0);
 			}

@@ -36,8 +36,19 @@ const MODE_SECTIONS = [
 		label: __("Inventory"),
 		modes: [
 			{ key: "material_request", icon: "fa-clipboard",    label: __("Request Stock") },
-			{ key: "inbound_receive",  icon: "fa-inbox",        label: __("Inbound Receive") },
+			// Sub-levels: read-only lists under the menu they belong to, shown
+			// to whoever may use that menu (see _is_mode_allowed). Stock Coming
+			// In sits with Request Stock: it is what the store asked for, arriving.
+			{ key: "my_requests",          icon: "fa-user",         label: __("Stock We Requested"),
+			  sub: true, parent: "material_request" },
+			{ key: "transfer_incoming_dc", icon: "fa-arrow-down",   label: __("Stock Coming In"),
+			  sub: true, parent: "material_request" },
+			{ key: "inbound_receive",  icon: "fa-inbox",        label: __("Purchase Receipt Receive") },
 			{ key: "stock_transfer",   icon: "fa-truck",        label: __("Transfers") },
+			{ key: "transfer_others",      icon: "fa-hand-paper-o", label: __("Requested From Us"),
+			  sub: true, parent: "stock_transfer" },
+			{ key: "transfer_outgoing_dc", icon: "fa-arrow-up",     label: __("Stock Sent Out"),
+			  sub: true, parent: "stock_transfer" },
 			{ key: "bin_manager",      icon: "fa-th-large",     label: __("Bin Manager") },
 			{ key: "stock_audit",      icon: "fa-balance-scale",label: __("Stock Audit") },
 		],
@@ -131,10 +142,19 @@ export class Sidebar {
 	}
 
 	_is_mode_allowed(modeKey) {
+		const all = MODE_SECTIONS.flatMap((sec) => sec.modes);
+		// A heading is shown when at least one list under it is.
+		if (all.some((m) => m.key === modeKey && m.group)) {
+			return all.some((m) => m.in_group === modeKey && this._is_mode_allowed(m.key));
+		}
 		if (!this._allowed_modes) return true;
 		if (modeKey === "bin_manager" && this._allowed_modes.has("stock_transfer")) {
 			return true;
 		}
+		// A sub-level follows the menu it sits under.
+		const parent = MODE_SECTIONS.flatMap((sec) => sec.modes)
+			.find((m) => m.key === modeKey && m.parent);
+		if (parent) return this._allowed_modes.has(parent.parent);
 		return this._allowed_modes.has(modeKey);
 	}
 
@@ -154,10 +174,29 @@ export class Sidebar {
 			html += `<div class="ch-pos-sidebar-section">${section.label}</div>`;
 			for (const mode of visible_modes) {
 				const active = mode.key === PosState.active_mode ? " active" : "";
-				html += `
-					<button class="ch-pos-sidebar-item${active}"
-						data-mode="${mode.key}"
+				if (mode.group) {
+					// Open when the screen in view is one of its lists, or it was left open.
+					const open = visible_modes.some((m) => m.in_group === mode.key && m.key === PosState.active_mode)
+						|| localStorage.getItem(`ch_pos_group_${mode.key}`) === "1";
+					this._open_groups = this._open_groups || {};
+					this._open_groups[mode.key] = open;
+					html += `
+					<button class="ch-pos-sidebar-item ch-pos-sidebar-group" data-group="${mode.key}"
 						title="${mode.label}">
+						<span class="sidebar-icon"><i class="fa ${mode.icon}"></i></span>
+						<span class="sidebar-label">${mode.label}</span>
+						<i class="fa ${open ? "fa-chevron-down" : "fa-chevron-right"} ch-pos-group-caret sidebar-label"
+							style="margin-left:auto;font-size:0.75em;opacity:0.7"></i>
+					</button>`;
+					continue;
+				}
+				const hidden = mode.in_group && !(this._open_groups || {})[mode.in_group];
+				html += `
+					<button class="ch-pos-sidebar-item${active}${mode.sub ? " ch-pos-sidebar-sub" : ""}"
+						data-mode="${mode.key}"
+						${mode.in_group ? `data-in-group="${mode.in_group}"` : ""}
+						title="${mode.label}"
+						${mode.sub ? `style="margin-left:18px;width:calc(100% - 18px);font-size:0.92em;opacity:0.92${hidden ? ";display:none" : ""}"` : ""}>
 						<span class="sidebar-icon"><i class="fa ${mode.icon}"></i></span>
 						<span class="sidebar-label">${mode.label}</span>
 					</button>`;
@@ -213,7 +252,7 @@ export class Sidebar {
 		// turns out this operator can't access it here, fall back rather
 		// than leaving the workspace panel stuck on a now-hidden mode.
 		if (!this._is_mode_allowed(PosState.active_mode)) {
-			const first_valid = this.wrapper.find(".ch-pos-sidebar-item").first().data("mode");
+			const first_valid = this.wrapper.find(".ch-pos-sidebar-item[data-mode]").first().data("mode");
 			if (first_valid && first_valid !== PosState.active_mode) {
 				PosState.active_mode = first_valid;
 				Sidebar._remember_mode(first_valid);
@@ -744,6 +783,17 @@ export class Sidebar {
 
 		// Mode navigation
 		sidebar.on("click", ".ch-pos-sidebar-item", function () {
+			// A heading only opens or closes its lists; it is not a screen.
+			const group = $(this).data("group");
+			if (group) {
+				const lists = sidebar.find(`.ch-pos-sidebar-item[data-in-group="${group}"]`);
+				const open = !lists.first().is(":visible");
+				lists.toggle(open);
+				$(this).find(".ch-pos-group-caret")
+					.toggleClass("fa-chevron-down", open).toggleClass("fa-chevron-right", !open);
+				localStorage.setItem(`ch_pos_group_${group}`, open ? "1" : "0");
+				return;
+			}
 			const mode = $(this).data("mode");
 			if (mode === PosState.active_mode) return;
 			sidebar.find(".ch-pos-sidebar-item").removeClass("active");
@@ -768,6 +818,7 @@ export class Sidebar {
 			if (mode === PosState.active_mode) return;
 			sidebar.find(".ch-pos-sidebar-item").removeClass("active");
 			sidebar.find(`.ch-pos-sidebar-item[data-mode="${mode}"]`).addClass("active");
+			Sidebar._reveal(sidebar, mode);
 			PosState.active_mode = mode;
 			Sidebar._remember_mode(mode);
 			EventBus.emit("mode:switch", mode);
@@ -777,6 +828,7 @@ export class Sidebar {
 		EventBus.on("mode:set", (mode) => {
 			sidebar.find(".ch-pos-sidebar-item").removeClass("active");
 			sidebar.find(`.ch-pos-sidebar-item[data-mode="${mode}"]`).addClass("active");
+			Sidebar._reveal(sidebar, mode);
 			PosState.active_mode = mode;
 			Sidebar._remember_mode(mode);
 		});
@@ -797,7 +849,7 @@ export class Sidebar {
 			this.update_store_info();
 			// If current mode is no longer allowed, switch to first valid mode
 			if (!this._is_mode_allowed(PosState.active_mode)) {
-				const first_valid = this.wrapper.find(".ch-pos-sidebar-item").first().data("mode");
+				const first_valid = this.wrapper.find(".ch-pos-sidebar-item[data-mode]").first().data("mode");
 				if (first_valid) {
 					PosState.active_mode = first_valid;
 					Sidebar._remember_mode(first_valid);
@@ -828,8 +880,17 @@ export class Sidebar {
 		// added to the bill directly from the Service Tracker.
 		return ["sell", "returns", "buyback", "repair", "service"];
 	}
+	/** Open the heading a list sits under, so the list in view is never hidden. */
+	static _reveal(sidebar, mode) {
+		const group = sidebar.find(`.ch-pos-sidebar-item[data-mode="${mode}"]`).data("in-group");
+		if (!group) return;
+		sidebar.find(`.ch-pos-sidebar-item[data-in-group="${group}"]`).show();
+		sidebar.find(`.ch-pos-sidebar-group[data-group="${group}"] .ch-pos-group-caret`)
+			.addClass("fa-chevron-down").removeClass("fa-chevron-right");
+	}
+
 	static get NON_TRANSACTIONAL_MODES() {
-		return ["imei", "customer360", "reports", "material_request", "inbound_receive", "stock_transfer", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
+		return ["imei", "customer360", "reports", "material_request", "my_requests", "inbound_receive", "stock_transfer", "transfer_others", "transfer_incoming_dc", "transfer_outgoing_dc", "bin_manager", "stock_audit", "guided", "model_compare", "claims", "exceptions", "queue"];
 	}
 
 	static get ALL_MODE_KEYS() {

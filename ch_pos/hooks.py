@@ -45,6 +45,8 @@ override_whitelisted_methods = {
 doctype_js = {
     "Sales Invoice": "custom/pos_invoice.js",
     "CH POS Password": "pos_core/doctype/ch_manager_pin/ch_manager_pin.js",
+    "User": "custom/user.js",
+    "Sales Person": "custom/sales_person.js",
 }
 
 # App-level JS (extends POS UI)
@@ -60,12 +62,14 @@ app_include_js = [
 app_include_css = [
     "/assets/ch_pos/css/pos_variables.css",
     "/assets/ch_pos/css/pos_layout.css",
-    "/assets/ch_pos/css/pos_components.css",
     # Versioned because these assets are served straight off the symlink with
     # no build hash -- editing a stylesheet in place leaves every till on the
     # copy its browser already cached. Bump the version when one changes.
+    # pos_components.css had no version at all, which is why the Request
+    # Stock header colours landed in the file and nowhere else.
+    "/assets/ch_pos/css/pos_components.css?v=7",
     "/assets/ch_pos/css/front_desk.css?v=7",
-    "/assets/ch_pos/css/stock_transfer.css",
+    "/assets/ch_pos/css/stock_transfer.css?v=2",
 ]
 
 # Session events
@@ -77,6 +81,14 @@ session_events = {
 
 # Doc events
 doc_events = {
+    # "Is Sales Person" on a User keeps a (disabled) Sales Person for them.
+    "Sales Person": {
+        "validate": "ch_pos.overrides.sales_person_user.validate_sales_person_store",
+    },
+    "User": {
+        "before_validate": "ch_pos.overrides.sales_person_user.sales_person_user_defaults",
+        "on_update": "ch_pos.overrides.sales_person_user.sync_sales_person",
+    },
     "Sales Invoice": {
         "validate": [
             "ch_pos.overrides.pos_invoice.validate_margin_scheme",

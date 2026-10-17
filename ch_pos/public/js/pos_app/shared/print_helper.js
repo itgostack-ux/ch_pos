@@ -36,6 +36,18 @@ async function resolve_sales_invoice_print_settings(invoice_name) {
 export async function print_invoice_pdf(invoice_name, print_format, opts = {}) {
 	if (!invoice_name) return;
 
+	// opts.new_tab: show the PDF in a new browser tab instead of the print
+	// dialog. The tab is opened now, inside the click, so the pop-up blocker
+	// lets it through; it is pointed at the PDF once that has been fetched.
+	let tab = null;
+	if (opts.new_tab) {
+		tab = window.open("", "_blank");
+		if (tab) {
+			tab.document.title = invoice_name;
+			tab.document.body.innerHTML = `<p style="font:15px sans-serif;color:#555;padding:24px">${__("Loading {0}…", [invoice_name])}</p>`;
+		}
+	}
+
 	const doctype = opts.doctype || "Sales Invoice";
 	let fmt = print_format || DEFAULT_SALES_INVOICE_FORMAT;
 	let no_letterhead = opts.no_letterhead ? 1 : 0;
@@ -80,8 +92,23 @@ export async function print_invoice_pdf(invoice_name, print_format, opts = {}) {
 		}
 		// Fallback: open the HTML printview so the user can still print manually
 		const fb = `/printview?doctype=${encodeURIComponent(doctype)}&name=${encodeURIComponent(invoice_name)}&format=${encodeURIComponent(fmt)}&no_letterhead=${no_letterhead}&trigger_print=1`;
-		window.open(fb, "_blank");
+		if (tab) tab.location.href = fb;
+		else window.open(fb, "_blank");
 		return;
+	}
+
+	if (opts.new_tab) {
+		if (tab) {
+			tab.location.href = blob_url;
+		} else {
+			// Pop-ups blocked: fall back to this tab's print dialog below.
+			frappe.show_alert({ message: __("Allow pop-ups for this site to open prints in a new tab."), indicator: "orange" });
+		}
+		if (tab) {
+			// Kept long enough for the tab to load, save or reprint it.
+			setTimeout(() => { try { URL.revokeObjectURL(blob_url); } catch (e) {} }, 10 * 60 * 1000);
+			return;
+		}
 	}
 
 	// Hidden iframe → load PDF → call iframe.contentWindow.print()

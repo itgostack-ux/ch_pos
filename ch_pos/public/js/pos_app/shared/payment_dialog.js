@@ -16,6 +16,10 @@ import { format_number } from "./helpers.js";
 import { pos_warning, pos_info } from "./toast.js";
 import { print_invoice_pdf } from "./print_helper.js";
 
+// Share of the bill loyalty points may pay for -- the label, the box and the
+// check all use this one value.
+const LOYALTY_MAX_PCT = 0.50;
+
 // ── MOP icon lookup ────────────────────────────────────────────────────────
 function _mop_icon(mop) {
 	const lc = (mop || "").toLowerCase();
@@ -272,24 +276,63 @@ export class PaymentDialog {
 		this._load_payment_machines();
 	}
 
+	/** "Billed By: <name> · Change" -- on the payment screen, so pressing Pay
+	 * with the name in view is the confirmation (no separate re-pick). */
+	_exec_tag_html() {
+		const name = PosState.sales_executive_name || "";
+		const who = name
+			? `<b>${frappe.utils.escape_html(name)}</b>`
+			: `<b class="ch-pay-exec-missing">${__("Not selected")}</b>`;
+		return `<span class="ch-pay-exec-tag"><i class="fa fa-id-badge"></i> ${__("Sales By")}: ${who}
+			<a class="ch-pay-exec-change" role="button">${name ? __("Change") : __("Select")}</a></span>`;
+	}
+
+	/** Pick Billed By without leaving the payment screen. Same effect as the
+	 * cart's Billed By select (state + executive:changed), which it also moves. */
+	_open_exec_picker() {
+		const execs = (PosState.executive_access?.store_executives || {})[PosState.active_company] || [];
+		if (!execs.length) {
+			frappe.show_alert({ message: __("No one is set up to bill at this store."), indicator: "red" });
+			return;
+		}
+		const options = execs.map((ex) => ({
+			value: ex.name,
+			label: ex.executive_name + (ex.role && ex.role !== "Executive" ? ` (${ex.role})` : ""),
+		}));
+		const dlg = new frappe.ui.Dialog({
+			title: __("Sales By"),
+			fields: [{
+				fieldtype: "Select", fieldname: "billed_by", label: __("Who is billing this sale?"),
+				options: [{ value: "", label: __("Select who is billing") }, ...options],
+				default: PosState.sales_executive || "", reqd: 1,
+			}],
+			primary_action_label: __("Set"),
+			primary_action: ({ billed_by }) => {
+				const exec = execs.find((ex) => ex.name === billed_by);
+				if (!exec) return;
+				PosState.sales_executive = exec.name;
+				PosState.sales_executive_name = exec.executive_name;
+				PosState.sales_executive_confirmed = true;
+				$(".ch-pos-executive-select").val(exec.name);
+				EventBus.emit("executive:changed", exec.name);
+				dlg.hide();
+			},
+		});
+		dlg.show();
+	}
+
 	_sync_executive_badge() {
 		if (!this._overlay?.length) return;
 
 		const $info = this._overlay.find(".ch-pay-cust-info");
 		if (!$info.length) return;
 
-		const name = PosState.sales_executive_name || "";
-		let $badge = $info.find(".ch-pay-exec-tag");
-
-		if (name) {
-			const html = `<span class="ch-pay-exec-tag"><i class="fa fa-id-badge"></i> ${frappe.utils.escape_html(name)}</span>`;
-			if ($badge.length) {
-				$badge.replaceWith(html);
-			} else {
-				$info.append(html);
-			}
-		} else if ($badge.length) {
-			$badge.remove();
+		const html = this._exec_tag_html();
+		const $badge = $info.find(".ch-pay-exec-tag");
+		if ($badge.length) {
+			$badge.replaceWith(html);
+		} else {
+			$info.append(html);
 		}
 
 		this._update_discount_auth_ui();
@@ -381,7 +424,7 @@ export class PaymentDialog {
 		const total = this._calc_grand_total();
 		const loyalty_pts = flt(PosState.loyalty_points) || 0;
 		const _LOYALTY_MIN_ORDER = 500;
-		const _LOYALTY_MAX_PCT   = 0.50;
+		const _LOYALTY_MAX_PCT   = LOYALTY_MAX_PCT;
 		const has_loyalty = loyalty_pts > 0 && PosState.loyalty_program && total >= _LOYALTY_MIN_ORDER;
 		const max_loyalty_from_pts = has_loyalty ? flt(loyalty_pts * (PosState.conversion_factor || 0)) : 0;
 		const max_loyalty = Math.min(max_loyalty_from_pts, total * _LOYALTY_MAX_PCT);
@@ -667,9 +710,7 @@ placeholder="${__("Enter code...")}">
 								<i class="fa fa-user-circle"></i>
 								${frappe.utils.escape_html(PosState.customer || __("Walk-in"))}
 							</span>
-							${PosState.sales_executive_name
-								? `<span class="ch-pay-exec-tag"><i class="fa fa-id-badge"></i> ${frappe.utils.escape_html(PosState.sales_executive_name)}</span>`
-								: ""}
+							${this._exec_tag_html()}
 						</div>
 					</div>
 
@@ -889,6 +930,7 @@ placeholder="${__("Enter code...")}">
 		const ov = this._overlay;
 
 		ov.on("click", ".ch-pay-close", () => this._close());
+		ov.on("click", ".ch-pay-exec-change", () => this._open_exec_picker());
 
 		// MOP button → switch (single-mode) or add/top-up (split)
 		ov.on("click", ".ch-pay-mop-btn", e => {
@@ -1215,7 +1257,7 @@ placeholder="${__("Enter code...")}">
 			const val = flt($(e.currentTarget).val()) || 0;
 			const grand = this._calc_grand_total();
 			this._advance_amount = Math.min(val, grand);
-			this._set_cash_amount(this._calc_balance_due());
+			this._fill_payment_row();
 			this._update_totals();
 		});
 
@@ -1223,27 +1265,28 @@ placeholder="${__("Enter code...")}">
 		ov.on("change", "#ch-pay-loyalty-chk", e => {
 			this._redeem_loyalty = $(e.currentTarget).is(":checked");
 			ov.find("#ch-pay-loyalty-input").toggle(this._redeem_loyalty);
-			this._loyalty_amount = this._redeem_loyalty ? flt(ov.find("#ch-pay-loyalty-amt").val()) : 0;
+			this._loyalty_amount = this._redeem_loyalty
+				? this._clamp_loyalty_input(ov.find("#ch-pay-loyalty-amt"), false) : 0;
 			// Finance mode: don't auto-adjust down payment rows — just recalc Finance row
 			if (!this._is_finance_sale_type(PosState.sale_type)) {
-				this._set_cash_amount(this._calc_balance_due());
+				this._fill_payment_row();
 			}
 			this._update_totals();
 		});
 		ov.on("input", "#ch-pay-loyalty-amt", e => {
-			const max = flt(PosState.loyalty_points) * flt(PosState.conversion_factor);
-			const max_usable = Math.min(max, this._calc_grand_total() * 0.50);
-			this._loyalty_amount = Math.min(flt($(e.currentTarget).val()) || 0, max_usable);
+			// What is typed is what is redeemed; over the limit is refused on the
+			// spot (alert + box reset to the maximum) instead of quietly capped.
+			this._loyalty_amount = this._clamp_loyalty_input($(e.currentTarget), true);
 			// Finance mode: don't auto-adjust down payment rows — just recalc Finance row
 			if (!this._is_finance_sale_type(PosState.sale_type)) {
-				this._set_cash_amount(this._calc_balance_due());
+				this._fill_payment_row();
 			}
 			this._update_totals();
 		});
 
 		// Quick cash exact
 		ov.on("click", "#ch-pay-exact-btn", () => {
-			this._set_cash_amount(this._calc_balance_due());
+			this._fill_payment_row();
 		});
 		// Quick cash rounded
 		ov.on("click", ".ch-pay-quick-btn:not(#ch-pay-exact-btn)", e => {
@@ -1345,7 +1388,7 @@ ov.on("click", ".ch-pay-offer-chip", e => {
 		this._sync_finance_payments();
 		this._render_payments();
 	} else {
-		this._set_cash_amount(this._calc_balance_due());
+		this._fill_payment_row();
 	}
 	this._update_totals();
 });
@@ -1549,12 +1592,40 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		});
 	}
 
-	_set_cash_amount(amt) {
-		// Prefer a Cash row; if none exists fall back to the first non-finance, non-frozen row
+	/** The row the balance lands in: the Cash row, else the first non-finance,
+	 *  non-gateway row (Card / UPI / ...). */
+	_fill_row_index() {
 		let idx = this._payments.findIndex(p => this._mop_type(p.mode) === "cash");
 		if (idx < 0) {
 			idx = this._payments.findIndex(p => this._mop_type(p.mode) !== "finance" && !p.gateway_initiated);
 		}
+		return idx;
+	}
+
+	/** What row `idx` must hold for the bill to be paid in full: the amount due
+	 *  after loyalty and advances, less every OTHER payment row. (The balance due
+	 *  already counts this row itself, so filling a row with the balance due
+	 *  shrank it -- loyalty made Cash 1,197 on a 70,165 bill.) */
+	_amount_for_row(idx) {
+		const grand = this._is_free_sale ? 0 : this._calc_grand_total();
+		const loyalty = this._redeem_loyalty ? Math.min(flt(this._loyalty_amount), grand) : 0;
+		const advance = Math.min(flt(this._advance_amount), Math.max(0, grand - loyalty));
+		const others = this._payments.reduce((sum, p, i) => {
+			if (i === idx || this._mop_type(p.mode) === "finance") return sum;
+			return sum + flt(p.amount);
+		}, 0);
+		return Math.max(0, flt(grand - loyalty - advance - others, 2));
+	}
+
+	/** Put the remaining amount into the fill row. */
+	_fill_payment_row() {
+		const idx = this._fill_row_index();
+		if (idx < 0) return;
+		this._set_cash_amount(this._amount_for_row(idx));
+	}
+
+	_set_cash_amount(amt) {
+		const idx = this._fill_row_index();
 		if (idx < 0) return;
 		this._payments[idx].amount = amt;
 		this._sync_payment_amount_inputs();
@@ -1751,6 +1822,37 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		}
 
 		this._sync_payment_amount_inputs();
+	}
+
+	/** Usable loyalty: the points' value, capped at the redeemable share of the bill. */
+	_loyalty_max_usable() {
+		const from_points = flt(PosState.loyalty_points) * flt(PosState.conversion_factor);
+		return flt(Math.min(from_points, this._calc_grand_total() * LOYALTY_MAX_PCT), 2);
+	}
+
+	/** Read the loyalty box, keep it within 0..max, and say so when it was over. */
+	_clamp_loyalty_input($input, alert_over) {
+		const max_usable = this._loyalty_max_usable();
+		const raw = $input.val();
+		let value = flt(raw) || 0;
+		$input.removeClass("ch-pay-input-invalid");
+		if (value < 0) {
+			value = 0;
+			$input.val("0");
+		}
+		if (value > max_usable + 0.005) {
+			if (alert_over) {
+				frappe.show_alert({
+					message: __("Loyalty can be at most ₹{0} on this bill. Amount set to the maximum.", [format_number(max_usable)]),
+					indicator: "orange",
+				}, 5);
+				$input.addClass("ch-pay-input-invalid");
+				setTimeout(() => $input.removeClass("ch-pay-input-invalid"), 1500);
+			}
+			value = max_usable;
+			$input.val(max_usable.toFixed(2));
+		}
+		return value;
 	}
 
 	_refresh_totals_block() {
@@ -2247,7 +2349,9 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	}
 
 	_render_quick_cash() {
-		const due = this._calc_balance_due();
+		// What the cash row needs to settle the bill (not the balance after it).
+		const cash_idx = this._payments.findIndex(p => this._mop_type(p.mode) === "cash");
+		const due = cash_idx >= 0 ? this._amount_for_row(cash_idx) : this._calc_balance_due();
 		const amounts = this._quick_amounts(due);
 		const btns = this._overlay.find("#ch-pay-quick-btns");
 		btns.empty();
@@ -2284,14 +2388,15 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			return sum + (this._mop_type(payment.mode) === "finance" ? flt(payment.amount) : 0);
 		}, 0);
 
-		// Sync loyalty amount — clamp to current payable grand
-		if (this._redeem_loyalty && this._loyalty_amount > grand) {
-			this._loyalty_amount = grand;
-			this._overlay.find("#ch-pay-loyalty-amt").val(grand.toFixed(2));
+		// Keep loyalty within what this bill allows now (points value, capped at
+		// the redeemable share of the total) -- the same limit the box enforces.
+		const _loy_max = this._loyalty_max_usable();
+		if (this._redeem_loyalty && this._loyalty_amount > _loy_max) {
+			this._loyalty_amount = _loy_max;
+			this._overlay.find("#ch-pay-loyalty-amt").val(_loy_max.toFixed(2));
 		}
-		// Dynamic max label: min(points_value, grand)
-		const _loy_pts_max = flt(PosState.loyalty_points) * flt(PosState.conversion_factor || 0);
-		this._overlay.find("#ch-pay-loyalty-max").text(`${__("max")} ₹${format_number(Math.min(_loy_pts_max, grand))}`);
+		this._overlay.find("#ch-pay-loyalty-max").text(
+			`${__("max")} ₹${format_number(_loy_max)} (${Math.round(LOYALTY_MAX_PCT * 100)}%)`);
 
 		const loyalty    = this._redeem_loyalty ? Math.min(this._loyalty_amount, grand) : 0;
 		const advance    = Math.min(this._advance_amount, Math.max(0, grand - loyalty));
@@ -2911,29 +3016,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// Billed By is mandatory: a shared till's login is not a person, and
 		// this name drives the incentive the sale pays out on. The server
 		// refuses an unattributed invoice too — this only saves the round trip.
+		// The auto-filled default needs no separate re-pick: the payment screen
+		// shows "Billed By: <name> · Change" beside the bill, so paying with
+		// that name in view is the confirmation.
 		if (!PosState.sales_executive) {
-			return this._block(__("Select who is billing this sale (Billed By) before confirming payment"),
-				".ch-pos-executive-select");
-		}
-
-		// Where several people work one till, an auto-filled default is not
-		// good enough — somebody has to say who actually served this customer.
-
-		// const _company_execs = (PosState.executive_access?.store_executives || {})[PosState.active_company] || [];
-		// if (_company_execs.length > 1 && !PosState.sales_executive_confirmed) {
-		// 	return this._block(__("Confirm who is billing this sale (Billed By) before confirming payment"),
-		// 		".ch-pos-executive-select", "orange");
-		// }
-
-		// updated:
-		const _company_execs = (PosState.executive_access?.store_executives || {})[PosState.active_company] || [];
-		if (_company_execs.length > 1 && !PosState.sales_executive_confirmed) {
-			if (PosState.sales_executive) {
-				PosState.sales_executive_confirmed = true;
-			} else {
-				return this._block(__("Confirm who is billing this sale (Billed By) before confirming payment"),
-					".ch-pos-executive-select", "orange");
-			}
+			this._open_exec_picker();
+			return this._block(__("Select who is billing this sale (Sales By) before confirming payment"),
+				".ch-pay-exec-tag");
 		}
 
 		const gstin_check = this._validate_billing_gstin(PosState.billing_gstin);
@@ -3000,6 +3089,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		// Credit Sale validations
 		if (this._is_credit_sale) {
+			// Nothing left on credit means the customer paid in full -- that is a
+			// direct sale, not a credit sale.
+			if (balance <= 0.005) {
+				return this._block(
+					__("Paid in full — this is not a Credit Sale. Change the Sale Type (e.g. Direct Sale) and proceed."),
+					"#ch-pay-sale-type-pills", "orange");
+			}
 			const credit_exposure = this._calc_credit_exposure();
 			if (credit_exposure > 0.005 && !this._credit_approved) {
 				frappe.show_alert({ message: __("Manager approval required — credit limit exceeded or overdue invoices"), indicator: "orange" });
@@ -3013,6 +3109,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			const financed_amount = this._payments.reduce((sum, payment) => {
 				return sum + (this._mop_type(payment.mode) === "finance" ? flt(payment.amount) : 0);
 			}, 0);
+			// Nothing financed means the customer paid it all -- not a finance sale.
+			if (financed_amount <= 0.005) {
+				return this._block(
+					__("Paid in full — this is not a Finance Sale. Change the Sale Type (e.g. Direct Sale) and proceed."),
+					"#ch-pay-sale-type-pills", "orange");
+			}
 			if (financed_amount > 0.005) {
 				if (!PosState.sale_sub_type) {
 					frappe.show_alert({ message: __("Select a Finance Partner"), indicator: "orange" });

@@ -31,7 +31,29 @@ const PHASES = [__("Customer"), __("Device"), __("Assessment"), __("Quote")];
 const WARRANTY_OPTIONS = ["In Warranty", "Out of Warranty"];
 const AGE_OPTIONS = ["0-3 Months", "4-6 Months", "7-11 Months", "12+ Months"];
 
+// The ages each warranty status can have. A phone still in warranty is under
+// a year old; one out of warranty is over it, and the price grid has a single
+// out-of-warranty row whatever its age.
+const OUT_OF_WARRANTY_AGE = "12+ Months";
+const ages_allowed = (warranty) =>
+	warranty === "In Warranty" ? AGE_OPTIONS.filter((a) => a !== OUT_OF_WARRANTY_AGE)
+		: warranty === "Out of Warranty" ? [OUT_OF_WARRANTY_AGE]
+			: AGE_OPTIONS;
+
 const esc = (v) => frappe.utils.escape_html(v == null ? "" : String(v));
+
+// A model is narrowed to one item in this order. A dimension no variant of the
+// model records (iPhones carry no RAM) is simply not asked.
+const SPEC_DIMENSIONS = [["ram", "RAM"], ["storage", "Storage"], ["colour", "Colour"]];
+// "64GB" < "128GB" < "1TB": sizes by their real size, everything else by name.
+const spec_order = (a, b) => {
+	const size = (v) => {
+		const m = /^([\d.]+)\s*(GB|TB|MB)$/i.exec(String(v).trim());
+		return m ? parseFloat(m[1]) * ({ MB: 1 / 1024, GB: 1, TB: 1024 }[m[2].toUpperCase()]) : null;
+	};
+	const x = size(a), y = size(b);
+	return x !== null && y !== null ? x - y : String(a).localeCompare(String(b));
+};
 
 function _chunk(list, size) {
 	const out = [];
@@ -65,6 +87,38 @@ function _group_by_category(rows) {
 	return out;
 }
 
+/**
+ * What the server said when it refused a call, as plain text.
+ *
+ * A refusal raised with frappe.throw arrives as `_server_messages` (a JSON
+ * list of JSON messages). An unexpected failure has only `exception` — the
+ * last line of the traceback. A permission refusal may carry just a type.
+ * Empty when the server never answered (offline, timed out), so the caller's
+ * own wording is used.
+ */
+function server_error_message(r) {
+	if (!r) return "";
+	const parts = [];
+	try {
+		for (const raw of JSON.parse(r._server_messages || "[]")) {
+			let item = raw;
+			try { item = JSON.parse(raw); } catch (e) { /* already plain text */ }
+			const text = item && typeof item === "object" ? item.message : item;
+			if (text) parts.push(String(text));
+		}
+	} catch (e) { /* not JSON — fall through to the other fields */ }
+	if (!parts.length && r.exception) {
+		// "frappe.exceptions.ValidationError: No Grade D price…" -> the sentence
+		parts.push(String(r.exception).replace(/^[\w.]+(Error|Exception)?:\s*/, ""));
+	}
+	if (!parts.length && r.exc_type === "PermissionError") {
+		parts.push(__("You do not have permission for this. Ask your manager to check your role."));
+	}
+	if (!parts.length && r.exc_type) parts.push(String(r.exc_type));
+	if (!parts.length && typeof r.message === "string") parts.push(r.message);
+	return [...new Set(parts)].join(" ");
+}
+
 export class BuybackIntake {
 	constructor({ store, on_created, on_cancel }) {
 		this.store = store || "";
@@ -81,6 +135,11 @@ export class BuybackIntake {
 			item_name: "",
 			item_brand: "",
 			item_model: "",
+			model: null,      // variant template picked first
+			model_name: "",
+			model_brand: "",
+			variants: [],     // its priced variants: {item_code, item_name, ram, storage, colour}
+			pick: { ram: "", storage: "", colour: "" },
 			imei_info: null,
 			quotable: null,   // {quotable, reason} once the device is checked
 			imei_serial: "",
@@ -121,19 +180,14 @@ export class BuybackIntake {
 	/** Rebuild the tail of the step list once the item's questions are known. */
 	_build_steps(tests, questions) {
 		const steps = this._base_steps();
-		// Diagnostic test → fault_code, so an already-answered automated test
-		// can hide the matching manual question later (see _hidden_fault_codes).
-		this._diag_fault_by_name = {};
-		(tests || []).forEach((t) => {
-			if (t.fault_code) this._diag_fault_by_name[t.name] = t.fault_code;
+		// Question → fault_code, so a fault already answered as a question
+		// hides the matching diagnostic test that comes after it (see
+		// _hidden_fault_codes).
+		this._question_fault_by_name = {};
+		(questions || []).forEach((q) => {
+			if (q.fault_code) this._question_fault_by_name[q.name] = q.fault_code;
 		});
 		if (!this.data.is_phone_dead) {
-			_chunk(tests, CHUNK).forEach((rows, i, all) =>
-				steps.push({
-					key: `diag_${i}`, label: __("Tests"), kind: "diagnostics", rows,
-					title: __("Diagnostic Tests"),
-					hint: all.length > 1 ? __("Screen {0} of {1}", [i + 1, all.length]) : "",
-				}));
 			const by_purpose = { Grading: [], Deduction: [], Eligibility: [] };
 			questions.forEach((q) => (by_purpose[q.question_purpose] || by_purpose.Deduction).push(q));
 			[
@@ -148,29 +202,38 @@ export class BuybackIntake {
 						hint: all.length > 1 ? __("Screen {0} of {1}", [i + 1, all.length]) : "",
 					}));
 			});
+			// Diagnostic tests last, after the condition, fault and eligibility
+			// questions.
+			_chunk(tests, CHUNK).forEach((rows, i, all) =>
+				steps.push({
+					key: `diag_${i}`, label: __("Tests"), kind: "diagnostics", rows,
+					title: __("Diagnostic Tests"),
+					hint: all.length > 1 ? __("Screen {0} of {1}", [i + 1, all.length]) : "",
+				}));
 		}
 		steps.push({ key: "review", label: __("Quote"),
 			title: __("Review and confirm"), hint: __("Check the details before creating the assessment.") });
 		this.steps = steps;
 	}
 
-	/** Fault codes already covered by an answered Diagnostic Test — computed
-	 * live off current answers, not baked into the step list, so it reflects
-	 * changes made after going Back and re-answering a diagnostic. */
+	/** Fault codes already covered by an answered question — computed live
+	 * off current answers, not baked into the step list, so it reflects
+	 * changes made after going Back and re-answering a question. */
 	_hidden_fault_codes() {
-		const map = this._diag_fault_by_name || {};
+		const map = this._question_fault_by_name || {};
 		const codes = new Set();
-		Object.keys(this.data.diagnostics).forEach((name) => {
+		Object.keys(this.data.answers).forEach((name) => {
 			if (map[name]) codes.add(map[name]);
 		});
 		return codes;
 	}
 
-	/** A manual question is skipped once its matching automated test (same
-	 * fault_code) has already been answered — same fault, already covered,
-	 * no need to ask the customer/staff again. */
+	/** A diagnostic test is skipped once a question for the same fault
+	 * (same fault_code) has been answered on an earlier screen — same fault,
+	 * already covered, no need to test it again. Questions come first, so they
+	 * are always asked in full. */
 	_visible_rows(step) {
-		if (step.kind !== "questions") return step.rows;
+		if (step.kind !== "diagnostics") return step.rows;
 		const hidden = this._hidden_fault_codes();
 		if (!hidden.size) return step.rows;
 		return step.rows.filter((r) => !r.fault_code || !hidden.has(r.fault_code));
@@ -233,9 +296,23 @@ export class BuybackIntake {
 	}
 
 	/** Keep server failures owned by this full-screen form. Without silent mode,
-	 * Frappe opens its global error dialog before our inline catch handler. */
+	 * Frappe opens its global error dialog before our inline catch handler.
+	 *
+	 * frappe.xcall rejects with the reply's `message`, which a failed call does
+	 * not have — so every refusal, whatever the server said, reached the catch
+	 * handlers as nothing and was shown as "Please retry.". The reason is on
+	 * the reply all the same (see server_error_message); this hands it on. */
 	_xcall(method, args) {
-		return frappe.xcall(method, args, undefined, { silent: true });
+		return new Promise((resolve, reject) => {
+			frappe.call({
+				method,
+				args,
+				type: "POST",
+				silent: true,
+				callback: (r) => resolve(r.message),
+				error: (r) => reject({ message: server_error_message(r), response: r }),
+			});
+		});
 	}
 
 	_html_head(step) {
@@ -263,7 +340,7 @@ export class BuybackIntake {
 		if (step.key === "customer") return this._html_customer();
 		if (step.key === "device") return this._html_device();
 		if (step.key === "review") return this._html_review();
-		if (step.kind === "diagnostics") return this._html_rows(step.rows, "diagnostics");
+		if (step.kind === "diagnostics") return this._html_rows(this._visible_rows(step), "diagnostics");
 		return this._html_rows(this._visible_rows(step), "answers");
 	}
 
@@ -291,18 +368,17 @@ export class BuybackIntake {
 
 	_html_device() {
 		const d = this.data;
-		const chip = (v, cur, cls) =>
-			`<button class="ch-bbi-chip ${cur === v ? "on" : ""} ${cls}" data-v="${esc(v)}">${esc(v)}</button>`;
+		const chip = (v, cur, cls, off) =>
+			`<button class="ch-bbi-chip ${cur === v ? "on" : ""} ${cls}" data-v="${esc(v)}"${off ? " disabled" : ""}>${esc(v)}</button>`;
+		const allowed_ages = ages_allowed(d.warranty_status);
 
-		const picked = d.item
+		const picked = (d.item || d.model)
 			? `<div class="ch-bbi-picked">
-					<div>
-						<div class="ch-bbi-picked-name">${esc(d.item_name)}</div>
-						<div class="ch-bbi-picked-code">${esc([d.item_brand, d.item_model].filter(Boolean).join(" · ") || d.item)}</div>
-					</div>
+					<div class="ch-bbi-picked-main">${this._html_picked_device()}</div>
 					<button class="ch-bbi-clear-item">${__("Change")}</button>
-				</div>`
-			: `<input type="text" class="ch-bbi-in ch-bbi-item-q" placeholder="${__("Search the device master…")}">
+				</div>
+				${d.model ? this._html_spec_picker() : ""}`
+			: `<input type="text" class="ch-bbi-in ch-bbi-item-q" placeholder="${__("Search the model…")}">
 			   <div class="ch-bbi-item-results"></div>`;
 
 		return `
@@ -311,13 +387,14 @@ export class BuybackIntake {
 					placeholder="${__("Scan or type — identifies the device if we sold it")}">`)}
 			<div class="ch-bbi-imei-note">${this._html_imei_note()}</div>
 			${this._field(__("Device"), picked, "", true)}
-			<div class="ch-bbi-quotable">${this._html_quotable()}</div>
 			${this._field(__("Warranty"),
 				`<div class="ch-bbi-chips">${WARRANTY_OPTIONS.map(o => chip(o, d.warranty_status, "ch-bbi-warr")).join("")}</div>`,
 				"", true)}
 			${this._field(__("Age of device"),
-				`<div class="ch-bbi-chips">${AGE_OPTIONS.map(o => chip(o, d.device_age_months, "ch-bbi-age")).join("")}</div>`,
+				`<div class="ch-bbi-chips">${AGE_OPTIONS.map(o => chip(o, d.device_age_months, "ch-bbi-age", !allowed_ages.includes(o))).join("")}</div>`,
 				__("Warranty and age decide the price band."), true)}
+			${/* Under the age: the price it shows depends on warranty and age. */""}
+			<div class="ch-bbi-quotable">${this._html_quotable()}</div>
 			<label class="ch-bbi-dead-row">
 				<input type="checkbox" class="ch-bbi-dead" ${d.is_phone_dead ? "checked" : ""}>
 				<span>
@@ -332,12 +409,18 @@ export class BuybackIntake {
 	_html_imei_note() {
 		const o = this.data.imei_info;
 		if (!o) return "";
+		// A phone may be assessed again while an earlier assessment is open;
+		// the executive is told, not stopped.
+		const open_one = o.active_assessment
+			? `<div class="ch-bbi-note warn"><i class="fa fa-exclamation-triangle"></i>
+				<span>${esc(o.active_assessment.message)}</span></div>`
+			: "";
 		if (o.origin === "external") {
 			return `<div class="ch-bbi-note ext">
 				<i class="fa fa-info-circle"></i>
-				<span>${__("Not sold by us — external device.")}</span></div>`;
+				<span>${__("Not sold by us — external device.")}</span></div>${open_one}`;
 		}
-		if (o.origin !== "ours") return "";
+		if (o.origin !== "ours") return open_one;
 		const bits = [];
 		if (o.last_sold_on) {
 			bits.push(__("Sold by us on {0}", [frappe.datetime.str_to_user(o.last_sold_on).split(" ")[0]]));
@@ -350,18 +433,108 @@ export class BuybackIntake {
 				<span>${__("Traded in before ({0}x) — status {1}", [o.buyback_count, o.buyback_status || "—"])}</span></div>`
 			: "";
 		return `<div class="ch-bbi-note ours"><i class="fa fa-check-circle"></i>
-			<span>${bits.join(" · ")}</span></div>${prior}`;
+			<span>${bits.join(" · ")}</span></div>${prior}${open_one}`;
 	}
 
 	/** A device with no Buyback Price Master cannot be quoted at all. The engine
 	 *  only says so on save, which is 13 screens too late — say it here. */
+	// The picked device as model, then RAM · Storage · Colour, whichever the
+	// item records. Until those arrive (with the price check) it reads as the
+	// item name, so the card is never blank.
+	// RAM, Storage and Colour as chips, each offering only what the variants
+	// left by the earlier choices actually have.
+	_html_spec_picker() {
+		const d = this.data;
+		if (!d.variants.length) {
+			return `<div class="ch-bbi-note stop"><i class="fa fa-ban"></i>
+				<span>${__("No variant of this model has a buyback price, so it cannot be quoted.")}</span></div>`;
+		}
+		let pool = d.variants;
+		const rows = [];
+		for (const [key, label] of SPEC_DIMENSIONS) {
+			const values = [...new Set(pool.map((v) => v[key]).filter(Boolean))].sort(spec_order);
+			if (!values.length) continue;
+			rows.push(`<div class="ch-bbi-spec-row">
+				<div class="ch-bbi-spec-label">${esc(__(label))}</div>
+				<div class="ch-bbi-chips">${values.map((v) => `<button class="ch-bbi-chip ch-bbi-spec ${d.pick[key] === v ? "on" : ""}"
+					data-dim="${key}" data-v="${esc(v)}">${esc(v)}</button>`).join("")}</div>
+			</div>`);
+			if (d.pick[key]) pool = pool.filter((v) => v[key] === d.pick[key]);
+		}
+		return `<div class="ch-bbi-spec-picker">${rows.join("")}</div>`;
+	}
+
+	// Narrow the model's variants by the choices so far: a choice the earlier
+	// ones ruled out is dropped, a dimension left with one value is filled in,
+	// and once every dimension is chosen the matching item becomes the device.
+	_resolve_spec_pick() {
+		const d = this.data;
+		let pool = d.variants;
+		for (const [key] of SPEC_DIMENSIONS) {
+			const values = [...new Set(pool.map((v) => v[key]).filter(Boolean))];
+			if (!values.length) { d.pick[key] = ""; continue; }
+			if (!values.includes(d.pick[key])) d.pick[key] = values.length === 1 ? values[0] : "";
+			if (d.pick[key]) pool = pool.filter((v) => v[key] === d.pick[key]);
+		}
+		const done = SPEC_DIMENSIONS.every(([key]) =>
+			!d.variants.some((v) => v[key]) || d.pick[key]);
+		const match = done && pool.length === 1 ? pool[0] : null;
+		const before = d.item;
+		d.item = match ? match.item_code : null;
+		d.item_name = match ? match.item_name : "";
+		d.item_brand = match ? (match.brand || d.model_brand) : "";
+		d.item_model = d.model_name || "";
+		if (d.item !== before) d.quotable = null;
+		return d.item !== before;
+	}
+
+	// Load a model's variants; with an item code, also preselect that item's
+	// own RAM, Storage and Colour.
+	_load_model(model, item_code) {
+		const d = this.data;
+		return this._xcall("buyback.api.get_device_variants", { model, item_code }).then((r) => {
+			if (!r || !r.model) return false;
+			d.model = r.model;
+			d.model_name = r.model_name || r.model;
+			d.model_brand = r.brand || "";
+			d.variants = r.variants || [];
+			d.pick = Object.assign({ ram: "", storage: "", colour: "" }, r.selected || {});
+			this._resolve_spec_pick();
+			this._render();
+			if (d.item) this._check_quotable();
+			return true;
+		});
+	}
+
+	_html_picked_device() {
+		const d = this.data;
+		if (d.model) {
+			return `<div class="ch-bbi-picked-name">${esc(d.model_name)}</div>
+				<div class="ch-bbi-picked-code">${esc(d.model_brand)}</div>`;
+		}
+		const spec = (d.quotable && d.quotable.device) || null;
+		if (!spec || !spec.model) {
+			return `<div class="ch-bbi-picked-name">${esc(d.item_name)}</div>
+				<div class="ch-bbi-picked-code">${esc([d.item_brand, d.item_model].filter(Boolean).join(" · ") || d.item)}</div>`;
+		}
+		const parts = [
+			spec.ram && __("RAM {0}", [esc(spec.ram)]),
+			spec.storage && __("Storage {0}", [esc(spec.storage)]),
+			spec.colour && __("Colour {0}", [esc(spec.colour)]),
+		].filter(Boolean);
+		return `<div class="ch-bbi-picked-name">${esc(spec.model)}</div>
+			${parts.length ? `<div class="ch-bbi-picked-code">${parts.join(" &nbsp;·&nbsp; ")}</div>` : ""}`;
+	}
+
 	_html_quotable() {
 		const q = this.data.quotable;
 		if (!q || !this.data.item) return "";
 		if (q.quotable) {
-			return q.market_price
+			// Only once warranty and age are chosen: the Grade A price of that
+			// band. Nothing before that.
+			return q.grade_a_price
 				? `<div class="ch-bbi-note ours"><i class="fa fa-tag"></i>
-					<span>${__("Market reference ₹{0}", [format_number(q.market_price)])}</span></div>`
+					<span>${__("Grade A ₹{0}", [format_number(q.grade_a_price)])}</span></div>`
 				: "";
 		}
 		return `<div class="ch-bbi-note stop"><i class="fa fa-ban"></i>
@@ -383,6 +556,7 @@ export class BuybackIntake {
 				if (this._quotable_request_key !== request_key) return;
 				this.data.quotable = q || null;
 				this.$host.find(".ch-bbi-quotable").html(this._html_quotable());
+				this.$host.find(".ch-bbi-picked-main").html(this._html_picked_device());
 			})
 			.catch((e) => this._show_form_error(
 				(e && e.message) || __("Could not check the device price configuration. Please retry.")));
@@ -511,6 +685,7 @@ export class BuybackIntake {
 			color:var(--text-color,#1f272e);transition:all .12s}
 		.ch-bbi-chip:hover{border-color:var(--primary,#4f46e5)}
 		.ch-bbi-chip.on{background:var(--primary,#4f46e5);border-color:var(--primary,#4f46e5);color:#fff}
+		.ch-bbi-chip:disabled{opacity:.4;cursor:not-allowed;border-color:var(--border-color,#dfe3e8)}
 		.ch-bbi-q{padding:13px 14px;border:1px solid var(--border-color,#e8ecf1);border-radius:12px;margin-bottom:10px}
 		.ch-bbi-body-questions .ch-bbi-q{margin-bottom:0}
 		.ch-bbi-q.done{border-color:#c7f0d8;background:#fbfefc}
@@ -528,6 +703,8 @@ export class BuybackIntake {
 		.ch-bbi-picked-code{font-size:12px;color:var(--text-muted,#8a94a6)}
 		.ch-bbi-clear-item{border:0;background:transparent;color:var(--primary,#4f46e5);font-weight:650;font-size:13px;cursor:pointer}
 		.ch-bbi-item-results{margin-top:6px}
+		.ch-bbi-spec-picker{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+		.ch-bbi-spec-label{font-size:12px;font-weight:650;color:var(--text-muted,#8a94a6);margin-bottom:4px}
 		.ch-bbi-hit-t{font-weight:650;font-size:14px}
 		.ch-bbi-hit-s{font-size:12px;color:var(--text-muted,#8a94a6);margin-top:1px}
 		.ch-bbi-imei-note:empty{display:none}
@@ -603,14 +780,25 @@ export class BuybackIntake {
 		$h.find(".ch-bbi-opt").on("click", (e) => {
 			this._clear_form_error();
 			const $b = $(e.currentTarget);
-			this.data[$b.data("bucket")][$b.data("key")] = $b.data("v");
+			const bucket = this.data[$b.data("bucket")];
+			const $card = $b.closest(".ch-bbi-q");
+			// Tapping the chosen answer again clears it, so an optional
+			// question answered by mistake can be left blank. A mandatory one
+			// cleared this way is caught by the Continue check.
+			if ($b.hasClass("on")) {
+				delete bucket[$b.data("key")];
+				$b.removeClass("on");
+				$card.removeClass("done");
+				$b.trigger("blur");
+				return;
+			}
+			bucket[$b.data("key")] = $b.data("v");
 			// Toggle the SAME class the renderer uses. This used to flip the old
 			// Bootstrap btn-primary/btn-outline-secondary pair, which no longer
 			// exists after the redesign — so the answer was stored but never
 			// looked selected, and the only dark chip on screen was whichever
 			// button happened to hold focus. It read as "my last answer got
 			// cleared" every time the user moved on.
-			const $card = $b.closest(".ch-bbi-q");
 			$card.find(".ch-bbi-opt").removeClass("on");
 			$b.addClass("on");
 			$card.addClass("done");
@@ -648,8 +836,20 @@ export class BuybackIntake {
 				this.data.item_name = "";
 				this.data.item_brand = "";
 				this.data.item_model = "";
+				this.data.model = null;
+				this.data.model_name = "";
+				this.data.model_brand = "";
+				this.data.variants = [];
+				this.data.pick = { ram: "", storage: "", colour: "" };
 				this.data.quotable = null;
 				this._render();
+			});
+			$h.find(".ch-bbi-spec").on("click", (e) => {
+				const $c = $(e.currentTarget);
+				this.data.pick[$c.data("dim")] = String($c.data("v"));
+				const changed = this._resolve_spec_pick();
+				this._render();
+				if (changed && this.data.item) this._check_quotable();
 			});
 			const $q = $h.find(".ch-bbi-item-q");
 			let t = null;
@@ -663,7 +863,17 @@ export class BuybackIntake {
 			$imei.on("blur", () => this._lookup_imei());
 			$imei.on("keypress", (e) => { if (e.which === 13) $imei.trigger("blur"); });
 			$h.find(".ch-bbi-warr").on("click", (e) => {
-				this.data.warranty_status = $(e.currentTarget).data("v"); this._render(); this._check_quotable();
+				const picked = $(e.currentTarget).data("v");
+				// Out of warranty leaves one age, so it is chosen for them. In
+				// warranty rules that age out; one already picked that no longer
+				// fits is cleared, so they choose again.
+				const allowed = ages_allowed(picked);
+				if (allowed.length === 1) {
+					this.data.device_age_months = allowed[0];
+				} else if (!allowed.includes(this.data.device_age_months)) {
+					this.data.device_age_months = "";
+				}
+				this.data.warranty_status = picked; this._render(); this._check_quotable();
 			});
 			$h.find(".ch-bbi-age").on("click", (e) => {
 				this.data.device_age_months = $(e.currentTarget).data("v"); this._render(); this._check_quotable();
@@ -686,15 +896,26 @@ export class BuybackIntake {
 			silent: true,
 			args: { doctype: "Customer", filters: { mobile_no: m }, fields: ["name", "customer_name"], limit_page_length: 1 },
 			callback: (r) => {
+				// The number may have changed while this was in flight.
+				if (this.data.mobile_no !== m) return;
 				const hit = (r.message || [])[0];
 				this.data.customer = hit ? hit.name : null;
 				if (!hit) {
 					return $hit.html(`<div style="font-size:12px;opacity:.7">
-						<i class="fa fa-user-plus"></i> ${__("New customer — will be linked by mobile")}</div>`);
+						<i class="fa fa-user-plus"></i> ${__("New customer — enter their name below")}</div>`);
 				}
-				this.data.customer_name = this.data.customer_name || hit.customer_name;
+				// A walk-in saved without a name carries its mobile number as
+				// the name; that is not a name to show or pre-fill.
+				const known = (hit.customer_name || "").trim();
+				const real_name = known && known !== m ? known : "";
+				if (real_name && !(this.data.customer_name || "").trim()) {
+					this.data.customer_name = real_name;
+					this.$host.find(".ch-bbi-cname").val(real_name);
+				}
 				$hit.html(`<div style="font-size:13px;font-weight:650;color:var(--green-600,#16a34a)">
-					<i class="fa fa-check-circle"></i> ${esc(hit.customer_name)}</div>`);
+					<i class="fa fa-check-circle"></i> ${__("Existing customer")}${real_name
+						? ` · ${esc(real_name)}`
+						: ` <span style="font-weight:500;opacity:.75">· ${__("no name on file, add it below")}</span>`}</div>`);
 			},
 		});
 	}
@@ -728,6 +949,8 @@ export class BuybackIntake {
 				this.data.item = info.item_code;
 				this.data.item_name = info.item_name || info.item_code;
 				this.data.item_brand = info.brand || "";
+				// Show it as its model with its RAM, Storage and Colour chosen.
+				this._load_model(null, info.item_code).catch(() => {});
 			}
 			// Only the auto-fill changes a field outside the banner, and that
 			// arrives a network round-trip later, well clear of the click.
@@ -739,37 +962,21 @@ export class BuybackIntake {
 	_search_items(term) {
 		const $res = this.$host.find(".ch-bbi-item-results");
 		if (!term || term.length < 2) return $res.empty();
-		frappe.call({
-			method: "buyback.api.search_items",
-			silent: true,
-			args: { search_text: term, limit: 8 },
-			callback: (r) => {
-				const items = r.message || [];
-				if (!items.length) {
-					return $res.html(`<div style="font-size:12px;opacity:.6;padding:6px">${__("No matching device")}</div>`);
-				}
-				$res.html(items.map(it => {
-					const label = it.ch_display_name || it.item_name || it.item_code;
-					const sub = [it.brand, it.ch_model, it.ch_sub_category].filter(Boolean).join(" · ");
-					return `
-						<div class="ch-bbi-hit" data-code="${esc(it.item_code || it.name)}"
-							data-label="${esc(label)}" data-brand="${esc(it.brand || "")}"
-							data-model="${esc(it.ch_model || "")}">
-							<div class="ch-bbi-hit-t">${esc(label)}</div>
-							${sub ? `<div class="ch-bbi-hit-s">${esc(sub)}</div>` : ""}
-						</div>`;
-				}).join(""));
-				$res.find(".ch-bbi-hit").on("click", (e) => {
-					const $t = $(e.currentTarget);
-					this.data.item = $t.data("code");
-					this.data.item_name = $t.data("label");
-					this.data.item_brand = $t.data("brand") || "";
-					this.data.item_model = $t.data("model") || "";
-					this.data.quotable = null;
-					this._render();
-					this._check_quotable();
-				});
-			},
+		this._xcall("buyback.api.search_device_models", { search_text: term, limit: 8 }).then((models) => {
+			models = models || [];
+			if (!models.length) {
+				return $res.html(`<div style="font-size:12px;opacity:.6;padding:6px">${__("No model found")}</div>`);
+			}
+			$res.html(models.map((m) => `
+				<div class="ch-bbi-hit ch-bbi-model-hit" data-model="${esc(m.model)}">
+					<div class="ch-bbi-hit-t">${esc(m.model_name)}</div>
+					${m.brand ? `<div class="ch-bbi-hit-s">${esc(m.brand)}</div>` : ""}
+				</div>`).join(""));
+			$res.find(".ch-bbi-model-hit").on("click", (e) => {
+				this._load_model(String($(e.currentTarget).data("model")));
+			});
+		}).catch(() => {
+			$res.html(`<div style="font-size:12px;opacity:.6;padding:6px">${__("Could not search the models. Please retry.")}</div>`);
 		});
 	}
 
@@ -785,7 +992,11 @@ export class BuybackIntake {
 		}
 
 		if (step.key === "device") {
-			if (!d.item) return this._show_form_error(__("Select the device"));
+			if (!d.item) {
+				return this._show_form_error(d.model
+					? __("Choose the RAM, Storage and Colour of the device")
+					: __("Select the device"));
+			}
 			if (!d.is_phone_dead && !d.imei_serial) {
 				return this._show_form_error(__("Enter the IMEI/serial, or check \"Phone does not switch on\""));
 			}
@@ -820,11 +1031,11 @@ export class BuybackIntake {
 		this._render();
 	}
 
-	/** A manual-question screen can end up with nothing left to show once
-	 * every one of its rows got hidden by a matching answered diagnostic —
-	 * step past those instead of rendering a blank screen. */
+	/** A diagnostic screen can end up with nothing left to show once every
+	 * one of its tests got hidden by a matching answered question — step past
+	 * those instead of rendering a blank screen. */
 	_step_is_empty(step) {
-		return step.kind === "questions" && this._visible_rows(step).length === 0;
+		return step.kind === "diagnostics" && this._visible_rows(step).length === 0;
 	}
 
 	_skip_empty_steps(direction) {
@@ -921,6 +1132,7 @@ export class BuybackIntake {
 			diagnostics: JSON.stringify(Object.entries(d.diagnostics).map(([t, v]) => ({ test: t, result: v }))),
 			answers: JSON.stringify(Object.entries(d.answers).map(([q, v]) => ({ question: q, answer: v }))),
 			remarks: d.remarks || null,
+			customer_name: (d.customer_name || "").trim() || null,
 		}).then((res) => {
 			frappe.dom.unfreeze();
 			this.busy = false;

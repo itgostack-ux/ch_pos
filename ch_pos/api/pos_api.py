@@ -2031,6 +2031,37 @@ def _get_item_total_gst_rate(item_code, item_tax_template, fallback_rate):
     _GST_RATE_CACHE[cache_key] = rate
     return rate
 
+def _spread_header_discount(inv, discount):
+    """Lower each paid line's rate by its share of a bill-level ``discount``
+    (by line value; the last line takes the rounding remainder) and clear the
+    header discount, so ERPNext does not take it off a second time."""
+    rows = [
+        row for row in (inv.items or [])
+        if not cint(row.get("is_free_item")) and flt(row.rate) * flt(row.qty) > 0
+    ]
+    base = sum(flt(row.rate) * flt(row.qty) for row in rows)
+    if not rows or base <= 0:
+        return
+    discount = min(flt(discount, 2), flt(base, 2))
+    remaining = discount
+    for index, row in enumerate(rows):
+        qty = flt(row.qty) or 1.0
+        line = flt(row.rate) * qty
+        share = remaining if index == len(rows) - 1 else flt(discount * line / base, 2)
+        share = min(share, line)
+        remaining = flt(remaining - share, 2)
+        row.rate = flt((line - share) / qty, 2)
+        # The commercial-policy check (overrides.discount_control) judges a
+        # line at its price before this share: the bill discount was already
+        # authorised as a bill discount, not as a per-item price cut.
+        row.flags.ch_header_discount_per_unit = flt(share / qty, 6)
+        if flt(row.price_list_rate) > 0:
+            row.discount_amount = flt(max(0, flt(row.price_list_rate) - row.rate), 2)
+            row.discount_percentage = flt(row.discount_amount / flt(row.price_list_rate) * 100, 6)
+    inv.additional_discount_percentage = 0
+    inv.discount_amount = 0
+
+
 def _write_item_calculations(si_name):
     """Calculate inclusive item values from configured item and header tax rates."""
     if not frappe.db.exists("Sales Invoice", si_name):
@@ -4045,11 +4076,32 @@ def create_pos_invoice(
         inv.loyalty_points = cint(loyalty_points)
         inv.loyalty_amount = flt(loyalty_amount)
 
-    assert_valid_sales_executive(
-        sales_executive, store=profile_anchors.get("store"), company=profile.company
-    )
-    inv.custom_sales_executive = sales_executive
-    sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
+    # Billed By is a POS Executive, or -- with no POS Executive behind them --
+    # a Sales Person of this store (a salesman with no login) or a POS Promoter
+    # of this store (a brand promoter).
+    from ch_pos.pos_core.doctype.pos_executive.pos_executive import (
+        billed_by_promoter, billed_by_sales_person)
+    billed_sp = billed_by_sales_person(
+        sales_executive, store=profile_anchors.get("store"), company=profile.company)
+    billed_promoter = billed_by_promoter(
+        sales_executive, store=profile_anchors.get("store"), company=profile.company)
+    if billed_sp:
+        inv.custom_sales_executive = None
+        if inv.meta.has_field("custom_billed_by_sales_person"):
+            inv.custom_billed_by_sales_person = billed_sp
+        sales_person = billed_sp
+    elif billed_promoter:
+        # No Sales Person behind a promoter, so no Sales Team row.
+        inv.custom_sales_executive = None
+        if inv.meta.has_field("custom_billed_by_promoter"):
+            inv.custom_billed_by_promoter = billed_promoter
+        sales_person = None
+    else:
+        assert_valid_sales_executive(
+            sales_executive, store=profile_anchors.get("store"), company=profile.company
+        )
+        inv.custom_sales_executive = sales_executive
+        sales_person = frappe.db.get_value("POS Executive", sales_executive, "sales_person")
     if sales_person:
         inv.append("sales_team", {
             "sales_person": sales_person,
@@ -4074,6 +4126,17 @@ def create_pos_invoice(
 
     if client_request_id:
         inv.custom_client_request_id = str(client_request_id)[:140]
+
+    # A bill-level discount (Discount %, amount, coupon, voucher, bank offer)
+    # is spread over the lines here and taken off the header, so the line
+    # amounts carry it. _write_item_calculations totals the lines alone, so a
+    # discount left on the header was never in the invoice total ("Payments
+    # do not add up"), and GST and income were booked on the undiscounted
+    # value.
+    header_discount = flt(requested_discount + promotion_discount, 2)
+    if header_discount > 0.005:
+        inv.flags.ch_header_discount_pct = additional_pct
+        _spread_header_discount(inv, header_discount)
 
     # ---------- 0b. Customer-advance allocation (down-payment clearing) ----
     allocated_advance_total = _allocate_customer_advances(
@@ -4119,18 +4182,22 @@ def create_pos_invoice(
             total_paid = sum(flt(p.amount) for p in inv.payments)
             # Advances reduce what the payment rows must carry — never
             # stuff the advance gap into a cash/card row as money that was
-            # never received.
-            expected_paid = round(rt) - flt(allocated_advance_total)
+            # never received. Redeemed loyalty does too: ERPNext settles it
+            # as loyalty_amount beside the payments (paid + loyalty = total),
+            # and the till already took it off the amount due.
+            redeemed_loyalty = flt(inv.loyalty_amount) if cint(inv.redeem_loyalty_points) else 0
+            expected_paid = round(rt) - flt(allocated_advance_total) - redeemed_loyalty
             rounding_diff = expected_paid - total_paid
 
             # A genuine rounding gap is < 1 currency unit. Anything larger
             # is a payment mismatch and must fail loudly, not be absorbed.
             if abs(rounding_diff) > 1.0:
                 frappe.throw(
-                    _("Payments {0} + advances {1} do not add up to the "
-                      "invoice total {2}.").format(
+                    _("Payments {0} + advances {1} + loyalty {2} do not add up to the "
+                      "invoice total {3}.").format(
                         fmt_money(total_paid),
                         fmt_money(allocated_advance_total),
+                        fmt_money(redeemed_loyalty),
                         fmt_money(rt)),
                     title=_("Payment Mismatch"))
 
@@ -4756,11 +4823,14 @@ def create_pos_invoice(
     incentive_total = 0
     incentive_warning = ""
     try:
-        incentive_total = _create_incentive_entries(
+        # POS incentive ledger is per POS Executive; a Sales Person bill earns
+        # through its Sales Team row instead, and a promoter earns none here.
+        no_executive = bool(billed_sp or billed_promoter)
+        incentive_total = 0 if no_executive else _create_incentive_entries(
             invoice=inv,
             pos_executive=sales_executive,
             transaction_type="Sale")
-        if _missing_incentive_setup(inv, sales_executive):
+        if not no_executive and _missing_incentive_setup(inv, sales_executive):
             incentive_warning = frappe._(
                 "Incentive setup missing for this executive/company. "
                 "Please configure active POS Incentive Slabs."
@@ -9870,7 +9940,8 @@ def _format_delay_minutes(minutes):
 
 @frappe.whitelist(methods=["POST"])
 def create_material_request(pos_profile, items, urgency=None, notes=None, source_warehouse=None,
-                            required_by_date=None, required_by_time=None) -> dict:
+                            required_by_date=None, required_by_time=None,
+                            delivery_store=None) -> dict:
     """Create a Store Material Request from POS for stock replenishment.
 
     Source warehouse is auto-resolved from the store's zone if not provided.
@@ -9890,7 +9961,8 @@ def create_material_request(pos_profile, items, urgency=None, notes=None, source
         notes=notes or None,
         required_by_date=required_by_date,
         required_by_datetime=due_dt,
-        preferred_source_warehouse=source_warehouse or None)
+        preferred_source_warehouse=source_warehouse or None,
+        delivery_store=delivery_store or None)
 
 
 @frappe.whitelist()
@@ -9927,6 +9999,28 @@ def check_material_request_capacity(pos_profile, items) -> dict:
 
 
 @frappe.whitelist()
+def get_delivery_locations(pos_profile) -> dict:
+    """Places this request could be delivered to, and the one to start with.
+
+    Warehouses, not stores: the hubs goods are sent back to are warehouses and
+    have no CH Store record at all, so a store-based list could never offer
+    them. Where a warehouse is a shop's, the shop's name is what gets shown —
+    "GF-AMBATTUR" means more on a counter than "GF-AMBATTUR-Sellable - GF".
+    The shops and the hubs are the whole list: the damaged, buyback, demo and
+    customer-device bins each shop also owns are not places a van unloads.
+    """
+    assert_pos_profile_scope(pos_profile)
+    profile = frappe.db.get_value(
+        "POS Profile", pos_profile, ["company", "warehouse"], as_dict=True) or {}
+    from ch_erp15.ch_erp15.store_request_api import delivery_locations
+
+    return {
+        "default": profile.get("warehouse"),
+        "locations": delivery_locations(profile.get("company")),
+    }
+
+
+@frappe.whitelist()
 def get_store_zone_info(pos_profile) -> dict:
     """Get zone and source warehouse info for the POS store."""
     assert_pos_profile_scope(pos_profile)
@@ -9960,6 +10054,100 @@ def get_transfer_warehouse_scope(pos_profile) -> dict:
         "zone": zone_info.get("zone"),
         "target_warehouses": target_warehouses,
         "restricted": bool(target_warehouses),
+    }
+
+
+@frappe.whitelist()
+def get_material_request_detail(pos_profile, material_request) -> dict:
+    """Everything a store asks about one of its own requests.
+
+    The list gives a shop enough to spot a request; this is what it needs when
+    it opens one and wants to know where the thing has got to — who raised it
+    and when, where it is meant to land, and line by line how much was granted,
+    how much refused, and whether the goods are being bought or moved.
+    """
+    assert_pos_profile_scope(pos_profile)
+    doc = frappe.get_doc("Material Request", material_request)
+    doc.check_permission("read")
+
+    from ch_erp15.ch_erp15.custom.material_request import line_fulfilment
+    from ch_erp15.ch_erp15.request_fulfilment import _status_display
+
+    cover = line_fulfilment(material_request) or {}
+
+    # Transfer documents arrive carrying their status; purchase ones do not —
+    # line_fulfilment hands those out as doctype/name/qty only, which is why
+    # the Purchase Status column read blank however much had been purchased.
+    # Looked up here, once for the whole request.
+    purchase_status = {}
+    wanted = {}
+    for entry in cover.values():
+        for d in entry.get("purchase_docs") or []:
+            wanted.setdefault(d["doctype"], set()).add(d["name"])
+    for doctype, names in wanted.items():
+        for row in frappe.get_all(doctype, filters={"name": ("in", list(names))},
+                                  fields=["name", "status"], limit_page_length=0):
+            purchase_status[(doctype, row.name)] = row.status or ""
+
+    def _documents(entry, key):
+        """The step those documents have reached, said once."""
+        docs = (entry or {}).get(key) or []
+        labels, seen = [], set()
+        for d in docs:
+            raw = d.get("status") or purchase_status.get((d.get("doctype"), d.get("name"))) or ""
+            label = _status_display(raw) or raw
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+        return ", ".join(labels)
+
+    items = []
+    for row in doc.items:
+        entry = cover.get(row.name) or {}
+        approved = flt(row.get("custom_accepted_qty"))
+        items.append({
+            "item_code": row.item_code,
+            "item_name": row.item_name or row.item_code,
+            # What the store asked for. Approval lowers the line's own qty to
+            # what was granted and keeps the ask in custom_requested_qty, so
+            # reading qty here showed the approved figure under "Qty" and the
+            # store lost sight of how much it had asked for.
+            "qty": flt(row.get("custom_requested_qty")) or flt(row.qty),
+            "uom": row.uom or row.stock_uom,
+            # Before anyone has decided, "approved 0" would read as a refusal;
+            # it is simply not decided yet.
+            "approved_qty": approved if doc.docstatus == 1 else None,
+            # Asked for but not yet decided — approvable later.
+            "pending_qty": flt(row.get("custom_pending_qty")) if doc.docstatus == 1 else None,
+            "rejected_qty": flt(row.get("custom_rejected_qty")),
+            "rejection_reason": row.get("custom_rejection_reason") or "",
+            # The quantities behind each status: how much is being moved from
+            # stock, how much is being bought. Both come from the documents
+            # themselves, since a store request is never linked to a Purchase
+            # Order directly — the buying goes through a Purchase Request that
+            # consolidates several stores.
+            "transfer_qty": flt((entry or {}).get("transfer_qty")),
+            "purchase_qty": flt((entry or {}).get("purchase_qty")),
+            "transfer_status": _documents(entry, "transfer_docs"),
+            "purchase_status": _documents(entry, "purchase_docs"),
+            "photo": row.get("custom_item_photo") or None,
+        })
+
+    delivery = doc.get("custom_delivery_warehouse") or doc.get("set_warehouse")
+    delivery_store = frappe.db.get_value("CH Store", {"warehouse": delivery}, "name") if delivery else None
+
+    return {
+        "name": doc.name,
+        "created_on": str(doc.creation) if doc.creation else None,
+        "raised_by": frappe.db.get_value("User", doc.owner, "full_name") or doc.owner,
+        "required_by": str(doc.get("custom_sla_breach_date") or doc.schedule_date or ""),
+        "requested_branch": doc.get("custom_store") or "",
+        "delivery_location": delivery_store or delivery or "",
+        "priority": doc.get("custom_priority") or "",
+        "status": doc.status,
+        "approval_status": doc.get("custom_approval_status") or "",
+        "notes": (doc.get("custom_request_notes") or "").strip(),
+        "items": items,
     }
 
 
@@ -10022,6 +10210,7 @@ def get_pending_material_requests(pos_profile) -> list:
             "transaction_date": str(sla_due_by or req.get("required_by_date") or req.get("creation")),
             "status": req.get("status"),
             "display_status": req.get("display_status") or req.get("status"),
+            "purchase_rejection_reason": req.get("purchase_rejection_reason") or "",
             "approval_status": req.get("approval_status", ""),
             "priority": req.get("priority", ""),
             "sla_breached": req.get("sla_breached", 0),
@@ -10035,6 +10224,9 @@ def get_pending_material_requests(pos_profile) -> list:
             "stock_entries": req.get("stock_entries", []),
             "per_ordered": req.get("per_ordered", 0),
             "per_received": req.get("per_received", 0),
+            # The rejected request this one was re-raised from, shown beside
+            # its ID; the old request itself is no longer listed.
+            "replaces": req.get("replaces") or "",
         }
         out.append(entry)
     return out
@@ -10049,15 +10241,29 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
     entries = []
 
     direction = (direction or "incoming").strip().lower()
-    if direction not in {"incoming", "outgoing"}:
+    if direction not in {"incoming", "outgoing", "requested"}:
         direction = "incoming"
 
+    # Whose request it is. The store's own are the ones its staff raised from
+    # this POS (New Transfer). Anything else going out of this store — raised
+    # in the back office, by another store or by the stock team, whoever was
+    # logged in — is a request made OF this store: it waits on "Requested by
+    # Others" until it is approved, and only then joins Outgoing. One that is
+    # refused is nobody's work here and is shown on neither.
+    own_users = _own_store_users(warehouse)
+    by_others = _raised_by_others_sql()
+
     if direction == "incoming":
-        wh_filter = "se.to_warehouse = %s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` sed WHERE sed.parent = se.name AND sed.t_warehouse = %s)"
-        params = (warehouse, warehouse)
+        wh_filter = "se.to_warehouse = %(wh)s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` sed WHERE sed.parent = se.name AND sed.t_warehouse = %(wh)s)"
+        scope = "1 = 1"
     else:
-        wh_filter = "se.from_warehouse = %s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` sed WHERE sed.parent = se.name AND sed.s_warehouse = %s)"
-        params = (warehouse, warehouse)
+        wh_filter = "se.from_warehouse = %(wh)s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` sed WHERE sed.parent = se.name AND sed.s_warehouse = %(wh)s)"
+        if direction == "requested":
+            scope = f"se.custom_status = 'Pending Approval' AND {by_others}"
+        else:
+            scope = (f"NOT (IFNULL(se.custom_status, '') IN ('Pending Approval', 'Rejected') "
+                     f"AND {by_others})")
+    params = {"wh": warehouse, "own_users": own_users}
 
     entries = frappe.db.sql(
         """SELECT se.name, se.posting_date, se.docstatus,
@@ -10112,8 +10318,9 @@ def get_stock_transfers(pos_profile, direction="incoming") -> dict:
         WHERE se.stock_entry_type = 'Material Transfer'
           AND se.docstatus IN (0, 1)
           AND ({wh_filter})
+          AND ({scope})
         ORDER BY se.creation DESC
-        LIMIT 20""".format(wh_filter=wh_filter),  # noqa: UP032
+        LIMIT 20""".format(wh_filter=wh_filter, scope=scope),  # noqa: UP032
         params,
         as_dict=True)
     return entries
@@ -10900,6 +11107,779 @@ def create_store_transfer_request(from_warehouse, to_warehouse, items,
         "status": mr.custom_approval_status,
         "source_warehouse": from_warehouse,
         "destination_warehouse": to_warehouse,
+    }
+
+
+@frappe.whitelist()
+def get_my_stock_requests(pos_profile, limit=50, only_mine=0, from_date=None, to_date=None) -> list:
+    """The stock requests raised from this store, one row per item, for
+    Request Stock > By Me.
+
+    "Me" is the store: everything its staff asked for, whoever was logged in,
+    with the person named on each row. ``only_mine`` narrows it to the
+    requests the logged-in user raised personally.
+
+    Each row says what was asked, what was approved and refused (and why),
+    what the store has received and what is still to come, where it is to be
+    delivered, how far it has got and who raised it. The "how far" is the
+    Latest Status the Request Fulfilment board shows for the line, said in the
+    store's words (see _STORE_STATUS_WORDS); ``doc_status`` keeps the board's.
+
+    ``from_date`` / ``to_date`` keep to the requests dated in that range; with
+    either given the list reaches back further than the latest few.
+    """
+    import json as _json
+
+    assert_pos_profile_scope(pos_profile)
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    store = frappe.db.get_value("CH Store", {"warehouse": profile.warehouse}, "name")
+    limit = min(max(cint(limit) or 50, 1), 200)
+    from_date, to_date = _list_date_range(from_date, to_date)
+    if from_date or to_date:
+        limit = 500
+    has_delivery = frappe.db.has_column("Material Request", "custom_delivery_warehouse")
+
+    filters = {
+        "material_request_type": "Material Transfer",
+        "docstatus": ("<", 2), "company": profile.company,
+    }
+    if store:
+        filters["custom_store"] = store
+    # With no store to go by, a person's own requests are all that can be
+    # safely called "theirs".
+    if cint(only_mine) or not store:
+        filters["owner"] = frappe.session.user
+    if from_date and to_date:
+        filters["transaction_date"] = ("between", [from_date, to_date])
+    elif from_date:
+        filters["transaction_date"] = (">=", from_date)
+    elif to_date:
+        filters["transaction_date"] = ("<=", to_date)
+    requests = frappe.get_all(
+        "Material Request", filters=filters,
+        fields=["name", "docstatus", "status", "custom_approval_status", "transaction_date",
+                "creation", "set_warehouse", "owner", "custom_approval_removed_lines"]
+               + (["custom_delivery_warehouse"] if has_delivery else []),
+        order_by="creation desc", limit_page_length=limit)
+    if not requests:
+        return []
+    names = [r.name for r in requests]
+
+    # How far each line has got, from the board's own reckoning.
+    latest, reasons, shipments = {}, {}, {}
+    try:
+        from ch_erp15.ch_erp15 import request_fulfilment as rf
+
+        for row in rf.request_rows(profile.company, names):
+            if not row.get("mr"):
+                continue
+            key = (row["mr"], row.get("row"))
+            latest.setdefault(key, []).append(row.get("status") or "")
+            if row.get("rejection_reason"):
+                reasons.setdefault(key, row["rejection_reason"])
+            for link in (row.get("transfers") or []) + (row.get("extra_transfers") or []):
+                if link.get("name"):
+                    shipments.setdefault(key, {})[link["name"]] = link
+    except Exception:
+        frappe.log_error(title="POS My Requests: latest status unavailable",
+                         message=frappe.get_traceback())
+
+    lines = {}
+    for item in frappe.get_all(
+            "Material Request Item", filters={"parent": ("in", names)},
+            fields=["name", "parent", "idx", "item_code", "item_name", "qty",
+                    "custom_requested_qty", "custom_rejected_qty"]
+                   + (["custom_rejection_reason"]
+                      if frappe.db.has_column("Material Request Item", "custom_rejection_reason") else []),
+            order_by="parent, idx"):
+        lines.setdefault(item.parent, []).append(item)
+
+    # What the store has booked in, per transfer and item.
+    transfer_names = sorted({name for links in shipments.values() for name in links})
+    booked_in = {}
+    for d in frappe.get_all(
+            "Stock Entry Detail", filters={"parent": ("in", transfer_names or [""])},
+            fields=["parent", "item_code", "custom_final_received_qty"]):
+        booked_in[(d.parent, d.item_code)] = (
+            booked_in.get((d.parent, d.item_code), 0) + flt(d.custom_final_received_qty))
+
+    warehouses = {r.get("custom_delivery_warehouse") or r.set_warehouse for r in requests}
+    warehouses.discard(None)
+    stores = dict(frappe.get_all(
+        "CH Store", filters={"warehouse": ("in", list(warehouses) or [""])},
+        fields=["warehouse", "name"], as_list=True))
+    wh_names = dict(frappe.get_all(
+        "Warehouse", filters={"name": ("in", list(warehouses) or [""])},
+        fields=["name", "warehouse_name"], as_list=True))
+    people = dict(frappe.get_all(
+        "User", filters={"name": ("in", list({r.owner for r in requests}))},
+        fields=["name", "full_name"], as_list=True))
+
+    out = []
+    for req in requests:
+        approval = req.custom_approval_status or ""
+        approved_doc = req.docstatus == 1 and approval == "Approved"
+        delivery = req.get("custom_delivery_warehouse") or req.set_warehouse or ""
+        base = {
+            "request": req.name,
+            "date": str(req.transaction_date or ""),
+            "raised_at": str(req.creation or ""),
+            "delivery_location": stores.get(delivery) or wh_names.get(delivery) or delivery,
+            "raised_by": people.get(req.owner) or req.owner,
+            "mine": 1 if req.owner == frappe.session.user else 0,
+            "approval_status": approval,
+        }
+        for item in lines.get(req.name, []):
+            asked = flt(item.custom_requested_qty) or flt(item.qty)
+            key = (req.name, item.name)
+            statuses = [s for s in latest.get(key, []) if s]
+            if approval == "Rejected":
+                statuses = ["Rejected"]
+            elif not statuses:
+                statuses = [approval or (req.status or "")]
+            statuses = list(dict.fromkeys(statuses))
+            approved = flt(item.qty) if approved_doc else 0
+            # A transfer counts once the store has booked it in: all of it
+            # when it is closed, what was scanned in when it is part-way.
+            received = 0.0
+            for link in shipments.get(key, {}).values():
+                if link.get("status") in ("Transferred", "Force Closed"):
+                    received += flt(link.get("qty"))
+                elif link.get("status") == "Partially Transferred":
+                    received += min(flt(link.get("qty")),
+                                    booked_in.get((link["name"], item.item_code), 0))
+            received = min(received, approved) if approved else 0.0
+            out.append({
+                **base,
+                "item_code": item.item_code, "item_name": item.item_name or item.item_code,
+                "qty": asked,
+                "approved_qty": approved,
+                "rejected_qty": flt(item.custom_rejected_qty),
+                "received_qty": received,
+                "pending_qty": max(approved - received, 0),
+                "rejection_reason": (reasons.get(key) or item.get("custom_rejection_reason") or "")
+                    if flt(item.custom_rejected_qty) or approval == "Rejected" else "",
+                # Goods are at the door and the store has not booked them in.
+                "to_receive": 1 if "Delivered At Store" in statuses else 0,
+                "doc_status": " / ".join(statuses),
+                "latest_status": " / ".join(dict.fromkeys(_store_status_words(s) for s in statuses)),
+            })
+        # A line refused in full is taken off the request and kept aside;
+        # it is still something this person asked for.
+        try:
+            removed = _json.loads(req.custom_approval_removed_lines or "[]")
+        except (TypeError, ValueError):
+            removed = []
+        for gone in removed if isinstance(removed, list) else []:
+            if not isinstance(gone, dict) or not gone.get("item_code"):
+                continue
+            asked = flt(gone.get("custom_requested_qty") or gone.get("requested_qty")
+                        or gone.get("rejected_qty") or gone.get("qty"))
+            out.append({
+                **base,
+                "item_code": gone["item_code"],
+                "item_name": gone.get("item_name") or gone["item_code"],
+                "qty": asked, "approved_qty": 0,
+                "rejected_qty": flt(gone.get("custom_rejected_qty") or gone.get("rejected_qty") or asked),
+                "received_qty": 0, "pending_qty": 0, "to_receive": 0,
+                "rejection_reason": gone.get("custom_rejection_reason") or gone.get("rejection_reason") or "",
+                "doc_status": "Rejected",
+                "latest_status": _store_status_words("Rejected"),
+            })
+    return out
+
+
+#: A request's status as the store reads it. The board's wording names the
+#: back-office document a line is sitting on (PO Submitted, PR Draft); a store
+#: only needs to know whether its stock is ordered, on the way, or at the door.
+_STORE_STATUS_WORDS = {
+    "Pending Approval": "Waiting for approval",
+    "Approved": "Approved - being arranged",
+    "MR Approved": "Approved - being arranged",
+    "Purchase Requested": "Purchase being arranged",
+    "PO Draft": "Purchase being arranged",
+    "PO Submitted": "Ordered from supplier",
+    "PO Closed": "Ordered from supplier",
+    "PR Draft": "Supplier stock reached hub",
+    "PR Submitted": "Supplier stock reached hub",
+    "PI Draft": "Supplier stock reached hub",
+    "PI Submitted": "Supplier stock reached hub",
+    "Partially Stock Outward": "Being packed at hub",
+    "Stock Outward": "Being packed at hub",
+    "Packed": "Packed - waiting for pickup",
+    "Ready For Pickup": "Packed - waiting for pickup",
+    "Manifest Created": "Packed - waiting for pickup",
+    "Pickup Assigned": "Driver assigned",
+    "In Transit": "On the way",
+    "Delivered At Store": "Delivered - receive it now",
+    "Delivered": "Received",
+    "Rejected": "Rejected",
+}
+
+
+def _store_status_words(status) -> str:
+    return _(_STORE_STATUS_WORDS.get(status or "", status or ""))
+
+
+def _list_date_range(from_date, to_date) -> tuple:
+    """The From / To dates a POS list was asked for, as dates or None; a
+    range typed backwards is read the way it was meant."""
+    start = frappe.utils.getdate(from_date) if from_date else None
+    end = frappe.utils.getdate(to_date) if to_date else None
+    if start and end and start > end:
+        start, end = end, start
+    return start, end
+
+
+def _own_store_users(warehouse) -> tuple:
+    """The active POS Executives of the store that owns ``warehouse``."""
+    store = frappe.db.get_value("CH Store", {"warehouse": warehouse}, "name")
+    users = set(frappe.get_all(
+        "POS Executive", filters={"store": store, "is_active": 1}, pluck="user")) if store else set()
+    users.discard(None)
+    return tuple(sorted(users)) or ("",)
+
+
+def _raised_by_others_sql() -> str:
+    """SQL for "this transfer was not raised from this store's own POS" —
+    the one rule behind Requested by Others (see get_stock_transfers)."""
+    if frappe.db.has_column("Stock Entry", "custom_raised_in_pos"):
+        return ("NOT (IFNULL(se.custom_raised_in_pos, 0) = 1 "
+                "AND se.owner IN %(own_users)s)")
+    return "se.owner NOT IN %(own_users)s"
+
+
+def _transfer_carriers(names) -> dict:
+    """{Stock Entry: (delivery mode, who carried it)} from the manifest and
+    the trip it travels on — the driver, the courier partner, or whoever a
+    third-party trip names."""
+    names = sorted({n for n in (names or []) if n})
+    if not names or not frappe.db.exists("DocType", "CH Transfer Manifest") \
+            or not frappe.db.has_column("Stock Entry", "custom_transfer_manifest"):
+        return {}
+    on_trip = (frappe.db.has_column("CH Transfer Manifest", "trip")
+               and frappe.db.exists("DocType", "CH Logistics Trip")
+               and frappe.db.has_column("CH Logistics Trip", "transport_mode"))
+    join = "LEFT JOIN `tabCH Logistics Trip` t ON t.name = m.trip" if on_trip else ""
+    cols = ("t.transport_mode, t.courier_partner, t.carrier_name, t.driver_name AS trip_driver"
+            if on_trip else "NULL AS transport_mode, NULL AS courier_partner, "
+                            "NULL AS carrier_name, NULL AS trip_driver")
+    out = {}
+    for row in frappe.db.sql(
+            f"""SELECT se.name, m.driver_name, m.courier_partner AS manifest_courier, {cols}
+                  FROM `tabStock Entry` se
+                  JOIN `tabCH Transfer Manifest` m ON m.name = se.custom_transfer_manifest
+                  {join}
+                 WHERE se.name IN %(names)s
+                   AND IFNULL(m.status, '') NOT IN ('Rejected', 'Returned', 'Cancelled')""",
+            {"names": tuple(names)}, as_dict=True):
+        mode = row.transport_mode or "Own"
+        if mode == "Own" and not (row.driver_name or row.trip_driver) \
+                and (row.courier_partner or row.manifest_courier):
+            mode = "Courier"
+        if mode == "Courier":
+            who = row.courier_partner or row.manifest_courier
+        elif mode == "Others":
+            who = row.carrier_name
+        else:
+            who = row.driver_name or row.trip_driver
+        out[row.name] = (mode, who or "")
+    return out
+
+
+def _transfer_latest_status(entries) -> dict:
+    """{Stock Entry: status as the Request Fulfilment board words it} —
+    Manifest Created once it is on a manifest, Pickup Assigned / In Transit
+    as a driver or a courier trip moves it, Delivered At Store, Delivered."""
+    try:
+        from ch_erp15.ch_erp15 import request_fulfilment as rf
+
+        links = [{"stock_entry": name, "status": status or ""} for name, status in entries]
+        rf._apply_manifest_status(links)
+        return {l["stock_entry"]: rf._TRANSFER_LABEL.get(l["status"], l["status"] or "")
+                for l in links}
+    except Exception:
+        frappe.log_error(title="POS transfer lists: latest status unavailable",
+                         message=frappe.get_traceback())
+        return {name: status or "" for name, status in entries}
+
+
+def _span_text(start, end) -> str:
+    """How long a transfer took, the way people say it: "2 Hrs 56 mins"."""
+    if not start or not end:
+        return ""
+    seconds = int((frappe.utils.get_datetime(end) - frappe.utils.get_datetime(start)).total_seconds())
+    if seconds < 0:
+        return ""
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    parts = []
+    if days:
+        parts.append(_("{0} Day(s)").format(days))
+    if hours or days:
+        parts.append(_("{0} Hrs").format(hours))
+    parts.append(_("{0} mins").format(minutes))
+    return " ".join(parts)
+
+
+def _transfer_receipts(entries, lines) -> tuple:
+    """When each transfer's goods were booked in at the destination, and by whom.
+
+    Read from the stock ledger, which is the one record that only exists once
+    the store has actually received: {(transfer, item): (when, who)} for a
+    line, and {(transfer, serial): (when, who)} for each device.
+    """
+    names = [e.name for e in entries]
+    targets = {e.to_warehouse for e in entries if e.to_warehouse}
+    targets |= {d.t_warehouse for rows in lines.values() for d in rows if d.t_warehouse}
+    if not names or not targets:
+        return {}, {}
+    args = {"names": tuple(names), "targets": tuple(targets)}
+    by_item = {}
+    for row in frappe.db.sql(
+            """SELECT voucher_no, item_code, MAX(creation) AS at_time,
+                      SUBSTRING_INDEX(GROUP_CONCAT(owner ORDER BY creation DESC), ',', 1) AS who
+                 FROM `tabStock Ledger Entry`
+                WHERE voucher_type = 'Stock Entry' AND voucher_no IN %(names)s
+                  AND warehouse IN %(targets)s AND actual_qty > 0 AND is_cancelled = 0
+                GROUP BY voucher_no, item_code""", args, as_dict=True):
+        by_item[(row.voucher_no, row.item_code)] = (row.at_time, row.who)
+    by_serial = {}
+    for row in frappe.db.sql(
+            """SELECT sle.voucher_no, e.serial_no, sle.creation AS at_time, sle.owner AS who
+                 FROM `tabStock Ledger Entry` sle
+                 JOIN `tabSerial and Batch Entry` e ON e.parent = sle.serial_and_batch_bundle
+                WHERE sle.voucher_type = 'Stock Entry' AND sle.voucher_no IN %(names)s
+                  AND sle.warehouse IN %(targets)s AND sle.actual_qty > 0 AND sle.is_cancelled = 0
+                  AND IFNULL(e.serial_no, '') != ''""", args, as_dict=True):
+        by_serial[(row.voucher_no, row.serial_no)] = (row.at_time, row.who)
+    return by_item, by_serial
+
+
+@frappe.whitelist()
+def get_transfer_item_list(pos_profile, view="others", limit=100, from_date=None, to_date=None) -> list:
+    """Item-by-item lists for the Transfers sub-menus in POS.
+
+    ``view``:
+      * "others"   — transfer requests somebody else raised asking this store
+                     to send stock, still waiting for approval;
+      * "incoming" — Delivery Challans coming to this store;
+      * "outgoing" — Delivery Challans this store has sent.
+
+    One row per item, with the same wording of status the Request Fulfilment
+    board uses, so the store and the back office read the same thing.
+
+    ``from_date`` / ``to_date`` keep to the rows whose Date column falls in
+    that range (the challan's date, or the request's for "others"); with
+    either given the list reaches back further than the latest few.
+    """
+    assert_pos_profile_scope(pos_profile)
+    profile = frappe.get_cached_doc("POS Profile", pos_profile)
+    warehouse = profile.warehouse
+    view = (view or "others").strip().lower()
+    if view not in ("others", "incoming", "outgoing"):
+        view = "others"
+    limit = min(max(cint(limit) or 100, 1), 300)
+    from_date, to_date = _list_date_range(from_date, to_date)
+    if from_date or to_date:
+        limit = 1000
+    params = {"wh": warehouse, "own_users": _own_store_users(warehouse),
+              "from_date": from_date, "to_date": to_date}
+
+    out_of_here = ("(se.from_warehouse = %(wh)s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` x "
+                   "WHERE x.parent = se.name AND x.s_warehouse = %(wh)s))")
+    into_here = ("(se.to_warehouse = %(wh)s OR EXISTS (SELECT 1 FROM `tabStock Entry Detail` x "
+                 "WHERE x.parent = se.name AND x.t_warehouse = %(wh)s))")
+    if view == "others":
+        where = f"{out_of_here} AND se.custom_status = 'Pending Approval' AND {_raised_by_others_sql()}"
+    elif view == "incoming":
+        where = f"{into_here} AND IFNULL(se.custom_delivery_challan, '') != ''"
+    else:
+        where = f"{out_of_here} AND IFNULL(se.custom_delivery_challan, '') != ''"
+
+    # The date a row shows is the date it is filtered on.
+    shown_date = "se.posting_date" if view == "others" else "COALESCE(dc.posting_date, se.posting_date)"
+    if from_date:
+        where += f" AND {shown_date} >= %(from_date)s"
+    if to_date:
+        where += f" AND {shown_date} <= %(to_date)s"
+
+    entries = frappe.db.sql(
+        f"""SELECT se.name, se.owner, se.creation, se.posting_date, se.custom_status,
+                   se.from_warehouse, se.to_warehouse, se.custom_delivery_challan
+              FROM `tabStock Entry` se
+              LEFT JOIN `tabCH Delivery Challan` dc ON dc.name = se.custom_delivery_challan
+             WHERE se.stock_entry_type = 'Material Transfer' AND se.docstatus IN (0, 1)
+               AND {where}
+             ORDER BY se.creation DESC
+             LIMIT {limit}""", params, as_dict=True)
+    if not entries:
+        return []
+    names = [e.name for e in entries]
+
+    lines = {}
+    for d in frappe.get_all(
+            "Stock Entry Detail", filters={"parent": ("in", names)},
+            fields=["parent", "idx", "item_code", "item_name", "qty", "custom_quantity",
+                    "custom_approved_qty", "custom_approval_pending_qty", "custom_rejected_qty",
+                    "custom_pending_qty", "custom_final_received_qty",
+                    "serial_no", "custom_dispatched_serials", "s_warehouse", "t_warehouse"],
+            order_by="parent, idx"):
+        lines.setdefault(d.parent, []).append(d)
+
+    challans = {}
+    if view != "others":
+        dc_names = [e.custom_delivery_challan for e in entries]
+        dates = {r.name: r for r in frappe.get_all(
+            "CH Delivery Challan", filters={"name": ("in", dc_names)},
+            fields=["name", "posting_date", "creation"])}
+        for dc in dc_names:
+            row = dates.get(dc) or {}
+            challans[dc] = {"date": row.get("posting_date"), "created": row.get("creation"),
+                            "items": {}}
+        for row in frappe.get_all(
+                "CH Delivery Challan Item", filters={"parent": ("in", dc_names)},
+                fields=["parent", "item_code", "qty", "serial_no"], order_by="parent, idx"):
+            slot = challans[row.parent]["items"].setdefault(row.item_code, {"qty": 0.0, "serials": []})
+            slot["qty"] += flt(row.qty)
+            slot["serials"] += _transfer_serials(row.serial_no)
+
+    warehouses = {w for e in entries for w in (e.from_warehouse, e.to_warehouse) if w}
+    warehouses |= {w for rows in lines.values() for d in rows for w in (d.s_warehouse, d.t_warehouse) if w}
+    stores = dict(frappe.get_all(
+        "CH Store", filters={"warehouse": ("in", list(warehouses) or [""])},
+        fields=["warehouse", "name"], as_list=True))
+    wh_names = dict(frappe.get_all(
+        "Warehouse", filters={"name": ("in", list(warehouses) or [""])},
+        fields=["name", "warehouse_name"], as_list=True))
+    place = lambda w: stores.get(w) or wh_names.get(w) or w or ""  # noqa: E731
+
+    owners = {e.owner for e in entries}
+    people = dict(frappe.get_all(
+        "User", filters={"name": ("in", list(owners))}, fields=["name", "full_name"], as_list=True))
+    # Where a request came from: the store its raiser works at, or the back
+    # office when they are on no store's roster.
+    raiser_store = dict(frappe.get_all(
+        "POS Executive", filters={"user": ("in", list(owners)), "is_active": 1},
+        fields=["user", "store"], as_list=True))
+
+    received_items, received_serials = (
+        _transfer_receipts(entries, lines) if view != "others" else ({}, {}))
+    receivers = {who for _at, who in list(received_items.values()) + list(received_serials.values()) if who}
+    people.update(dict(frappe.get_all(
+        "User", filters={"name": ("in", list(receivers) or [""])},
+        fields=["name", "full_name"], as_list=True)))
+    carriers = _transfer_carriers(names) if view != "others" else {}
+    boxes = dict(frappe.db.sql(
+        """SELECT parent, COUNT(*) FROM `tabCH Stock Entry Package`
+            WHERE parent IN %(names)s GROUP BY parent""", {"names": tuple(names)})) \
+        if view != "others" and frappe.db.exists("DocType", "CH Stock Entry Package") else {}
+    latest = _transfer_latest_status([(e.name, e.custom_status) for e in entries])
+
+    out = []
+    for e in entries:
+        rows = lines.get(e.name, [])
+        source = e.from_warehouse or (rows[0].s_warehouse if rows else "")
+        target = e.to_warehouse or (rows[0].t_warehouse if rows else "")
+        mode, carrier = carriers.get(e.name, ("", ""))
+        dc = challans.get(e.custom_delivery_challan) or {}
+        base = {
+            "transfer": e.name,
+            "delivery_challan": e.custom_delivery_challan or "",
+            "date": str((dc.get("date") if view != "others" else None) or e.posting_date or ""),
+            "raised_at": str(e.creation or ""),
+            # When the challan itself was raised, and how many boxes it is packed in.
+            "created": str(dc.get("created") or e.creation or ""),
+            "boxes": cint(boxes.get(e.name)),
+            "status": e.custom_status or "",
+            "from_location": place(source),
+            "delivery_location": place(target),
+            "requested_from": raiser_store.get(e.owner) or _("Back office"),
+            "delivery_mode": mode,
+            "delivered_by": carrier,
+            "latest_status": latest.get(e.name) or e.custom_status or "",
+            "raised_by": people.get(e.owner) or e.owner,
+        }
+        for d in rows:
+            if not d.item_code:
+                continue
+            on_challan = (dc.get("items") or {}).get(d.item_code) or {}
+            asked = (flt(d.custom_approved_qty) + flt(d.custom_approval_pending_qty)
+                     + flt(d.custom_rejected_qty)) or flt(d.custom_quantity) or flt(d.qty)
+            serials = (on_challan.get("serials")
+                       or _transfer_serials(d.custom_dispatched_serials)
+                       or _transfer_serials(d.serial_no))
+            serials = list(dict.fromkeys(serials))
+            sent = (flt(on_challan.get("qty")) or flt(d.custom_pending_qty) or flt(d.qty)) \
+                if view != "others" else asked
+            accepted = flt(d.custom_final_received_qty)
+            sent_at = dc.get("created") or e.creation
+            at_time, who = received_items.get((e.name, d.item_code), (None, None))
+
+            def _state(got, total):
+                if total and got >= total:
+                    return _("Received")
+                if got > 0:
+                    return _("Partially Received")
+                return base["latest_status"]
+
+            # Each device on its own: sent, booked in or not, when and by whom.
+            devices = []
+            for serial in serials:
+                s_at, s_who = received_serials.get((e.name, serial), (None, None))
+                got = 1 if s_at else 0
+                devices.append({
+                    "serial": serial, "qty": 1, "accepted_qty": got, "pending_qty": 1 - got,
+                    "status": _state(got, 1),
+                    "in_time": str(s_at or ""),
+                    "inward_by": people.get(s_who) or s_who or "",
+                    "duration": _span_text(sent_at, s_at),
+                })
+            out.append({
+                **base,
+                "item_code": d.item_code,
+                "item_name": d.item_name or d.item_code,
+                # A request shows what was asked; a challan shows what it carries.
+                "qty": asked if view == "others" else (flt(on_challan.get("qty")) or flt(d.custom_pending_qty) or flt(d.qty)),
+                "approved_qty": flt(d.custom_approved_qty),
+                "rejected_qty": flt(d.custom_rejected_qty),
+                # What the store has booked in. custom_receive_qty is the
+                # driver's count on the way and says nothing about receipt.
+                "received_qty": flt(d.custom_final_received_qty),
+                "serials": ", ".join(serials),
+                # The transfer as the store reads it once goods arrive.
+                "transferred_qty": sent,
+                "accepted_qty": accepted,
+                "pending_qty": max(sent - accepted, 0),
+                "item_status": _state(accepted, sent),
+                "in_time": str(at_time or ""),
+                "inward_by": people.get(who) or who or "",
+                "duration": _span_text(sent_at, at_time),
+                "devices": devices,
+            })
+    return out
+
+
+@frappe.whitelist()
+def search_transfer_items(from_warehouse, txt=None) -> list:
+    """Items the source store holds, for the New Transfer item picker.
+
+    Only what is in stock there is offered — a store cannot send what it does
+    not have — with how many it holds, so the quantity typed can be checked
+    before the request is raised.
+    """
+    if not from_warehouse:
+        return []
+    company = frappe.db.get_value("Warehouse", from_warehouse, "company")
+    assert_store_scope(warehouse=from_warehouse, company=company)
+    txt = f"%{(txt or '').strip()}%"
+    return frappe.db.sql(
+        """SELECT b.item_code, i.item_name, i.stock_uom AS uom,
+                  b.actual_qty AS available, i.has_serial_no
+             FROM `tabBin` b
+             JOIN `tabItem` i ON i.name = b.item_code
+            WHERE b.warehouse = %(warehouse)s AND b.actual_qty > 0
+              AND i.disabled = 0 AND i.is_stock_item = 1
+              AND (b.item_code LIKE %(txt)s OR i.item_name LIKE %(txt)s)
+            ORDER BY i.item_name
+            LIMIT 20""",
+        {"warehouse": from_warehouse, "txt": txt}, as_dict=True)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_store_transfer(from_warehouse, to_warehouse, items, notes=None) -> dict:
+    """Raise a Transfer Request from POS: items and quantities, nothing scanned.
+
+    It opens waiting for approval like every other transfer (see
+    StockEntry.before_insert in ch_erp15.custom.stock_entry). Which devices
+    go is settled later, when the approved request is sent out — see
+    create_transfer_delivery_challan.
+    """
+    if isinstance(items, str):
+        items = frappe.parse_json(items)
+    if not isinstance(items, list) or not items:
+        frappe.throw(_("At least one item is required."))
+    if not from_warehouse or not to_warehouse or from_warehouse == to_warehouse:
+        frappe.throw(_("Choose two different store warehouses."))
+
+    company = frappe.db.get_value("Warehouse", from_warehouse, "company")
+    if not company or frappe.db.get_value("Warehouse", to_warehouse, "company") != company:
+        frappe.throw(_("Store transfers must remain within one company."))
+    assert_store_scope(warehouse=from_warehouse, company=company)
+    source_profile = frappe.db.get_value(
+        "POS Profile",
+        {"warehouse": from_warehouse, "company": company, "disabled": 0},
+        "name")
+    if not source_profile:
+        frappe.throw(_("Source warehouse is not linked to an active POS Profile."))
+    if not is_privileged_user() and to_warehouse not in set(
+        get_transfer_warehouse_scope(source_profile).get("target_warehouses") or []
+    ):
+        frappe.throw(_("Destination store is outside the configured transfer network."),
+                     frappe.PermissionError)
+
+    wanted = {}
+    for item in items:
+        item_code = (item.get("item_code") or "").strip()
+        qty = flt(item.get("qty"))
+        if not item_code:
+            frappe.throw(_("Item code is required."))
+        if qty <= 0 or qty != int(qty):
+            frappe.throw(_("{0}: quantity must be a whole number greater than zero.").format(item_code))
+        wanted[item_code] = wanted.get(item_code, 0) + qty
+
+    se = frappe.new_doc("Stock Entry")
+    se.stock_entry_type = "Material Transfer"
+    se.purpose = "Material Transfer"
+    se.company = company
+    se.from_warehouse = from_warehouse
+    se.to_warehouse = to_warehouse
+    if notes:
+        se.remarks = str(notes)[:1000]
+    if se.meta.has_field("custom_raised_in_pos"):
+        se.custom_raised_in_pos = 1
+    for item_code, qty in wanted.items():
+        held = flt(frappe.db.get_value(
+            "Bin", {"item_code": item_code, "warehouse": from_warehouse}, "actual_qty"))
+        if qty > held:
+            frappe.throw(
+                _("{0}: only {1} in stock at {2}, {3} asked for.").format(
+                    item_code, int(held), from_warehouse, int(qty)),
+                title=_("Not Enough Stock"))
+        se.append("items", {
+            "item_code": item_code,
+            "qty": qty,
+            "custom_quantity": qty,
+            "s_warehouse": from_warehouse,
+            "t_warehouse": to_warehouse,
+        })
+    # The store's scope was checked above; a POS user need not hold the desk
+    # permission to create Stock Entries to ask for a transfer.
+    se.insert(ignore_permissions=True)
+    return {
+        "name": se.name,
+        "status": se.get("custom_status"),
+        "source_warehouse": from_warehouse,
+        "destination_warehouse": to_warehouse,
+    }
+
+
+def _transfer_serials(value) -> list:
+    return [s.strip() for s in str(value or "").splitlines() if s.strip()]
+
+
+@frappe.whitelist()
+def get_transfer_dispatch_lines(stock_entry) -> dict:
+    """What an approved transfer still has to send, line by line, for the
+    Create Delivery Challan dialog."""
+    from ch_erp15.ch_erp15.custom.stock_entry import _authorize_stock_entry
+
+    doc = _authorize_stock_entry(stock_entry, location="source")
+    lines = []
+    for row in doc.items:
+        if not row.item_code:
+            continue
+        need = flt(row.get("custom_quantity") or row.qty) - flt(row.get("custom_pending_qty"))
+        if need <= 0:
+            continue
+        lines.append({
+            "row": row.name,
+            "item_code": row.item_code,
+            "item_name": row.item_name or row.item_code,
+            "qty": int(need),
+            "serialized": cint(frappe.db.get_value("Item", row.item_code, "has_serial_no")),
+            "from_warehouse": row.s_warehouse or doc.from_warehouse,
+        })
+    return {
+        "name": doc.name, "status": doc.get("custom_status"),
+        "from_warehouse": doc.from_warehouse, "to_warehouse": doc.to_warehouse,
+        "lines": lines,
+    }
+
+
+@frappe.whitelist(methods=["POST"])
+def create_transfer_delivery_challan(stock_entry, serials=None) -> dict:
+    """Send out an approved transfer against the devices scanned for it.
+
+    The scanned IMEIs are written onto the lines they belong to and the
+    transfer goes through the same Stock Outward every transfer does
+    (set_pending_qty), which moves the stock into transit and raises the
+    Delivery Challan. A serialized line must have every unit scanned; a line
+    with no serials goes by its quantity.
+    """
+    from ch_erp15.ch_erp15.custom.stock_entry import _authorize_stock_entry, set_pending_qty
+
+    if isinstance(serials, str):
+        serials = frappe.parse_json(serials or "[]")
+    scanned = list(dict.fromkeys(str(s).strip() for s in (serials or []) if str(s).strip()))
+
+    doc = _authorize_stock_entry(stock_entry, location="source")
+    if doc.get("custom_status") not in ("Approved", "Partially Stock Outward"):
+        frappe.throw(
+            _("{0} is {1} — a Delivery Challan is raised once the transfer is approved.").format(
+                doc.name, doc.get("custom_status") or _("Draft")),
+            title=_("Not Approved Yet"))
+
+    rows = {}
+    for row in scanned and frappe.get_all(
+            "Serial No", filters={"name": ("in", scanned)},
+            fields=["name", "item_code", "warehouse", "status"]) or []:
+        rows[row.name] = row
+    missing = [s for s in scanned if s not in rows]
+    if missing:
+        frappe.throw(_("Serial / IMEI not found: {0}").format(", ".join(missing)))
+
+    by_item = {}
+    for name in scanned:
+        by_item.setdefault(rows[name].item_code, []).append(name)
+
+    for line in doc.items:
+        if not line.item_code:
+            continue
+        need = int(flt(line.get("custom_quantity") or line.qty) - flt(line.get("custom_pending_qty")))
+        if need <= 0:
+            continue
+        if not cint(frappe.db.get_value("Item", line.item_code, "has_serial_no")):
+            continue
+        source = line.s_warehouse or doc.from_warehouse
+        mine = by_item.get(line.item_code, [])[:need]
+        by_item[line.item_code] = by_item.get(line.item_code, [])[need:]
+        if len(mine) < need:
+            frappe.throw(
+                _("{0}: scan {1} more — {2} of {3} scanned.").format(
+                    line.item_name or line.item_code, need - len(mine), len(mine), need),
+                title=_("Scan All Units"))
+        for name in mine:
+            sn = rows[name]
+            if (sn.warehouse or "") != source:
+                frappe.throw(_("{0} is at {1}, not {2}.").format(
+                    name, sn.warehouse or _("(no warehouse)"), source))
+            if (sn.status or "").lower() not in ("", "active"):
+                frappe.throw(_("{0} status is {1}; it cannot be transferred.").format(name, sn.status))
+            reserved = _get_open_reserved_sales_order_for_serial(name, source)
+            if reserved:
+                frappe.throw(_("{0} is reserved on Sales Order {1}; transfer is blocked.").format(
+                    name, reserved))
+        already = _transfer_serials(line.get("custom_dispatched_serials"))
+        line.serial_no = "\n".join(dict.fromkeys(already + mine))
+        if line.meta.has_field("custom_scanned_qty"):
+            line.custom_scanned_qty = len(already) + len(mine)
+
+    extra = [s for names in by_item.values() for s in names]
+    if extra:
+        frappe.throw(
+            _("These were scanned but are not needed on this transfer: {0}").format(", ".join(extra)),
+            title=_("Not On This Transfer"))
+
+    doc.save(ignore_permissions=True)
+    out = set_pending_qty(doc.name) or {}
+    sent = out.get("transfer") or doc.name
+    return {
+        "name": sent,
+        "status": frappe.db.get_value("Stock Entry", sent, "custom_status"),
+        "delivery_challan": frappe.db.get_value("Stock Entry", sent, "custom_delivery_challan"),
+        "remainder": out.get("remainder"),
     }
 
 
@@ -12640,6 +13620,59 @@ def _get_executive_access(user, warehouse):
             "can_give_discount": e.can_give_discount,
             "max_discount_pct": e.max_discount_pct,
         })
+
+    # Sales Persons of these stores join the Billed By list: a salesman with no
+    # login or POS Executive, set up on Sales Person with a Store (its company
+    # follows the store). Anyone already listed through a POS Executive at the
+    # store is not listed twice. Prefixed so the server can tell the two apart
+    # (pos_executive.billed_by_sales_person).
+    sp_meta = frappe.get_meta("Sales Person")
+    if stores and sp_meta.has_field("custom_store") and sp_meta.has_field("custom_company"):
+        from ch_pos.pos_core.doctype.pos_executive.pos_executive import SALES_PERSON_PREFIX
+        listed = {(e.store, e.sales_person) for e in all_execs if e.get("sales_person")}
+        for sp in frappe.get_all(
+            "Sales Person",
+            filters={"custom_store": ("in", stores), "enabled": 1, "is_group": 0},
+            fields=["name", "sales_person_name", "custom_store", "custom_company"],
+            order_by="sales_person_name asc",
+            limit_page_length=row_limit,
+        ):
+            if not sp.custom_company or sp.custom_company not in accessible_companies:
+                continue
+            if (sp.custom_store, sp.name) in listed:
+                continue
+            store_execs_by_company.setdefault(sp.custom_company, []).append({
+                "name": SALES_PERSON_PREFIX + sp.name,
+                "executive_name": sp.sales_person_name or sp.name,
+                "user": None,
+                "role": "Sales Person",
+                "can_give_discount": 0,
+                "max_discount_pct": 0,
+                "is_sales_person": 1,
+            })
+
+    # Brand promoters of these stores (POS Promoter) join the list the same
+    # way: no login or POS Executive, prefixed for billed_by_promoter.
+    if stores and frappe.db.table_exists("POS Promoter"):
+        from ch_pos.pos_core.doctype.pos_executive.pos_executive import PROMOTER_PREFIX
+        for pr in frappe.get_all(
+            "POS Promoter",
+            filters={"store": ("in", stores), "enabled": 1},
+            fields=["name", "promoter_name", "brand", "company"],
+            order_by="promoter_name asc",
+            limit_page_length=row_limit,
+        ):
+            if not pr.company or pr.company not in accessible_companies:
+                continue
+            store_execs_by_company.setdefault(pr.company, []).append({
+                "name": PROMOTER_PREFIX + pr.name,
+                "executive_name": pr.promoter_name + (f" ({pr.brand})" if pr.brand else ""),
+                "user": None,
+                "role": "Promoter",
+                "can_give_discount": 0,
+                "max_discount_pct": 0,
+                "is_promoter": 1,
+            })
 
     # Determine user's own executive records — one per company
     own_default = None
@@ -15742,7 +16775,121 @@ def _stamp_sales_invoice_print_metadata(rows, company=None):
         else:
             row["__print_format"] = "Custom Sales Invoice"
             row["__no_letterhead"] = 0
+    _stamp_billed_by(rows)
+    _stamp_invoice_view_totals(rows)
     return rows
+
+
+def _stamp_invoice_view_totals(rows):
+    """Sales Invoice View columns: sub type, the customer's phone / email, and
+    per-invoice sums of the line tax split (exempted, taxable, CGST, SGST,
+    IGST) plus the Sales Order(s) the lines came from. Exempted value is
+    stored per unit on the line, so it is multiplied by qty."""
+    names = [r.get("name") for r in rows if r.get("name")]
+    if not names:
+        return
+    item_cols = {c for c in frappe.db.get_table_columns("Sales Invoice Item")}
+    exempt = "ifnull(sii.custom_exempted_value, 0) * sii.qty" if "custom_exempted_value" in item_cols else "0"
+    taxable = "ifnull(sii.taxable_value, sii.net_amount)" if "taxable_value" in item_cols else "sii.net_amount"
+    tax = {k: (f"ifnull(sii.{k}, 0)" if k in item_cols else "0") for k in ("cgst_amount", "sgst_amount", "igst_amount")}
+    sums = {
+        r.parent: r for r in frappe.db.sql(f"""
+            select sii.parent,
+                   sum({exempt}) as total_exempted, sum({taxable}) as total_taxable,
+                   sum({tax['cgst_amount']}) as total_cgst, sum({tax['sgst_amount']}) as total_sgst,
+                   sum({tax['igst_amount']}) as total_igst,
+                   group_concat(distinct nullif(sii.sales_order, '') separator ', ') as order_ids
+              from `tabSales Invoice Item` sii
+             where sii.parent in %(names)s
+             group by sii.parent""", {"names": names}, as_dict=True)
+    }
+    head_fields = ["name", "customer", "contact_mobile", "contact_email"]
+    if frappe.get_meta("Sales Invoice").has_field("custom_ch_sale_sub_type"):
+        head_fields.append("custom_ch_sale_sub_type")
+    heads = {r.name: r for r in frappe.get_all(
+        "Sales Invoice", filters={"name": ("in", names)}, fields=head_fields)}
+    customers = list({h.customer for h in heads.values() if h.customer})
+    cust = {c.name: c for c in frappe.get_all(
+        "Customer", filters={"name": ("in", customers)}, fields=["name", "mobile_no", "email_id"])} if customers else {}
+    for row in rows:
+        h = heads.get(row.get("name")) or frappe._dict()
+        c = cust.get(h.get("customer")) or frappe._dict()
+        t = sums.get(row.get("name")) or frappe._dict()
+        row["sale_sub_type"] = h.get("custom_ch_sale_sub_type") or ""
+        row["phone"] = h.get("contact_mobile") or c.get("mobile_no") or ""
+        row["email"] = h.get("contact_email") or c.get("email_id") or ""
+        for key in ("total_exempted", "total_taxable", "total_cgst", "total_sgst", "total_igst"):
+            row[key] = flt(t.get(key), 2)
+        row["order_ids"] = t.get("order_ids") or ""
+
+
+@frappe.whitelist()
+def get_invoice_item_breakdown(invoice_name, pos_profile):
+    """Line-wise tax split of one POS invoice for the Sales Invoice View pop-up."""
+    anchors = assert_pos_profile_scope(pos_profile)
+    inv = frappe.db.get_value("Sales Invoice", invoice_name, ["name", "company", "pos_profile"], as_dict=True)
+    if not inv or inv.company != anchors.get("company") or inv.pos_profile != pos_profile:
+        frappe.throw(_("Invoice {0} is not from this POS.").format(invoice_name), frappe.PermissionError)
+    frappe.has_permission("Sales Invoice", "read", doc=invoice_name, throw=True)
+    item_cols = {c for c in frappe.db.get_table_columns("Sales Invoice Item")}
+    lines = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": invoice_name, "parenttype": "Sales Invoice"},
+        fields=["item_name", "item_code", "serial_no", "qty", "amount", "net_amount"]
+        + [c for c in ("custom_exempted_value", "taxable_value", "cgst_amount", "sgst_amount", "igst_amount") if c in item_cols],
+        order_by="idx asc")
+    out = []
+    for ln in lines:
+        out.append({
+            "item_name": ln.item_name or ln.item_code,
+            "serial_no": ", ".join(s.strip() for s in (ln.serial_no or "").split("\n") if s.strip()),
+            "qty": flt(ln.qty),
+            "exempted": flt(flt(ln.get("custom_exempted_value")) * flt(ln.qty), 2),
+            "taxable": flt(ln.get("taxable_value") if ln.get("taxable_value") is not None else ln.net_amount, 2),
+            "cgst": flt(ln.get("cgst_amount"), 2),
+            "sgst": flt(ln.get("sgst_amount"), 2),
+            "igst": flt(ln.get("igst_amount"), 2),
+            "total": flt(ln.amount, 2),
+        })
+    return out
+
+
+def _stamp_billed_by(rows):
+    """Add ``billed_by`` -- the person's name -- to Sales Invoice rows: the POS
+    Executive, or with none behind the bill, the Sales Person or Promoter."""
+    names = [r.get("name") for r in rows if r.get("name")]
+    if not names:
+        return
+    meta = frappe.get_meta("Sales Invoice")
+    fields = ["name"] + [f for f in ("custom_sales_executive", "custom_billed_by_sales_person",
+                                     "custom_billed_by_promoter") if meta.has_field(f)]
+    if len(fields) == 1:
+        return
+    inv = {r.name: r for r in frappe.get_all(
+        "Sales Invoice", filters={"name": ("in", names)}, fields=fields)}
+
+    def _labels(doctype, label_field, values):
+        values = list({v for v in values if v})
+        if not values or not frappe.db.table_exists(doctype):
+            return {}
+        return dict(frappe.get_all(doctype, filters={"name": ("in", values)},
+                                   fields=["name", label_field], as_list=True))
+
+    execs = _labels("POS Executive", "executive_name",
+                    [i.get("custom_sales_executive") for i in inv.values()])
+    sps = _labels("Sales Person", "sales_person_name",
+                  [i.get("custom_billed_by_sales_person") for i in inv.values()])
+    promoters = _labels("POS Promoter", "promoter_name",
+                        [i.get("custom_billed_by_promoter") for i in inv.values()])
+    for row in rows:
+        i = inv.get(row.get("name")) or {}
+        ex, sp, pr = (i.get("custom_sales_executive"), i.get("custom_billed_by_sales_person"),
+                      i.get("custom_billed_by_promoter"))
+        row["billed_by"] = (
+            (ex and (execs.get(ex) or ex))
+            or (sp and (sps.get(sp) or sp))
+            or (pr and (promoters.get(pr) or pr))
+            or "")
 
 
 @frappe.whitelist()
@@ -15807,8 +16954,10 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
                 pi.is_return,
                 pi.status,
                 pi.custom_ch_sale_type,
+                pi.total_qty,
                 GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
-                GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+                (SELECT GROUP_CONCAT(sii.item_name ORDER BY sii.idx SEPARATOR '\\n')
+                   FROM `tabSales Invoice Item` sii WHERE sii.parent = pi.name) AS items_summary
             FROM `tabSales Invoice` pi
             LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
@@ -15846,8 +16995,10 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
                 pi.is_return,
                 pi.status,
                 pi.custom_ch_sale_type,
+                pi.total_qty,
                 GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
-                GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+                (SELECT GROUP_CONCAT(sii.item_name ORDER BY sii.idx SEPARATOR '\\n')
+                   FROM `tabSales Invoice Item` sii WHERE sii.parent = pi.name) AS items_summary
             FROM `tabSales Invoice` pi
             LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
             JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
@@ -15876,8 +17027,10 @@ def get_todays_invoices(pos_profile, date=None, phone=None, invoice_no=None,
             pi.is_return,
             pi.status,
             pi.custom_ch_sale_type,
+            pi.total_qty,
             GROUP_CONCAT(DISTINCT sip.mode_of_payment ORDER BY sip.mode_of_payment SEPARATOR ', ') AS mode_of_payment,
-            GROUP_CONCAT(pii.item_name ORDER BY pii.idx SEPARATOR ', ') AS items_summary
+            (SELECT GROUP_CONCAT(sii.item_name ORDER BY sii.idx SEPARATOR '\\n')
+                   FROM `tabSales Invoice Item` sii WHERE sii.parent = pi.name) AS items_summary
         FROM `tabSales Invoice` pi
         LEFT JOIN `tabSales Invoice Payment` sip ON sip.parent = pi.name
         JOIN `tabSales Invoice Item` pii ON pii.parent = pi.name
@@ -15914,7 +17067,7 @@ def _get_prebooking_advance_receipts(
         NULL AS custom_ch_sale_type,
         pe.mode_of_payment,
         GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS linked_sales_orders,
-        GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR ', ') AS items_summary,
+        GROUP_CONCAT(DISTINCT per.reference_name ORDER BY per.reference_name SEPARATOR '\\n') AS items_summary,
         'Payment Entry' AS __doctype,
         'Pre-Booking Advance Receipt' AS __print_format,
         1 AS __no_letterhead,
@@ -16007,13 +17160,14 @@ def _get_proforma_quotations(
         q.party_name AS customer,
         q.customer_name,
         q.grand_total,
+        q.total_qty,
         q.transaction_date AS posting_date,
         NULL AS posting_time,
         0 AS is_return,
         q.status,
         NULL AS custom_ch_sale_type,
         NULL AS mode_of_payment,
-        GROUP_CONCAT(qi.item_name ORDER BY qi.idx SEPARATOR ', ') AS items_summary,
+        GROUP_CONCAT(qi.item_name ORDER BY qi.idx SEPARATOR '\\n') AS items_summary,
         'Quotation' AS __doctype,
         'Proforma Invoice' AS __print_format
     """
@@ -16212,6 +17366,25 @@ def get_fifo_override_reasons(company=None) -> list:
     for row in rows:
         row["allowed"] = True if not cint(row.requires_approval) else can_approve
     return rows
+
+
+@frappe.whitelist()
+def get_exception_reasons_for_pos(exception_type, pos_profile=None) -> list:
+    """Reason dropdown feed for the POS exception form: the enabled CH Exception
+    Reason rows of ``exception_type`` (this company's and all-company rows), in
+    display order. An empty list means none are set up; the form then takes a
+    typed reason."""
+    if not exception_type or not frappe.db.exists("DocType", "CH Exception Reason"):
+        return []
+    company = assert_pos_profile_scope(pos_profile).get("company") if pos_profile else None
+    rows = frappe.get_all(
+        "CH Exception Reason",
+        filters={"enabled": 1, "exception_type": exception_type},
+        fields=["reason_name", "requires_remarks", "description", "company"],
+        order_by="sort_order asc, reason_name asc",
+        ignore_permissions=True)
+    # A blank company means every company.
+    return [r for r in rows if not r.company or not company or r.company == company]
 
 
 def _assert_fifo_override_allowed(reason, remarks, company=None):

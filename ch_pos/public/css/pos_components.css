@@ -1177,6 +1177,13 @@
   box-shadow: 0 6px 20px rgba(79,110,247,0.4);
   transform: translateY(-1px);
 }
+.ch-pos-btn-pay:disabled,
+.ch-pos-btn-pay:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
 
 /* ══════════════════════════════════════════
    EMPTY STATE
@@ -3784,10 +3791,41 @@ body > .desk-alert-container,
   white-space: nowrap;
 }
 .ch-pay-exec-tag {
-  font-size: 11px;
+  font-size: 12px;
   color: #94a3b8;
   margin-top: 2px;
   display: block;
+}
+/* Billed By stands out on the payment screen: it is the name the sale is
+   credited to, confirmed by pressing Pay. */
+.ch-pay-exec-tag {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px !important;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #78350f !important;
+  font-size: 12px !important;
+  font-weight: 600;
+}
+.ch-pay-exec-tag b {
+  color: #451a03;
+  font-weight: 800;
+}
+.ch-pay-exec-tag b.ch-pay-exec-missing {
+  color: #b91c1c;
+}
+.ch-pay-exec-change {
+  margin-left: 6px;
+  color: #1d4ed8;
+  cursor: pointer;
+  text-decoration: underline;
+  font-weight: 700;
+}
+.ch-pay-exec-change:hover {
+  color: #1e3a8a;
 }
 
 /* ── Items scrollable area ───────────────────────────────────────────── */
@@ -6452,3 +6490,31 @@ body > .desk-alert-container,
 	border-top: 1px dashed var(--border-color);
 	margin-top: 4px;
 }
+
+/* Request Stock: the two lists are read at a glance from across a counter,
+   so each header carries its own colour — blue for what is still being
+   written, red for what has gone and is now waiting on somebody else. */
+.ch-pos-section-card .section-header.ch-mr-head-draft {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-bottom-color: #bfdbfe;
+}
+.ch-pos-section-card .section-header.ch-mr-head-submitted {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-bottom-color: #fecaca;
+}
+
+/* Payment screen: a value that was over its limit and has been reset. */
+.ch-pay-input-invalid {
+  border-color: #dc2626 !important;
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.25) !important;
+}
+
+/* Sell toolbar: the right-hand buttons keep their size ("Sales Invoice View"
+   is longer than "Reprint"), so the scan and search boxes give way instead of
+   sliding under "In Stock". */
+.ch-pos-toolbar-left .ch-pos-imei-wrap { min-width: 200px; flex: 0 1 340px; }
+.ch-pos-toolbar-left .ch-pos-search-wrap { min-width: 160px; flex: 1 1 360px; }
+.ch-pos-toolbar-right { position: relative; z-index: 1; }
+

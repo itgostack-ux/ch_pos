@@ -277,6 +277,28 @@ def canonicalize_cart_items(
                     if serial_no:
                         historical_prices_by_serial[serial_no] = source_rate
 
+    # A plan covers ONE device -- the row it was attached to (for_serial_no /
+    # for_item_code). Price it on that device's rate in this cart. Pricing
+    # every plan on the costliest device refused any plan attached to a cheaper
+    # phone in a mixed cart ("does not match the configured price"), while the
+    # till had priced it, rightly, on its own phone.
+    cart_prices_by_serial = {}
+    cart_prices_by_item = {}
+    for row in normalized:
+        if row.get("warranty_plan"):
+            continue
+        row_rate = flt(row.get("rate"))
+        if row_rate <= 0:
+            continue
+        for serial_no in str(row.get("serial_no") or "").replace(",", "\n").split("\n"):
+            serial_no = serial_no.strip()
+            if serial_no:
+                cart_prices_by_serial[serial_no] = row_rate
+        # Two of one model at different rates are told apart by IMEI; by item
+        # alone, take the higher as the old rule did.
+        cart_prices_by_item[row["item_code"]] = max(
+            cart_prices_by_item.get(row["item_code"], 0), row_rate)
+
     for index, item in enumerate(normalized, start=1):
         plan_name = item.get("warranty_plan")
         if not plan_name:
@@ -291,13 +313,18 @@ def canonicalize_cart_items(
         if not external_intent and availability == "External Only":
             frappe.throw(_("Warranty plan {0} is available only for customer-provided devices.").format(plan_name))
 
+        # The covered device: in this cart by IMEI, then by item; else on the
+        # original invoice (VAS-only follow-up bill); the costliest device in
+        # the cart only when the row names no device we can find.
         covered_device_price = max_device_price
-        if not external_intent and historical_prices_by_serial:
+        if not external_intent:
             covered_serial = str(item.get("for_serial_no") or "").strip()
             covered_item = str(item.get("for_item_code") or "").strip()
             covered_device_price = (
-                historical_prices_by_serial.get(covered_serial)
-                or historical_prices_by_item.get(covered_item)
+                (covered_serial and cart_prices_by_serial.get(covered_serial))
+                or (covered_item and cart_prices_by_item.get(covered_item))
+                or (covered_serial and historical_prices_by_serial.get(covered_serial))
+                or (covered_item and historical_prices_by_item.get(covered_item))
                 or max_device_price
             )
 

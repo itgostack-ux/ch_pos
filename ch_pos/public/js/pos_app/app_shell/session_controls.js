@@ -452,44 +452,37 @@ export class SessionControls {
 				d.hide();
 				if (values.company === current) return;
 
-				PosState.active_company = values.company;
-				PosState.company = values.company;
-
-				// Update company_type from server-provided data
-				const access = PosState.executive_access;
-				const entry = access && access.companies
-					? access.companies.find(c => c.company === values.company)
-					: null;
-				PosState.active_company_type = entry ? entry.company_type : null;
-
-				// Update sales executive to own record for the new company
-				const comp_exec = (access && access.own_by_company || {})[values.company];
-				const own = comp_exec || (access && access.own_executive);
-				if (own) {
-					PosState.sales_executive = own.name;
-					PosState.sales_executive_name = own.executive_name;
-				}
-
-				// Update company display in session bar
+				// Switching company moves the whole till: store, POS Profile,
+				// warehouse, price list and Billed By all belong to a company.
+				// Relabelling the header in place left the till on the old
+				// company's store (a GoFix label over GG-PALLAVARAM) whenever the
+				// store picker that followed was closed, and nothing remembered
+				// the choice on reload. Save it as the Desk company -- the same
+				// call the top-right switcher makes -- and reload: the POS boots
+				// for that company (get_pos_context), resuming its open session
+				// or opening this person's store there.
 				const short = values.company.replace(/ Pvt Ltd| Private Limited| Ltd/gi, "").trim();
-				$(".ch-session-profile-company").text(short);
-
-				// Re-render sidebar modes and cart executive bar
-				EventBus.emit("company:switched", values.company);
-				EventBus.emit("profile:loaded", PosState);
-
-				frappe.show_alert({
-					message: __("Switched to {0}", [short]),
-					indicator: "green",
+				frappe.dom.freeze(__("Switching to {0}…", [short]));
+				frappe.call({
+					method: "ch_erp15.ch_erp15.company_lock.switch_active_company",
+					args: { company: values.company },
+				}).then(() => {
+					try {
+						// A store remembered from the other company must not pull
+						// the till back there.
+						window.sessionStorage?.removeItem("ch_pos_selected_store");
+						window.sessionStorage?.removeItem("ch_pos_resume_store_once");
+					} catch (e) {
+						// Restricted storage: the server still picks by company.
+					}
+					window.location.reload();
+				}).catch(() => {
+					frappe.dom.unfreeze();
+					frappe.show_alert({
+						message: __("Could not switch to {0}. You may not have access to it.", [short]),
+						indicator: "red",
+					});
 				});
-
-				// Company and store are not independent. Switching company here
-				// only ever relabelled the header, leaving the till pointed at the
-				// previous company's store -- a GoFix store showing under Bestbuy,
-				// still selling from the old warehouse and price list. Follow the
-				// company through to the store rather than leaving the two out of
-				// step.
-				this._reconcile_store_for_company(values.company);
 			},
 		});
 		d.show();
@@ -761,13 +754,7 @@ export class SessionControls {
 									}
 								}
 
-								// Pick own_executive for the active company (not just first match)
-								const comp_exec = (access.own_by_company || {})[PosState.active_company];
-								const own = comp_exec || access.own_executive;
-								if (own) {
-									PosState.sales_executive = own.name;
-									PosState.sales_executive_name = own.executive_name;
-								}
+								// Sales By is not pre-filled: it opens on "Select who is billing".
 
 								EventBus.emit("executive_access:loaded", access);
 								if (company_changed) {

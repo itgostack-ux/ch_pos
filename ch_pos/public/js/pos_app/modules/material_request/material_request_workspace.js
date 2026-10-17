@@ -28,6 +28,13 @@ function _ch_keep_photos_unoptimized(uploader) {
 	setTimeout(stop, 10 * 60 * 1000);
 }
 
+// The name each photo was picked under, per request line: {file url: name}.
+// Kept beside the rows rather than on them — the rows are posted to the server
+// as they are, and this is only for refusing a second photo of the same name.
+const CH_MR_PHOTO_NAMES = new WeakMap();
+
+const _ch_photo_key = (name) => String(name || "").split(/[\\/]/).pop().trim().toLowerCase();
+
 export class MaterialRequestWorkspace {
 	constructor() {
 		EventBus.on("workspace:render", (ctx) => {
@@ -96,6 +103,16 @@ export class MaterialRequestWorkspace {
 								<input type="time" class="form-control ch-mr-needed-time" style="border-radius:var(--pos-radius-sm);height:36px">
 							</div>
 						</div>
+						<!-- Where it is to be delivered. Almost always this shop, so it
+						     starts there and says so plainly when it is changed. -->
+						<div style="margin-bottom:12px">
+							<div class="ch-pos-field-group">
+								<label style="font-size:var(--pos-fs-2xs);font-weight:700;color:var(--pos-text-secondary)">${__("Delivery Location")}</label>
+								<select class="form-control ch-mr-delivery-store" style="border-radius:var(--pos-radius-sm);height:36px"></select>
+								<div class="ch-mr-delivery-note" style="font-size:var(--pos-fs-2xs);color:var(--pos-text-secondary);margin-top:4px">${
+									__("Delivered to this store unless you pick another one")}</div>
+							</div>
+						</div>
 						<!-- Item + qty row -->
 						<div class="ch-mr-add-row" style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
 							<div class="ch-mr-item-field" style="flex:2"></div>
@@ -127,7 +144,7 @@ export class MaterialRequestWorkspace {
 
 				<!-- Draft Requests: what this store started earlier -->
 				<div class="ch-pos-section-card ch-mr-drafts-section" style="margin-bottom:var(--pos-space-md);display:none">
-					<div class="section-header"><i class="fa fa-pencil-square-o"></i> ${__("Draft Requests (add items before submitting)")}</div>
+					<div class="section-header ch-mr-head-draft"><i class="fa fa-pencil-square-o"></i> ${__("Draft Requests (add items before submitting)")}</div>
 					<div class="section-body" style="padding:0">
 						<div class="ch-mr-drafts-list"></div>
 					</div>
@@ -135,7 +152,7 @@ export class MaterialRequestWorkspace {
 
 				<!-- Pending Requests -->
 				<div class="ch-pos-section-card">
-					<div class="section-header"><i class="fa fa-clock-o"></i> ${__("Submitted Requests")}</div>
+					<div class="section-header ch-mr-head-submitted"><i class="fa fa-clock-o"></i> ${__("Submitted Requests")}</div>
 					<div class="section-body" style="padding:0">
 						<div class="ch-mr-pending-loading" style="padding:24px;text-align:center">
 							<i class="fa fa-spinner fa-spin" style="opacity:0.3"></i>
@@ -335,6 +352,7 @@ export class MaterialRequestWorkspace {
 	}
 
 	_load_zone_info(panel) {
+		this._load_delivery_locations(panel);
 		frappe.call({
 			method: "ch_pos.api.pos_api.get_store_zone_info",
 			args: { pos_profile: PosState.pos_profile },
@@ -362,7 +380,53 @@ export class MaterialRequestWorkspace {
 		});
 	}
 
+	_load_delivery_locations(panel) {
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_delivery_locations",
+			args: { pos_profile: PosState.pos_profile },
+			callback: (r) => {
+				const out = r.message || {};
+				this.delivery_default = out.default || "";
+				this.delivery_locations = out.locations || [];
+				const found = this.delivery_locations.find(
+					(l) => l.warehouse === this.delivery_default);
+				this.delivery_default_label = (found && found.label) || this.delivery_default;
+				const select = panel.find(".ch-mr-delivery-store");
+				select.html(
+					this.delivery_locations
+						.map((l) => `<option value="${frappe.utils.escape_html(l.warehouse)}" ${
+							l.warehouse === this.delivery_default ? "selected" : ""
+						}>${frappe.utils.escape_html(l.label)}</option>`)
+						.join("")
+				);
+				this._on_delivery_store_change(panel);
+			},
+		});
+	}
+
+	_on_delivery_store_change(panel) {
+		const chosen = panel.find(".ch-mr-delivery-store").val() || "";
+		const note = panel.find(".ch-mr-delivery-note");
+		if (!chosen || chosen === this.delivery_default) {
+			note.css("color", "var(--pos-text-secondary)").text(
+				__("Delivered to this store unless you pick another one"));
+			return;
+		}
+		// Saying where it moved to, rather than only that it moved: the whole
+		// point of the message is that somebody reads the name and notices if
+		// it is the wrong one.
+		const picked = (this.delivery_locations || []).find((l) => l.warehouse === chosen);
+		note.css("color", "#b45309").text(
+			__("Delivery location changed — these goods will be delivered to {0}, not {1}",
+				[(picked && picked.label) || chosen, this.delivery_default_label]));
+		frappe.show_alert({
+			message: __("Delivering to {0}", [(picked && picked.label) || chosen]),
+			indicator: "orange",
+		});
+	}
+
 	_bind(panel) {
+		panel.on("change", ".ch-mr-delivery-store", () => this._on_delivery_store_change(panel));
 		panel.on("change", ".ch-mr-urgency", (e) => this._on_urgency_change(panel, $(e.currentTarget)));
 		this.needed_date_field.$input.on("change", () => this._on_needed_date_change(panel));
 		panel.on("change", ".ch-mr-needed-time", (e) => this._on_needed_time_change(panel, $(e.currentTarget)));
@@ -377,8 +441,18 @@ export class MaterialRequestWorkspace {
 			panel.trigger("mr:remove", [idx]);
 		});
 		panel.on("mr:remove", (e, idx) => {
-			this.request_items.splice(idx, 1);
-			this._render_items(panel);
+			const row = this.request_items[idx];
+			if (!row) return;
+			frappe.confirm(
+				__("Remove {0} from this request?", [`<b>${frappe.utils.escape_html(row.item_name || row.item_code)}</b>`]),
+				() => {
+					// The list may have changed while the dialog was open.
+					const at = this.request_items.indexOf(row);
+					if (at === -1) return;
+					this.request_items.splice(at, 1);
+					this._render_items(panel);
+				}
+			);
 		});
 		panel.on("click", ".ch-mr-item-photo-btn", (e) => {
 			this._upload_item_photo(panel, $(e.currentTarget).data("idx"));
@@ -575,14 +649,32 @@ export class MaterialRequestWorkspace {
 				const url = file_doc && file_doc.file_url;
 				if (!url) return;
 				row.photos = row.photos || [];
+				// One name, one photo per line. The server renames a second
+				// file of the same name to keep both, so the name it reports
+				// cannot be compared; the name the file was picked under is
+				// read off the uploader's own list instead.
+				const picked = (uploader.uploader?.files || [])
+					.find((f) => f.doc && f.doc.name === file_doc.name);
+				const picked_name = (picked && picked.name) || file_doc.file_name || url;
+				const names = CH_MR_PHOTO_NAMES.get(row) || {};
+				const taken = row.photos.map((u) => _ch_photo_key(names[u] || u));
+				if (taken.includes(_ch_photo_key(picked_name))) {
+					frappe.show_alert({
+						message: __("A photo named {0} is already on this line. Rename it or pick a different photo.",
+							[frappe.utils.escape_html(String(picked_name).split(/[\\/]/).pop())]),
+						indicator: "orange" }, 7);
+					return;
+				}
 				// Frappe gives the same file_url to the same image however
-				// often it is uploaded, so two shots that happen to share a
-				// name stay separate while the identical one is not doubled.
+				// often it is uploaded, so the identical picture under a new
+				// name is not doubled either.
 				if (row.photos.includes(url)) {
 					frappe.show_alert({
 						message: __("That photo is already on this line"), indicator: "orange" });
 					return;
 				}
+				names[url] = picked_name;
+				CH_MR_PHOTO_NAMES.set(row, names);
 				row.photos.push(url);
 				row.photo = row.photos[0];
 				this._render_items(panel);
@@ -638,12 +730,26 @@ export class MaterialRequestWorkspace {
 				</div>`);
 		};
 
+		// A photo is evidence for the hub and cannot be brought back once
+		// dropped — the file is gone from the line — so a stray tap on the
+		// small red cross asks before it removes anything.
 		dialog.$wrapper.on("click", ".ch-mr-photo-drop", (e) => {
 			const i = parseInt($(e.currentTarget).data("i"), 10);
-			row.photos.splice(i, 1);
-			row.photo = row.photos[0] || null;
-			this._render_items(panel);
-			draw();
+			const url = row.photos[i];
+			if (!url) return;
+			frappe.confirm(
+				__("Remove photo {0} of {1} from {2}?",
+					[i + 1, row.photos.length, row.item_name || row.item_code]),
+				() => {
+					// By url, not position: the list may have changed while
+					// the question was on screen.
+					const at = row.photos.indexOf(url);
+					if (at < 0) return;
+					row.photos.splice(at, 1);
+					row.photo = row.photos[0] || null;
+					this._render_items(panel);
+					draw();
+				});
 		});
 
 		draw();
@@ -652,10 +758,17 @@ export class MaterialRequestWorkspace {
 
 	_remove_item_photos(panel, idx) {
 		const row = this.request_items[idx];
-		if (!row) return;
-		row.photos = [];
-		row.photo = null;
-		this._render_items(panel);
+		if (!row || !(row.photos || []).length) return;
+		const count = row.photos.length;
+		frappe.confirm(
+			count > 1
+				? __("Remove all {0} photos from {1}?", [count, row.item_name || row.item_code])
+				: __("Remove the photo from {0}?", [row.item_name || row.item_code]),
+			() => {
+				row.photos = [];
+				row.photo = null;
+				this._render_items(panel);
+			});
 	}
 
 	_submit_request(panel) {
@@ -727,6 +840,7 @@ export class MaterialRequestWorkspace {
 				required_by_date,
 				required_by_time,
 				notes: notes || undefined,
+				delivery_store: panel.find(".ch-mr-delivery-store").val() || undefined,
 			},
 			freeze: true,
 			freeze_message: __("Creating Material Request..."),
@@ -812,9 +926,6 @@ export class MaterialRequestWorkspace {
 				this._mr_lookup = this._mr_lookup || {};
 				drafts.forEach((d) => { this._mr_lookup[d.name] = d; });
 				list.html(drafts.map((d) => {
-					const items_text = (d.items || []).map(i =>
-						`${frappe.utils.escape_html(i.item_name || i.item_code)} x${i.qty}`
-					).join(", ");
 					const time = d.request_datetime
 						? frappe.datetime.prettyDate(d.request_datetime)
 						: frappe.datetime.prettyDate(d.creation);
@@ -828,12 +939,14 @@ export class MaterialRequestWorkspace {
 								<div style="display:flex;align-items:center;gap:8px">
 									<span class="ch-mr-id-link" data-name="${frappe.utils.escape_html(d.name)}"
 										style="font-weight:700;font-size:var(--pos-fs-sm);cursor:pointer;text-decoration:underline dotted"
-										title="${__("View details")}">${frappe.utils.escape_html(d.name)}</span>
+										title="${__("View details")}">${frappe.utils.escape_html(d.name)}</span>${
+										d.replaces ? `<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">(${
+											__("Replaced {0}", [frappe.utils.escape_html(d.replaces)])})</span>` : ""}
 									<span class="ch-pos-badge ch-pos-badge-warning" style="font-size:10px">${__("Draft")}</span>
 									<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${d.priority}</span>
 								</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-									${d.item_count} ${__("items")} · ${items_text}
+									${d.item_count} ${__("items")}
 								</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${time}</div>
 							</div>
@@ -855,40 +968,99 @@ export class MaterialRequestWorkspace {
 	}
 
 	_show_mr_detail_popup(name) {
-		const d = (this._mr_lookup || {})[name];
-		if (!d) return;
+		// Fetched rather than read from the list: the list carries what a shop
+		// needs to SPOT a request, and this is what it needs once it opens
+		// one — who raised it, where it is going, and line by line what was
+		// granted, what was refused and where the goods have got to.
+		frappe.call({
+			method: "ch_pos.api.pos_api.get_material_request_detail",
+			args: { pos_profile: PosState.pos_profile, material_request: name },
+			freeze: true,
+			callback: (r) => {
+				if (!r.message) return;
+				this._render_mr_detail_popup(r.message);
+			},
+		});
+	}
+
+	_render_mr_detail_popup(d) {
 		const esc = frappe.utils.escape_html;
-		const priority = esc(d.priority || "");
+		const when = (v) => (v ? frappe.datetime.str_to_user(v) : "—");
+		const fact = (label, value) => `
+			<div style="display:flex;gap:8px;padding:3px 0">
+				<div style="min-width:132px;color:var(--pos-text-secondary);font-size:var(--pos-fs-2xs);
+						font-weight:700;text-transform:uppercase">${label}</div>
+				<div style="font-size:var(--pos-fs-xs)">${value || "—"}</div>
+			</div>`;
+
+		// A quantity nobody has ruled on yet is not a refusal, so it is left
+		// blank rather than shown as a zero.
+		const qty = (v) => (v === null || v === undefined ? "—" : format_number(flt(v)));
 		const rows = (d.items || []).length
-			? d.items.map(it => `
+			? d.items.map((it) => `
 				<tr>
 					<td>
 						<div style="font-weight:600">${esc(it.item_name || it.item_code)}</div>
 						<div style="font-size:11px;color:var(--pos-text-muted)">${esc(it.item_code)}</div>
 					</td>
 					<td class="text-center" style="font-weight:600">${flt(it.qty)} ${esc(it.uom || "")}</td>
-					<td class="text-center">${priority}</td>
-					<td class="text-center">
-						${it.photo
-							? `<img src="${esc(it.photo)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px">`
-							: ""}
-					</td>
+					<td class="text-center">${qty(it.approved_qty)}</td>
+					<td class="text-center">${flt(it.pending_qty)
+						? `<span style="color:#b45309;font-weight:600">${qty(it.pending_qty)}</span>`
+						: "—"}</td>
+					<td class="text-center">${flt(it.rejected_qty)
+						? `<span style="color:#b91c1c">${qty(it.rejected_qty)}</span>${
+							it.rejection_reason
+								? `<div style="font-size:10px;color:var(--pos-text-muted)">${
+									esc(it.rejection_reason)}</div>` : ""}`
+						: "—"}</td>
+					<td class="text-center">${flt(it.purchase_qty)
+						? format_number(flt(it.purchase_qty)) : "—"}</td>
+					<td class="text-center">${esc(it.purchase_status || "—")}</td>
+					<td class="text-center">${flt(it.transfer_qty)
+						? format_number(flt(it.transfer_qty)) : "—"}</td>
+					<td class="text-center">${esc(it.transfer_status || "—")}</td>
 				</tr>`).join("")
-			: `<tr><td colspan="4" style="text-align:center;color:var(--pos-text-muted)">${__("No items found")}</td></tr>`;
+			: `<tr><td colspan="9" style="text-align:center;color:var(--pos-text-muted)">${
+				__("No items found")}</td></tr>`;
 
 		const dialog = new frappe.ui.Dialog({
-			title: __("{0} details", [name]),
+			title: __("{0} details", [d.name]),
+			size: "extra-large",
 			fields: [{
 				fieldtype: "HTML",
 				fieldname: "draft_detail_html",
 				options: `
+					<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 24px;
+							margin-bottom:14px">
+						<div>
+							${fact(__("Created"), esc(when(d.created_on)))}
+							${fact(__("Raised By"), esc(d.raised_by || ""))}
+							${fact(__("Required By"), esc(when(d.required_by)))}
+							${fact(__("Request Type"), esc(d.priority || ""))}
+						</div>
+						<div>
+							${fact(__("Requested Branch"), esc(d.requested_branch || ""))}
+							${fact(__("Delivery Location"), esc(d.delivery_location || ""))}
+							${fact(__("Approval"), esc(d.approval_status || ""))}
+							${fact(__("Status"), esc(d.status || ""))}
+						</div>
+					</div>
+					${d.notes
+						? `<div style="margin-bottom:12px;font-size:var(--pos-fs-xs)">
+							<b>${__("Notes")}:</b> ${esc(d.notes)}</div>` : ""}
 					<table class="table table-bordered" style="margin-bottom:0">
 						<thead>
 							<tr>
 								<th>${__("Item")}</th>
-								<th class="text-center" style="width:100px">${__("Qty")}</th>
-								<th class="text-center" style="width:120px">${__("Request Type")}</th>
-								<th class="text-center" style="width:60px">${__("Photo")}</th>
+								<th class="text-center" style="width:88px">${__("Qty")}</th>
+								<th class="text-center" style="width:88px">${__("Approved")}</th>
+								<th class="text-center" style="width:88px">${__("Pending")}</th>
+								<th class="text-center" style="width:100px">${__("Rejected")}</th>
+								<th class="text-center" style="width:88px">${__("Purchased")}</th>
+								<th class="text-center" style="width:124px">${__("Purchase Status")}</th>
+								<th class="text-center" style="width:88px">${__("Transferred")}</th>
+								<th class="text-center" style="width:124px">${__("Transfer Status")}</th>
 							</tr>
 						</thead>
 						<tbody>${rows}</tbody>
@@ -959,7 +1131,8 @@ export class MaterialRequestWorkspace {
 					// states (Stopped / Received / Transferred / Issued / short-
 					// closed) render as a single friendly "Completed" badge.
 					const shown_status = mr.display_status || mr.status;
-					const status_cls = shown_status === "Completed" ? "ch-pos-badge-success"
+					const status_cls = ["Rejected", "Purchase Rejected"].includes(shown_status) ? "badge-danger"
+						: shown_status === "Completed" ? "ch-pos-badge-success"
 						: ["Draft", "Pending"].includes(shown_status) ? "ch-pos-badge-warning"
 						: ["Ordered", "Partially Ordered", "Partially Received"].includes(shown_status) ? "ch-pos-badge-info"
 						: ["Received", "Transferred"].includes(shown_status) ? "ch-pos-badge-success"
@@ -982,13 +1155,19 @@ export class MaterialRequestWorkspace {
 								<div style="display:flex;align-items:center;gap:8px">
 									<span class="ch-mr-id-link" data-name="${frappe.utils.escape_html(mr.name)}"
 										style="font-weight:700;font-size:var(--pos-fs-sm);cursor:pointer;text-decoration:underline dotted"
-										title="${__("View details")}">${frappe.utils.escape_html(mr.name)}</span>${sla_warn}
+										title="${__("View details")}">${frappe.utils.escape_html(mr.name)}</span>${
+										mr.replaces ? `<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">(${
+											__("Replaced {0}", [frappe.utils.escape_html(mr.replaces)])})</span>` : ""}${sla_warn}
 									<span style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">${frappe.utils.escape_html(priority)}</span>
 								</div>
 								<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
 									${dueText} · ${mr.item_count} ${__("items")}
 								</div>
 								${delayText ? `<div style="margin-top:4px">${delayText}</div>` : ""}
+								${mr.purchase_rejection_reason
+									? `<div style="margin-top:4px;color:#b91c1c;font-size:var(--pos-fs-2xs);font-weight:600">
+										<i class="fa fa-ban"></i> ${__("Reason")}: ${frappe.utils.escape_html(mr.purchase_rejection_reason)}</div>`
+									: ""}
 							</div>
 							<div style="display:flex;gap:8px;align-items:center">
 								<span class="ch-pos-badge ${status_cls}">${frappe.utils.escape_html(shown_status)}</span>

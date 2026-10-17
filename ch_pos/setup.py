@@ -4,6 +4,23 @@ from textwrap import dedent
 
 
 CUSTOM_FIELDS = {
+    # A transfer asked for from a store's own POS (Transfers > New Transfer).
+    # The store's Transfers screen keeps those under Outgoing from the start;
+    # a transfer raised anywhere else — the back office, another store — is a
+    # request made OF the store and waits under "Requested by Others" until it
+    # is approved (see pos_api.get_stock_transfers).
+    "Stock Entry": [
+        {
+            "fieldname": "custom_raised_in_pos",
+            "fieldtype": "Check",
+            "label": "Raised In POS",
+            "insert_after": "custom_transfer_type",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
+            "module": "POS Core",
+        },
+    ],
     "Accounts Settings": [
         {
             "fieldname": "ch_daily_cash_receipt_limit",
@@ -190,11 +207,34 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
         {
+            # Billed By when it is a Sales Person rather than a POS Executive
+            # (a salesman with no login). custom_sales_executive stays empty
+            # then; the Sales Team carries the same Sales Person.
+            "fieldname": "custom_billed_by_sales_person",
+            "fieldtype": "Link",
+            "label": "Billed By (Sales Person)",
+            "options": "Sales Person",
+            "insert_after": "custom_sales_executive",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
+            # Billed By when it is a brand promoter (POS Promoter). No Sales
+            # Person behind them, so no Sales Team row.
+            "fieldname": "custom_billed_by_promoter",
+            "fieldtype": "Link",
+            "label": "Billed By (Promoter)",
+            "options": "POS Promoter",
+            "insert_after": "custom_billed_by_sales_person",
+            "read_only": 1,
+            "module": "POS Core",
+        },
+        {
             "fieldname": "custom_ch_sale_type",
             "fieldtype": "Link",
             "label": "Sale Type",
             "options": "CH Sale Type",
-            "insert_after": "custom_sales_executive",
+            "insert_after": "custom_billed_by_promoter",
             "read_only": 1,
             "module": "POS Core",
         },
@@ -577,6 +617,78 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
     ],
+    # A Sales Person with a Store is offered in the POS Billed By list of that
+    # store, without a POS Executive or a login. The company follows the store.
+    "Sales Person": [
+        {
+            # Picked first; the Store list then shows only this company's
+            # stores (custom/sales_person.js), and save refuses a mismatch.
+            "fieldname": "custom_company",
+            "fieldtype": "Link",
+            "label": "Company",
+            "options": "Company",
+            "insert_after": "enabled",
+            "in_list_view": 1,
+            "in_standard_filter": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_store",
+            "fieldtype": "Link",
+            "label": "Branch",
+            "options": "CH Store",
+            "insert_after": "custom_company",
+            "in_list_view": 1,
+            "in_standard_filter": 1,
+            "description": "The store whose POS Sales By lists this Sales Person. No login or POS Executive is needed.",
+            "module": "POS Core",
+        },
+        {
+            # Set by a User's "Is Sales Person" box, or picked here; Email and
+            # Mobile No are fetched from it.
+            "fieldname": "custom_user",
+            "fieldtype": "Link",
+            "label": "User",
+            "options": "User",
+            "insert_after": "custom_store",
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_email",
+            "fieldtype": "Data",
+            "label": "Email",
+            "options": "Email",
+            "insert_after": "custom_user",
+            "fetch_from": "custom_user.email",
+            "fetch_if_empty": 1,
+            "in_list_view": 1,
+            "module": "POS Core",
+        },
+        {
+            "fieldname": "custom_mobile_no",
+            "fieldtype": "Data",
+            "label": "Mobile No",
+            "options": "Phone",
+            "insert_after": "custom_email",
+            "fetch_from": "custom_user.mobile_no",
+            "fetch_if_empty": 1,
+            "in_list_view": 1,
+            "in_standard_filter": 1,
+            "module": "POS Core",
+        },
+    ],
+    # Ticking it creates this person's Sales Person, disabled, ready for a
+    # Store to be set and switched on for POS Billed By.
+    "User": [
+        {
+            "fieldname": "custom_is_sales_person",
+            "fieldtype": "Check",
+            "label": "Is Sales Person",
+            "insert_after": "enabled",
+            "description": "Creates a Sales Person for this user (disabled). Set its Store and enable it to list it in POS Billed By.",
+            "module": "POS Core",
+        },
+    ],
     "Sales Invoice Item": [
         {
             "fieldname": "custom_warranty_plan",
@@ -924,6 +1036,9 @@ def after_install():
     _ensure_default_docperms()
     _ensure_pos_control_defaults()
     _ensure_fifo_override_reasons()
+    _ensure_exception_reasons()
+    _unlock_sales_person_company()
+    _sales_person_list_view()
 
 
 def ensure_pos_executive_sales_persons():
@@ -1004,6 +1119,9 @@ def after_migrate():
     _ensure_default_docperms()
     _ensure_pos_control_defaults()
     _ensure_fifo_override_reasons()
+    _ensure_exception_reasons()
+    _unlock_sales_person_company()
+    _sales_person_list_view()
     _ensure_repair_consumable_groups()
     ensure_pos_executive_sales_persons()
     _seed_pos_profiles()
@@ -1259,6 +1377,161 @@ def _ensure_fifo_exception_type():
     doc.applicable_to_gfs = 1
     doc.insert(ignore_permissions=True)
     return True
+
+
+# Counter reasons for the cashier exception types, picked from a dropdown on
+# the POS exception form. Seeded once for all companies (blank company); edit
+# or add more on CH Exception Reason. "Other" asks for written remarks.
+_OTHER_REASON = {"reason_name": "Other (Explain in Remarks)", "reason_code": "OTHER", "sort_order": 999,
+                 "requires_remarks": 1, "description": "Catch-all. Requires a written explanation."}
+EXCEPTION_REASON_SEED = {
+    "Discount Override": [
+        {"reason_name": "Customer Negotiated", "reason_code": "NEGOTIATED", "sort_order": 10,
+         "description": "The customer bargained and the store agreed a lower price."},
+        {"reason_name": "Competitor Price Match", "reason_code": "PRICE_MATCH", "sort_order": 20,
+         "description": "Matching a lower price the customer showed from another store or online."},
+        {"reason_name": "Bulk / Multiple Purchase", "reason_code": "BULK", "sort_order": 30,
+         "description": "Price agreed because the customer is buying several units or items."},
+        {"reason_name": "Loyal / Repeat Customer", "reason_code": "LOYAL", "sort_order": 40,
+         "description": "Goodwill price for a regular customer."},
+        {"reason_name": "Display / Demo Unit", "reason_code": "DISPLAY_UNIT", "sort_order": 50,
+         "description": "Selling the display or demo piece."},
+        {"reason_name": "Box Damaged / Opened", "reason_code": "BOX_DAMAGED", "sort_order": 60,
+         "description": "Device is fine but the box is damaged or already opened."},
+    ],
+    "Free Accessory": [
+        {"reason_name": "Promotional Freebie / Offer", "reason_code": "PROMO", "sort_order": 10,
+         "description": "Given under a running offer or contest (e.g. spin the wheel)."},
+        {"reason_name": "Customer Negotiated", "reason_code": "NEGOTIATED", "sort_order": 20,
+         "description": "Added free to close the sale."},
+        {"reason_name": "With High-Value Purchase", "reason_code": "BUNDLE", "sort_order": 30,
+         "description": "Free with a large purchase on the same bill."},
+        {"reason_name": "Compensation for Delay / Issue", "reason_code": "COMPENSATION", "sort_order": 40,
+         "description": "Goodwill for a delay or a problem the customer faced."},
+    ],
+    "Return Override": [
+        {"reason_name": "Manufacturing Defect", "reason_code": "DEFECT", "sort_order": 10,
+         "description": "Item found defective after sale."},
+        {"reason_name": "Wrong Item Given", "reason_code": "WRONG_ITEM", "sort_order": 20,
+         "description": "Customer received a different item or variant."},
+        {"reason_name": "Beyond Return Window - Goodwill", "reason_code": "GOODWILL", "sort_order": 30,
+         "description": "Outside the return period, accepted as goodwill."},
+    ],
+    "Buyback Price Override": [
+        {"reason_name": "Customer Negotiated", "reason_code": "NEGOTIATED", "sort_order": 10,
+         "description": "The customer bargained a better buyback value."},
+        {"reason_name": "Competitor Offer Match", "reason_code": "COMPETITOR", "sort_order": 20,
+         "description": "Matching a better offer from another buyer."},
+        {"reason_name": "Device Better Than Graded", "reason_code": "REGRADE", "sort_order": 30,
+         "description": "Device condition is better than the automatic grade."},
+    ],
+    "Service Below Cost Billing": [
+        {"reason_name": "Warranty / Goodwill Repair", "reason_code": "GOODWILL", "sort_order": 10,
+         "description": "Charged below cost as goodwill or under warranty."},
+        {"reason_name": "Customer Negotiated", "reason_code": "NEGOTIATED", "sort_order": 20,
+         "description": "The customer bargained the repair charge."},
+        {"reason_name": "Repeat Customer", "reason_code": "REPEAT", "sort_order": 30,
+         "description": "Regular customer."},
+    ],
+    "Service Estimate Override": [
+        {"reason_name": "Extra Fault Found", "reason_code": "EXTRA_FAULT", "sort_order": 10,
+         "description": "More faults found after the estimate was given."},
+        {"reason_name": "Part Price Changed", "reason_code": "PART_PRICE", "sort_order": 20,
+         "description": "Spare part cost changed since the estimate."},
+        {"reason_name": "Customer Negotiated", "reason_code": "NEGOTIATED", "sort_order": 30,
+         "description": "The customer bargained the estimate."},
+    ],
+    "Service Reopen After QC": [
+        {"reason_name": "QC Failed", "reason_code": "QC_FAILED", "sort_order": 10,
+         "description": "Device failed quality check after repair."},
+        {"reason_name": "Customer Complaint After Delivery", "reason_code": "COMPLAINT", "sort_order": 20,
+         "description": "Customer reported the issue again after delivery."},
+    ],
+}
+
+
+def _sales_person_list_view():
+    """Sales Person list: ID, Sales Person Name, Company, Branch, Email, Mobile No and
+    the Enabled/Disabled status -- not the tree columns (Parent, Is Group)."""
+    if not frappe.db.exists("DocType", "Sales Person"):
+        return
+    from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+    for fieldname in ("parent_sales_person", "is_group"):
+        make_property_setter("Sales Person", fieldname, "in_list_view", 0, "Check",
+                             validate_fields_for_doctype=False)
+    # Email / Mobile from the linked User or Employee where still blank.
+    meta = frappe.get_meta("Sales Person")
+    if not (meta.has_field("custom_email") and meta.has_field("custom_mobile_no")):
+        return
+    for sp in frappe.get_all(
+        "Sales Person",
+        filters={"is_group": 0},
+        or_filters=[["custom_email", "is", "not set"], ["custom_mobile_no", "is", "not set"]],
+        fields=["name", "custom_user", "employee", "custom_email", "custom_mobile_no"],
+    ):
+        email, mobile = sp.custom_email, sp.custom_mobile_no
+        if sp.custom_user:
+            u = frappe.db.get_value("User", sp.custom_user, ["email", "mobile_no"], as_dict=True) or {}
+            email, mobile = email or u.get("email"), mobile or u.get("mobile_no")
+        if sp.employee and (not email or not mobile):
+            e = frappe.db.get_value(
+                "Employee", sp.employee,
+                ["prefered_email", "company_email", "personal_email", "cell_number"], as_dict=True) or {}
+            email = email or e.get("prefered_email") or e.get("company_email") or e.get("personal_email")
+            mobile = mobile or e.get("cell_number")
+        updates = {}
+        if email and not sp.custom_email:
+            updates["custom_email"] = email
+        if mobile and not sp.custom_mobile_no:
+            updates["custom_mobile_no"] = mobile
+        if updates:
+            frappe.db.set_value("Sales Person", sp.name, updates, update_modified=False)
+
+
+def _unlock_sales_person_company():
+    """Sales Person Company used to be read-only, fetched from the Store.
+    It is now picked first (the Store list follows it); migrate only adds
+    missing custom fields, so unlock the existing one here."""
+    cf = frappe.db.get_value(
+        "Custom Field", {"dt": "Sales Person", "fieldname": "custom_company"},
+        ["name", "read_only", "fetch_from", "insert_after"], as_dict=True)
+    if not cf or (not cf.read_only and not cf.fetch_from and cf.insert_after == "enabled"):
+        return
+    frappe.db.set_value("Custom Field", cf.name,
+                        {"read_only": 0, "fetch_from": "", "insert_after": "enabled", "in_list_view": 1})
+    store_cf = frappe.db.get_value("Custom Field", {"dt": "Sales Person", "fieldname": "custom_store"})
+    if store_cf:
+        frappe.db.set_value("Custom Field", store_cf, {
+            "insert_after": "custom_company", "label": "Branch", "in_list_view": 1})
+    frappe.clear_cache(doctype="Sales Person")
+
+
+def _ensure_exception_reasons():
+    """Default reasons for each cashier exception type, once per reason."""
+    if not frappe.db.exists("DocType", "CH Exception Reason"):
+        return
+    created = False
+    for exception_type, seeds in EXCEPTION_REASON_SEED.items():
+        if not frappe.db.exists("CH Exception Type", exception_type):
+            continue
+        for seed in seeds + [_OTHER_REASON]:
+            if frappe.db.exists("CH Exception Reason", {
+                "exception_type": exception_type,
+                "reason_name": seed["reason_name"],
+            }):
+                continue
+            doc = frappe.new_doc("CH Exception Reason")
+            doc.update(seed)
+            doc.exception_type = exception_type
+            doc.enabled = 1
+            doc.insert(ignore_permissions=True)
+            # Blank company = every company. Insert fills in the user's default
+            # company, so it is cleared afterwards.
+            frappe.db.set_value("CH Exception Reason", doc.name, "company", None, update_modified=False)
+            created = True
+    if created:
+        frappe.db.commit()
 
 
 def _ensure_fifo_override_reasons():

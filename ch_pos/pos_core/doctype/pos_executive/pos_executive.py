@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import cint
 from frappe.model.document import Document
 
 
@@ -40,6 +41,63 @@ class POSExecutive(Document):
             self.sales_person = sp
 
 
+#: Billed By values that name a Sales Person rather than a POS Executive.
+SALES_PERSON_PREFIX = "SP:"
+
+
+def billed_by_sales_person(billed_by, store=None, company=None):
+    """The Sales Person named by a Billed By value, or None for a POS Executive.
+
+    A Sales Person with a Store is listed in that store's POS Billed By with no
+    POS Executive behind it (a salesman with no login). It must still be
+    enabled, a person rather than a group, and belong to the till's store and
+    company -- the same "this store's people only" rule a POS Executive meets.
+    """
+    value = str(billed_by or "")
+    if not value.startswith(SALES_PERSON_PREFIX):
+        return None
+    name = value[len(SALES_PERSON_PREFIX):]
+    meta = frappe.get_meta("Sales Person")
+    if not (meta.has_field("custom_store") and meta.has_field("custom_company")):
+        frappe.throw(frappe._("Sales Persons are not set up for POS billing yet. Run migrate."))
+    row = frappe.db.get_value(
+        "Sales Person", name, ["enabled", "is_group", "custom_store", "custom_company"], as_dict=True)
+    if (not row or not cint(row.enabled) or cint(row.is_group)
+            or (store and row.custom_store != store)
+            or (company and row.custom_company != company)):
+        frappe.throw(
+            frappe._("Sales By must be an active Sales Person of this store."),
+            title=frappe._("Invalid Sales By"),
+        )
+    return name
+
+
+#: Billed By values that name a POS Promoter.
+PROMOTER_PREFIX = "PR:"
+
+
+def billed_by_promoter(billed_by, store=None, company=None):
+    """The POS Promoter named by a Billed By value, or None otherwise.
+
+    A brand promoter set up on POS Promoter is listed in their store's Billed
+    By with no user or POS Executive. Same rule as a Sales Person: enabled, and
+    of the till's store and company.
+    """
+    value = str(billed_by or "")
+    if not value.startswith(PROMOTER_PREFIX):
+        return None
+    name = value[len(PROMOTER_PREFIX):]
+    row = frappe.db.get_value("POS Promoter", name, ["enabled", "store", "company"], as_dict=True)
+    if (not row or not cint(row.enabled)
+            or (store and row.store != store)
+            or (company and row.company != company)):
+        frappe.throw(
+            frappe._("Sales By must be an active Promoter of this store."),
+            title=frappe._("Invalid Sales By"),
+        )
+    return name
+
+
 def assert_valid_sales_executive(sales_executive, store=None, company=None, msg=None) -> None:
     """Require a genuine, active POS Executive as a document's billing identity.
 
@@ -56,8 +114,22 @@ def assert_valid_sales_executive(sales_executive, store=None, company=None, msg=
     """
     if not sales_executive:
         frappe.throw(
-            msg or frappe._("Select who is billing this sale (Billed By) before continuing."),
-            title=frappe._("Billed By Required"),
+            msg or frappe._("Select who is billing this sale (Sales By) before continuing."),
+            title=frappe._("Sales By Required"),
+        )
+    # A Sales Person or Promoter in Billed By can bill POS sales only, products
+    # and VAS / warranty plans (that path resolves them with
+    # billed_by_sales_person / billed_by_promoter); returns, repairs and the
+    # rest still need a POS Executive.
+    if str(sales_executive).startswith(SALES_PERSON_PREFIX):
+        frappe.throw(
+            frappe._("A Sales Person can only bill sales. Choose a POS Executive for this."),
+            title=frappe._("Choose a POS Executive"),
+        )
+    if str(sales_executive).startswith(PROMOTER_PREFIX):
+        frappe.throw(
+            frappe._("A Promoter can only bill sales. Choose a POS Executive for this."),
+            title=frappe._("Choose a POS Executive"),
         )
 
     filters = {"name": sales_executive, "is_active": 1}
@@ -71,8 +143,8 @@ def assert_valid_sales_executive(sales_executive, store=None, company=None, msg=
 
     if not frappe.db.exists("POS Executive", filters):
         frappe.throw(
-            frappe._("Billed By must be an active POS Executive for this store."),
-            title=frappe._("Invalid Billed By"),
+            frappe._("Sales By must be an active POS Executive for this store."),
+            title=frappe._("Invalid Sales By"),
         )
 
 
