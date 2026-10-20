@@ -6039,6 +6039,11 @@ body > .desk-alert-container,
 .ch-q-card--engaged  .ch-q-indicator { background: #3b82f6; }
 .ch-q-card--progress .ch-q-indicator { background: #8b5cf6; }
 .ch-q-card--default  .ch-q-indicator { background: #d1d5db; }
+/* Today's finished visits stay in the queue: Billed / Pre-Booked, Rejected / Withdrawn. */
+.ch-q-card--done     .ch-q-indicator { background: #16a34a; }
+.ch-q-card--rejected .ch-q-indicator { background: #dc2626; }
+.ch-q-card--done, .ch-q-card--rejected { opacity: .75; }
+.ch-q-closed-ref { font-size: 12px; font-weight: 600; text-align: center; display: block; }
 
 /* Card content area */
 .ch-q-content {
@@ -6087,6 +6092,10 @@ body > .desk-alert-container,
 .ch-q-status--progress .ch-q-status-dot { background: #8b5cf6; }
 .ch-q-status--default            { background: #f9fafb; color: #6b7280; }
 .ch-q-status--default .ch-q-status-dot  { background: #9ca3af; }
+.ch-q-status--done               { background: #f0fdf4; color: #15803d; }
+.ch-q-status--done .ch-q-status-dot     { background: #16a34a; }
+.ch-q-status--rejected           { background: #fef2f2; color: #b91c1c; }
+.ch-q-status--rejected .ch-q-status-dot { background: #dc2626; }
 
 .ch-q-time {
   margin-left: auto;
@@ -6518,3 +6527,10 @@ body > .desk-alert-container,
 .ch-pos-toolbar-left .ch-pos-search-wrap { min-width: 160px; flex: 1 1 360px; }
 .ch-pos-toolbar-right { position: relative; z-index: 1; }
 
+
+/* Units reserved on open pre-bookings (product grid / list). */
+.ch-pos-prebook-badge {
+	display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 10px;
+	background: #ffedd5; color: #c2410c; border: 1px solid #fdba74;
+	font-size: 10.5px; font-weight: 700; white-space: nowrap;
+}

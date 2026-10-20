@@ -24,6 +24,19 @@ import { PosState, EventBus } from "../../state.js";
 import { format_number, wh_label } from "../../shared/helpers.js";
 import { print_invoice_pdf } from "../../shared/print_helper.js";
 
+
+// Why a pre-booking is cancelled (Cancel / Refund).
+const PREBOOK_CANCEL_REASONS = [
+	"Customer Changed Mind",
+	"Stock Not Available",
+	"Delivery Delayed",
+	"Price Changed",
+	"Bought Elsewhere",
+	"Wrong Item / Variant Booked",
+	"Duplicate Booking",
+	"Other",
+];
+
 export class PickupWorkspace {
 	constructor() {
 		this._panel = null;
@@ -34,6 +47,7 @@ export class PickupWorkspace {
 			this._can_reassign_reserved_capability = false;
 		this._filter = { search: "", days_ahead: 30, overdue_only: 0 };
 		this._focus_so = null;
+		this._highlight_so = null; // a just-created pre-booking, marked on top of the list
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "pickup") return;
 			this.render(ctx.panel);
@@ -89,17 +103,17 @@ export class PickupWorkspace {
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md);">
 					<div class="section-body">
 						<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+							<!-- Redrawn from this._filter, so a filter in force is never hidden. -->
 							<input type="text" class="form-control ch-pickup-search"
 								placeholder="${__("Search SO #, customer, IMEI, tracking…")}"
+								value="${frappe.utils.escape_html(this._filter.search || "")}"
 								style="flex:1;min-width:240px;">
 							<select class="form-control ch-pickup-window" style="width:180px;">
-								<option value="7">${__("Due in 7 days")}</option>
-								<option value="30" selected>${__("Due in 30 days")}</option>
-								<option value="90">${__("Due in 90 days")}</option>
-								<option value="0">${__("All upcoming")}</option>
+								${[["7", __("Due in 7 days")], ["30", __("Due in 30 days")], ["90", __("Due in 90 days")], ["0", __("All upcoming")]]
+									.map(([v, l]) => `<option value="${v}" ${String(this._filter.days_ahead) === v ? "selected" : ""}>${l}</option>`).join("")}
 							</select>
 							<label class="ch-pu-overdue-wrap" style="display:inline-flex;align-items:center;gap:6px;margin:0;">
-								<input type="checkbox" class="ch-pickup-overdue"> ${__("Overdue only")}
+								<input type="checkbox" class="ch-pickup-overdue" ${this._filter.overdue_only ? "checked" : ""}> ${__("Overdue only")}
 							</label>
 							<button class="btn btn-default btn-sm ch-pickup-refresh">
 								<i class="fa fa-refresh"></i> ${__("Refresh")}
@@ -122,6 +136,8 @@ export class PickupWorkspace {
 
 			this._bind(panel);
 			this._refresh_kpis();
+			// Opened normally: nothing is "just created" any more.
+			if (!this._focus_so) this._highlight_so = null;
 			this._load_capabilities().finally(() => {
 				if (this._focus_so) {
 					this._apply_focus_filter();
@@ -205,23 +221,22 @@ export class PickupWorkspace {
 			const advance = flt($(e.currentTarget).data("advance"));
 			this._cancel_pickup_prebook_flow(name, advance);
 		});
+		panel.on("click", ".ch-pickup-print", (e) => {
+			const name = $(e.currentTarget).data("name");
+			window.open(`/printview?doctype=Sales%20Order&name=${encodeURIComponent(name)}`
+				+ `&format=${encodeURIComponent("Pre-Booking")}&no_letterhead=0`, "_blank");
+		});
+		panel.on("click", ".ch-pickup-items", (e) => {
+			e.preventDefault();
+			this._show_pickup_items($(e.currentTarget).data("name"));
+		});
 		panel.on("click", ".ch-pickup-bill", (e) => {
 			const name = $(e.currentTarget).data("name");
 			const row = this._rows.find(r => r.name === name);
 			if (!row) return;
-			// Reserved-stock prebookings need their IMEI tagged first. Previously
-			// the button was simply disabled, so clicking did nothing with no
-			// explanation — now give clear, actionable feedback instead.
-			const requires_gate = cint(row.reserve_stock) === 1;
-			const ready = !requires_gate || (row.reserved_serials || []).length > 0;
-			if (!ready) {
-				frappe.msgprint({
-					title: __("Reserved IMEI Not Tagged"),
-					indicator: "orange",
-					message: __("This pre-booking reserves stock, but no IMEI is tagged on its rows. Open the Sales Order, fill Reserved IMEI/Serial on serialized rows, then bill from Pickup."),
-				});
-				return;
-			}
+			// Tagged IMEIs are scan-confirmed; rows with none (pre-booked
+			// without an IMEI, reserve-stock or not) take one from this store's
+			// stock in the cart step, or show Out of Stock -- procure / raise MR.
 			this._bill_flow(row);
 			});
 			panel.on("click", ".ch-pickup-invoice-print", (e) => {
@@ -262,10 +277,12 @@ export class PickupWorkspace {
 	_apply_focus_filter() {
 		if (!this._focus_so) return;
 		this._active_tab = "pending";
-		this._filter.search = this._focus_so;
+		// Highlighted on top of the full list; searching for it hid everyone else.
+		this._highlight_so = this._focus_so;
+		this._filter.search = "";
 		this._filter.overdue_only = 0;
 		this._filter.days_ahead = 30;
-		this._panel.find(".ch-pickup-search").val(this._focus_so);
+		this._panel.find(".ch-pickup-search").val("");
 		this._panel.find(".ch-pickup-overdue").prop("checked", false);
 		this._panel.find(".ch-pickup-window").val("30");
 		this._focus_so = null;
@@ -371,98 +388,119 @@ export class PickupWorkspace {
 			return;
 		}
 
-		const rows = this._rows.map((r) => {
-			const item_summary = (r.items || []).slice(0, 3).map((it) => {
-				const title = `${frappe.utils.escape_html(it.item_name || it.item_code)} \u00D7 ${flt(it.qty)}`;
-				const item_reserved = (it.reserved_serials || []).map((s) => frappe.utils.escape_html(s));
-				const item_imei = item_reserved.length
-					? `<div class="small" style="margin-top:2px;color:#1d4ed8;">
-						<i class="fa fa-barcode"></i> ${item_reserved.slice(0, 2).map((s) => `<code>${s}</code>`).join(" ")}
-						${item_reserved.length > 2 ? `<span class="text-muted">+${item_reserved.length - 2}</span>` : ""}
-					</div>`
-					: "";
-				return `<div style="margin-bottom:4px;">${title}${item_imei}</div>`;
-			}).join("");
-			const extra = (r.items || []).length > 3
-				? `<div class="small text-muted">+${(r.items || []).length - 3} ${__("more")}</div>`
-				: "";
+		// One row per pre-booking; its item lines open from the ID.
+		const esc = frappe.utils.escape_html;
+		this._pickup_rows = {};
+		const th = "padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--pos-text-muted);background:var(--pos-surface-sunken);position:sticky;top:0;z-index:1;white-space:nowrap;border-bottom:1px solid var(--pos-border)";
+		const td = "padding:8px 10px;vertical-align:middle;border-bottom:1px solid var(--pos-border)";
+		const can_manage = this._can_reassign_reserved();
+		const badge = (bg, fg, text) => `<span class="badge" style="background:${bg};color:${fg};font-size:10px;">${text}</span>`;
 
-			const due_label = r.delivery_date
-				? frappe.datetime.str_to_user(r.delivery_date)
-				: "—";
-			let due_class = "text-muted", due_badge = "";
+		const hl = this._highlight_so;
+		if (hl) {
+			this._rows = this._rows.filter((r) => r.name === hl).concat(this._rows.filter((r) => r.name !== hl));
+		}
+		const body = this._rows.map((r) => {
+			this._pickup_rows[r.name] = r;
+			const adv = flt(r.advance_paid);
+			// Collected but its Payment Entry is still a draft (maker-checker):
+			// shown, not deducted -- billing can only adjust an approved advance.
+			const pending_adv = flt(r.advance_pending);
+			const bal = flt(r.balance_due);
+			const reserved_serials = r.reserved_serials || [];
+			const requires_imei_gate = cint(r.reserve_stock) === 1;
+			const imei_ready = !requires_imei_gate || reserved_serials.length > 0;
+			const qty = (r.items || []).reduce((t, it) => t + flt(it.qty), 0);
+
+			let due_class = "", due_badge = "";
 			if (r.is_overdue) {
 				due_class = "text-danger";
-				due_badge = `<span class="badge badge-danger" style="background:#dc2626;color:#fff;margin-left:4px;">${__("Overdue")}</span>`;
+				due_badge = `<div>${badge("#dc2626", "#fff", __("Overdue"))}</div>`;
 			} else if (r.days_to_delivery !== null && r.days_to_delivery <= 2) {
 				due_class = "text-warning";
 			}
-
-			const adv = flt(r.advance_paid);
-			const bal = flt(r.balance_due);
-			const reserve_badge = r.reserve_stock
-				? `<span class="badge" style="background:#dbeafe;color:#1d4ed8;font-size:10px;margin-left:4px;">${__("Reserved")}</span>`
-				: "";
-
-			const reserved_serials = (r.reserved_serials || []);
-			const requires_imei_gate = cint(r.reserve_stock) === 1;
-			const imei_ready = !requires_imei_gate || reserved_serials.length > 0;
-			const readiness_badge = imei_ready
-				? `<span class="badge" style="background:#dcfce7;color:#166534;font-size:10px;margin-left:4px;">${__("Ready")}</span>`
-				: `<span class="badge" style="background:#fee2e2;color:#991b1b;font-size:10px;margin-left:4px;">${__("Not Ready")}</span>`;
-			const imei_badge = reserved_serials.length
-				? `<div class="small" style="margin-top:6px;color:#1d4ed8;">
-					<i class="fa fa-barcode"></i> ${reserved_serials.slice(0,3).map(s => `<code>${frappe.utils.escape_html(s)}</code>`).join(" ")}
-					${reserved_serials.length > 3 ? `<span class="text-muted">+${reserved_serials.length - 3}</span>` : ""}
-				</div>`
-				: (requires_imei_gate
-					? `<div class="small" style="margin-top:6px;color:#991b1b;">
-						<i class="fa fa-exclamation-triangle"></i> ${__("Reserved IMEI not tagged on pre-booking")}
-					</div>`
-					: "");
+			const status = [
+				r.reserve_stock ? badge("#dbeafe", "#1d4ed8", __("Reserved")) : "",
+				imei_ready ? badge("#dcfce7", "#166534", __("Ready")) : badge("#fee2e2", "#991b1b", __("Not Ready")),
+			].join(" ");
 			const bill_title = imei_ready
 				? __("Verify IMEI and create invoice")
 				: __("Cannot bill until reserved IMEI is available");
-			const row_state_class = imei_ready ? "ch-pickup-row-ready" : "ch-pickup-row-not-ready";
-			const can_manage = this._can_reassign_reserved();
-			const add_imei_btn = (!imei_ready && can_manage)
-				? `<button class="btn btn-default btn-sm ch-pickup-add-imei" data-name="${frappe.utils.escape_html(r.name)}">
-					<i class="fa fa-plus"></i> ${__("Add IMEI")}
-				</button>`
-				: "";
 
-			return `
-				<div class="ch-pickup-row ${row_state_class}" style="display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--pos-border);align-items:flex-start;">
-					<div style="flex:1.2;min-width:180px;">
-						<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name)}${reserve_badge}${readiness_badge}</div>
-						<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div>
-						<div class="small ${due_class}" style="margin-top:4px;">
-							<i class="fa fa-calendar"></i> ${__("Due")}: ${due_label} ${due_badge}
-						</div>
-						<div class="small text-muted">${r.name}</div>
-						${imei_badge}
-					</div>
-					<div style="flex:1.5;min-width:200px;font-size:12px;">
-						${item_summary || `<span class="text-muted">${__("(no items)")}</span>`}
-						${extra}
-					</div>
-					<div style="flex:0.9;min-width:140px;text-align:right;font-size:12px;">
-						<div>${__("Total")}: <b>\u20B9${format_number(r.grand_total)}</b></div>
-						${adv > 0 ? `<div class="text-success">${__("Advance")}: \u20B9${format_number(adv)}</div>` : ""}
-						<div style="margin-top:2px;"><b>${__("Balance")}: \u20B9${format_number(bal)}</b></div>
-					</div>
-					<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:140px;">
-						<button class="btn btn-success btn-sm ch-pickup-bill" data-name="${r.name}" title="${frappe.utils.escape_html(bill_title)}">
-							<i class="fa fa-check"></i> ${__("Bill & Pickup")}
-						</button>
-						${add_imei_btn}					<button class="btn btn-default btn-sm ch-pickup-cancel-refund" data-name="${r.name}" data-advance="${adv}" style="color:#dc2626;border-color:#fca5a5;" title="${__('Cancel pre-booking and refund/retain advance')}">
-						<i class="fa fa-times-circle"></i> ${__('Cancel / Refund')}
-					</button>					</div>
-				</div>
-			`;
+			return `<tr class="${imei_ready ? "ch-pickup-row-ready" : "ch-pickup-row-not-ready"}"${
+				r.name === hl ? ` style="background:#ecfdf5;box-shadow:inset 3px 0 0 #16a34a" title="${__("Just created")}"` : ""}>
+				<td style="${td};white-space:nowrap"><a href="#" class="ch-pickup-items" data-name="${esc(r.name)}" style="font-weight:600">${esc(r.name)}</a></td>
+				<td style="${td}">${esc(r.customer_name || r.customer || "")}</td>
+				<td style="${td};white-space:nowrap" class="${due_class}">${r.delivery_date ? frappe.datetime.str_to_user(r.delivery_date) : "—"}${due_badge}</td>
+				<td style="${td};text-align:center">${qty}</td>
+				<td style="${td};white-space:nowrap">${status}</td>
+				<td style="${td};text-align:right;white-space:nowrap">\u20B9${format_number(r.grand_total)}</td>
+				<td style="${td};text-align:right;white-space:nowrap">
+					<span class="${adv > 0 ? "text-success" : "text-muted"}">\u20B9${format_number(adv)}</span>
+					${pending_adv > 0 ? `<div class="small" style="color:#b45309;line-height:1.25" title="${__("Advance Payment Entry is a draft awaiting approval; it is not deducted from the balance until approved.")}">
+						+ \u20B9${format_number(pending_adv)}<br>${__("pending approval")}</div>` : ""}</td>
+				<td style="${td};text-align:right;white-space:nowrap"><b>\u20B9${format_number(bal)}</b></td>
+				<td style="${td};text-align:center">
+					<button class="btn btn-default btn-xs ch-pickup-print" data-name="${esc(r.name)}" title="${__("Print Pre-Booking")}">
+						<i class="fa fa-print"></i></button></td>
+				<td style="${td};text-align:center">
+					<button class="btn btn-success btn-xs ch-pickup-bill" data-name="${esc(r.name)}" title="${esc(bill_title)}" style="white-space:nowrap">
+						<i class="fa fa-check"></i> ${__("Bill & Pickup")}</button>
+					${(!imei_ready && can_manage) ? `<div style="margin-top:4px"><button class="btn btn-default btn-xs ch-pickup-add-imei" data-name="${esc(r.name)}" style="white-space:nowrap">
+						<i class="fa fa-plus"></i> ${__("Add IMEI")}</button></div>` : ""}</td>
+				<td style="${td};text-align:center">
+					<button class="btn btn-default btn-xs ch-pickup-cancel-refund" data-name="${esc(r.name)}" data-advance="${adv}" style="color:#dc2626;border-color:#fca5a5;white-space:nowrap" title="${__("Cancel pre-booking and refund/retain advance")}">
+						<i class="fa fa-times-circle"></i> ${__("Cancel / Refund")}</button></td>
+			</tr>`;
 		}).join("");
 
-		$list.html(rows);
+		const head = [
+			[__("Pre-Booking ID"), "left"], [__("Customer Name"), "left"], [__("Due Date"), "left"],
+			[__("Qty"), "center"], [__("Status"), "left"],
+			[__("Total"), "right"], [__("Advance"), "right"], [__("Balance"), "right"],
+			[__("Print"), "center"], [__("Bill & Pickup"), "center"], [__("Cancel / Refund"), "center"],
+		].map(([l, a]) => `<th style="${th};text-align:${a}">${l}</th>`).join("");
+		$list.html(`<div style="max-height:65vh;overflow:auto">
+			<table style="width:100%;border-collapse:collapse;font-size:12.5px">
+				<thead><tr>${head}</tr></thead><tbody>${body}</tbody>
+			</table></div>`);
+	}
+
+	// Pre-Booking ID clicked: its item lines with qty, amount and reserved IMEI.
+	_show_pickup_items(name) {
+		const r = (this._pickup_rows || {})[name];
+		if (!r) return;
+		const esc = frappe.utils.escape_html;
+		const items = r.items || [];
+		const d = new frappe.ui.Dialog({
+			title: __("{0} — {1}", [r.name, r.customer_name || r.customer || ""]),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "items" }],
+		});
+		d.fields_dict.items.$wrapper.html(`
+			<table class="table table-sm" style="margin:0">
+				<thead><tr><th>#</th><th>${__("Item Name")}</th><th>${__("Reserved IMEI")}</th>
+					<th class="text-right">${__("Qty")}</th><th class="text-right">${__("Amount")}</th></tr></thead>
+				<tbody>${items.map((it, i) => `<tr>
+					<td class="text-muted">${i + 1}</td>
+					<td>${esc(it.item_name || it.item_code || "")}<div class="small text-muted">${esc(it.item_code || "")}</div></td>
+					<td>${(it.reserved_serials || []).map((sn) => `<code>${esc(sn)}</code>`).join("<br>") || "—"}</td>
+					<td class="text-right">${flt(it.qty)}</td>
+					<td class="text-right">${it.amount !== undefined || it.rate !== undefined
+						? format_currency(flt(it.amount) || flt(it.qty) * flt(it.rate)) : "—"}</td>
+				</tr>`).join("")}</tbody>
+				<tfoot>
+					<tr style="font-weight:700"><td></td><td>${__("Total")}</td><td></td>
+						<td class="text-right">${items.reduce((t, it) => t + flt(it.qty), 0)}</td>
+						<td class="text-right">${format_currency(flt(r.grand_total))}</td></tr>
+					<tr><td></td><td colspan="3">${__("Advance")}${flt(r.advance_pending) > 0
+						? ` <span class="small" style="color:#b45309">(+ ${format_currency(flt(r.advance_pending))} ${__("pending approval")})</span>` : ""}</td>
+						<td class="text-right text-success">${format_currency(flt(r.advance_paid))}</td></tr>
+					<tr style="font-weight:700"><td></td><td colspan="3">${__("Balance")}</td>
+						<td class="text-right">${format_currency(flt(r.balance_due))}</td></tr>
+				</tfoot>
+			</table>`);
+		d.show();
 	}
 
 	_render_reserved() {
@@ -907,11 +945,14 @@ export class PickupWorkspace {
 		frappe.xcall("ch_pos.api.pos_api.load_sales_order_to_cart", {
 			pos_profile: PosState.pos_profile,
 			sales_order: row.name,
-		}).then((res) => {
+		}).then(async (res) => {
 			if (!res || !res.items || !res.items.length) {
 				frappe.show_alert({ message: __("Nothing left to bill on this Sales Order"), indicator: "orange" });
 				return;
 			}
+			// Pre-booking made without a reserved IMEI: pick one from this
+			// store's stock now, or say it is out of stock.
+			if (!(await this._assign_imeis_from_stock(res.items, scanned_serials))) return;
 
 			// Reset transaction, then seed from SO.
 			PosState.reset_transaction();
@@ -952,6 +993,146 @@ export class PickupWorkspace {
 			const msg = err && err.message ? err.message : __("Failed to load Sales Order");
 			frappe.msgprint({ title: __("Load Failed"), indicator: "red", message: msg });
 		});
+	}
+
+	// Serial rows still without an IMEI (and not covered by the reserved-IMEI
+	// scan) take one from this store's sellable stock. Out of stock on any row
+	// → nothing is loaded; the cashier is told to procure or raise an MR.
+	// Resolves true when the cart can be loaded.
+	async _assign_imeis_from_stock(items, scanned_serials) {
+		const covered = (scanned_serials || []).length;
+		const need = items.filter((it) => cint(it.has_serial_no) && !String(it.serial_no || "").trim()).slice(covered);
+		if (!need.length) return true;
+		const wh = PosState.warehouse;
+		const stock = {};
+		for (const code of [...new Set(need.map((it) => it.item_code))]) {
+			stock[code] = await frappe.xcall("ch_pos.api.search.get_available_serials",
+				{ item_code: code, warehouse: wh }).catch(() => []);
+		}
+		// Units wanted per item vs IMEIs on hand here.
+		const wanted = {};
+		need.forEach((it) => { wanted[it.item_code] = (wanted[it.item_code] || 0) + Math.max(1, cint(it.qty)); });
+		const short = Object.keys(wanted).filter((code) => (stock[code] || []).length < wanted[code]);
+		if (short.length) {
+			this._show_out_of_stock(short.map((code) => {
+				const it = need.find((x) => x.item_code === code);
+				return { item_code: code, item_name: it.item_name || code, wanted: wanted[code], have: (stock[code] || []).length };
+			}));
+			return false;
+		}
+		const taken = new Set();
+		for (const it of need) {
+			const picked = await this._pick_imeis(it, (stock[it.item_code] || []).filter((r) => !taken.has(r.serial_no)),
+				Math.max(1, cint(it.qty)), [...taken]);
+			if (!picked) return false;
+			picked.forEach((sn) => taken.add(sn));
+			it.serial_no = picked.join("\n");
+		}
+		return true;
+	}
+
+	// Choose `qty` IMEIs for one pre-booked row. The oldest (FIFO) ones are
+	// ticked to start; scanning an IMEI ticks it. Resolves the list, or null
+	// when the dialog is closed.
+	_pick_imeis(it, rows, qty, in_cart) {
+		return new Promise((resolve) => {
+			const esc = frappe.utils.escape_html;
+			let settled = false;
+			const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+			const d = new frappe.ui.Dialog({
+				title: __("Select IMEI — {0}", [it.item_name || it.item_code]),
+				size: "large",
+				fields: [
+					{ fieldtype: "HTML", fieldname: "list" },
+					{ fieldtype: "Data", fieldname: "scan", label: __("Scan IMEI / Serial"),
+						description: __("Scan to tick it in the list") },
+				],
+				primary_action_label: __("Add to Cart"),
+				primary_action: async () => {
+					const chosen = ticked();
+					if (chosen.length !== qty) {
+						frappe.show_alert({ message: __("Select exactly {0} IMEI(s)", [qty]), indicator: "orange" });
+						return;
+					}
+					d.disable_primary_action();
+					for (const sn of chosen) {
+						const res = await frappe.xcall("ch_pos.api.pos_api.validate_serial_for_sale", {
+							serial_no: sn, item_code: it.item_code, warehouse: PosState.warehouse,
+							in_cart_serials: in_cart,
+						}).catch((e) => ({ valid: false, reason: e && e.message }));
+						if (!res || !res.valid) {
+							d.enable_primary_action();
+							frappe.msgprint({ title: __("IMEI {0} cannot be sold", [sn]), indicator: "red",
+								message: (res && res.reason) || __("Invalid serial number") });
+							return;
+						}
+					}
+					finish(chosen);
+					d.hide();
+				},
+			});
+			d.onhide = () => finish(null);
+			d.fields_dict.list.$wrapper.html(`
+				<div class="text-muted" style="margin-bottom:6px">${__("Pick {0} of {1} available in this store", [qty, rows.length])}</div>
+				<div style="max-height:45vh;overflow:auto;border:1px solid var(--border-color);border-radius:6px">
+				<table class="table table-sm" style="margin:0"><tbody>
+				${rows.map((r, i) => `<tr class="pk-sn-row" style="cursor:pointer">
+					<td style="width:32px"><input type="checkbox" class="pk-sn" data-sn="${esc(r.serial_no)}" ${i < qty ? "checked" : ""}></td>
+					<td><code>${esc(r.serial_no)}</code> ${cint(r.is_oldest) ? `<span class="indicator-pill green">${__("Sell First")}</span>` : ""}</td>
+					<td class="text-muted small text-right">${r.inward_date ? esc(frappe.datetime.str_to_user(String(r.inward_date).split(" ")[0])) : ""}</td>
+				</tr>`).join("")}
+				</tbody></table></div>`);
+			const $w = d.$wrapper;
+			const ticked = () => $w.find(".pk-sn:checked").map((_i, el) => String($(el).data("sn"))).get();
+			$w.on("click", ".pk-sn-row", function (e) {
+				if ($(e.target).is("input")) return;
+				const $cb = $(this).find(".pk-sn");
+				$cb.prop("checked", !$cb.prop("checked"));
+			});
+			d.fields_dict.scan.$input.on("keydown", (e) => {
+				if (e.key !== "Enter") return;
+				e.preventDefault();
+				const val = String(d.get_value("scan") || "").replace(/\s/g, "").toUpperCase();
+				const $cb = $w.find(".pk-sn").filter((_i, el) => String($(el).data("sn")).toUpperCase() === val);
+				if ($cb.length) {
+					if (ticked().length >= qty && !$cb.prop("checked")) {
+						// Swap out the last ticked one for the scanned IMEI.
+						$w.find(".pk-sn:checked").last().prop("checked", false);
+					}
+					$cb.prop("checked", true);
+				} else {
+					frappe.show_alert({ message: __("{0} is not available in this store for this item", [val]), indicator: "red" });
+				}
+				d.set_value("scan", "");
+			});
+			d.show();
+		});
+	}
+
+	_show_out_of_stock(items) {
+		const esc = frappe.utils.escape_html;
+		const d = new frappe.ui.Dialog({
+			title: __("Out of Stock"),
+			fields: [{ fieldtype: "HTML", fieldname: "msg" }],
+			primary_action_label: __("Raise MR"),
+			primary_action: () => {
+				d.hide();
+				EventBus.emit("mode:switch", "material_request");
+			},
+			secondary_action_label: __("Close"),
+			secondary_action: () => d.hide(),
+		});
+		d.fields_dict.msg.$wrapper.html(`
+			<p>${__("Not enough stock at this store to hand over this pre-booking:")}</p>
+			<ul style="margin:0 0 12px 18px;padding:0">
+				${items.map((it) => `<li><b>${esc(it.item_name)}</b> <span class="text-muted small">${esc(it.item_code)}</span>
+					— ${__("needed {0}, available {1}", [it.wanted, it.have])}</li>`).join("")}
+			</ul>
+			<div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:6px;padding:8px 12px;">
+				<i class="fa fa-exclamation-triangle"></i>
+				${__("Out of Stock — please procure, or raise a Material Request.")}
+			</div>`);
+		d.show();
 	}
 
 	_show_success(inv, auto_print) {
@@ -1021,9 +1202,12 @@ export class PickupWorkspace {
 			});
 		}
 		fields.push({
-			fieldtype: "Small Text", fieldname: "reason", label: __("Reason (required)"),
-			reqd: 1,
-			description: __("Minimum 5 characters. Explain why the pre-booking is being cancelled."),
+			fieldtype: "Select", fieldname: "reason", label: __("Reason"), reqd: 1,
+			options: [""].concat(PREBOOK_CANCEL_REASONS.map((r) => __(r))).join("\n"),
+		});
+		fields.push({
+			fieldtype: "Small Text", fieldname: "remarks", label: __("Remarks"),
+			description: __("Required when the reason is Other."),
 		});
 
 		const d = new frappe.ui.Dialog({
@@ -1032,11 +1216,18 @@ export class PickupWorkspace {
 			fields,
 			primary_action_label: __("Cancel Pre-Booking"),
 			primary_action: (v) => {
-				const reason = (v.reason || "").trim();
-				if (reason.length < 5) {
-					frappe.show_alert({ message: __("Please enter a reason (min 5 chars)."), indicator: "red" });
+				const picked = (v.reason || "").trim();
+				const remarks = (v.remarks || "").trim();
+				if (!picked) {
+					frappe.show_alert({ message: __("Choose a reason."), indicator: "red" });
 					return;
 				}
+				if (picked === __("Other") && remarks.length < 5) {
+					frappe.show_alert({ message: __("Describe the reason in Remarks (min 5 chars)."), indicator: "red" });
+					return;
+				}
+				// Stored on the pre-booking's cancel comment as one line.
+				const reason = remarks ? `${picked} — ${remarks}` : picked;
 				const retain = v.action === __("Keep as credit (adjust to another bill)");
 				d.hide();
 				frappe.confirm(

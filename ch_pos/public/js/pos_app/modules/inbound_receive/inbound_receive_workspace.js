@@ -134,7 +134,7 @@ export class InboundReceiveWorkspace {
 					}));
 					return;
 				}
-				body.html(`<div class="ch-inbound-list">${rows.map(pr => this._pr_card(pr)).join("")}</div>`);
+				body.html(this._pr_table(rows));
 			},
 		});
 	}
@@ -157,99 +157,126 @@ export class InboundReceiveWorkspace {
 					}));
 					return;
 				}
-				body.html(`<div class="ch-inbound-list">${rows.map(po => this._po_card(po)).join("")}</div>`);
+				body.html(this._po_table(rows));
 			},
 		});
 	}
 
 	// ── List cards ──────────────────────────────────────────────────
-	_pr_card(pr) {
-		const name = frappe.utils.escape_html(pr.name);
-		const supplier = frappe.utils.escape_html(pr.supplier_name || pr.supplier || "");
-		const wh = wh_label(pr.set_warehouse);
-		const pending = parseInt(pr.pending_generate_rows || 0, 10) || 0;
-		const pending_badge = pending > 0
-			? `<span class="ch-pos-badge ch-pos-badge-warning">${__("{0} rows need Generate", [pending])}</span>`
-			: `<span class="ch-pos-badge ch-pos-badge-success">${__("Ready to Submit")}</span>`;
-		const gt = pr.grand_total
-			? `${frappe.utils.escape_html(pr.currency || "")} ${format_currency(pr.grand_total)}`
-			: "";
-
-		return `
-			<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-sm)">
-				<div class="section-body" style="padding:12px 16px">
-					<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
-						<div>
-							<div style="font-weight:700;font-size:var(--pos-fs-sm)">${name}</div>
-							<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
-								${frappe.datetime.str_to_user(pr.posting_date)} · ${supplier || "—"}
-							</div>
-						</div>
-						<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
-							${pending_badge}
-							<button class="btn btn-xs btn-primary ch-inbound-open-pr" data-name="${name}" style="border-radius:var(--pos-radius-sm)">
-								<i class="fa fa-check-square-o"></i> ${__("Generate & Receive")}
-							</button>
-							<button class="btn btn-xs btn-outline-secondary ch-inbound-view-desk" data-name="${name}" style="border-radius:var(--pos-radius-sm)">
-								<i class="fa fa-external-link"></i>
-							</button>
-						</div>
-					</div>
-					<div style="display:flex;align-items:center;gap:6px;font-size:var(--pos-fs-xs);color:var(--pos-text-secondary);flex-wrap:wrap">
-						<span style="font-size:11px;color:var(--pos-text-muted)">${__("To")}</span>
-						<span style="padding:3px 8px;background:var(--pos-surface-sunken);border-radius:var(--pos-radius-sm)">${wh || "—"}</span>
-						<span style="font-size:11px;color:var(--pos-text-muted);margin-left:10px">${__("Items")}</span>
-						<span>${parseInt(pr.item_count || 0, 10)}</span>
-						${gt ? `<span style="font-size:11px;color:var(--pos-text-muted);margin-left:10px">${__("Value")}</span><span>${gt}</span>` : ""}
-					</div>
-				</div>
-			</div>`;
+	// Draft Receipts as a list (table), in the same layout as Pending POs.
+	_pr_table(rows) {
+		const esc = frappe.utils.escape_html;
+		return this._list_table(rows, [
+			{ label: "#", cell: (pr, i) => `<span style="color:var(--pos-text-muted)">${i + 1}</span>` },
+			{ label: __("GRN Number"), cell: (pr) => `<span style="font-weight:700;white-space:nowrap">${esc(pr.name)}</span>` },
+			{ label: __("Date"), cell: (pr) => `<span style="white-space:nowrap">${frappe.datetime.str_to_user(pr.posting_date)}</span>` },
+			{ label: __("Supplier"), cell: (pr) => esc(pr.supplier_name || pr.supplier || "—") },
+			{ label: __("To"), cell: (pr) => esc(wh_label(pr.set_warehouse) || "—") },
+			{ label: __("Items"), num: true, sum: (pr) => parseInt(pr.item_count || 0, 10) || 0, cell: (pr) => parseInt(pr.item_count || 0, 10) },
+			{ label: __("Value"), num: true, money: true, sum: (pr) => parseFloat(pr.grand_total) || 0,
+				cell: (pr) => `<span style="white-space:nowrap">${pr.grand_total ? `${esc(pr.currency || "")} ${format_currency(pr.grand_total)}` : "—"}</span>` },
+			{ label: __("Status"), cell: (pr) => {
+				const pending = parseInt(pr.pending_generate_rows || 0, 10) || 0;
+				return pending > 0
+					? `<span class="ch-pos-badge ch-pos-badge-warning" style="white-space:nowrap">${__("{0} rows need Generate", [pending])}</span>`
+					: `<span class="ch-pos-badge ch-pos-badge-success" style="white-space:nowrap">${__("Ready to Submit")}</span>`;
+			} },
+			{ label: "", action: true, cell: (pr) => `<div style="display:flex;gap:6px;justify-content:flex-end">
+				<button class="btn btn-xs btn-primary ch-inbound-open-pr" data-name="${esc(pr.name)}" style="border-radius:var(--pos-radius-sm);white-space:nowrap">
+					<i class="fa fa-check-square-o"></i> ${__("Generate & Receive")}
+				</button>
+				<button class="btn btn-xs btn-outline-secondary ch-inbound-view-desk" data-name="${esc(pr.name)}" title="${__("Open in Desk")}" style="border-radius:var(--pos-radius-sm)">
+					<i class="fa fa-external-link"></i>
+				</button></div>` },
+		], __("GRN"), __("GRNs"));
 	}
 
-	_po_card(po) {
-		const name = frappe.utils.escape_html(po.name);
-		const supplier = frappe.utils.escape_html(po.supplier_name || po.supplier || "");
-		const wh = wh_label(po.set_warehouse);
-		const per = parseFloat(po.per_received || 0);
-		const per_badge = per > 0
-			? `<span class="ch-pos-badge ch-pos-badge-info">${__("Received {0}%", [per.toFixed(0)])}</span>`
-			: `<span class="ch-pos-badge ch-pos-badge-muted">${__("Not yet received")}</span>`;
-		const ds_badge = parseInt(po.custom_is_drop_ship || 0, 10)
-			? `<span class="ch-pos-badge ch-pos-badge-warning" style="margin-left:6px">${__("Drop-Ship")}</span>`
-			: "";
-		const gt = po.grand_total
-			? `${frappe.utils.escape_html(po.currency || "")} ${format_currency(po.grand_total)}`
-			: "";
+	// Pending POs as a list (table): one row per PO, newest first as the
+	// server sends them. Buttons keep the card's classes, so the bound
+	// handlers (Create GRN / open in desk) are unchanged.
+	_po_table(rows) {
+		const esc = frappe.utils.escape_html;
+		const cols = [
+			{ label: "#", cell: (po, i) => `<span style="color:var(--pos-text-muted)">${i + 1}</span>` },
+			{ label: __("PO Number"), cell: (po) => `<span style="font-weight:700;white-space:nowrap">${esc(po.name)}</span>`
+				+ (parseInt(po.custom_is_drop_ship || 0, 10)
+					? ` <span class="ch-pos-badge ch-pos-badge-warning">${__("Drop-Ship")}</span>` : "") },
+			{ label: __("Date"), cell: (po) => `<span style="white-space:nowrap">${frappe.datetime.str_to_user(po.transaction_date)}</span>` },
+			{ label: __("Supplier"), cell: (po) => esc(po.supplier_name || po.supplier || "—") },
+			{ label: __("Destination"), cell: (po) => esc(wh_label(po.set_warehouse) || "—") },
+			{ label: __("Items"), num: true, sum: (po) => parseInt(po.item_count || 0, 10) || 0, cell: (po) => parseInt(po.item_count || 0, 10) },
+			{ label: __("Value"), num: true, money: true, sum: (po) => parseFloat(po.grand_total) || 0, cell: (po) => `<span style="white-space:nowrap">${po.grand_total
+				? `${esc(po.currency || "")} ${format_currency(po.grand_total)}` : "—"}</span>` },
+			{ label: __("Status"), cell: (po) => {
+				const drafts = po.draft_grns || [];
+				const submitted = po.submitted_grns || [];
+				const nowrap = "white-space:nowrap";
+				if (submitted.length) {
+					return `<span class="ch-pos-badge ch-pos-badge-success" style="${nowrap}">${__("GRN Submitted")}</span>
+						<div style="font-size:11px;color:var(--pos-text-muted);${nowrap}">${submitted.map(esc).join(", ")}</div>`;
+				}
+				if (drafts.length) {
+					return `<span class="ch-pos-badge ch-pos-badge-warning" style="${nowrap}">${__("GRN Draft")}</span>
+						<div style="font-size:11px;color:var(--pos-text-muted);${nowrap}">${drafts.map(esc).join(", ")}</div>`;
+				}
+				// Company receives from the invoice and none is submitted yet.
+				if (po.invoice_first && !(po.receive_from_invoices || []).length) {
+					return `<span class="ch-pos-badge ch-pos-badge-muted" style="${nowrap}" title="${__("Create the Purchase Invoice first; the GRN is made from it.")}">${__("Awaiting Invoice")}</span>`;
+				}
+				const per = parseFloat(po.per_received || 0);
+				return per > 0
+					? `<span class="ch-pos-badge ch-pos-badge-info" style="${nowrap}">${__("Received {0}%", [per.toFixed(0)])}</span>`
+					: `<span class="ch-pos-badge ch-pos-badge-muted" style="${nowrap}">${__("Not yet received")}</span>`;
+			} },
+			// Create GRN only when no GRN exists for the PO: a draft is finished
+			// (Open Draft), a submitted one needs nothing more here.
+			{ label: "", action: true, cell: (po) => {
+				const drafts = po.draft_grns || [];
+				const submitted = po.submitted_grns || [];
+				const btn = "border-radius:var(--pos-radius-sm);white-space:nowrap";
+				let main = "";
+				const awaiting_invoice = po.invoice_first && !(po.receive_from_invoices || []).length;
+				if (!drafts.length && !submitted.length && !awaiting_invoice) {
+					// Under "PO -> PI -> PR" the server builds it from the invoice.
+					const from_pi = po.invoice_first ? (po.receive_from_invoices || [])[0] : "";
+					main = `<button class="btn btn-xs btn-primary ch-inbound-create-pr" data-name="${esc(po.name)}" style="${btn}"
+						${from_pi ? `title="${__("From Purchase Invoice {0}", [esc(from_pi)])}"` : ""}>
+						<i class="fa fa-plus"></i> ${__("Create GRN")}</button>`;
+				} else if (drafts.length && !submitted.length) {
+					main = `<button class="btn btn-xs btn-default ch-inbound-open-pr" data-name="${esc(drafts[0])}" style="${btn}">
+						<i class="fa fa-pencil"></i> ${__("Open Draft")}</button>`;
+				}
+				return `<div style="display:flex;gap:6px;justify-content:flex-end">${main}
+					<button class="btn btn-xs btn-outline-secondary ch-inbound-view-po" data-name="${esc(po.name)}" title="${__("Open in Desk")}" style="border-radius:var(--pos-radius-sm)">
+						<i class="fa fa-external-link"></i>
+					</button></div>`;
+			} },
+		];
+		return this._list_table(rows, cols, __("PO"), __("POs"));
+	}
 
-		return `
-			<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-sm)">
-				<div class="section-body" style="padding:12px 16px">
-					<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
-						<div>
-							<div style="font-weight:700;font-size:var(--pos-fs-sm)">${name}${ds_badge}</div>
-							<div style="font-size:var(--pos-fs-2xs);color:var(--pos-text-muted)">
-								${frappe.datetime.str_to_user(po.transaction_date)} · ${supplier || "—"}
-							</div>
-						</div>
-						<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
-							${per_badge}
-							<button class="btn btn-xs btn-primary ch-inbound-create-pr" data-name="${name}" style="border-radius:var(--pos-radius-sm)">
-								<i class="fa fa-plus"></i> ${__("Create GRN")}
-							</button>
-							<button class="btn btn-xs btn-outline-secondary ch-inbound-view-po" data-name="${name}" style="border-radius:var(--pos-radius-sm)">
-								<i class="fa fa-external-link"></i>
-							</button>
-						</div>
-					</div>
-					<div style="display:flex;align-items:center;gap:6px;font-size:var(--pos-fs-xs);color:var(--pos-text-secondary);flex-wrap:wrap">
-						<span style="font-size:11px;color:var(--pos-text-muted)">${__("Destination")}</span>
-						<span style="padding:3px 8px;background:var(--pos-surface-sunken);border-radius:var(--pos-radius-sm)">${wh || "—"}</span>
-						<span style="font-size:11px;color:var(--pos-text-muted);margin-left:10px">${__("Items")}</span>
-						<span>${parseInt(po.item_count || 0, 10)}</span>
-						${gt ? `<span style="font-size:11px;color:var(--pos-text-muted);margin-left:10px">${__("Value")}</span><span>${gt}</span>` : ""}
-					</div>
-				</div>
-			</div>`;
+	// Shared list layout: sticky header, one row per record, totals footer
+	// for the columns that carry a `sum`.
+	_list_table(rows, cols, one, many) {
+		const line = "1px solid var(--pos-border, var(--border-color))";
+		const th = `padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--pos-text-muted);background:var(--pos-surface-sunken);position:sticky;top:0;z-index:1;white-space:nowrap;border-bottom:${line}`;
+		const td = `padding:8px 10px;vertical-align:middle;border-bottom:${line}`;
+		const ft = `padding:8px 10px;font-weight:700;background:var(--pos-surface-sunken);position:sticky;bottom:0;border-top:2px solid var(--pos-border, var(--border-color));white-space:nowrap`;
+		const align = (c) => (c.num || c.action ? "right" : "left");
+		const head = cols.map((c) => `<th style="${th};text-align:${align(c)}">${c.label}</th>`).join("");
+		const body = rows.map((r, i) => `<tr>${cols.map((c) =>
+			`<td style="${td};text-align:${align(c)}">${c.cell(r, i)}</td>`).join("")}</tr>`).join("");
+		const first_sum = cols.findIndex((c) => c.sum);
+		const foot = `<tr><td colspan="${first_sum}" style="${ft}">${__("Total")} · ${rows.length} ${rows.length === 1 ? one : many}</td>`
+			+ cols.slice(first_sum).map((c) => {
+				if (!c.sum) return `<td style="${ft}"></td>`;
+				const total = rows.reduce((t, r) => t + c.sum(r), 0);
+				return `<td style="${ft};text-align:right">${c.money ? format_currency(total) : total}</td>`;
+			}).join("") + `</tr>`;
+		return `<div class="ch-inbound-list" style="max-height:70vh;overflow:auto;border:${line};border-radius:var(--pos-radius-md, 8px);background:var(--pos-surface, #fff)">
+			<table style="width:100%;border-collapse:collapse;font-size:var(--pos-fs-xs, 12.5px)">
+				<thead><tr>${head}</tr></thead><tbody>${body}</tbody><tfoot>${foot}</tfoot>
+			</table></div>`;
 	}
 
 	// ── PR Detail (Generate + Submit) ──────────────────────────────
@@ -395,79 +422,208 @@ export class InboundReceiveWorkspace {
 		);
 	}
 
+	// Same model as the Purchase Receipt desk form's IMEI Entry
+	// (ch_erp15 purchase_receipt.js open_imei_dialog): a scan box that fills
+	// the next empty slot, one slot per unit, a live Scanned / Remaining
+	// counter, and the same checks -- not twice in this list, not on another
+	// row of this receipt, not an IMEI already in stock. A partial list may be
+	// saved; the row counts as Generated once every slot is filled.
 	_open_imei_dialog(panel, row_name) {
 		if (!this.current_pr) return;
 		const row = (this.current_pr.items || []).find(r => r.name === row_name);
 		if (!row) return;
+		const esc = frappe.utils.escape_html;
 
-		const qty = parseInt(row.qty || 0, 10);
-		const existing = (row.serials || []).join("\n");
+		const allowed_qty = Math.max(parseInt(row.qty || 0, 10) || 0, 0);
+		if (allowed_qty <= 0) {
+			frappe.msgprint({ title: __("No Receivable Quantity"), indicator: "orange",
+				message: __("Row {0} has no quantity available for IMEI entry.", [row.idx]) });
+			return;
+		}
+		const existing = (row.serials || []).map(s => String(s).trim()).filter(Boolean);
+		if (existing.length > allowed_qty) {
+			frappe.msgprint({ title: __("Quantity Mismatch"), indicator: "red",
+				message: __("This row allows only {0} quantity, but {1} IMEIs are already present.", [allowed_qty, existing.length]) });
+			return;
+		}
+		const table_data = [];
+		for (let i = 0; i < allowed_qty; i++) {
+			table_data.push({ item_code: row.item_code, item_name: row.item_name, imei_no: existing[i] || "" });
+		}
+		// IMEIs already on the receipt's other rows.
+		const other_rows = (this.current_pr.items || []).filter(r => r.name !== row.name)
+			.map(r => ({ idx: r.idx, item_code: r.item_code, serials: (r.serials || []).map(s => String(s).trim()) }));
 
 		const dlg = new frappe.ui.Dialog({
-			title: __("Scan / Enter IMEIs — {0}", [row.item_name || row.item_code]),
+			title: __("IMEI Entry — {0}", [row.item_code]),
+			size: "large",
 			fields: [
+				{ fieldname: "scanner_input", fieldtype: "Data", label: __("Scan IMEI"), placeholder: __("Scan / Type / Paste IMEI") },
+				{ fieldname: "error_html", fieldtype: "HTML" },
+				{ fieldname: "counter_html", fieldtype: "HTML" },
 				{
-					fieldtype: "HTML",
-					fieldname: "hint",
-					options: `<div class="alert alert-info" style="margin-bottom:8px">
-						${__("Enter or scan one IMEI per line. Need <b>{0}</b> serials for Qty {0}.", [qty])}
-					</div>`,
-				},
-				{
-					fieldtype: "Small Text",
-					fieldname: "serial_list",
-					label: __("IMEI / Serial Numbers"),
-					default: existing,
-					reqd: 1,
+					fieldname: "imei_table", fieldtype: "Table", label: __("IMEI List"),
+					cannot_add_rows: true, cannot_delete_rows: true, in_place_edit: true, data: table_data,
+					fields: [
+						{ fieldtype: "Data", fieldname: "item_code", label: __("Item Code"), read_only: 1, in_list_view: 1 },
+						{ fieldtype: "Data", fieldname: "item_name", label: __("Item Name"), read_only: 1, in_list_view: 1 },
+						{ fieldtype: "Data", fieldname: "imei_no", label: __("IMEI"), in_list_view: 1 },
+					],
 				},
 			],
-			primary_action_label: __("Save Serials"),
-			primary_action: (values) => {
-				const list = (values.serial_list || "")
-					.split(/\r?\n/)
-					.map(s => s.trim())
-					.filter(Boolean);
-
-				if (list.length !== qty) {
-					frappe.msgprint({
-						title: __("Count mismatch"),
-						message: __("Entered {0} serial(s) but Qty is {1}.", [list.length, qty]),
-						indicator: "red",
-					});
+			primary_action_label: __("Save"),
+			primary_action: async () => {
+				clear_error();
+				const list = grid().get_data().map(d => (d.imei_no || "").trim()).filter(Boolean);
+				if (list.length > allowed_qty) {
+					show_error(__("Quantity mismatch: allowed {0}, entered {1}.", [allowed_qty, list.length]));
 					return;
 				}
-				if (new Set(list).size !== list.length) {
-					frappe.msgprint({
-						title: __("Duplicates"),
-						message: __("The list has duplicate serials — please de-duplicate."),
-						indicator: "red",
-					});
-					return;
+				const seen = {};
+				for (const val of list) {
+					if (seen[val]) { show_error(__("Duplicate IMEI in list: {0}", [val])); return; }
+					seen[val] = true;
 				}
-
+				for (const val of list) {
+					const clash = on_other_row(val);
+					if (clash) { show_error(clash); return; }
+				}
+				for (const val of list) {
+					if (await in_stock_already(val)) {
+						show_error(__("IMEI {0} already exists. Please remove it.", [val]));
+						return;
+					}
+				}
 				frappe.call({
 					method: `${API}.pos_pr_set_imei_serials`,
-					args: {
-						pr_name: this.current_pr.name,
-						row_name,
-						serials: list,
-						pos_profile: PosState.pos_profile,
-					},
+					args: { pr_name: this.current_pr.name, row_name, serials: list, pos_profile: PosState.pos_profile },
 					freeze: true,
 					freeze_message: __("Saving serials..."),
 					callback: (r) => {
 						if (!r.message) return;
 						dlg.hide();
-						frappe.show_alert({
-							message: __("Saved {0} serial(s) for row {1}", [list.length, row.idx]),
-							indicator: "green",
-						});
+						frappe.show_alert(list.length === allowed_qty
+							? { message: __("IMEI saved successfully"), indicator: "green" }
+							: { message: __("Saved {0}/{1}. Scan again to continue.", [list.length, allowed_qty]), indicator: "orange" }, 5);
 						this._open_pr(panel, this.current_pr.name);
 					},
 				});
 			},
 		});
 		dlg.show();
+
+		const grid = () => dlg.fields_dict.imei_table.grid;
+		const scanner_input = dlg.fields_dict.scanner_input.$input;
+		setTimeout(() => scanner_input.focus(), 300);
+
+		function show_error(msg) {
+			dlg.fields_dict.error_html.$wrapper.html(`
+				<div style="background:#FBE9E7;color:#B71C1C;padding:8px 12px;border-radius:6px;border:1px solid #EF9A9A;margin:6px 0;">
+					<strong>⚠ ${esc(msg)}</strong>
+				</div>`);
+		}
+		function clear_error() { dlg.fields_dict.error_html.$wrapper.html(""); }
+		function update_counter() {
+			const scanned = grid().get_data().filter(d => d.imei_no && d.imei_no.trim()).length;
+			dlg.fields_dict.counter_html.$wrapper.html(`
+				<div style="margin:8px 0;display:flex;gap:10px;align-items:center;">
+					<span style="background:#EAF3DE;padding:4px 10px;border-radius:12px;">${__("Scanned")}: ${scanned}</span>
+					<span style="background:#FAEEDA;padding:4px 10px;border-radius:12px;">${__("Remaining")}: ${allowed_qty - scanned}</span>
+					<span style="margin-left:auto;">${scanned} / ${allowed_qty}</span>
+				</div>`);
+		}
+		function on_other_row(val) {
+			const other = other_rows.find(r => r.serials.includes(val));
+			return other ? __("IMEI {0} already scanned in row {1} ({2})", [val, other.idx, other.item_code]) : "";
+		}
+		// A unit already in the system (anything but Delivered) cannot be received again.
+		async function in_stock_already(val) {
+			try {
+				const found = await frappe.db.get_list("Serial No", { filters: { name: val }, fields: ["name", "status"], limit: 1 });
+				return found.length > 0 && (found[0].status || "").trim() !== "Delivered";
+			} catch (e) {
+				return false;
+			}
+		}
+		async function add_imei(val) {
+			clear_error();
+			val = (val || "").trim();
+			if (!val) return false;
+			const table = grid().get_data();
+			if (table.some(d => (d.imei_no || "").trim() === val)) {
+				show_error(__("IMEI {0} already entered in this list", [val]));
+				return false;
+			}
+			const clash = on_other_row(val);
+			if (clash) { show_error(clash); return false; }
+			if (await in_stock_already(val)) {
+				show_error(__("IMEI {0} already exists.", [val]));
+				return false;
+			}
+			const empty = table.find(d => !d.imei_no || !d.imei_no.trim());
+			if (!empty) { show_error(__("All IMEI slots are filled")); return false; }
+			empty.imei_no = val;
+			grid().refresh();
+			update_counter();
+			return true;
+		}
+		update_counter();
+
+		scanner_input.on("keydown", async (e) => {
+			if (e.key !== "Enter") return;
+			e.preventDefault();
+			const raw = (scanner_input.val() || "").trim();
+			if (!raw) return;
+			const values = raw.split(/[\n\r\t,;]+/).map(v => v.trim()).filter(Boolean);
+			let filled = 0, failed = 0;
+			for (const val of values) {
+				if (await add_imei(val)) filled++; else failed++;
+			}
+			scanner_input.val("");
+			scanner_input.focus();
+			if (values.length > 1) {
+				frappe.show_alert({ message: __("{0} added, {1} skipped", [filled, failed]), indicator: filled ? "green" : "orange" });
+			}
+		});
+		// A pasted list lands in the box as-is; Enter then splits and adds it.
+		scanner_input.on("paste", (e) => {
+			e.preventDefault();
+			clear_error();
+			const data = (e.originalEvent.clipboardData || window.clipboardData).getData("text");
+			if (data) scanner_input.val(data.trim());
+		});
+		// Pasting several IMEIs into one slot fills the slots in turn.
+		grid().wrapper.on("paste", '.grid-row [data-fieldname="imei_no"] input', async function (e) {
+			const clip = (e.originalEvent.clipboardData || window.clipboardData).getData("text");
+			const imeis = (clip || "").split(/[\n\r\t,;]+/).map(v => v.trim()).filter(Boolean);
+			if (imeis.length <= 1) return;
+			e.preventDefault();
+			clear_error();
+			let filled = 0, failed = 0;
+			for (const val of imeis) {
+				if (await add_imei(val)) filled++; else failed++;
+			}
+			frappe.show_alert({ message: __("{0} added, {1} skipped", [filled, failed]), indicator: filled ? "green" : "orange" });
+		});
+		// Typed straight into a slot: same checks, the slot is emptied if refused.
+		grid().wrapper.on("change", '.grid-row [data-fieldname="imei_no"] input', async function () {
+			clear_error();
+			const $input = $(this);
+			const val = ($input.val() || "").trim();
+			const idx = (parseInt($input.closest(".grid-row").attr("data-idx"), 10) || 0) - 1;
+			if (idx < 0 || !val) { update_counter(); return; }
+			const table = grid().get_data();
+			let msg = table.some((d, i) => i !== idx && (d.imei_no || "").trim() === val)
+				? __("IMEI {0} already entered in this list", [val]) : on_other_row(val);
+			if (!msg && await in_stock_already(val)) msg = __("IMEI {0} already exists.", [val]);
+			if (msg) {
+				show_error(msg);
+				$input.val("");
+				if (table[idx]) table[idx].imei_no = "";
+				grid().refresh();
+			}
+			update_counter();
+		});
 	}
 
 	_submit_pr(panel) {

@@ -181,6 +181,7 @@ def list_pending_purchase_orders(pos_profile: str, limit: int = 25) -> list[dict
     rows = frappe.db.sql(
         """
         SELECT po.name,
+               po.company,
                po.transaction_date,
                po.schedule_date,
                po.supplier,
@@ -211,7 +212,58 @@ def list_pending_purchase_orders(pos_profile: str, limit: int = 25) -> list[dict
         """,
         {"wh": warehouse, "limit": limit},
         as_dict=True)
+    # The GRNs already raised against each PO: the POS offers "Create GRN"
+    # only for a PO that has none (draft or submitted).
+    grns = _grns_by_po([r.name for r in rows])
+    for r in rows:
+        r["draft_grns"] = grns.get(r.name, {}).get(0, [])
+        r["submitted_grns"] = grns.get(r.name, {}).get(1, [])
+        # Under "PO -> PI -> PR" the GRN is made from the PO's invoice, so
+        # until one is submitted there is nothing to create a GRN from.
+        r["invoice_first"] = 1 if _receives_from_invoice(r.company) else 0
+        r["receive_from_invoices"] = _invoices_to_receive(r.name) if r["invoice_first"] else []
     return rows or []
+
+
+def _receives_from_invoice(company) -> bool:
+    from ch_erp15.ch_erp15.custom.procurement_flow import transition_allowed
+    return (not transition_allowed(company, "Purchase Order", "Purchase Receipt")
+            and transition_allowed(company, "Purchase Invoice", "Purchase Receipt"))
+
+
+def _invoices_to_receive(po_name) -> list:
+    """Submitted invoices of this PO that still have goods to receive."""
+    return [r[0] for r in frappe.db.sql(
+        """
+        SELECT DISTINCT pii.parent
+        FROM `tabPurchase Invoice Item` pii
+        JOIN `tabPurchase Invoice` pi ON pi.name = pii.parent
+        WHERE pii.purchase_order = %s AND pi.docstatus = 1 AND pi.is_return = 0
+          AND IFNULL(pii.received_qty, 0) < pii.qty
+        ORDER BY pii.parent
+        """,
+        po_name,
+    )]
+
+
+def _grns_by_po(po_names) -> dict:
+    """{po: {docstatus: [Purchase Receipt, ...]}} for drafts and submitted GRNs."""
+    out = {}
+    if not po_names:
+        return out
+    for row in frappe.db.sql(
+        """
+        SELECT DISTINCT pri.purchase_order AS po, pr.name, pr.docstatus
+        FROM `tabPurchase Receipt Item` pri
+        JOIN `tabPurchase Receipt` pr ON pr.name = pri.parent
+        WHERE pri.purchase_order IN %(pos)s AND pr.docstatus IN (0, 1)
+        ORDER BY pr.creation
+        """,
+        {"pos": po_names},
+        as_dict=True,
+    ):
+        out.setdefault(row.po, {}).setdefault(row.docstatus, []).append(row.name)
+    return out
 
 
 @frappe.whitelist()
@@ -308,12 +360,41 @@ def create_pr_from_po(po_name: str, pos_profile: str) -> dict:
             ).format(po_name, warehouse),
             frappe.PermissionError)
 
-    from ch_erp15.ch_erp15.custom.purchase_order import (
-        make_purchase_receipt as _make_pr)
+    # One GRN per PO from the POS: a draft is finished from Draft Receipts,
+    # and a submitted one means the PO was already received here.
+    existing = _grns_by_po([po_name]).get(po_name, {})
+    if existing.get(0):
+        frappe.throw(
+            _("Purchase Order {0} already has a draft GRN {1}. Open it from Draft Receipts.").format(
+                po_name, ", ".join(existing[0])),
+            title=_("GRN Already Created"))
+    if existing.get(1):
+        frappe.throw(
+            _("Purchase Order {0} is already received on GRN {1}.").format(
+                po_name, ", ".join(existing[1])),
+            title=_("GRN Already Submitted"))
+
+    # The company's procurement flow decides the source: from the PO, or --
+    # under "PO -> PI -> PR" -- from the PO's submitted invoice.
+    if _receives_from_invoice(po.company):
+        invoices = _invoices_to_receive(po_name)
+        if not invoices:
+            frappe.throw(
+                _("{0} receives goods from the Purchase Invoice. Create and submit the "
+                  "Purchase Invoice for {1} first; the GRN is then made from it.").format(
+                    po.company, po_name),
+                title=_("Purchase Invoice Needed First"))
+        from ch_erp15.ch_erp15.custom.purchase_invoice import (
+            make_purchase_receipt as _make_pr)
+        source = invoices[0]
+    else:
+        from ch_erp15.ch_erp15.custom.purchase_order import (
+            make_purchase_receipt as _make_pr)
+        source = po_name
 
     frappe.flags.ignore_permissions = True
     try:
-        pr = _make_pr(po_name)
+        pr = _make_pr(source)
     finally:
         frappe.flags.ignore_permissions = False
 
@@ -324,6 +405,8 @@ def create_pr_from_po(po_name: str, pos_profile: str) -> dict:
     for row in pr.items or []:
         row.warehouse = warehouse
 
+    # Generate happens on the POS screen after this draft exists.
+    pr.flags.ch_generate_later = True
     pr.insert()
 
     return {"pr_name": pr.name}
@@ -379,9 +462,31 @@ def pos_pr_set_imei_serials(
             )
         )
 
+    # The same checks as the IMEI Entry dialog, made here so they hold for
+    # any caller: no more than the row's qty, no repeats, not already on
+    # another row of this receipt, and not a unit already in the system.
+    if len(cleaned) > int(flt(row.qty)):
+        frappe.throw(_("Row {0}: {1} IMEIs entered but the quantity is {2}.").format(
+            row.idx, len(cleaned), int(flt(row.qty))))
+    if len(set(cleaned)) != len(cleaned):
+        frappe.throw(_("Row {0}: the same IMEI is entered more than once.").format(row.idx))
+    for other in pr.items:
+        if other.name == row.name:
+            continue
+        clash = set(cleaned) & {s.strip() for s in (other.serial_no or "").split("\n") if s.strip()}
+        if clash:
+            frappe.throw(_("IMEI {0} is already on row {1} ({2}).").format(
+                ", ".join(sorted(clash)), other.idx, other.item_code))
+    if cleaned:
+        existing = frappe.get_all(
+            "Serial No", filters={"name": ("in", cleaned), "status": ("!=", "Delivered")}, pluck="name")
+        if existing:
+            frappe.throw(_("IMEI {0} already exists.").format(", ".join(existing)))
+
     row.serial_no = "\n".join(cleaned)
     row.custom_serial_generated = 1 if len(cleaned) == int(flt(row.qty)) else 0
 
+    pr.flags.ch_generate_later = True  # other rows may still need Generate
     pr.save()
 
     return {
@@ -437,6 +542,7 @@ def pos_pr_generate_barcode_serials(
     row.serial_no = "\n".join(serials)
     row.custom_serial_generated = 1 if serials else 0
 
+    pr.flags.ch_generate_later = True  # other rows may still need Generate
     pr.save()
 
     return {

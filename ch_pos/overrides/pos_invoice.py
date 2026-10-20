@@ -599,6 +599,11 @@ def update_kiosk_token_status(doc, method=None):
     """Hook: on_submit — mark kiosk token as Converted if linked, record exit time."""
     token = doc.get("custom_kiosk_token")
     if not token:
+        # A pickup bill belongs to the visit its pre-booking came from.
+        token = _prebooking_token(doc)
+        if token:
+            frappe.db.set_value("Sales Invoice", doc.name, "custom_kiosk_token", token)
+    if not token:
         # Auto-create token if POS invoice submitted without one (enforcement fallback)
         if cint(doc.get("is_pos")) and doc.get("pos_profile"):
             token = _auto_create_token_for_invoice(doc)
@@ -615,6 +620,17 @@ def update_kiosk_token_status(doc, method=None):
             release_pos_billing(token_name=token, pos_profile=doc.pos_profile, revert_current=0)
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"Failed to release held queue tokens after invoice {doc.name}")
+
+
+def _prebooking_token(doc):
+    if not frappe.get_meta("Sales Order").has_field("custom_kiosk_token"):
+        return None
+    orders = {it.get("sales_order") for it in (doc.get("items") or []) if it.get("sales_order")}
+    for so in sorted(orders):
+        token = frappe.db.get_value("Sales Order", so, "custom_kiosk_token")
+        if token:
+            return token
+    return None
 
 
 def _auto_create_token_for_invoice(doc):

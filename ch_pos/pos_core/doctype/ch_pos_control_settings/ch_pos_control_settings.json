@@ -1032,8 +1032,8 @@
    "description": "Retired. This gate is now enforced by Role Permission Manager (document permissions)."
   },
   {
-   "default": "2",
-   "description": "Days after the promised delivery date before an uncollected IMEI reservation expires.",
+   "default": "0",
+   "description": "Extra days after the pre-booking's Delivery Date before an unbilled IMEI reservation is released. 0 = released the day after the Delivery Date.",
    "fieldname": "prebook_hold_grace_days",
    "fieldtype": "Int",
    "label": "Pre-Book Hold Grace Days"
@@ -1597,7 +1597,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-03-30 10:00:00.000000",
+ "modified": "2026-10-20 16:30:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "CH POS Control Settings",

@@ -409,6 +409,23 @@ def open_session(pos_profile, opening_cash, session_grant=None, device=None,
             },
             pluck="name")
         all_stale = set(stale_entries + user_stale)
+        # Orphaned means no CH POS Session is still running on it. Without
+        # this check, a cashier opening a second till (e.g. GoFix after
+        # Gogizmo in the same store) closed the first till's live opening
+        # entry, and every bill there failed "No open POS Opening Entry"
+        # while its session still read Open.
+        if all_stale:
+            live = set(frappe.get_all(
+                "CH POS Session",
+                filters={"pos_opening_entry": ("in", list(all_stale)), "status": ("!=", "Closed")},
+                pluck="pos_opening_entry"))
+            all_stale -= live
+        # This user's tills that are still running elsewhere. ERPNext refuses a
+        # new opening entry while the cashier has any other Open one
+        # (check_user_already_assigned), so these are set aside only while
+        # this till's entry is created, then reopened -- billing needs one
+        # Open entry per till, not one per cashier.
+        parked = sorted(set(user_stale) - set(stale_entries) - all_stale)
         for se in all_stale:
             frappe.db.set_value("POS Opening Entry", se, "status", "Closed", update_modified=False)
 
@@ -436,14 +453,20 @@ def open_session(pos_profile, opening_cash, session_grant=None, device=None,
             "period_start_date": now_datetime(),
             "balance_details": balance_details,
         })
-        opening_entry.insert()
-        # SECURITY (H9): Validate POS Manager role or approval before submitting
-        if not frappe.has_permission("POS Opening Entry", "submit", throw=False):
-            frappe.throw(
-                frappe._("You do not have permission to submit POS Opening Entries. "
-                         "Contact your Store Manager for approval."),
-                frappe.PermissionError)
-        opening_entry.submit()
+        for se in parked:
+            frappe.db.set_value("POS Opening Entry", se, "status", "Closed", update_modified=False)
+        try:
+            opening_entry.insert()
+            # SECURITY (H9): Validate POS Manager role or approval before submitting
+            if not frappe.has_permission("POS Opening Entry", "submit", throw=False):
+                frappe.throw(
+                    frappe._("You do not have permission to submit POS Opening Entries. "
+                             "Contact your Store Manager for approval."),
+                    frappe.PermissionError)
+            opening_entry.submit()
+        finally:
+            for se in parked:
+                frappe.db.set_value("POS Opening Entry", se, "status", "Open", update_modified=False)
 
         # Update Business Date status to Open if not already
         bd_doc_name = frappe.db.get_value("CH Business Date", {"store": store}, "name")

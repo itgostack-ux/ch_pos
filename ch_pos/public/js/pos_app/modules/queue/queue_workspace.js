@@ -59,6 +59,8 @@ export class QueueWorkspace {
 		EventBus.on("mode:switch", (mode) => {
 			if (mode !== "queue") this._stopAutoRefresh();
 		});
+		// Held Bills → Bill on a walk-in the queue put on Hold.
+		EventBus.on("queue:bill_token", (token) => this._startBilling(token));
 	}
 
 	_startAutoRefresh() {
@@ -186,7 +188,9 @@ export class QueueWorkspace {
 		// clearly-labelled section and never mix into this store's work -- one
 		// lead on four desks was the original complaint, and the answer to it
 		// is a visible unowned pile, not an invisible one.
-		const own = frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile });
+		// Today's billed / rejected visits stay listed, marked as done.
+		const own = frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens",
+			{ pos_profile, include_closed: 1 });
 		// Named by store, not by company: active_company is the billing
 		// selection and is still null on a restored session, and a blank
 		// company used to widen the pool to every company on the site.
@@ -202,6 +206,8 @@ export class QueueWorkspace {
 					})));
 				this._renderTokenList(this._tokens);
 				if (this._selected) this._openDetail(this._selected);
+				// Held Bills badge counts the queue's Hold customers.
+				EventBus.emit("held_bills:updated");
 			})
 			.catch(() => {
 				if (this._panel) {
@@ -270,14 +276,17 @@ export class QueueWorkspace {
 
 		const unrouted_count = (tokens || []).filter((t) => t.unassigned).length;
 		const remote_count = (tokens || []).filter(
-			(t) => t.channel_group === "remote" && !t.unassigned).length;
-		const unanswered = (tokens || []).filter(
-			(t) => t.channel_group === "remote" && t.awaiting_response).length;
+			(t) => t.channel_group === "remote" && !t.unassigned && t.is_open !== false).length;
+		const closed_here = (tokens || []).filter(
+			(t) => t.channel_group !== "remote" && !t.unassigned && t.is_open === false).length;
+		// Sales cards have no Reply, so nothing there could ever clear it.
+		const unanswered = _is_service() ? (tokens || []).filter(
+			(t) => t.channel_group === "remote" && t.awaiting_response).length : 0;
 
 		// "In store" means people actually in the shop -- not those who wrote
 		// in, and not the unowned pool riding along beneath them.
 		let stats_html = `<span class="ch-queue-count-text">${
-			tokens.length - remote_count - unrouted_count} ${__("in store")}</span>`;
+			tokens.length - remote_count - unrouted_count - closed_here} ${__("in store")}</span>`;
 		if (remote_count > 0) {
 			stats_html += `<span class="ch-queue-stat-badge ch-queue-stat--waiting">${
 				remote_count} ${__("wrote in")}</span>`;
@@ -298,8 +307,14 @@ export class QueueWorkspace {
 		// People physically here come first: they are standing in the shop while
 		// a message can wait a few minutes. Both are the same record, so this is
 		// ordering, not separation.
-		const here = tokens.filter((t) => t.channel_group !== "remote" && !t.unassigned);
-		const wrote = tokens.filter((t) => t.channel_group === "remote" && !t.unassigned);
+		// Newest first. Billed / rejected visits stay listed, after the ones
+		// still waiting (also newest first).
+		const newest = (rows) => rows.slice().sort((x, y) =>
+			String(y.creation || "").localeCompare(String(x.creation || "")));
+		const open_first = (rows) => newest(rows.filter((t) => t.is_open !== false))
+			.concat(newest(rows.filter((t) => t.is_open === false)));
+		const here = open_first(tokens.filter((t) => t.channel_group !== "remote" && !t.unassigned));
+		const wrote = open_first(tokens.filter((t) => t.channel_group === "remote" && !t.unassigned));
 		const unrouted = tokens.filter((t) => t.unassigned);
 		const section = (label, rows) => rows.length
 			? `<div class="ch-queue-section-label">${label} · ${rows.length}</div>
@@ -361,10 +376,20 @@ export class QueueWorkspace {
 			const token = this._tokens.find((t) => t.name === name);
 			if (token) this._startBilling(token);
 		});
+		list.find(".ch-queue-prebook-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._convertToPrebook(token, "prebook");
+		});
+		list.find(".ch-queue-proforma-btn").on("click", (e) => {
+			const name = $(e.currentTarget).data("token");
+			const token = this._tokens.find((t) => t.name === name);
+			if (token) this._convertToPrebook(token, "proforma");
+		});
 		list.find(".ch-queue-drop-btn").on("click", (e) => {
 			const name = $(e.currentTarget).data("token");
 			const token = this._tokens.find((t) => t.name === name);
-			if (token) this._showDropDialog(token);
+			if (token) this._showDropDialog(token, $(e.currentTarget).data("mode") === "reject");
 		});
 		list.find(".ch-queue-status-btn, .ch-queue-collect-btn").on("click", (e) => {
 			const name = $(e.currentTarget).data("token");
@@ -603,6 +628,10 @@ export class QueueWorkspace {
 			Hold:          { cls: "waiting",  icon: "fa-pause-circle", label: __("Hold") },
 			Engaged:       { cls: "engaged",  icon: "fa-handshake-o", label: __("Engaged") },
 			"In Progress": { cls: "progress", icon: "fa-cogs",        label: __("In Progress") },
+			Converted:     { cls: "done",     icon: "fa-check",       label: t.converted_invoice ? __("Billed")
+				: (t.converted_sales_order ? __("Pre-Booked") : __("Converted")) },
+			Dropped:       { cls: "rejected", icon: "fa-times",       label: t.channel_group === "remote"
+				? __("Rejected") : __("Withdrawn") },
 		};
 		const st = statusMap[t.status] || { cls: "default", icon: "fa-circle", label: t.status };
 		const timeAgo = frappe.datetime.comment_when(t.creation);
@@ -621,7 +650,8 @@ export class QueueWorkspace {
 				? `<span class="ch-q-duetoday">${__("due today")}</span>` : "");
 
 		// Nobody has replied yet, and it is not a person standing here.
-		const unanswered = t.channel_group === "remote" && t.awaiting_response
+		// Service only: sales cards have no Reply to clear it with.
+		const unanswered = is_svc && t.channel_group === "remote" && t.awaiting_response
 			? `<span class="ch-q-unanswered" title="${
 				__("Nobody has replied to this yet")}">${__("unanswered")}</span>`
 			: "";
@@ -722,11 +752,13 @@ export class QueueWorkspace {
 			// Checked FIRST: counter_action comes from the visit reason, which
 			// only a walk-in has. A written request has none, so it defaulted to
 			// "None" and the card offered nothing but Withdraw.
+			// A sales enquiry is answered by acting on it (bill, pre-book,
+			// proforma, or reject), so Reply stays on service requests only.
 			actions_html = `
-				<button class="btn btn-sm btn-default ch-queue-reply-btn"
+				${is_svc ? `<button class="btn btn-sm btn-default ch-queue-reply-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					<i class="fa fa-comment-o"></i> ${__("Reply")}
-				</button>
+				</button>` : ""}
 				${this._isOverdue(t) ? `<button class="btn btn-sm btn-default ch-queue-extend-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					<i class="fa fa-calendar-plus-o"></i> ${__("Extend")}
@@ -737,10 +769,18 @@ export class QueueWorkspace {
 				</button>` : `<button class="btn btn-sm btn-primary ch-queue-bill-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					${__("Bill")}
-				</button>`}
-				<button class="btn btn-sm btn-default ch-queue-drop-btn"
+				</button>
+				<button class="btn btn-sm btn-default ch-queue-proforma-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
-					${__("Close")}
+					<i class="fa fa-file-text-o"></i> ${__("Generate Proforma Invoice")}
+				</button>
+				<button class="btn btn-sm btn-default ch-queue-prebook-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-bookmark"></i> ${__("Generate Prebook")}
+				</button>`}
+				<button class="btn btn-sm btn-default ch-queue-drop-btn" data-mode="reject"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-times-circle"></i> ${__("Reject / Cancel")}
 				</button>`;
 		} else if (is_svc && action !== "Create Request") {
 			const buttons = [];
@@ -799,6 +839,14 @@ export class QueueWorkspace {
 					data-token="${frappe.utils.escape_html(t.name)}">
 					${__("Bill")}
 				</button>
+				<button class="btn btn-sm btn-default ch-queue-proforma-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-file-text-o"></i> ${__("Generate Proforma Invoice")}
+				</button>
+				<button class="btn btn-sm btn-default ch-queue-prebook-btn"
+					data-token="${frappe.utils.escape_html(t.name)}">
+					<i class="fa fa-bookmark"></i> ${__("Generate Prebook")}
+				</button>
 				<button class="btn btn-sm btn-default ch-queue-note-btn"
 					data-token="${frappe.utils.escape_html(t.name)}">
 					<i class="fa fa-comment-o"></i> ${__("Note")}
@@ -809,6 +857,15 @@ export class QueueWorkspace {
 				</button>`;
 		}
 
+		if (t.is_open === false) {
+			const esc = frappe.utils.escape_html;
+			const link = (doctype, name) => `<a href="/desk/${doctype.toLowerCase().replace(/ /g, "-")}/${encodeURIComponent(name)}"
+				target="_blank" class="ch-q-closed-ref">${esc(name)}</a>`;
+			actions_html = t.converted_invoice ? link("Sales Invoice", t.converted_invoice)
+				: t.converted_sales_order ? link("Sales Order", t.converted_sales_order)
+				: t.drop_reason ? `<span class="ch-q-closed-ref text-muted">${esc(t.drop_reason)}</span>` : "";
+		}
+
 		return `
 			<div class="ch-q-card ch-q-card--${st.cls}${
 				this._selected === t.name ? " ch-q-card--open" : ""}"
@@ -816,7 +873,8 @@ export class QueueWorkspace {
 				<div class="ch-q-indicator"></div>
 				<div class="ch-q-content">
 					<div class="ch-q-row-top">
-						<span class="ch-q-token-id">${frappe.utils.escape_html(t.token_display || t.name)}</span>
+						<span class="ch-q-token-id" title="${frappe.utils.escape_html(t.token_display || "")}">${
+							frappe.utils.escape_html(t.name)}</span>
 						${chan_pill}
 						${unanswered}
 						${overdue}
@@ -836,6 +894,132 @@ export class QueueWorkspace {
 				</div>
 			</div>
 		`;
+	}
+
+	// ── Retail: Convert to Pre-Book ─────────────────────────────
+	// The customer wants a device that is not to be billed today: pick the
+	// exact variant of the model they asked about (price and stock at this
+	// store shown), then open the Pre-Book dialog with that item and the
+	// token's customer already filled in.
+
+	// target: "prebook" (Pre-Booking dialog) or "proforma" (Proforma Invoice).
+	async _convertToPrebook(token, target = "prebook") {
+		const is_proforma = target === "proforma";
+		const doc_label = is_proforma ? __("Generate Proforma Invoice") : __("Generate Prebook");
+		// A proforma / pre-booking names the customer: a new one is created
+		// first (same dialog Bill uses), then this carries on with them.
+		const customer = await this._ensure_customer(token);
+
+		const go = (items) => {
+			EventBus.emit("mode:set", "prebook");
+			EventBus.emit("mode:switch", "prebook");
+			// After the Pre-Book screen has mounted.
+			setTimeout(() => EventBus.emit(is_proforma ? "prebook:proforma_with" : "prebook:start_with",
+				{ items, customer, kiosk_token: token.name }), 300);
+		};
+		const priced = (code, name, qty) => frappe.xcall("ch_pos.api.search.get_item_detail_for_pos",
+			{ item_code: code, warehouse: PosState.warehouse || null })
+			.then((d) => ({ item_code: code, item_name: name || (d && d.item_name) || code, qty: flt(qty) || 1,
+				rate: flt(d && (d.selling_price || d.mrp)) }))
+			.catch(() => ({ item_code: code, item_name: name || code, qty: flt(qty) || 1, rate: 0 }));
+
+		// Same order as Bill: 1. the item picked at Log Walk-in, 2. the typed
+		// device text when it is an item's exact name, 3. the model's variants
+		// (always listed), 4. nothing -- an empty form, said so.
+		const doc = await frappe.xcall("frappe.client.get",
+			{ doctype: "POS Kiosk Token", name: token.name }).catch(() => null);
+		const picked = ((doc && doc.items) || []).filter((r) => r.item_code);
+		if (picked.length) {
+			go(await Promise.all(picked.map((r) => priced(r.item_code, r.item_name, r.qty))));
+			return;
+		}
+		const hint = ((doc && doc.other_device_hint) || token.other_device_hint || "").trim();
+		if (hint) {
+			const r = await frappe.db.get_value("Item",
+				{ item_name: hint, disabled: 0, has_variants: 0, is_sales_item: 1 },
+				["name", "item_name"]).catch(() => null);
+			const item = r && r.message;
+			if (item && item.name) {
+				go([await priced(item.name, item.item_name, 1)]);
+				return;
+			}
+		}
+		const variants = token.device_model
+			? await frappe.db.get_list("Item", {
+				filters: { ch_model: token.device_model, has_variants: 0, disabled: 0, is_sales_item: 1 },
+				fields: ["name", "item_name"],
+				order_by: "item_name asc",
+				limit: 50,
+			}).catch(() => [])
+			: [];
+		if (!variants.length) {
+			frappe.show_alert({
+				message: __("No item selected for this walk-in. Add it in the Items table."),
+				indicator: "orange",
+			}, 6);
+			go([]);
+			return;
+		}
+		const details = await Promise.all(variants.map((v) =>
+			frappe.xcall("ch_pos.api.search.get_item_detail_for_pos",
+				{ item_code: v.name, warehouse: PosState.warehouse || null })
+				.then((d) => ({ ...v, rate: flt(d && (d.selling_price || d.mrp)), stock: flt(d && d.stock_qty) }))
+				.catch(() => ({ ...v, rate: 0, stock: 0 }))));
+
+		// Several variants can be pre-booked at once: tick each one wanted.
+		const esc = frappe.utils.escape_html;
+		const d = new frappe.ui.Dialog({
+			title: __("{0} — choose the variant(s)", [doc_label]),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "list" }],
+			primary_action_label: doc_label,
+			primary_action: () => {
+				const chosen = ticked();
+				if (!chosen.length) return;
+				d.hide();
+				go(chosen.map((v) => ({ item_code: v.name, item_name: v.item_name, qty: 1, rate: v.rate })));
+			},
+		});
+		d.fields_dict.list.$wrapper.html(`
+			<div class="text-muted" style="margin-bottom:8px">
+				${esc(token.customer_name || "")} ${token.customer_phone ? "· " + esc(token.customer_phone) : ""}
+				· ${esc(token.device_model_name || token.device_model || "")}
+			</div>
+			<table class="table table-sm" style="margin:0">
+				<thead><tr>
+					<th style="width:32px"><input type="checkbox" class="ch-q-variant-all" title="${__("Select all")}"></th>
+					<th>${__("Item")}</th><th class="text-right">${__("Price")}</th>
+					<th class="text-right">${__("In Stock")}</th></tr></thead>
+				<tbody>${details.map((v, i) => `<tr class="ch-q-variant-row" style="cursor:pointer">
+					<td><input type="checkbox" class="ch-q-variant" data-i="${i}"></td>
+					<td>${esc(v.item_name)}<div class="text-muted small">${esc(v.name)}</div></td>
+					<td class="text-right">${v.rate ? format_currency(v.rate) : "—"}</td>
+					<td class="text-right">${v.stock > 0 ? v.stock : `<span class="text-muted">0</span>`}</td>
+				</tr>`).join("")}</tbody>
+			</table>`);
+		const $w = d.fields_dict.list.$wrapper;
+		const ticked = () => $w.find(".ch-q-variant:checked").map((_i, el) => details[parseInt($(el).data("i"), 10)]).get();
+		const sync = () => {
+			const n = ticked().length;
+			const $btn = d.get_primary_btn();
+			$btn.prop("disabled", !n).toggleClass("disabled", !n)
+				.text(n > 1 ? `${doc_label} (${n})` : doc_label);
+			$w.find(".ch-q-variant-all").prop("checked", n === details.length);
+		};
+		$w.on("change", ".ch-q-variant", sync);
+		$w.on("change", ".ch-q-variant-all", function () {
+			$w.find(".ch-q-variant").prop("checked", this.checked);
+			sync();
+		});
+		// Clicking anywhere on a row ticks it.
+		$w.on("click", ".ch-q-variant-row", function (e) {
+			if ($(e.target).is("input")) return;
+			const $cb = $(this).find(".ch-q-variant");
+			$cb.prop("checked", !$cb.prop("checked"));
+			sync();
+		});
+		d.show();
+		sync();
 	}
 
 	// ── Retail: Start Billing ───────────────────────────────────
@@ -895,14 +1079,7 @@ export class QueueWorkspace {
 				sales_executive: PosState.sales_executive || "",
 		}).then((result) => {
 			if (result && result.action === "held") {
-				frappe.show_alert({
-					message: __("Billing is already active for {0}. {1} has been placed on Hold.", [
-						(result.active_token && (result.active_token.token_display || result.active_token.name)) || __("another token"),
-						token.token_display || token.name,
-					]),
-					indicator: "orange",
-				}, 6);
-				this._loadTokens();
+				this._offer_switch(token, result.active_token);
 				return;
 			}
 			_proceed();
@@ -914,6 +1091,62 @@ export class QueueWorkspace {
 			});
 	}
 
+	// Bill pressed while another customer is being billed: the server has put
+	// this one on Hold. Offer to swap -- the open one back to Waiting (its cart
+	// cleared) and this one billed now -- instead of leaving both stuck.
+	_offer_switch(token, active) {
+		const esc = frappe.utils.escape_html;
+		const active_label = (active && active.name) || __("another customer");
+		const this_label = token.name;
+		const done = () => {
+			this._loadTokens();
+			EventBus.emit("held_bills:updated");
+		};
+		if (!active || !active.name) {
+			frappe.show_alert({ message: __("{0} has been placed on Hold.", [this_label]), indicator: "orange" }, 6);
+			done();
+			return;
+		}
+		const d = new frappe.ui.Dialog({
+			title: __("Another bill is open"),
+			fields: [{ fieldtype: "HTML", fieldname: "msg" }],
+			primary_action_label: __("Switch to {0}", [this_label]),
+			primary_action: () => {
+				d.hide();
+				frappe.xcall("ch_pos.api.token_api.release_pos_billing", {
+					token_name: active.name,
+					pos_profile: PosState.pos_profile,
+					revert_current: 1,
+				}).then(() => {
+					// The open cart belonged to the customer just sent back.
+					if (PosState.kiosk_token === active.name || !PosState.kiosk_token) {
+						PosState.reset_transaction();
+						EventBus.emit("cart:updated");
+					}
+					this._startBilling(token);
+				}).catch((err) => {
+					frappe.show_alert({ message: (err && err.message) || __("Could not switch"), indicator: "red" });
+					done();
+				});
+			},
+			secondary_action_label: __("Keep {0}", [active_label]),
+			secondary_action: () => {
+				d.hide();
+				frappe.show_alert({ message: __("{0} is on Hold until {1} is finished.", [this_label, active_label]), indicator: "orange" }, 6);
+				done();
+			},
+		});
+		const cart_note = PosState.cart.length && PosState.kiosk_token === active.name
+			? `<p class="text-muted">${__("Its cart ({0} item(s)) will be cleared. Use Hold first to keep it.", [PosState.cart.length])}</p>`
+			: "";
+		d.fields_dict.msg.$wrapper.html(`
+			<p><b>${esc(active_label)}</b>${active.customer_name ? " (" + esc(active.customer_name) + ")" : ""}
+			${__("is being billed on this till.")}</p>
+			<p>${__("Put {0} back in Waiting and bill {1} instead?", [`<b>${esc(active_label)}</b>`, `<b>${esc(this_label)}</b>`])}</p>
+			${cart_note}`);
+		d.show();
+	}
+
 	_open_sell_mode(token) {
 		PosState.active_mode = "sell";
 		EventBus.emit("mode:set", "sell");
@@ -921,17 +1154,223 @@ export class QueueWorkspace {
 
 		frappe.show_alert({
 			message: __("Billing started for token {0} — {1}", [
-				token.token_display || token.name,
+				token.name,
 				token.customer_name || __("Walk-in"),
 			]),
 			indicator: "blue",
 		}, 5);
+		// After the Sell screen has mounted.
+		setTimeout(() => this._bring_token_items(token), 300);
+	}
+
+	// The items the customer asked for on the token go straight to the cart:
+	// in stock → the usual add (IMEI picker for serial items, one after the
+	// other); not in stock → listed with "Out of Stock — procure or raise MR".
+	async _bring_token_items(token) {
+		const doc = await frappe.xcall("frappe.client.get",
+			{ doctype: "POS Kiosk Token", name: token.name }).catch(() => null);
+		if (!doc) return;
+		let picked = (doc.items || []).filter((r) => r.item_code);
+		if (!picked.length) {
+			// No catalogue item picked at Log Walk-in: go by what the customer said.
+			picked = await this._items_from_walkin_text(doc);
+			if (!picked) return;
+		}
+		// Bill pressed again for the same visit: skip what is already in the cart.
+		const in_cart = new Set((PosState.cart || []).map((c) => c.item_code));
+		const lines = picked.filter((r) => !in_cart.has(r.item_code));
+		if (!lines.length) return;
+
+		const ready = [];
+		const out = [];
+		for (const line of lines) {
+			const res = await frappe.xcall("ch_pos.api.search.pos_item_search", {
+				search_term: line.item_code,
+				pos_profile: PosState.pos_profile,
+				page_size: 10,
+				company: PosState.active_company || "",
+			}).catch(() => null);
+			const row = ((res && res.items) || []).find((r) => r.item_code === line.item_code);
+			// Units on open pre-bookings are not for sale (same rule as the grid).
+			const sellable = row ? flt(row.stock_qty) - flt(row.prebooked_qty) : 0;
+			if (row && (!cint(row.is_stock_item) || sellable > 0)) {
+				ready.push(row);
+			} else {
+				out.push({ item_code: line.item_code, item_name: (row && row.item_name) || line.item_name || line.item_code });
+			}
+		}
+
+		const next = () => {
+			const row = ready.shift();
+			if (row) {
+				EventBus.emit("cart:add_item_then", { item: row, on_done: next });
+			} else if (out.length) {
+				this._show_out_of_stock(out);
+			}
+		};
+		next();
+	}
+
+	// A walk-in logged with only a typed device / a model and no item picked.
+	// Resolves to [{item_code, item_name}], or null when the cashier has to
+	// add the item by hand (told so here).
+	async _items_from_walkin_text(doc) {
+		const hint = (doc.other_device_hint || "").trim();
+		if (hint) {
+			// The typed text is often an item's exact name.
+			const r = await frappe.db.get_value("Item",
+				{ item_name: hint, disabled: 0, has_variants: 0, is_sales_item: 1 },
+				["name", "item_name"]).catch(() => null);
+			const item = r && r.message;
+			if (item && item.name) return [{ item_code: item.name, item_name: item.item_name }];
+		}
+		if (doc.device_model) {
+			const chosen = await this._pick_model_variant(doc);
+			if (chosen) return chosen;
+			return null;
+		}
+		frappe.msgprint({
+			title: __("No item selected"),
+			indicator: "orange",
+			message: hint
+				? __("No catalogue item matches \"{0}\" for this walk-in. Search and add it from the item list.", [frappe.utils.escape_html(hint)])
+				: __("No item was selected for this walk-in. Search and add it from the item list."),
+		});
+		return null;
+	}
+
+	// Only a model was given: choose the variant(s), with price and stock here.
+	_pick_model_variant(doc) {
+		return new Promise(async (resolve) => {
+			const variants = await frappe.db.get_list("Item", {
+				filters: { ch_model: doc.device_model, has_variants: 0, disabled: 0, is_sales_item: 1 },
+				fields: ["name", "item_name"],
+				order_by: "item_name asc",
+				limit: 50,
+			}).catch(() => []);
+			if (!variants.length) {
+				frappe.msgprint({
+					title: __("No item selected"),
+					indicator: "orange",
+					message: __("No sellable item exists for model {0}. Search and add it from the item list.",
+						[frappe.utils.escape_html(doc.device_model_name || doc.device_model)]),
+				});
+				resolve(null);
+				return;
+			}
+			const details = await Promise.all(variants.map((v) =>
+				frappe.xcall("ch_pos.api.search.get_item_detail_for_pos",
+					{ item_code: v.name, warehouse: PosState.warehouse || null })
+					.then((d) => ({ ...v, rate: flt(d && (d.selling_price || d.mrp)), stock: flt(d && d.stock_qty) }))
+					.catch(() => ({ ...v, rate: 0, stock: 0 }))));
+			const as_line = (v) => ({ item_code: v.name, item_name: v.item_name });
+			// Listed even when there is one variant, so a model always reads the same way.
+			const esc = frappe.utils.escape_html;
+			let settled = false;
+			const finish = (val) => { if (!settled) { settled = true; resolve(val); } };
+			const d = new frappe.ui.Dialog({
+				title: __("Bill — choose the variant(s)"),
+				size: "large",
+				fields: [{ fieldtype: "HTML", fieldname: "list" }],
+				primary_action_label: __("Add to Bill"),
+				primary_action: () => {
+					const chosen = ticked();
+					if (!chosen.length) return;
+					finish(chosen.map(as_line));
+					d.hide();
+				},
+			});
+			d.onhide = () => finish(null);
+			d.fields_dict.list.$wrapper.html(`
+				<div class="text-muted" style="margin-bottom:8px">
+					${esc(doc.customer_name || "")} ${doc.customer_phone ? "· " + esc(doc.customer_phone) : ""}
+					· ${esc(doc.device_model_name || doc.device_model)}
+				</div>
+				<table class="table table-sm" style="margin:0">
+					<thead><tr><th style="width:32px"></th>
+						<th>${__("Item")}</th><th class="text-right">${__("Price")}</th>
+						<th class="text-right">${__("In Stock")}</th></tr></thead>
+					<tbody>${details.map((v, i) => `<tr class="ch-q-bill-variant-row" style="cursor:pointer">
+						<td><input type="checkbox" class="ch-q-bill-variant" data-i="${i}"></td>
+						<td>${esc(v.item_name)}<div class="text-muted small">${esc(v.name)}</div></td>
+						<td class="text-right">${v.rate ? format_currency(v.rate) : "—"}</td>
+						<td class="text-right">${v.stock > 0 ? v.stock : `<span class="text-danger">${__("Out of Stock")}</span>`}</td>
+					</tr>`).join("")}</tbody>
+				</table>`);
+			const $w = d.fields_dict.list.$wrapper;
+			const ticked = () => $w.find(".ch-q-bill-variant:checked")
+				.map((_i, el) => details[parseInt($(el).data("i"), 10)]).get();
+			const sync = () => {
+				const n = ticked().length;
+				d.get_primary_btn().prop("disabled", !n).toggleClass("disabled", !n);
+			};
+			$w.on("change", ".ch-q-bill-variant", sync);
+			$w.on("click", ".ch-q-bill-variant-row", function (e) {
+				if ($(e.target).is("input")) return;
+				const $cb = $(this).find(".ch-q-bill-variant");
+				$cb.prop("checked", !$cb.prop("checked"));
+				sync();
+			});
+			d.show();
+			sync();
+		});
+	}
+
+	_show_out_of_stock(items) {
+		const esc = frappe.utils.escape_html;
+		const d = new frappe.ui.Dialog({
+			title: __("Out of Stock"),
+			fields: [{ fieldtype: "HTML", fieldname: "msg" }],
+			primary_action_label: __("Raise MR"),
+			primary_action: () => {
+				d.hide();
+				EventBus.emit("mode:switch", "material_request");
+			},
+			secondary_action_label: __("Close"),
+			secondary_action: () => d.hide(),
+		});
+		d.fields_dict.msg.$wrapper.html(`
+			<p>${__("Not available at this store:")}</p>
+			<ul style="margin:0 0 12px 18px;padding:0">
+				${items.map((it) => `<li><b>${esc(it.item_name)}</b> <span class="text-muted small">${esc(it.item_code)}</span></li>`).join("")}
+			</ul>
+			<div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:6px;padding:8px 12px;">
+				<i class="fa fa-exclamation-triangle"></i>
+				${__("Out of Stock — please procure, or raise a Material Request.")}
+			</div>`);
+		d.show();
 	}
 
 	/**
 	 * Resolve an ERPNext Customer from token data.
 	 * Priority: linked_customer > phone lookup > default_customer (Walk-in).
 	 */
+	// Resolves with an existing Customer for the walk-in. When there is none
+	// (or only the store's default walk-in customer), the New Customer dialog
+	// opens pre-filled and this resolves once the customer is created or an
+	// existing one is picked; closing the dialog leaves the action undone.
+	_ensure_customer(token) {
+		return this._resolve_customer(token).then((customer) => new Promise((resolve) => {
+			const is_default = customer && customer === PosState.default_customer && !token.linked_customer;
+			if (customer && !is_default) {
+				resolve(customer);
+				return;
+			}
+			if (!window.ch_open_new_customer_dialog) {
+				resolve(customer || PosState.default_customer || null);
+				return;
+			}
+			frappe.show_alert({ message: __("New customer — create the customer first"), indicator: "blue" }, 4);
+			window.ch_open_new_customer_dialog({
+				company: PosState.company,
+				prefill_name: token.customer_name || "",
+				prefill_mobile: token.customer_phone || "",
+				on_success: (name) => { if (name) resolve(name); },
+				on_use_existing: (existing) => { if (existing) resolve(existing); },
+			});
+		}));
+	}
+
 	_resolve_customer(token) {
 		// 1. Already linked to an ERPNext Customer
 		if (token.linked_customer) {
@@ -954,9 +1393,12 @@ export class QueueWorkspace {
 	// existing reports, but the UX uses "Withdraw"/"Withdrawn" terminology that
 	// matches Salesforce, Dynamics 365 and Oracle Service Cloud conventions.
 
-	_showDropDialog(token) {
+	// as_reject: opened from "Reject / Cancel" on a remote sales enquiry --
+	// same record and mandatory reason, worded as the counter says it.
+	_showDropDialog(token, as_reject = false) {
+		const action_label = as_reject ? __("Reject / Cancel") : __("Withdraw Token");
 		const d = new frappe.ui.Dialog({
-			title: `${__("Withdraw Token")} — ${token.token_display || token.name}`,
+			title: `${action_label} — ${token.name}`,
 			fields: [
 				{
 					label: __("Customer"),
@@ -966,7 +1408,7 @@ export class QueueWorkspace {
 					read_only: 1,
 				},
 				{
-					label: __("Withdrawal Reason"),
+					label: as_reject ? __("Reason") : __("Withdrawal Reason"),
 					fieldtype: "Select",
 					fieldname: "drop_reason",
 					options: WITHDRAW_REASONS.join("\n"),
@@ -993,7 +1435,7 @@ export class QueueWorkspace {
 					placeholder: __("Capture why the customer did not convert (mandatory for audit)"),
 				},
 			],
-			primary_action_label: `<i class="fa fa-times-circle"></i> ${__("Withdraw Token")}`,
+			primary_action_label: `<i class="fa fa-times-circle"></i> ${action_label}`,
 			primary_action: (values) => {
 				if (!String(values.drop_remarks || "").trim()) {
 					frappe.show_alert({ message: __("Remarks are required"), indicator: "red" });
@@ -1009,7 +1451,7 @@ export class QueueWorkspace {
 					d.hide();
 					frappe.show_alert({
 						message: __("Token {0} withdrawn — {1}", [
-							token.token_display || token.name,
+							token.name,
 							values.drop_reason,
 						]),
 						indicator: "orange",
@@ -1204,7 +1646,7 @@ export class QueueWorkspace {
 					<div class="ch-q-d-title">${esc(d.customer_name || __("Unknown caller"))}
 						<span class="ch-q-chan" data-c="${esc(d.visit_source || "")}">${
 							esc(d.visit_source || "")}</span></div>
-					<div class="ch-q-d-sub">${esc(d.token_display || d.name)} · ${
+					<div class="ch-q-d-sub">${esc(d.name)} · ${
 						esc(d.customer_phone || "")}</div>
 				</div>
 				<div class="ch-q-d-actions">
@@ -1212,12 +1654,14 @@ export class QueueWorkspace {
 						<i class="fa fa-comment-o"></i> ${remote ? __("Reply") : __("Note")}</button>
 					${remote && d.expires_at ? `<button class="btn btn-sm btn-default ch-q-d-extend">
 						<i class="fa fa-calendar-plus-o"></i> ${__("Extend")}</button>` : ""}
-					${d.linked_service_request || d.converted_invoice ? "" : (_is_service()
+					${d.linked_service_request || d.converted_invoice
+						|| ["Converted", "Dropped"].includes(d.status) ? "" : (_is_service()
 						? `<button class="btn btn-sm btn-primary ch-q-d-convert">
 							<i class="fa fa-plus"></i> ${__("Create Service Request")}</button>`
 						: `<button class="btn btn-sm btn-primary ch-q-d-bill">
 							${__("Bill")}</button>`)}
-					<button class="btn btn-sm btn-default ch-q-d-close">${__("Close")}</button>
+					${["Converted", "Dropped"].includes(d.status) ? ""
+						: `<button class="btn btn-sm btn-default ch-q-d-close">${__("Close")}</button>`}
 				</div>
 			</div>
 			${others}

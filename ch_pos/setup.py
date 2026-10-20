@@ -107,7 +107,47 @@ CUSTOM_FIELDS = {
             "module": "POS Core",
         },
     ],
+    # The POS session an advance was taken in. Set only by the POS
+    # (pre-booking advance); the Payment Entry workflow's "POS Direct Submit"
+    # step is open only to entries carrying it, as for POS Sales Invoices.
+    # The queue token a pre-booking came from: the token is Converted when the
+    # pre-booking is made, and the pickup bill reuses it instead of opening a
+    # second token for the same visit.
+    "Sales Order": [
+        {
+            "fieldname": "custom_kiosk_token",
+            "fieldtype": "Link",
+            "label": "Queue Token",
+            "options": "POS Kiosk Token",
+            "insert_after": "customer",
+            "read_only": 1,
+            "no_copy": 1,
+            "module": "POS Core",
+        },
+    ],
+    "Payment Entry": [
+        {
+            "fieldname": "custom_ch_pos_session",
+            "fieldtype": "Link",
+            "label": "POS Session",
+            "options": "CH POS Session",
+            "insert_after": "mode_of_payment",
+            "read_only": 1,
+            "no_copy": 1,
+            "module": "POS Core",
+        },
+    ],
     "Sales Invoice": [
+        {
+            "fieldname": "custom_source_quotation",
+            "fieldtype": "Link",
+            "label": "Source Proforma",
+            "options": "Quotation",
+            "insert_after": "custom_ch_pos_session",
+            "read_only": 1,
+            "no_copy": 1,
+            "module": "POS Core",
+        },
         {
             "fieldname": "custom_kiosk_token",
             "fieldtype": "Link",
@@ -684,8 +724,10 @@ CUSTOM_FIELDS = {
             "fieldname": "custom_is_sales_person",
             "fieldtype": "Check",
             "label": "Is Sales Person",
-            "insert_after": "enabled",
-            "description": "Creates a Sales Person for this user (disabled). Set its Store and enable it to list it in POS Billed By.",
+            "insert_after": "first_name",
+            # Also on the New User quick-entry dialog.
+            "allow_in_quick_entry": 1,
+            "description": "Creates a Sales Person for this user (disabled). Set its Store and enable it to list it in POS Sales By.",
             "module": "POS Core",
         },
     ],
@@ -1039,6 +1081,25 @@ def after_install():
     _ensure_exception_reasons()
     _unlock_sales_person_company()
     _sales_person_list_view()
+    _place_user_is_sales_person()
+
+
+def _reusable_sales_person(label, user):
+    """A same-name Sales Person the executive may be credited through: enabled,
+    and not tied to a different user (an "Is Sales Person" user's record).
+    Linking by name alone once tied an active executive to another person's
+    disabled Sales Person, and every bill she made failed with
+    "Sales Person ... is disabled"."""
+    has_user = frappe.db.has_column("Sales Person", "custom_user")
+    for sp in frappe.get_all(
+        "Sales Person",
+        filters={"sales_person_name": label, "enabled": 1, "is_group": 0},
+        fields=["name"] + (["custom_user"] if has_user else []),
+    ):
+        owner = sp.get("custom_user") if has_user else None
+        if not owner or owner == user:
+            return sp.name
+    return None
 
 
 def ensure_pos_executive_sales_persons():
@@ -1049,7 +1110,8 @@ def ensure_pos_executive_sales_persons():
     report could name who was on the till but never pay anyone -- an incentive
     scheme that cannot attribute a sale is not a scheme.
 
-    Idempotent: reuses a Sales Person of the same name, skips an executive that
+    Idempotent: reuses an enabled same-name Sales Person that is not another
+    user's (see _reusable_sales_person), skips an executive that
     already has one, and never disturbs one set by hand. Returns how many it
     linked.
     """
@@ -1065,10 +1127,14 @@ def ensure_pos_executive_sales_persons():
         label = (row.executive_name or "").strip() or (row.user or "").split("@")[0]
         if not label:
             continue
-        sp = frappe.db.get_value("Sales Person", {"sales_person_name": label}, "name")
+        sp = _reusable_sales_person(label, row.user)
         if not sp:
             doc = frappe.new_doc("Sales Person")
-            doc.sales_person_name = label
+            # A same-name Sales Person that cannot be reused (disabled, or
+            # another user's) keeps its name; this one is told apart by user.
+            doc.sales_person_name = (
+                label if not frappe.db.exists("Sales Person", label)
+                else f"{label} ({row.user})" if row.user else label)
             doc.parent_sales_person = parent
             doc.is_group = 0
             if row.user and frappe.db.exists("Employee", {"user_id": row.user}):
@@ -1122,6 +1188,7 @@ def after_migrate():
     _ensure_exception_reasons()
     _unlock_sales_person_company()
     _sales_person_list_view()
+    _place_user_is_sales_person()
     _ensure_repair_consumable_groups()
     ensure_pos_executive_sales_persons()
     _seed_pos_profiles()
@@ -1505,6 +1572,20 @@ def _unlock_sales_person_company():
         frappe.db.set_value("Custom Field", store_cf, {
             "insert_after": "custom_company", "label": "Branch", "in_list_view": 1})
     frappe.clear_cache(doctype="Sales Person")
+
+
+def _place_user_is_sales_person():
+    """Is Sales Person sat at the top beside Enabled; it now follows First
+    Name. Migrate only adds missing custom fields, so move the existing one."""
+    spec = next(f for f in CUSTOM_FIELDS["User"] if f["fieldname"] == "custom_is_sales_person")
+    cf = frappe.db.get_value(
+        "Custom Field", {"dt": "User", "fieldname": "custom_is_sales_person"},
+        ["name", "insert_after", "description"], as_dict=True)
+    if not cf or (cf.insert_after == spec["insert_after"] and cf.description == spec["description"]):
+        return
+    frappe.db.set_value("Custom Field", cf.name, {
+        "insert_after": spec["insert_after"], "description": spec["description"]})
+    frappe.clear_cache(doctype="User")
 
 
 def _ensure_exception_reasons():

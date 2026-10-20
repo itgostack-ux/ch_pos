@@ -299,6 +299,7 @@ def canonicalize_cart_items(
         cart_prices_by_item[row["item_code"]] = max(
             cart_prices_by_item.get(row["item_code"], 0), row_rate)
 
+    free_plan_seen = set()
     for index, item in enumerate(normalized, start=1):
         plan_name = item.get("warranty_plan")
         if not plan_name:
@@ -344,6 +345,11 @@ def canonicalize_cart_items(
             frappe.throw(
                 _("Warranty plan {0} has no computable server price.").format(plan_name)
             )
+        if cint(item.get("is_free_bundle_item")) and not external_intent:
+            # A plan given free with a device through its Product Bundle.
+            _assert_free_bundle_plan(index, item, plan, cart_prices_by_serial,
+                                     cart_prices_by_item, free_plan_seen)
+            expected_rate = 0
         if abs(flt(item.get("rate")) - expected_rate) > 0.01:
             frappe.throw(
                 _("Cart row {0} does not match the configured price for plan {1}.").format(
@@ -355,6 +361,39 @@ def canonicalize_cart_items(
         if not external_intent and plan.max_device_price and covered_device_price > flt(plan.max_device_price):
             frappe.throw(_("Warranty plan {0} is not valid for this device value.").format(plan_name))
     return normalized
+
+
+def _assert_free_bundle_plan(index, item, plan, cart_prices_by_serial,
+                             cart_prices_by_item, seen) -> None:
+    """A ₹0 plan row flagged as a free bundle gift is allowed only when the
+    device it covers is a paid line in this same cart, that device's active
+    Product Bundle lists the plan's service item, and it is the only free copy
+    of this plan for that device. Otherwise the flag would be a way to get any
+    plan free."""
+    from ch_pos.api.pos_api import resolve_bundle_parent
+
+    covered_serial = str(item.get("for_serial_no") or "").strip()
+    covered_item = str(item.get("for_item_code") or "").strip()
+    device_in_cart = (
+        (covered_serial and covered_serial in cart_prices_by_serial)
+        or (not covered_serial and covered_item and covered_item in cart_prices_by_item)
+    )
+    parent = resolve_bundle_parent(covered_item) if covered_item else None
+    in_bundle = parent and frappe.db.exists(
+        "Product Bundle Item",
+        {"parent": parent, "parenttype": "Product Bundle", "item_code": plan.service_item})
+    if not (device_in_cart and in_bundle):
+        frappe.throw(
+            _("Cart row {0}: plan {1} is not a free gift of a device on this bill.").format(
+                index, plan.name),
+            frappe.PermissionError)
+    key = (covered_serial or covered_item, plan.name)
+    if key in seen:
+        frappe.throw(
+            _("Cart row {0}: plan {1} is already given free with this device.").format(
+                index, plan.name),
+            frappe.PermissionError)
+    seen.add(key)
 
 
 def _cart_hash_rows(items) -> list[dict]:

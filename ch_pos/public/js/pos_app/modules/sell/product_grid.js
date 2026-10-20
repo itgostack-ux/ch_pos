@@ -193,16 +193,24 @@ export class ProductGrid {
 			   ${show_mrp ? `<span class="ch-pos-item-mrp">₹${format_number(item.mrp)}</span>` : ""}`
 			: `<span class="ch-pos-item-price">—</span>`;
 
-		const in_stock = item.stock_qty > 0;
-		const low_stock = in_stock && item.stock_qty <= 3;
+		// Units on open pre-bookings are in the store but not for sale:
+		// the badge shows what can be sold, the orange tag what is promised.
+		const prebooked = Math.floor(flt(item.prebooked_qty));
+		const sellable = Math.max(0, Math.floor(flt(item.stock_qty)) - prebooked);
+		const in_stock = sellable > 0;
+		const low_stock = in_stock && sellable <= 3;
+		const prebook_tag = prebooked > 0
+			? `<span class="ch-pos-prebook-badge" title="${__("{0} in store, {1} reserved on pre-bookings", [Math.floor(flt(item.stock_qty)), prebooked])}">${__("{0} Pre-booked", [prebooked])}</span>`
+			: "";
 
 		// Stock badge
 		let stock_badge = "";
 		if (in_stock) {
 			stock_badge = low_stock
-				? `<span class="ch-pos-stock-badge low-stock">${Math.floor(item.stock_qty)} left</span>`
-				: `<span class="ch-pos-stock-badge in-stock">${Math.floor(item.stock_qty)}</span>`;
+				? `<span class="ch-pos-stock-badge low-stock">${sellable} left</span>`
+				: `<span class="ch-pos-stock-badge in-stock">${sellable}</span>`;
 		}
+		stock_badge += prebook_tag;
 
 		// Offer ribbon
 		const offer_ribbon = has_offer
@@ -310,13 +318,18 @@ export class ProductGrid {
 			   ${show_mrp ? `<span class="row-mrp">₹${format_number(item.mrp)}</span>` : ""}`
 			: `<span class="row-price">—</span>`;
 
-		const in_stock = item.stock_qty > 0;
-		const low_stock = in_stock && item.stock_qty <= 3;
-		const stock_html = in_stock
+		const prebooked = Math.floor(flt(item.prebooked_qty));
+		const sellable = Math.max(0, Math.floor(flt(item.stock_qty)) - prebooked);
+		const in_stock = sellable > 0;
+		const low_stock = in_stock && sellable <= 3;
+		const stock_html = (in_stock
 			? (low_stock
-				? `<span class="stock-badge low">${Math.floor(item.stock_qty)} left</span>`
-				: `<span class="stock-badge in">${Math.floor(item.stock_qty)}</span>`)
-			: `<span class="stock-badge out">OOS</span>`;
+				? `<span class="stock-badge low">${sellable} left</span>`
+				: `<span class="stock-badge in">${sellable}</span>`)
+			: `<span class="stock-badge out">OOS</span>`)
+			+ (prebooked > 0
+				? ` <span class="ch-pos-prebook-badge" title="${__("{0} in store, {1} reserved on pre-bookings", [Math.floor(flt(item.stock_qty)), prebooked])}">${__("{0} Pre-booked", [prebooked])}</span>`
+				: "");
 
 		// Specs: attributes as compact pills
 		let specs_html = "";

@@ -157,12 +157,18 @@ export class CartService {
 
 	// POS-10 fix: Auto-persist active cart state to localStorage on every change
 	_persist_active_cart() {
+		// A saved bill is still waiting to be restored (company not known yet):
+		// the empty till on screen must not overwrite it.
+		if (this._restore_pending) return;
 		try {
 			const has_cart = PosState.cart && PosState.cart.length > 0;
 			const has_exchange = flt(PosState.exchange_amount) > 0 || flt(PosState.product_exchange_credit) > 0;
+			// Customer / Sale Type picked before any item is scanned are part of
+			// the bill too -- a refresh must not lose them.
+			const has_header = !!(PosState.customer || PosState.sale_type || PosState.kiosk_token);
 
 			// Clear storage only when there is nothing worth saving
-			if (!has_cart && !has_exchange) {
+			if (!has_cart && !has_exchange && !has_header) {
 				localStorage.removeItem("ch_pos_active_cart");
 				return;
 			}
@@ -192,6 +198,10 @@ export class CartService {
 				is_free_sale: PosState.is_free_sale || false,
 				exception_request: PosState.exception_request,
 				exception_request_data: PosState.exception_request_data,
+				// The queue visit being billed. Lost on refresh, Cancel and PAY
+				// could no longer release it and it held the till for good.
+				kiosk_token: PosState.kiosk_token || null,
+				kiosk_token_status: PosState.kiosk_token_status || null,
 				// Whose cart this is. Without it a cart saved at one company was
 				// restored into whichever company happened to be active next --
 				// another company's items, customer and exception sitting in the
@@ -262,7 +272,8 @@ export class CartService {
 				has_exchange = false;
 			}
 
-			if (!has_cart && !has_exchange) return;
+			const has_header = !!(data.customer || data.sale_type || data.kiosk_token);
+			if (!has_cart && !has_exchange && !has_header) return;
 
 			if (has_cart) {
 				// Self-heal: a cart saved by an affected build may hold the
@@ -366,6 +377,10 @@ export class CartService {
 				}, 12);
 			}
 			if (data.sale_type) PosState.sale_type = data.sale_type;
+			if (data.kiosk_token) {
+				PosState.kiosk_token = data.kiosk_token;
+				PosState.kiosk_token_status = data.kiosk_token_status || "In Progress";
+			}
 			PosState.is_credit_sale = data.is_credit_sale || false;
 			PosState.is_free_sale = data.is_free_sale || false;
 			PosState.exception_request = data.exception_request || null;
@@ -378,7 +393,7 @@ export class CartService {
 
 			const msg = has_exchange && !has_cart
 				? __("Exchange credit ₹{0} restored", [format_number(flt(data.exchange_amount) + flt(data.product_exchange_credit))])
-				: __("Previous cart restored");
+				: has_cart ? __("Previous cart restored") : __("Customer and Sale Type restored");
 			frappe.show_alert({ message: msg, indicator: "blue" });
 		} catch (e) {
 			localStorage.removeItem("ch_pos_active_cart");
@@ -392,9 +407,13 @@ export class CartService {
 	 * switcher. Armed once -- a second listener would restore twice.
 	 */
 	_arm_deferred_restore() {
+		// Re-armed if a retry still finds the company unknown.
+		this._restore_pending = true;
 		if (this._deferred_restore_armed) return;
 		this._deferred_restore_armed = true;
 		const retry = () => {
+			if (!this._restore_pending) return;
+			this._restore_pending = false;
 			// Never over an active till: whatever is on screen wins.
 			if (PosState.cart && PosState.cart.length) return;
 			this._restore_active_cart();
@@ -409,6 +428,9 @@ export class CartService {
 
 	_bind_events() {
 		EventBus.on("cart:add_item", (item_data) => this.add_to_cart(item_data));
+		// Same add, with a callback once it is finished (added, refused, or the
+		// IMEI picker closed) -- Queue → Bill adds a token's items one by one.
+		EventBus.on("cart:add_item_then", ({ item, on_done }) => this.add_to_cart(item, on_done));
 
 		EventBus.on("company:switched", () => {
 			// Unconditionally: an empty till with a stored cart used to keep that
@@ -486,7 +508,19 @@ export class CartService {
 		});
 
 		EventBus.on("cart:cancel", () => {
-			if (!PosState.cart.length) return;
+			if (!PosState.cart.length) {
+				// Nothing to clear, but a queue visit may still hold the till
+				// (Bill pressed, nothing added): let it go back to Waiting.
+				if (!PosState.kiosk_token) return;
+				const token = PosState.kiosk_token;
+				this._release_kiosk_billing(true).finally(() => {
+					PosState.reset_transaction();
+					EventBus.emit("cart:updated");
+					EventBus.emit("held_bills:updated");
+					frappe.show_alert({ message: __("{0} returned to the queue", [token]), indicator: "blue" });
+				});
+				return;
+			}
 			frappe.confirm(__("Clear all items from cart?"), () => {
 				this._release_kiosk_billing(true).finally(() => {
 					PosState.reset_transaction();
@@ -561,6 +595,10 @@ export class CartService {
 
 		// POS-10 fix: Auto-persist cart to localStorage on every update
 		EventBus.on("cart:updated", () => this._persist_active_cart());
+		// Customer and Sale Type are saved the moment they change, not on the
+		// next item change -- picked last, they were lost on a refresh.
+		EventBus.on("customer:changed", () => this._persist_active_cart());
+		EventBus.on("sale_type:changed", () => this._persist_active_cart());
 		EventBus.on("cart:updated", () => this._sync_pending_exception_statuses());
 
 		// H-11: Combo offer detection — runs after any item is added or qty changed
@@ -818,7 +856,12 @@ export class CartService {
 
 		frappe.call({
 			method: "ch_pos.api.pos_api.validate_serial_for_sale",
-			args: { serial_no, item_code: item_data.item_code, warehouse: PosState.warehouse },
+			args: {
+				serial_no,
+				item_code: item_data.item_code,
+				warehouse: PosState.warehouse,
+				in_cart_serials: this._cart_serials(),
+			},
 			always: () => this._release_serial(serial_no),
 			callback: (r) => {
 				const res = r.message || {};
@@ -838,6 +881,22 @@ export class CartService {
 				}
 			},
 		});
+	}
+
+	/**
+	 * IMEIs already in the cart. The FIFO check skips them when finding the
+	 * "oldest unit to sell first" — a unit already in the cart is being sold
+	 * now, so the next unit is judged against the oldest one NOT in the cart.
+	 */
+	_cart_serials() {
+		const out = [];
+		(PosState.cart || []).forEach((c) => {
+			String(c.serial_no || "").split(/[\n,]+/).forEach((sn) => {
+				sn = sn.trim();
+				if (sn) out.push(sn);
+			});
+		});
+		return out;
 	}
 
 	/**
@@ -960,7 +1019,13 @@ export class CartService {
 		setTimeout(() => d.set_df_property("remarks", "reqd", 0), 0);
 	}
 
-	add_to_cart(item_data) {
+	add_to_cart(item_data, on_done) {
+		const waiting = this._add_to_cart(item_data, on_done);
+		if (on_done && !waiting) on_done();
+	}
+
+	// Returns true only when the IMEI picker opened; it calls on_done itself.
+	_add_to_cart(item_data, on_done) {
 		// ── Availability gate ────────────────────────────────────────────
 		// Only STOCK items go through the "out of stock" check. Non-stock
 		// service SKUs (warranty / VAS / activations) never have Bin rows
@@ -997,8 +1062,8 @@ export class CartService {
 
 		// Serial/IMEI items: force scan before adding
 		if (cint(item_data.has_serial_no)) {
-			this._prompt_serial_scan(item_data);
-			return;
+			this._prompt_serial_scan(item_data, on_done);
+			return true;
 		}
 
 		// ── External-IMEI plan intercept ─────────────────────────────────
@@ -1236,14 +1301,26 @@ export class CartService {
 		if (!cart_item.discount_amount && flt(item_data.discount_amount) > 0) {
 			cart_item.discount_amount = flt(item_data.discount_amount);
 		}
-		this._apply_best_offer(cart_item);
+		if (cint(item_data.is_free_bundle_item)) {
+			// Free gift with a device: the IMEI picker / barcode scan add it
+			// through here, so zero it here rather than after the fact. Leaving
+			// price_list_rate at MRP made the ₹0 read as an unauthorized discount
+			// (spurious manager approvals, consumed caps).
+			Object.assign(cart_item, {
+				qty: 1, rate: 0, price_list_rate: 0, discount_amount: 0, discount_percentage: 0,
+				is_free_bundle_item: true, bundle_parent: item_data.bundle_parent || null,
+			});
+		} else {
+			this._apply_best_offer(cart_item);
+		}
 		this._apply_exception_pricing_to_item(cart_item, PosState.exception_request_data);
 		PosState.cart.push(cart_item);
 		this._refresh_vas_offer_state(cart_item, item_data);
 		EventBus.emit("cart:updated");
 		EventBus.emit("cart:item_added", { item_data, cart_item });
 		this._prompt_warranty(item_data, cart_item);
-		this._prompt_bundle_items(item_data);
+		// A free gift has no gifts of its own.
+		if (!cint(item_data.is_free_bundle_item)) this._prompt_bundle_items(item_data, cart_item);
 		return cart_item;
 	}
 
@@ -1270,7 +1347,7 @@ export class CartService {
 	}
 
 	/** Show a popup to add free bundle items (accessories) when a main device is added */
-	_prompt_bundle_items(item_data) {
+	_prompt_bundle_items(item_data, device_row) {
 		frappe.xcall("ch_pos.api.pos_api.get_bundle_items", {
 			item_code: item_data.item_code,
 			warehouse: PosState.warehouse,
@@ -1288,7 +1365,17 @@ export class CartService {
 			];
 
 			items.forEach((bi, i) => {
-				const in_stock = flt(bi.stock_qty) > 0;
+				// Units already in this cart are not on the shelf any more (the
+				// first device's gift took the last one), so judge stock on what
+				// is left — the cashier sees "Out of stock" here, not an empty
+				// IMEI picker after clicking Add Selected.
+				const in_cart = (PosState.cart || [])
+					.filter((c) => c.item_code === bi.item_code)
+					.reduce((n, c) => n + flt(c.qty), 0);
+				// Plans and services have no stock: always available.
+				const in_stock = (bi.warranty_plan || !cint(bi.is_stock_item))
+					? true
+					: flt(bi.stock_qty) - in_cart > 0;
 				fields.push({
 					fieldname: `bundle_item_${i}`,
 					fieldtype: "Check",
@@ -1296,50 +1383,65 @@ export class CartService {
 					default: in_stock ? 1 : 0,
 					read_only: !in_stock ? 1 : 0,
 					description: bi.selling_price ? `₹${bi.selling_price} → ₹0 (Free)` : __("Free"),
+					onchange: () => sync_add_btn(),
 				});
 			});
 
-			const dlg = new frappe.ui.Dialog({
+			// Add Selected works only while at least one gift is ticked (none
+			// in stock means none can be). Frappe's disable_primary_action()
+			// only greys the button (CSS class) and the click still fires, so
+			// the element itself is disabled too.
+			let dlg = null;
+			const any_ticked = () => items.some((_, i) => cint(dlg && dlg.get_value(`bundle_item_${i}`)));
+			const sync_add_btn = () => {
+				if (!dlg) return;
+				const on = any_ticked();
+				dlg.get_primary_btn()
+					.toggleClass("disabled", !on)
+					.prop("disabled", !on)
+					.css("pointer-events", on ? "" : "none");
+			};
+
+			dlg = new frappe.ui.Dialog({
 				title: __("Free Accessories — {0}", [item_data.item_name]),
 				fields: fields,
 				size: "small",
 				primary_action_label: __("Add Selected"),
 				primary_action: (values) => {
+					// Plans / services (non-stock) go straight in. A product is a
+					// physical unit leaving the shelf, so it only reaches the cart
+					// once its IMEI (serialized) or barcode is scanned — one
+					// product at a time, in the order shown.
+					if (!any_ticked()) return; // Ctrl+Enter reaches here too
+					const to_scan = [];
 					items.forEach((bi, i) => {
-						if (values[`bundle_item_${i}`]) {
-							const free_item = {
-								...bi,
-								qty: 1,
-								selling_price: 0,
-								mrp: bi.mrp || 0,
-								ch_allow_zero_rate: 1,
-								is_free_bundle_item: 1,
-							};
-							// Use the returned row, not cart[length-1] — a refused
-							// add (duplicate serial) would otherwise zero-rate
-							// whatever row happened to be last.
-							const added = this._add_new_cart_item(free_item);
-							if (added) {
-								added.qty = 1;
-								added.rate = 0;
-								// Free means free end to end: leaving price_list_rate
-								// at MRP made the ₹0 read as an unauthorized discount
-								// (spurious manager approvals, consumed caps).
-								added.price_list_rate = 0;
-								added.discount_amount = 0;
-								added.discount_percentage = 0;
-								added.is_free_bundle_item = true;
-								added.bundle_parent = item_data.item_code;
-							}
+						if (!values[`bundle_item_${i}`]) return;
+						const free_item = {
+							...bi,
+							qty: 1,
+							selling_price: 0,
+							mrp: bi.mrp || 0,
+							ch_allow_zero_rate: 1,
+							is_free_bundle_item: 1,
+							bundle_parent: item_data.item_code,
+						};
+						if (bi.warranty_plan) {
+							this._add_free_bundle_plan(bi, item_data, device_row);
+						} else if (cint(bi.has_serial_no) || cint(bi.is_stock_item)) {
+							to_scan.push(free_item);
+						} else {
+							this._add_new_cart_item(free_item);
 						}
 					});
 					EventBus.emit("cart:updated");
 					dlg.hide();
+					this._scan_free_gifts(to_scan);
 				},
 				secondary_action_label: __("Skip"),
 				secondary_action: () => dlg.hide(),
 			});
 			dlg.show();
+			sync_add_btn();
 		});
 	}
 
@@ -1371,8 +1473,110 @@ export class CartService {
 
 
 
+	/**
+	 * A warranty / protection plan given free with a device (Product Bundle).
+	 * It covers that device's IMEI like a sold plan, at ₹0; the server accepts
+	 * the ₹0 only because the device's bundle lists this plan.
+	 */
+	_add_free_bundle_plan(bi, item_data, device_row) {
+		const for_serial_no = String((device_row && device_row.serial_no) || "");
+		const for_item_code = (device_row && device_row.item_code) || item_data.item_code;
+		const dup = (PosState.cart || []).find(
+			(c) => c.warranty_plan === bi.warranty_plan && c.for_item_code === for_item_code
+				&& (c.for_serial_no || "") === for_serial_no
+		);
+		if (dup) {
+			frappe.show_alert({ message: __("{0} is already on this device", [bi.plan_name || bi.item_name]), indicator: "orange" });
+			return;
+		}
+		const plan_type = bi.plan_type || "Value Added Service";
+		PosState.cart.push({
+			item_code: bi.item_code,
+			item_name: `✦ ${bi.plan_name || bi.item_name}`,
+			qty: 1,
+			rate: 0,
+			price_list_rate: 0,
+			mrp: 0,
+			uom: bi.stock_uom || "Nos",
+			discount_percentage: 0,
+			discount_amount: 0,
+			offers: [],
+			applied_offer: null,
+			warranty_plan: bi.warranty_plan,
+			for_item_code,
+			for_serial_no,
+			plan_type,
+			is_warranty: ["Own Warranty", "Extended Warranty", "Post-Repair Warranty"].includes(plan_type),
+			is_vas: ["Value Added Service", "Protection Plan"].includes(plan_type),
+			is_free_bundle_item: true,
+			bundle_parent: item_data.item_code,
+		});
+	}
+
+	/**
+	 * Free-gift products, one after another: serialized ones through the IMEI
+	 * picker, the rest through a barcode scan. Closing a scan skips that gift.
+	 */
+	_scan_free_gifts(queue) {
+		if (!queue.length) return;
+		const [gift, ...rest] = queue;
+		const next = () => this._scan_free_gifts(rest);
+		if (cint(gift.has_serial_no)) {
+			this._prompt_serial_scan(gift, next);
+		} else {
+			this._prompt_gift_barcode_scan(gift, next);
+		}
+	}
+
+	/** Non-serialized free gift: the cashier scans its barcode to confirm the unit. */
+	_prompt_gift_barcode_scan(gift, on_done) {
+		let finished = false;
+		const dlg = new frappe.ui.Dialog({
+			title: __("Scan Free Gift — {0}", [gift.item_name]),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "info",
+					options: `<p class="text-muted" style="margin-bottom:8px">
+						${__("Scan the barcode of {0} to add it free.", [frappe.utils.escape_html(gift.item_name)])}
+					</p>`,
+				},
+				{ fieldtype: "Data", fieldname: "barcode", label: __("Barcode / Item Code"), reqd: 1 },
+			],
+			size: "small",
+			primary_action_label: __("Add to Cart"),
+			primary_action: (values) => {
+				const code = String(values.barcode || "").trim();
+				if (!code) return;
+				frappe.call({
+					method: "ch_pos.api.pos_api.scan_barcode",
+					args: { barcode: code, pos_profile: PosState.pos_profile },
+					callback: (r) => {
+						const hit = r.message || {};
+						if (hit.item_code !== gift.item_code) {
+							frappe.show_alert({
+								message: __("{0} is not {1}. Scan the free gift's own barcode.", [code, gift.item_name]),
+								indicator: "red",
+							});
+							dlg.set_value("barcode", "");
+							return;
+						}
+						this._add_new_cart_item(gift);
+						EventBus.emit("cart:updated");
+						finished = true;
+						dlg.hide();
+						on_done && on_done();
+					},
+				});
+			},
+		});
+		dlg.onhide = () => { if (!finished) { finished = true; on_done && on_done(); } };
+		dlg.show();
+		setTimeout(() => dlg.fields_dict.barcode.$input.focus(), 150);
+	}
+
 	/** Prompt for IMEI/serial selection from available stock, with manual scan fallback */
-	_prompt_serial_scan(item_data) {
+	_prompt_serial_scan(item_data, on_done) {
 		const dlg = new frappe.ui.Dialog({
 			title: __("Select IMEI / Serial — {0}", [item_data.item_name]),
 			fields: [
@@ -1417,6 +1621,7 @@ export class CartService {
 						serial_no: final_serial,
 						item_code: item_data.item_code,
 						warehouse: PosState.warehouse,
+						in_cart_serials: this._cart_serials(),
 					},
 					always: () => this._release_serial(final_serial),
 					callback: (r) => {
@@ -1453,6 +1658,11 @@ export class CartService {
 				});
 			},
 		});
+		// Free-gift queue: move on once this picker closes, added or skipped.
+		if (on_done) {
+			let done = false;
+			dlg.onhide = () => { if (!done) { done = true; on_done(); } };
+		}
 		dlg.show();
 
 		// Inject scoped CSS once for picker alignment + hover/selected styles
@@ -2952,6 +3162,17 @@ export class CartService {
 
 	// ── Held Bills Dialog ───────────────────────────────
 	_show_held_bills_dialog() {
+		// Walk-ins the Queue put on Hold (Bill pressed while another bill was
+		// open) are listed here too, so every waiting customer is in one place.
+		const holds = PosState.pos_profile
+			? frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile: PosState.pos_profile })
+				.then((tokens) => (tokens || []).filter((t) => t.status === "Hold"))
+				.catch(() => [])
+			: Promise.resolve([]);
+		holds.then((queue_holds) => this._render_held_bills_dialog(queue_holds));
+	}
+
+	_render_held_bills_dialog(queue_holds) {
 		// Collect all held bills from localStorage
 		const bills = [];
 		let hidden = 0;
@@ -2975,7 +3196,7 @@ export class CartService {
 		// Sort by timestamp descending (newest first)
 		bills.sort((a, b) => (b.timestamp > a.timestamp ? 1 : -1));
 
-		if (!bills.length) {
+		if (!bills.length && !queue_holds.length) {
 			frappe.show_alert({
 				message: hidden
 					? __("No held bills for this company ({0} held elsewhere)", [hidden])
@@ -3043,19 +3264,51 @@ export class CartService {
 			</div>`;
 		}).join("");
 
+		const section = (label) => `<div style="padding:8px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--text-muted);background:var(--subtle-fg,#f8fafc)">${label}</div>`;
+		const queue_html = queue_holds.map((t, i) => {
+			const since = (t.creation || "").split(" ")[1] || "";
+			const meta = [
+				`<b>${esc(t.name)}</b>`,
+				t.customer_phone ? `<i class="fa fa-phone"></i> ${esc(t.customer_phone)}` : "",
+				t.device_model_name ? esc(t.device_model_name) : "",
+				since ? `<i class="fa fa-clock-o"></i> ${esc(since.substring(0, 5))}` : "",
+			].filter(Boolean).join(" &nbsp;·&nbsp; ");
+			return `
+			<div style="display:flex;align-items:center;gap:10px;padding:12px;border-bottom:1px solid var(--border-color)">
+				<div style="flex:1;min-width:0">
+					<div style="font-weight:700;font-size:14px">${esc(t.customer_name || __("Walk-in"))}
+						<span class="indicator-pill orange" style="margin-left:6px">${__("Hold")}</span></div>
+					<div class="text-muted" style="font-size:12px;margin-top:2px">${meta}</div>
+				</div>
+				<button class="btn btn-sm btn-primary ch-held-queue-bill" data-i="${i}" style="white-space:nowrap">
+					${__("Bill")}
+				</button>
+			</div>`;
+		}).join("");
+		const list_html = (queue_holds.length ? section(__("Walk-ins on Hold (Queue)")) + queue_html : "")
+			+ (bills.length ? (queue_holds.length ? section(__("Held Carts")) : "") + rows_html : "");
+
 		const dlg = new frappe.ui.Dialog({
-			title: __("Held Bills ({0})", [bills.length]),
+			title: __("Held Bills ({0})", [bills.length + queue_holds.length]),
 			fields: [
 				{
 					fieldname: "bills_html",
 					fieldtype: "HTML",
-					options: `<div class="ch-held-list" style="max-height:65vh;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${rows_html}</div>`,
+					options: `<div class="ch-held-list" style="max-height:65vh;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px">${list_html}</div>`,
 				},
 			],
 			size: "large",
 		});
 
 		dlg.show();
+
+		// Same Bill as on the Queue card.
+		dlg.$wrapper.on("click", ".ch-held-queue-bill", (e) => {
+			const token = queue_holds[parseInt($(e.currentTarget).data("i"), 10)];
+			if (!token) return;
+			dlg.hide();
+			EventBus.emit("queue:bill_token", token);
+		});
 
 		dlg.$wrapper.on("click", ".ch-held-retrieve", (e) => {
 			e.stopPropagation();
@@ -3083,7 +3336,7 @@ export class CartService {
 				bills.splice(idx, 1);
 				EventBus.emit("held_bills:updated");
 				dlg.hide();
-				if (bills.length) this._show_held_bills_dialog();
+				if (bills.length || queue_holds.length) this._show_held_bills_dialog();
 				else frappe.show_alert({ message: __("All held bills cleared"), indicator: "blue" });
 			});
 		});
@@ -3432,6 +3685,8 @@ export class CartService {
 					fieldtype: "Date",
 					label: __("Date"),
 					default: today,
+					// No bills exist in the future: those days are disabled.
+					max_date: frappe.datetime.str_to_obj(today),
 					depends_on: "eval:doc.search_by==='Date'",
 				},
 				{
@@ -3493,6 +3748,12 @@ export class CartService {
 		// Reload when date changes
 		dlg.fields_dict.date.$input.on("change", () => {
 			const d = dlg.get_value("date");
+			// A typed future date is not blocked by the calendar's max_date.
+			if (d && d > today) {
+				frappe.show_alert({ message: __("Future dates cannot be selected"), indicator: "orange" });
+				dlg.set_value("date", today);
+				return;
+			}
 			if (d) build_invoice_list(d, null, null, container, current_doc_type());
 		});
 

@@ -136,14 +136,8 @@ export class CartPanel {
 					<i class="fa fa-pause-circle"></i> ${__("Held Bills")}
 					<span class="ch-held-count" style="display:none"></span>
 				</button>
-				<button class="btn btn-xs btn-default ch-pos-btn-reprint-cart" title="${__("Reprint today\'s invoices")}">
-					<i class="fa fa-print"></i> ${__("Sales Invoice View")}
-				</button>
 				<button class="btn btn-xs btn-default ch-pos-btn-sell-vas" title="${__("Sell a Value Added Service — incl. for a phone bought elsewhere (external IMEI)")}">
 					<i class="fa fa-shield"></i> ${__("Sell VAS")}
-				</button>
-				<button class="btn btn-xs btn-default ch-pos-btn-prebook" title="${__("Pre-Book the current cart — carries the items & customer into the Pre-Book screen")}">
-					<i class="fa fa-bookmark"></i> ${__("Prebook")}
 				</button>
 			</div>
 			<div class="ch-pos-cart-actions">
@@ -987,9 +981,9 @@ export class CartPanel {
 		w.on("click", ".ch-pos-btn-hold", () => EventBus.emit("cart:hold"));
 		w.on("click", ".ch-pos-btn-pay", () => EventBus.emit("cart:pay"));
 
-		// Quick-link: held bills + reprint (in cart panel)
+		// Quick-link: held bills (in cart panel). Sales Invoice View lives on
+		// the top toolbar; Pre-Book is reached from the sidebar or a queue card.
 		w.on("click", ".ch-pos-btn-held-bills", () => EventBus.emit("held_bills:open"));
-		w.on("click", ".ch-pos-btn-reprint-cart", () => EventBus.emit("reprint:open"));
 
 		// Quick-link: standalone VAS sale (no device line required). Opens the
 		// VAS dialog with no for_item so the cashier can sell a Value Added
@@ -997,18 +991,6 @@ export class CartPanel {
 		// purchased from us. Plans flagged allow_external_device drive this.
 		w.on("click", ".ch-pos-btn-sell-vas", () => EventBus.emit("vas:open", {}));
 
-		// #7: jump to the Pre-Book screen carrying the current cart + customer.
-		// The cart lives on PosState, which persists across modes, so the
-		// prebook workspace renders it pre-filled (no re-entry).
-		// Fire BOTH events (same pattern as buyback/returns/queue/etc.):
-		//   `mode:set`    — updates sidebar highlight + PosState.active_mode
-		//   `mode:switch` — LayoutManager mounts the target workspace
-		// Emitting only `mode:set` here previously left the content panel
-		// stuck on Sell while the sidebar row for Prebook lit up.
-		w.on("click", ".ch-pos-btn-prebook", () => {
-			EventBus.emit("mode:set", "prebook");
-			EventBus.emit("mode:switch", "prebook");
-		});
 
 		// Keep held-bills badge current whenever any held bill changes
 		EventBus.on("held_bills:updated", () => this._refresh_held_count(w));
@@ -1593,11 +1575,13 @@ export class CartPanel {
 			if (localStorage.key(i).startsWith("ch_pos_held_")) count++;
 		}
 		const badge = (w || this.wrapper).find(".ch-held-count");
-		if (count > 0) {
-			badge.text(count).show();
-		} else {
-			badge.hide();
-		}
+		const show = (n) => (n > 0 ? badge.text(n).show() : badge.hide());
+		show(count);
+		// Plus walk-ins the Queue has on Hold -- they are listed in Held Bills too.
+		if (!PosState.pos_profile) return;
+		frappe.xcall("ch_pos.api.token_api.get_pos_waiting_tokens", { pos_profile: PosState.pos_profile })
+			.then((tokens) => show(count + (tokens || []).filter((t) => t.status === "Hold").length))
+			.catch(() => null);
 	}
 
 	_update_exception_banner() {

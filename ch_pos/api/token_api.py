@@ -2878,7 +2878,7 @@ def get_pos_profiles() -> list:
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
-def get_pos_waiting_tokens(pos_profile: str) -> dict:
+def get_pos_waiting_tokens(pos_profile: str, include_closed: int = 0) -> dict:
     """
     Everyone currently waiting on this store, however they reached us.
 
@@ -2891,6 +2891,15 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
     _assert_pos_profile_scope(pos_profile)
     today = frappe.utils.today()
     result_limit = _configured_limit("token_queue_result_limit", 200, 2000)
+    # include_closed: the Queue screen also lists today's billed / pre-booked
+    # (Converted) and rejected / withdrawn (Dropped) visits, marked as such,
+    # instead of having them vanish. Other callers keep the open-only list.
+    closed = "'Converted', 'Dropped'"
+    in_shop_status = (f"status IN ({_OPEN_SQL}, {closed})" if cint(include_closed)
+                      else f"status IN ({_OPEN_SQL})")
+    remote_status = (f"(status IN ({_OPEN_SQL}) OR (status IN ({closed})"
+                     f" AND DATE(COALESCE(exit_at, modified)) = CURDATE()))" if cint(include_closed)
+                     else f"status IN ({_OPEN_SQL})")
     tokens = frappe.db.sql(
         f"""SELECT name, token_display, customer_name, customer_phone,
                   device_type, device_brand, device_model, device_model_name,
@@ -2906,10 +2915,11 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                   -- the same Create Request button.
                   visit_reason, visit_source, referral_source, customer_language,
                   linked_service_request, converted_invoice, linked_buyback,
+                  converted_sales_order, drop_reason,
                   total_estimate
            FROM `tabPOS Kiosk Token`
            WHERE pos_profile = %s
-             AND status IN ({_OPEN_SQL})
+             AND {in_shop_status}
              -- People who came into the shop. Written requests are fetched
              -- separately below; without this a request that arrived today AND
              -- carries a store matches both queries and appears twice in the
@@ -2948,13 +2958,14 @@ def get_pos_waiting_tokens(pos_profile: str) -> dict:
                   technician, creation,
                   visit_reason, visit_source, referral_source, customer_language,
                   linked_service_request, converted_invoice, linked_buyback,
+                  converted_sales_order, drop_reason,
                   total_estimate,
                   preferred_datetime, first_response_at, assigned_to, email,
                   expires_at
            FROM `tabPOS Kiosk Token`
            WHERE company = %s
              AND visit_source NOT IN ('Kiosk', 'Counter')
-             AND status IN ({_OPEN_SQL})
+             AND {remote_status}
              AND pos_profile = %s
            ORDER BY creation DESC
            LIMIT %s""",

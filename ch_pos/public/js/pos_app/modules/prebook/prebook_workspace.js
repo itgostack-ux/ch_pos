@@ -8,7 +8,9 @@
  *      advance amount tracking (Phase H, ch_payments/advance_payments).
  *
  * Cashier visibility (parity with SAP Retail / Oracle Xstore / GoFrugal POS):
- *   - Tabbed UI: "Create" + "My Proformas" + "My Pre-Bookings"
+ *   - No direct create here: a proforma or pre-booking starts from a walk-in
+ *     (Queue → Generate Prebook / Generate Proforma Invoice); this screen
+ *     lists the proformas and converts them.
  *   - KPI strip: today/open/converted/expired counts, reserved IMEI count
  *
  * Reuse-first: backend wrappers `create_pos_quotation`, `create_pre_booking`,
@@ -21,8 +23,9 @@ import { format_number, wh_label } from "../../shared/helpers.js";
 export class PrebookWorkspace {
 	constructor() {
 		this._panel = null;
-		this._active_tab = "create"; // create | proformas | prebookings
-		this._tab_filter = { status: "All", days: 30, only_mine: 1, search: "" };
+		this._active_tab = "proformas";
+		// Every proforma of this store (the list is store-scoped server-side).
+		this._tab_filter = { status: "All", days: 30, only_mine: 0, search: "" };
 		EventBus.on("workspace:render", (ctx) => {
 			if (ctx.mode !== "prebook") return;
 			this.render(ctx.panel);
@@ -30,6 +33,23 @@ export class PrebookWorkspace {
 		// Deep-link hint: the Pickup/Bill "Proforma Open" KPI fires this so
 		// the workspace opens directly on the My Proformas tab where the
 		// cashier can Convert → Sale or Convert → Pre-Booking.
+		// Queue → Pre-Book: a waiting customer's chosen item, carried straight
+		// into the Pre-Book dialog with the customer already filled in.
+		EventBus.on("prebook:start_with", ({ items, customer, kiosk_token } = {}) => {
+			// The queue visit this pre-booking is for; it is closed as
+			// Converted when the pre-booking is saved.
+			this._kiosk_token = kiosk_token || null;
+			const cart = (items || []).map((it) => ({ ...it, qty: flt(it.qty || 1) }));
+			const total = cart.reduce((s, it) => s + flt(it.qty) * flt(it.rate || 0), 0);
+			this._prebook_flow(cart, customer || "", total);
+		});
+
+		// Queue → Proforma: same hand-over, into the Proforma Invoice dialog.
+		EventBus.on("prebook:proforma_with", ({ items, customer } = {}) => {
+			const cart = (items || []).map((it) => ({ ...it, qty: flt(it.qty || 1) }));
+			this._proforma_flow(cart, customer || "");
+		});
+
 		EventBus.on("prebook:goto_proformas", () => {
 			this._active_tab = "proformas";
 			if (this._panel && this._panel.is(":visible")) {
@@ -40,8 +60,8 @@ export class PrebookWorkspace {
 
 	render(panel) {
 		this._panel = panel;
-		// Guard: if reopening from a tab that was removed, fall back to Create.
-		if (this._active_tab === "prebookings") this._active_tab = "create";
+		// Only My Proformas is left; anything else is a tab that was removed.
+		this._active_tab = "proformas";
 		panel.html(`
 			<div class="ch-pos-mode-panel">
 				<div class="ch-mode-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
@@ -52,7 +72,7 @@ export class PrebookWorkspace {
 							</span>
 							${__("Pre-Book / Proforma")}
 						</h4>
-						<span class="ch-mode-hint">${__("Quote and reserve future sales \u2014 Proforma Invoice (Quotation) or Pre-Booking (Sales Order) with stock reservation and advance.")}</span>
+						<span class="ch-mode-hint">${__("Proformas and pre-bookings are raised from a walk-in in the Queue. Convert a proforma to a sale or a pre-booking here.")}</span>
 					</div>
 					<button class="btn btn-default btn-sm ch-pb-go-pickup" title="${__("Pickup / Bill is where pre-bookings are billed at handover.")}">
 						<i class="fa fa-cube"></i> ${__("Go to Pickup / Bill")}
@@ -64,9 +84,6 @@ export class PrebookWorkspace {
 				<div class="ch-pos-section-card" style="margin-bottom:var(--pos-space-md);">
 					<div class="section-body" style="padding:0;">
 						<div class="ch-pb-tabs" style="display:flex;border-bottom:1px solid var(--pos-border);">
-							<div class="ch-pb-tab" data-tab="create" style="padding:10px 16px;cursor:pointer;border-bottom:2px solid transparent;">
-								<i class="fa fa-plus-circle"></i> ${__("Create New")}
-							</div>
 							<div class="ch-pb-tab" data-tab="proformas" style="padding:10px 16px;cursor:pointer;border-bottom:2px solid transparent;">
 								<i class="fa fa-file-text-o"></i> ${__("My Proformas")}
 							</div>
@@ -91,15 +108,6 @@ export class PrebookWorkspace {
 		panel.on("click", ".ch-pb-go-pickup", () => {
 			EventBus.emit("mode:switch", "pickup");
 		});
-		// "Create" subview events
-		panel.on("click", ".ch-prebook-proforma", () => {
-			const ctx = this._read_cart_ctx();
-			this._proforma_flow(ctx.cart, ctx.customer);
-		});
-		panel.on("click", ".ch-prebook-reserve", () => {
-			const ctx = this._read_cart_ctx();
-			this._prebook_flow(ctx.cart, ctx.customer, ctx.total);
-		});
 		// List filter events
 		panel.on("input", ".ch-pb-search", (e) => {
 			this._tab_filter.search = e.target.value.trim();
@@ -114,13 +122,13 @@ export class PrebookWorkspace {
 			this._tab_filter.days = parseInt(e.target.value, 10) || 30;
 			this._reload_list();
 		});
-		panel.on("change", ".ch-pb-mine", (e) => {
-			this._tab_filter.only_mine = e.target.checked ? 1 : 0;
-			this._reload_list();
-		});
 		panel.on("click", ".ch-pb-refresh", () => {
 			this._refresh_kpis();
 			this._reload_list();
+		});
+		panel.on("click", ".ch-pb-qtn-items", (e) => {
+			e.preventDefault();
+			this._show_proforma_items($(e.currentTarget).data("name"));
 		});
 		panel.on("click", ".ch-pb-print", (e) => {
 			const url = $(e.currentTarget).data("url");
@@ -143,13 +151,6 @@ export class PrebookWorkspace {
 			const name = $(e.currentTarget).data("name");
 			if (name) this._convert_proforma_to_prebook(name);
 		});
-	}
-
-	_read_cart_ctx() {
-		const cart = PosState.cart || [];
-		const customer = PosState.customer || PosState.default_customer || "";
-		const total = cart.reduce((s, it) => s + flt(it.qty || 1) * flt(it.rate || 0), 0);
-		return { cart, customer, total };
 	}
 
 	/**
@@ -281,12 +282,8 @@ export class PrebookWorkspace {
 			});
 		});
 		const $body = this._panel.find(".ch-pb-tab-body");
-		if (tab === "create") {
-			$body.html(this._render_create());
-		} else {
-			$body.html(this._render_list_shell(tab));
-			this._reload_list();
-		}
+		$body.html(this._render_list_shell(tab));
+		this._reload_list();
 	}
 
 	_refresh_kpis() {
@@ -320,97 +317,6 @@ export class PrebookWorkspace {
 		});
 	}
 
-	// ─────────────────────────────────────────── Create subview ──
-
-	_render_create() {
-		const { cart, customer, total } = this._read_cart_ctx();
-		const has_cart = cart.length > 0;
-		const rows = has_cart
-			? cart.map((it) => `
-				<tr>
-					<td>${frappe.utils.escape_html(it.item_name || it.item_code)}</td>
-					<td style="text-align:right">${flt(it.qty || 1)}</td>
-					<td style="text-align:right">\u20B9${format_number(it.rate || 0)}</td>
-					<td style="text-align:right"><b>\u20B9${format_number(flt(it.qty || 1) * flt(it.rate || 0))}</b></td>
-				</tr>
-			`).join("")
-			: "";
-
-		const cart_card = has_cart
-			? `<div style="background:#fff;border:1px solid var(--pos-border);border-radius:var(--pos-radius);padding:14px;">
-					<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-						<b>${__("Customer")}</b>
-						<span class="text-muted">${frappe.utils.escape_html(customer || __("(no customer selected)"))}</span>
-					</div>
-					<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-						<b>${__("Cart Items (optional starting point)")}</b>
-						<span>${cart.length} ${__("line(s)")}</span>
-					</div>
-					<table class="table table-condensed" style="margin:0;">
-						<thead>
-							<tr>
-								<th>${__("Item")}</th>
-								<th style="text-align:right">${__("Qty")}</th>
-								<th style="text-align:right">${__("Rate")}</th>
-								<th style="text-align:right">${__("Amount")}</th>
-							</tr>
-						</thead>
-						<tbody>${rows}</tbody>
-						<tfoot>
-							<tr>
-								<th colspan="3" style="text-align:right">${__("Total")}</th>
-								<th style="text-align:right">\u20B9${format_number(total)}</th>
-							</tr>
-						</tfoot>
-					</table>
-					<div class="text-muted" style="font-size:11px;margin-top:8px;">
-						${__("These cart items are only a starting point. You can add more items — including out-of-stock or upcoming-launch items — inside the Pre-Booking form.")}
-					</div>
-				</div>`
-			: `<div style="background:#fff;border:1px solid var(--pos-border);border-radius:var(--pos-radius);padding:24px;text-align:center;">
-					<i class="fa fa-bookmark" style="font-size:36px;color:#0369a1;opacity:0.6;"></i>
-					<h4 style="margin:12px 0 6px;">${__("Start a New Pre-Booking")}</h4>
-					<p class="text-muted" style="font-size:13px;margin-bottom:16px;">
-						${__("Add any item from the full Item list — including items not currently in stock (upcoming launches, back-orders, custom orders). Reserve stock when available, or tag IMEI later before billing.")}
-					</p>
-					<button class="btn btn-success btn-lg ch-prebook-reserve">
-						<i class="fa fa-plus-circle"></i> ${__("New Pre-Booking")}
-					</button>
-					<button class="btn btn-default btn-lg ch-prebook-proforma" style="margin-left:8px;">
-						<i class="fa fa-file-text-o"></i> ${__("New Proforma")}
-					</button>
-					<div class="text-muted" style="font-size:11px;margin-top:12px;">
-						${__("Pre-Booking = Sales Order with reservation + advance. Proforma = non-binding quotation.")}
-					</div>
-				</div>`;
-
-		return `
-			<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;">
-				<div style="flex:2;min-width:380px;">
-					${cart_card}
-				</div>
-
-				<div style="flex:1;min-width:280px;">
-					<div style="background:#fff;border:1px solid var(--pos-border);border-radius:var(--pos-radius);padding:14px;display:flex;flex-direction:column;gap:10px;">
-						<button class="btn btn-primary btn-block ch-prebook-proforma">
-							<i class="fa fa-file-text-o"></i> ${__("Generate Proforma Invoice")}
-						</button>
-						<div class="text-muted" style="font-size:11px;margin-top:-4px;">
-							${__("Creates a submitted Quotation and opens the Proforma Invoice print format. No stock reservation.")}
-						</div>
-						<hr style="margin:8px 0;">
-						<button class="btn btn-success btn-block ch-prebook-reserve">
-							<i class="fa fa-bookmark"></i> ${__("Create Pre-Booking (Reserve Stock)")}
-						</button>
-						<div class="text-muted" style="font-size:11px;margin-top:-4px;">
-							${__("Opens an editable Pre-Booking form. Pick any item — stock availability is not required.")}
-						</div>
-					</div>
-				</div>
-			</div>
-		`;
-	}
-
 	// ─────────────────────────────────────────── List subview ──
 
 	_render_list_shell(tab) {
@@ -431,9 +337,6 @@ export class PrebookWorkspace {
 							<option value="90">${__("Last 90 days")}</option>
 							<option value="180">${__("Last 6 months")}</option>
 						</select>
-						<label style="display:inline-flex;align-items:center;gap:6px;margin:0;">
-							<input type="checkbox" class="ch-pb-mine" ${this._tab_filter.only_mine ? "checked" : ""}> ${__("Only mine")}
-						</label>
 						<button class="btn btn-default btn-sm ch-pb-refresh"><i class="fa fa-refresh"></i> ${__("Refresh")}</button>
 					</div>
 				</div>
@@ -447,7 +350,6 @@ export class PrebookWorkspace {
 	}
 
 	_reload_list() {
-		if (this._active_tab === "create") return;
 		if (!PosState.pos_profile) {
 			this._panel.find(".ch-pb-list").html(
 				`<div class="text-muted text-center" style="padding:20px;">${__("Select a POS profile first.")}</div>`
@@ -505,41 +407,86 @@ export class PrebookWorkspace {
 			const label = expired ? __("Expired") : (expiring ? __("Expiring") : status);
 			return `<span style="background:${bg};color:${fg};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">${label}</span>`;
 		};
-		$list.html(rows.map(r => `
-			<div style="display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--pos-border);align-items:flex-start;">
-				<div style="flex:1.2;min-width:180px;">
-					<div style="font-weight:600;">${frappe.utils.escape_html(r.customer_name)}</div>
-					<div class="small text-muted">${frappe.utils.escape_html(r.customer)}</div>
-					<div class="small text-muted" style="margin-top:4px;">${r.name}</div>
-				</div>
-				<div style="flex:1.4;min-width:200px;font-size:12px;">
-					${(r.items || []).slice(0,3).map(it => `${frappe.utils.escape_html(it.item_name || it.item_code)} \u00D7 ${flt(it.qty)}`).join("<br>")}
-					${(r.items || []).length > 3 ? `<div class="small text-muted">+${(r.items || []).length - 3} ${__("more")}</div>` : ""}
-				</div>
-				<div style="flex:0.9;min-width:140px;text-align:right;font-size:12px;">
-					<div>${__("Total")}: <b>\u20B9${format_number(r.grand_total)}</b></div>
-					${r.advance_received > 0 ? `<div class="text-success">${__("Advance")}: \u20B9${format_number(r.advance_received)}</div>` : ""}
-					<div>${__("Valid till")}: ${r.valid_till || "—"}</div>
-				</div>
-				<div style="flex:0.7;min-width:110px;text-align:center;">
-					${status_badge(r.status, r.is_expiring_soon, r.is_expired)}
-					${r.days_left !== null && r.days_left !== undefined ? `<div class="small text-muted" style="margin-top:4px;">${r.days_left >= 0 ? __("{0}d left", [r.days_left]) : __("{0}d ago", [-r.days_left])}</div>` : ""}
-				</div>
-				<div style="flex:0;display:flex;flex-direction:column;gap:6px;min-width:160px;">
-					<button class="btn btn-default btn-xs ch-pb-print" data-url="${r.print_url}">
-						<i class="fa fa-print"></i> ${__("Print")}
-					</button>
-					${r.status === "Open" && !r.is_expired ? `
-						<button class="btn btn-primary btn-xs ch-pb-convert-sale" data-name="${r.name}" title="${__("Bill this proforma now — items load into the Sell cart; add accessories or scan IMEIs before PAY")}">
-							<i class="fa fa-shopping-cart"></i> ${__("Convert → Sale")}
-						</button>
-						<button class="btn btn-success btn-xs ch-pb-convert-prebook" data-name="${r.name}" title="${__("Reserve stock and collect advance — opens Pre-Booking dialog pre-filled with these items")}">
-							<i class="fa fa-bookmark"></i> ${__("Convert → Pre-Booking")}
-						</button>
-					` : ""}
-				</div>
-			</div>
-		`).join(""));
+		// One row per proforma; its items open from the Quotation ID.
+		const esc = frappe.utils.escape_html;
+		this._proforma_rows = {};
+		rows.forEach((r) => { this._proforma_rows[r.name] = r; });
+		const th = "padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--pos-text-muted);background:var(--pos-surface-sunken);position:sticky;top:0;z-index:1;white-space:nowrap;border-bottom:1px solid var(--pos-border)";
+		const td = "padding:8px 10px;vertical-align:middle;border-bottom:1px solid var(--pos-border)";
+		// Converted proformas say what they became instead of offering the
+		// conversion again: Pre-Booked (pre-booking no.) / Billed (invoice no.).
+		const done = (label, bg, fg, doctype, name) => `<span class="badge" style="background:${bg};color:${fg};font-size:11px;padding:3px 8px">${label}</span>
+			<div class="small"><a href="/desk/${frappe.router.slug(doctype)}/${encodeURIComponent(name)}" target="_blank">${esc(name)}</a></div>`;
+		const body = rows.map((r) => {
+			const converted = !!(r.prebooked_so || r.billed_invoice);
+			const open = r.status === "Open" && !r.is_expired && !converted;
+			const left = r.days_left !== null && r.days_left !== undefined
+				? `<div class="small text-muted">${r.days_left >= 0 ? __("{0}d left", [r.days_left]) : __("{0}d ago", [-r.days_left])}</div>` : "";
+			return `<tr>
+				<td style="${td};white-space:nowrap"><a href="#" class="ch-pb-qtn-items" data-name="${esc(r.name)}" style="font-weight:600">${esc(r.name)}</a></td>
+				<td style="${td}">${esc(r.customer_name || r.customer || "")}</td>
+				<td style="${td};text-align:right;white-space:nowrap"><b>\u20B9${format_number(r.grand_total)}</b>
+					${r.advance_received > 0 ? `<div class="small text-success">${__("Advance")}: \u20B9${format_number(r.advance_received)}</div>` : ""}</td>
+				<td style="${td};white-space:nowrap">${r.valid_till ? frappe.datetime.str_to_user(r.valid_till) : "—"}</td>
+				<td style="${td};text-align:center;white-space:nowrap">${r.billed_invoice
+					? `<span style="background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">${__("Billed")}</span>`
+					: r.prebooked_so
+					? `<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">${__("Pre-Booked")}</span>`
+					: `${status_badge(r.status, r.is_expiring_soon, r.is_expired)}${left}`}</td>
+				<td style="${td};text-align:center">
+					<button class="btn btn-default btn-xs ch-pb-print" data-url="${r.print_url}" title="${__("Print")}"><i class="fa fa-print"></i></button></td>
+				<td style="${td};text-align:center">${r.prebooked_so
+					? done(__("Pre-Booked"), "#dcfce7", "#15803d", "Sales Order", r.prebooked_so)
+					: open
+					? `<button class="btn btn-success btn-xs ch-pb-convert-prebook" data-name="${r.name}" style="white-space:nowrap" title="${__("Reserve stock and collect advance — opens Pre-Booking dialog pre-filled with these items")}"><i class="fa fa-bookmark"></i> ${__("Pre-Book")}</button>`
+					: `<span class="text-muted">—</span>`}</td>
+				<td style="${td};text-align:center">${r.billed_invoice
+					? done(__("Billed"), "#dbeafe", "#1d4ed8", "Sales Invoice", r.billed_invoice)
+					: open
+					? `<button class="btn btn-primary btn-xs ch-pb-convert-sale" data-name="${r.name}" style="white-space:nowrap" title="${__("Bill this proforma now — items load into the Sell cart; add accessories or scan IMEIs before PAY")}"><i class="fa fa-shopping-cart"></i> ${__("Sale")}</button>`
+					: `<span class="text-muted">—</span>`}</td>
+			</tr>`;
+		}).join("");
+		const head = [
+			[__("Quotation ID"), "left"], [__("Customer Name"), "left"],
+			[__("Total Amount"), "right"], [__("Valid Till"), "left"], [__("Status"), "center"],
+			[__("Print"), "center"], [__("Convert Prebook"), "center"], [__("Convert Sale"), "center"],
+		].map(([l, a]) => `<th style="${th};text-align:${a}">${l}</th>`).join("");
+		$list.html(`<div style="max-height:65vh;overflow:auto">
+			<table style="width:100%;border-collapse:collapse;font-size:12.5px">
+				<thead><tr>${head}</tr></thead><tbody>${body}</tbody>
+			</table></div>`);
+	}
+
+	// Quotation ID clicked: its items, quantities and amounts.
+	_show_proforma_items(name) {
+		const r = (this._proforma_rows || {})[name];
+		if (!r) return;
+		const esc = frappe.utils.escape_html;
+		const items = r.items || [];
+		const amount = (it) => flt(it.amount) || flt(it.qty) * flt(it.rate);
+		const total_qty = items.reduce((t, it) => t + flt(it.qty), 0);
+		const d = new frappe.ui.Dialog({
+			title: __("{0} — {1}", [r.name, r.customer_name || r.customer || ""]),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "items" }],
+		});
+		d.fields_dict.items.$wrapper.html(`
+			<table class="table table-sm" style="margin:0">
+				<thead><tr><th>#</th><th>${__("Item Name")}</th><th class="text-right">${__("Qty")}</th>
+					<th class="text-right">${__("Rate")}</th><th class="text-right">${__("Amount")}</th></tr></thead>
+				<tbody>${items.map((it, i) => `<tr>
+					<td class="text-muted">${i + 1}</td>
+					<td>${esc(it.item_name || it.item_code || "")}<div class="small text-muted">${esc(it.item_code || "")}</div></td>
+					<td class="text-right">${flt(it.qty)}</td>
+					<td class="text-right">${it.rate !== undefined ? format_currency(flt(it.rate)) : "—"}</td>
+					<td class="text-right">${it.rate !== undefined || it.amount !== undefined ? format_currency(amount(it)) : "—"}</td>
+				</tr>`).join("")}</tbody>
+				<tfoot><tr style="font-weight:700"><td></td><td>${__("Total")}</td>
+					<td class="text-right">${total_qty}</td><td></td>
+					<td class="text-right">${format_currency(flt(r.grand_total))}</td></tr></tfoot>
+			</table>`);
+		d.show();
 	}
 
 	_render_prebooking_rows(rows) {
@@ -675,6 +622,17 @@ export class PrebookWorkspace {
 				{
 					fieldname: "valid_till", fieldtype: "Date", label: __("Valid Till"),
 					default: frappe.datetime.add_days(frappe.datetime.nowdate(), 15),
+					// A proforma cannot already have expired: past days are
+					// disabled in the calendar, and a typed past date is reset.
+					min_date: frappe.datetime.str_to_obj(frappe.datetime.nowdate()),
+					onchange: () => {
+						const d = get_dlg && get_dlg();
+						const v = d && d.get_value("valid_till");
+						if (v && v < frappe.datetime.nowdate()) {
+							frappe.show_alert({ message: __("Valid Till cannot be a past date"), indicator: "orange" });
+							d.set_value("valid_till", frappe.datetime.add_days(frappe.datetime.nowdate(), 15));
+						}
+					},
 				},
 				{ fieldname: "section_break_items", fieldtype: "Section Break", label: __("Proforma Items") },
 				{
@@ -766,7 +724,16 @@ export class PrebookWorkspace {
 		dlg.show();
 	}
 
+	// Tiles and list only loaded when the screen opened; a proforma or
+	// pre-booking made since (here, or from a queue card) left them at 0.
+	_after_document_created() {
+		if (!this._panel || !this._panel.closest("body").length) return;
+		this._refresh_kpis();
+		if (this._panel.find(".ch-pb-list").length) this._reload_list();
+	}
+
 	_show_proforma_success(qtn) {
+		this._after_document_created();
 		const print_url = `/printview?doctype=Quotation&name=${encodeURIComponent(qtn.name)}`
 			+ `&format=${encodeURIComponent(qtn.print_format || "Proforma Invoice")}&no_letterhead=0`;
 		frappe.msgprint({
@@ -795,6 +762,8 @@ export class PrebookWorkspace {
 	}
 
 	_prebook_flow(cart, customer, total) {
+		// Converting a proforma: its name rides on the cart rows.
+		const source_quotation = (cart || []).map((it) => it.source_quotation).find(Boolean) || null;
 		let seed_items = (cart || []).map((it) => ({
 			item_code: it.item_code,
 			item_name: it.item_name || "",
@@ -830,6 +799,17 @@ export class PrebookWorkspace {
 				{
 					fieldname: "delivery_date", fieldtype: "Date", label: __("Delivery Date"), reqd: 1,
 					default: frappe.datetime.add_days(frappe.datetime.nowdate(), 7),
+					// Delivery cannot be in the past: earlier days are disabled
+					// in the calendar, and a typed past date is reset.
+					min_date: frappe.datetime.str_to_obj(frappe.datetime.nowdate()),
+					onchange: () => {
+						const d = get_dlg && get_dlg();
+						const v = d && d.get_value("delivery_date");
+						if (v && v < frappe.datetime.nowdate()) {
+							frappe.show_alert({ message: __("Delivery Date cannot be a past date"), indicator: "orange" });
+							d.set_value("delivery_date", frappe.datetime.add_days(frappe.datetime.nowdate(), 7));
+						}
+					},
 				},
 				{ fieldname: "column_break_a", fieldtype: "Column Break" },
 				{
@@ -1005,6 +985,10 @@ export class PrebookWorkspace {
 						payments: payments,
 						notes: v.notes,
 						reserve_stock,
+						// From a queue card, or the token being billed when
+						// the cashier switched to Pre-Book.
+						kiosk_token: this._kiosk_token || PosState.kiosk_token || null,
+						source_quotation,
 					},
 					freeze: true,
 					freeze_message: __("Creating Pre-Booking..."),
@@ -1012,6 +996,7 @@ export class PrebookWorkspace {
 						if (!r.message) return;
 						dlg.hide();
 						const so = r.message;
+						this._kiosk_token = null;
 						PosState.reset_transaction();
 						this._show_prebook_success(so);
 					},
@@ -1023,9 +1008,10 @@ export class PrebookWorkspace {
 	}
 
 	_show_prebook_success(so) {
+		this._after_document_created();
 		const so_name = so.name || __("Sales Order");
-		const so_url = `/app/sales-order/${encodeURIComponent(so_name)}`;
-		const so_print = `/printview?doctype=Sales%20Order&name=${encodeURIComponent(so_name)}&no_letterhead=0`;
+		const so_url = `/desk/sales-order/${encodeURIComponent(so_name)}`;
+		const so_print = `/printview?doctype=Sales%20Order&name=${encodeURIComponent(so_name)}&format=${encodeURIComponent("Pre-Booking")}&no_letterhead=0`;
 		const pending_rows = (so.serial_pending_rows || []).filter(Boolean);
 		const qty_pending_rows = (so.qty_pending_rows || []).filter(Boolean);
 		const pe_details = (so.advance_payment_entries_detail || []).filter(Boolean);
@@ -1042,7 +1028,7 @@ export class PrebookWorkspace {
 		});
 		const pe_links = pe_names.length
 			? pe_names.map((pe) => {
-				const open_url = `/app/payment-entry/${encodeURIComponent(pe)}`;
+				const open_url = `/desk/payment-entry/${encodeURIComponent(pe)}`;
 				const print_url = `/printview?doctype=Payment%20Entry&name=${encodeURIComponent(pe)}&format=Pre-Booking%20Advance%20Receipt&no_letterhead=1`;
 				const st = pe_state_map[pe] || { receipt_state: "Draft", docstatus: 0 };
 				const is_final = cint(st.docstatus) === 1 || String(st.receipt_state || "").toLowerCase() === "final";
@@ -1099,10 +1085,21 @@ export class PrebookWorkspace {
 			</div>`
 			: "";
 
-		frappe.msgprint({
+		// Its own dialog, not frappe.msgprint: the shared message box is
+		// reused by anything else that reports during the save, and the
+		// cashier was left with an empty "Pre-Booking Created" box.
+		const done = new frappe.ui.Dialog({
 			title: __("Pre-Booking Created"),
-			indicator: so.docstatus === 1 ? "green" : "orange",
-			message: `
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "summary" }],
+			primary_action_label: __("Open Pickup / Bill Queue"),
+			primary_action: () => {
+				done.hide();
+				EventBus.emit("pickup:focus_so", so_name);
+				EventBus.emit("mode:switch", "pickup");
+			},
+		});
+		done.fields_dict.summary.$wrapper.html(`
 				<div style="padding:8px 2px;">
 					<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
 						<div>
@@ -1135,15 +1132,9 @@ export class PrebookWorkspace {
 					</div>
 					${pending_html}
 					${qty_pending_html}
-				</div>`,
-			primary_action: {
-				label: __("Open Pickup / Bill Queue"),
-				action: () => {
-					EventBus.emit("pickup:focus_so", so_name);
-					EventBus.emit("mode:switch", "pickup");
-				},
-			},
-		});
+				</div>`);
+		done.set_indicator && done.set_indicator(__("Created"), so.docstatus === 1 ? "green" : "orange");
+		setTimeout(() => done.show(), 0);
 	}
 
 	/**

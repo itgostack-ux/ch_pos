@@ -47,6 +47,7 @@ doctype_js = {
     "CH POS Password": "pos_core/doctype/ch_manager_pin/ch_manager_pin.js",
     "User": "custom/user.js",
     "Sales Person": "custom/sales_person.js",
+    "Product Bundle": "custom/product_bundle.js",
 }
 
 # App-level JS (extends POS UI)
@@ -56,6 +57,7 @@ app_include_js = [
     "/assets/ch_pos/js/bin_transfer_dialog.js",
     "/assets/ch_pos/js/ch_pin_ux.js",  # TC_018 — Manager PIN field UX
     "/assets/ch_pos/js/session_logout_guard.js",  # Prevent logout with pending tokens
+    "/assets/ch_pos/js/user_quick_entry.js",  # New User: Is Sales Person disables Role Profiles
 ]
 
 # App-level CSS
@@ -67,7 +69,7 @@ app_include_css = [
     # copy its browser already cached. Bump the version when one changes.
     # pos_components.css had no version at all, which is why the Request
     # Stock header colours landed in the file and nowhere else.
-    "/assets/ch_pos/css/pos_components.css?v=7",
+    "/assets/ch_pos/css/pos_components.css?v=9",
     "/assets/ch_pos/css/front_desk.css?v=7",
     "/assets/ch_pos/css/stock_transfer.css?v=2",
 ]

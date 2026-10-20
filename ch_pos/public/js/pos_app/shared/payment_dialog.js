@@ -3169,6 +3169,9 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			external_device_model_item: c.external_device_model_item || null,
 			is_warranty:      c.is_warranty || false,
 			is_vas:           c.is_vas || false,
+			// Free gift with a device (Product Bundle): billed at ₹0 by the
+			// server, and lets a bundled plan pass its price check at ₹0.
+			is_free_bundle_item: c.is_free_bundle_item ? 1 : 0,
 			// GoFix service rows — consolidated repair billing (bifurcated
 			// from retail rows server-side: no stock, no MSP, repair gates).
 			is_service:       c.is_service || false,
@@ -3272,6 +3275,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			original_invoice_reason:        this._original_invoice_reason || (vas_source_invoice ? "VAS After Sale" : null),
 			advance_amount:                 advance > 0 ? advance : 0,
 			sales_order:                    PosState.sales_order_reference || null,
+			// Billing a proforma (My Proformas → Sale): marks it Billed.
+			source_quotation:               PosState.source_quotation || null,
 			kiosk_token:                    PosState.kiosk_token || null,
 			guided_session:                 PosState.guided_session || null,
 			exception_request:              PosState.exception_request || null,

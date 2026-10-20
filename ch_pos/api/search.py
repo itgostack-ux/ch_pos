@@ -372,11 +372,15 @@ def pos_item_search(
             all_bins = frappe.get_all(
                 "Bin",
                 filters={"item_code": ("in", item_codes), "warehouse": warehouse},
-                fields=["item_code", "actual_qty"],
+                fields=["item_code", "actual_qty", "reserved_qty"],
                 limit_page_length=related_limit + 1,
             )
             _ensure_search_limit(all_bins, related_limit, frappe._("Item stock rows"))
         stock_map = {b.item_code: flt(b.actual_qty) for b in all_bins}
+        # Units promised on open pre-bookings (Sales Order reservations). For
+        # serialised items this is replaced below by the count of reserved
+        # IMEIs -- the same rule that keeps them out of the IMEI picker.
+        prebooked_map = {b.item_code: flt(b.reserved_qty) for b in all_bins if flt(b.reserved_qty) > 0}
 
         # For serial-tracked items, use count of Active serials (stays in sync with IMEI picker)
         if warehouse:
@@ -396,6 +400,24 @@ def pos_item_search(
                 )
                 for sc in serial_counts:
                     stock_map[sc.item_code] = sc.cnt
+                active = frappe.db.sql(
+                    """SELECT name, item_code FROM `tabSerial No`
+                       WHERE item_code IN %(item_codes)s AND warehouse = %(warehouse)s
+                         AND status = 'Active'""",
+                    {"item_codes": serial_item_codes, "warehouse": warehouse},
+                    as_dict=True,
+                )
+                for code in serial_item_codes:
+                    prebooked_map.pop(code, None)
+                if active:
+                    from ch_pos.api.pos_api import _get_blocked_serials_for_sale
+                    reserved, _exchange = _get_blocked_serials_for_sale(
+                        [a.name for a in active], warehouse, include_exchange=False)
+                    item_of = {a.name: a.item_code for a in active}
+                    for sn in reserved or {}:
+                        code = item_of.get(sn)
+                        if code:
+                            prebooked_map[code] = prebooked_map.get(code, 0) + 1
 
         # Batch-fetch active offers
         today = frappe.utils.today()
@@ -482,6 +504,7 @@ def pos_item_search(
 
             # Stock
             row.stock_qty = stock_map.get(row.item_code, 0)
+            row.prebooked_qty = prebooked_map.get(row.item_code, 0)
 
             # Offers
             row.offers = offers_map.get(row.item_code, [])

@@ -1143,7 +1143,7 @@ export class SessionControls {
 							const abs_var = Math.abs(variance);
 							const indicator = abs_var <= accept_limit ? "green"
 								: abs_var <= approval_limit ? "orange" : "red";
-							frappe.msgprint({
+							const recorded = frappe.msgprint({
 								title: __("Settlement Recorded"),
 								indicator: indicator,
 								message: `
@@ -1155,15 +1155,19 @@ export class SessionControls {
 									</table>
 									<div class="text-muted small">${petty.rows.length
 										? __("Petty cash logged. Session is now Pending Close.")
-										: __("Session is now Pending Close.")}</div>`,
+										: __("Session is now Pending Close.")}
+										${__("Close Session opens when you close this.")}</div>`,
 							});
-							if (!is_current_session) {
-								// This was the "settle your stale session first"
-								// flow (session:force_settle) — chain straight
-								// into Close Session for that same session so
-								// the operator doesn't have to hunt for a
-								// second button.
-								this._closing_dashboard.show(target_session);
+							// Settlement is the step before Close Session: chain
+							// straight into it for the session just settled, so
+							// the cashier does not hunt for a second button. It
+							// opens once the variance above has been read and
+							// dismissed. one(): frappe reuses this message dialog.
+							const open_close = () => this._closing_dashboard.show(target_session);
+							if (recorded && recorded.$wrapper) {
+								recorded.$wrapper.one("hidden.bs.modal", open_close);
+							} else {
+								open_close();
 							}
 						}
 					},
@@ -1245,7 +1249,12 @@ export class SessionControls {
 				apply_count_mode();
 				refresh_totals();
 			});
-			dlg.fields_dict.actual_closing_cash.$input.on("input change", () => {
+			// The field starts read-only, so its <input> does not exist yet:
+			// `.$input.on(...)` threw here and every handler below (the
+			// denomination boxes included) was never bound -- the grid stayed
+			// ₹0 and the count went in as 0. Listen on the wrapper instead; it
+			// also catches the input made when "Enter counted total" unlocks it.
+			dlg.fields_dict.actual_closing_cash.$wrapper.on("input change", "input", () => {
 				if (!counting_by_denomination()) refresh_totals();
 			});
 			apply_count_mode();

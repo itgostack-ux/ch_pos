@@ -625,7 +625,7 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
                        delivery_date=None, sales_executive=None, sale_reference=None,
                        reserve_stock=1, client_request_id=None,
                        mode_of_payment=None, payment_reference_no=None,
-                       payments=None) -> dict:
+                       payments=None, kiosk_token=None, source_quotation=None) -> dict:
     """Create a reservation-style Sales Order for pre-booking / advance orders.
 
     When ``advance_amount`` > 0 and ``mode_of_payment`` is provided, a Draft
@@ -838,6 +838,20 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
                         "pending": max(need_qty - max(avail, 0.0), 0.0),
                     })
 
+    # Proforma this pre-booking was converted from: each line is linked to its
+    # quotation line (ERPNext's own prevdoc link), so on submit ERPNext marks
+    # the proforma Ordered and the My Proformas list can show it Pre-Booked.
+    qtn_lines = {}
+    if source_quotation:
+        qtn = frappe.db.get_value("Quotation", source_quotation,
+                                  ["name", "docstatus", "party_name", "company"], as_dict=True)
+        if qtn and qtn.docstatus == 1 and qtn.party_name == customer and qtn.company == profile.company:
+            for qi in frappe.get_all("Quotation Item", filters={"parent": qtn.name},
+                                     fields=["name", "item_code"], order_by="idx"):
+                qtn_lines.setdefault(qi.item_code, []).append(qi.name)
+        else:
+            source_quotation = None
+
     for item in items:
         serial = "\n".join(_split_serial_blob(item.get("serial_no") or ""))
         row = {
@@ -853,6 +867,9 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         # serial out of the Sellable bin on pickup.
         if has_custom_serial and serial:
             row["custom_serial_no"] = serial
+        if source_quotation and qtn_lines.get(row["item_code"]):
+            row["prevdoc_docname"] = source_quotation
+            row["quotation_item"] = qtn_lines[row["item_code"]].pop(0)
         so.append("items", row)
 
     if sales_executive and so.meta.has_field("custom_sales_executive"):
@@ -1010,7 +1027,8 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
         for r in pay_rows:
             try:
                 pe_name = _create_pre_booking_advance_pe(
-                    so, r["mode_of_payment"], flt(r["amount"]), r.get("reference_no")
+                    so, r["mode_of_payment"], flt(r["amount"]), r.get("reference_no"),
+                    pos_session=_prebook_pos_session(pos_profile),
                 )
                 advance_pe_names.append(pe_name)
                 pe_docstatus = cint(frappe.db.get_value("Payment Entry", pe_name, "docstatus") or 0)
@@ -1028,6 +1046,11 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
                     f"Pre-booking advance PE failed for {so.name} / {r.get('mode_of_payment')}")
 
     advance_pe_name = advance_pe_names[0] if advance_pe_names else None
+
+    # The queue visit this pre-booking came from ends here: the token is
+    # Converted, pointing at the pre-booking. Its pickup bill reuses it.
+    if kiosk_token and so.docstatus == 1:
+        _convert_token_to_prebooking(kiosk_token, so, pos_profile)
 
     prebook_warning = None
     warning_bits = []
@@ -1074,7 +1097,8 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
 
 
 def _create_pre_booking_advance_pe(so, mode_of_payment: str, amount: float,
-                                   reference_no: str | None = None) -> str:
+                                   reference_no: str | None = None,
+                                   pos_session: str | None = None) -> str:
     """Create a Draft Payment Entry against ``so`` for ``amount``.
 
     Mirrors ``ch_payments.advance_payments.create_advance_from_quotation``
@@ -1127,8 +1151,53 @@ def _create_pre_booking_advance_pe(so, mode_of_payment: str, amount: float,
     })
     pe.remarks = _("Pre-booking advance against Sales Order {0}").format(so.name)
     apply_cost_center(pe, warehouse=so.set_warehouse)
+    if pos_session and pe.meta.has_field("custom_ch_pos_session"):
+        pe.custom_ch_pos_session = pos_session
     pe.insert()
+
+    # Collected at the counter: posted now through the workflow's
+    # "POS Direct Submit" step (open only to POS-session entries), so the
+    # advance counts against the balance at once. Where that step is not
+    # available the entry stays a draft for Accounts to approve, as before.
+    if pe.get("custom_ch_pos_session"):
+        from frappe.model.workflow import apply_workflow, get_transitions, get_workflow_name
+        if get_workflow_name("Payment Entry"):
+            if any(t.action == "POS Direct Submit" for t in get_transitions(pe)):
+                apply_workflow(pe, "POS Direct Submit")
+        else:
+            pe.submit()
     return pe.name
+
+
+def _convert_token_to_prebooking(kiosk_token, so, pos_profile) -> None:
+    token = frappe.db.get_value(
+        "POS Kiosk Token", kiosk_token, ["name", "pos_profile", "status"], as_dict=True)
+    if not token or token.pos_profile != pos_profile:
+        return
+    if token.status in ("Completed", "Cancelled", "Converted", "Dropped", "Expired"):
+        return
+    frappe.db.set_value("POS Kiosk Token", token.name, {
+        "status": "Converted",
+        "converted_sales_order": so.name,
+        "exit_at": now_datetime(),
+    })
+    if frappe.get_meta("Sales Order").has_field("custom_kiosk_token"):
+        frappe.db.set_value("Sales Order", so.name, "custom_kiosk_token", token.name,
+                            update_modified=False)
+    try:
+        from ch_pos.api.token_api import release_pos_billing
+        release_pos_billing(token_name=token.name, pos_profile=pos_profile, revert_current=0)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Failed to release queue token after pre-booking {so.name}")
+
+
+def _prebook_pos_session(pos_profile) -> str | None:
+    """The open POS session of the till taking the advance, if any."""
+    if not pos_profile:
+        return None
+    from ch_pos.pos_core.doctype.ch_pos_session.ch_pos_session import get_active_session
+    active = get_active_session(pos_profile)
+    return active.get("name") if active else None
 
 
 @frappe.whitelist(methods=["POST"])
@@ -2082,8 +2151,16 @@ def _write_item_calculations(si_name):
     has_pev = sii_meta.has_field("purchase_exempted_value")
     has_taxable_val = sii_meta.has_field("taxable_value")
 
-    si_items = frappe.db.sql("""
-        SELECT name, item_code, qty, rate, serial_no, item_tax_template
+    # India Compliance's per-line GST split (rates on the line, amounts it
+    # worked out on the full inclusive rate). The amounts are rewritten below
+    # from row_tax, so a margin-scheme line carries GST on its taxable part only.
+    sii_cols = _get_table_columns("tabSales Invoice Item")
+    gst_parts = [p for p in ("igst", "sgst", "cess", "cgst")
+                 if f"{p}_rate" in sii_cols and f"{p}_amount" in sii_cols]
+    gst_rate_cols = "".join(f", {p}_rate" for p in gst_parts)
+
+    si_items = frappe.db.sql(f"""
+        SELECT name, item_code, qty, rate, serial_no, item_tax_template{gst_rate_cols}
         FROM `tabSales Invoice Item`
         WHERE parent = %s ORDER BY idx
     """, (si_name), as_dict=True)
@@ -2179,6 +2256,24 @@ def _write_item_calculations(si_name):
         if si_gst_field:
             set_parts.append(f"`{si_gst_field}` = %(gst)s")
             params["gst"] = row_tax
+
+        # Per-line CGST / SGST / IGST (and cess) = row_tax split by the line's
+        # own rates, CGST taking the rounding paisa -- the same split the tax
+        # rows get, so the lines add up to them exactly.
+        rated = [(p, flt(si_item.get(f"{p}_rate"))) for p in gst_parts]
+        rate_sum = sum(r for _p, r in rated if r > 0)
+        if rate_sum > 0:
+            given = 0.0
+            live = [(p, r) for p, r in rated if r > 0]
+            for i, (part, part_rate) in enumerate(live):
+                share = (flt(row_tax - given, 2) if i == len(live) - 1
+                         else flt(row_tax * part_rate / rate_sum, 2))
+                given += share
+                set_parts.append(f"`{part}_amount` = %({part}_amt)s")
+                params[f"{part}_amt"] = share
+            for part, part_rate in rated:
+                if part_rate <= 0:
+                    set_parts.append(f"`{part}_amount` = 0")
 
         try:
             frappe.db.sql(f"""
@@ -2386,7 +2481,10 @@ def _write_tax_rows_and_header(si_name, totals):
     rounded_total = flt(round(grand_total), 2)
     rounding_adj = flt(rounded_total - grand_total, 2)
     paid_amount = flt(frappe.db.get_value("Sales Invoice", si_name, "paid_amount") or 0, 2)
-    outstanding = flt(grand_total - paid_amount, 2)
+    # An advance adjusted on the bill settles that much too; leaving it out
+    # showed a fully-settled pickup as still owing the advance.
+    total_advance = flt(frappe.db.get_value("Sales Invoice", si_name, "total_advance") or 0, 2)
+    outstanding = flt(grand_total - paid_amount - total_advance, 2)
 
     try:
         frappe.db.sql("""
@@ -2941,7 +3039,32 @@ def _allocate_customer_advances(inv, advance_amount, customer, company):
     if not customer or customer == "Walk-in Customer":
         frappe.throw(_("Advance adjustment requires an identified customer."))
 
-    rows = get_customer_advances(customer, company=company)
+    # Advances paid against the Sales Order(s) this bill is made from (a
+    # pre-booking's advance) come first. They are linked to the order, so the
+    # unallocated query below never saw them and Bill & Pickup refused its own
+    # advance ("unallocated advance balance 0.00"). Each carries its Payment
+    # Entry Reference row; on submit ERPNext moves that allocation from the
+    # order to this invoice (Sales Invoice Advance.reference_row).
+    orders = sorted({it.get("sales_order") for it in (inv.get("items") or []) if it.get("sales_order")})
+    order_rows = []
+    if orders:
+        order_rows = frappe.db.sql(
+            """
+            SELECT pe.name, per.name AS reference_row, per.allocated_amount AS balance
+              FROM `tabPayment Entry Reference` per
+              JOIN `tabPayment Entry` pe ON pe.name = per.parent
+             WHERE per.reference_doctype = 'Sales Order'
+               AND per.reference_name IN %(orders)s
+               AND per.allocated_amount > 0
+               AND pe.docstatus = 1 AND pe.payment_type = 'Receive'
+               AND pe.party_type = 'Customer' AND pe.party = %(customer)s
+               AND pe.company = %(company)s
+             ORDER BY pe.posting_date, pe.name
+            """,
+            {"orders": orders, "customer": customer, "company": company},
+            as_dict=True,
+        )
+    rows = list(order_rows) + list(get_customer_advances(customer, company=company))
     available = sum(flt(r.get("balance")) for r in rows)
     if requested > available + 0.01:
         frappe.throw(
@@ -2957,13 +3080,16 @@ def _allocate_customer_advances(inv, advance_amount, customer, company):
         if remaining <= 0.005:
             break
         take = min(flt(r.get("balance")), remaining)
-        inv.append("advances", {
+        adv_row = {
             "doctype": "Sales Invoice Advance",
             "reference_type": "Payment Entry",
             "reference_name": r.get("name"),
             "advance_amount": flt(r.get("balance")),
             "allocated_amount": take,
-        })
+        }
+        if r.get("reference_row"):
+            adv_row["reference_row"] = r.get("reference_row")
+        inv.append("advances", adv_row)
         remaining -= take
     return requested - max(remaining, 0.0)
 
@@ -3158,6 +3284,13 @@ def create_pos_invoice(
     inv.custom_ch_pos_session = session_name
     inv.pos_profile = pos_profile
     inv.customer = customer
+    # Billed from a proforma (My Proformas → Sale): recorded so the proforma
+    # reads Billed. Only the customer's own submitted proforma of this company.
+    if source_quotation and inv.meta.has_field("custom_source_quotation"):
+        _q = frappe.db.get_value("Quotation", source_quotation,
+                                 ["docstatus", "party_name", "company"], as_dict=True)
+        if _q and _q.docstatus == 1 and _q.party_name == customer and _q.company == profile.company:
+            inv.custom_source_quotation = source_quotation
     inv.company = profile.company
     pos_cost_center = profile.cost_center or frappe.db.get_value(
         "Company", profile.company, "cost_center"
@@ -3700,6 +3833,9 @@ def create_pos_invoice(
                 "external_intent": 1 if item.get("customer_imei") else 0,
                 "external_device_model_item": item.get("external_device_model_item"),
             })
+
+    # FIFO judged against the whole bill (see _assert_bill_fifo).
+    _assert_bill_fifo(inv)
 
     profile_payment_modes = {
         row.mode_of_payment for row in (profile.payments or []) if row.mode_of_payment
@@ -4272,6 +4408,13 @@ def create_pos_invoice(
         workflow_name = get_workflow_name(inv.doctype)
         if workflow_name:
             apply_workflow(inv, "POS Direct Submit")
+            # apply_workflow reloads the invoice from the database before it
+            # submits, so the Approval State set above was dropped and POS
+            # bills were left "Draft" next to an Approved workflow state.
+            if inv.meta.has_field("custom_si_approval_state"):
+                frappe.db.set_value("Sales Invoice", inv.name,
+                                    "custom_si_approval_state", "Approved",
+                                    update_modified=False)
         else:
             inv.submit()
 
@@ -4300,6 +4443,17 @@ def create_pos_invoice(
         # GL rows. Paid invoices must still pass the normal balanced repost.
         if abs(flt((totals or {}).get("total_net"))) > 0.005:
             _rewrite_gl_entries(inv.name, totals)
+
+        # ---------- 7a. Advances adjusted on this bill ----------
+        # ERPNext reconciles a Sales Invoice's advances on submit only when it
+        # is NOT a POS invoice (SalesInvoice.on_submit), so the advance Payment
+        # Entry stayed linked to the pre-booking order and the invoice was
+        # never settled by it. Do that reconciliation here: each advance's
+        # allocation moves onto this invoice (reference_row for an order-linked
+        # advance), exactly as a desk invoice would do it.
+        if inv.get("advances"):
+            _adv_inv = frappe.get_doc("Sales Invoice", inv.name)
+            _adv_inv.update_against_document_in_jv()
 
         # ---------- 7b. LEDGER-INTEGRITY BACKSTOP ----------
         # The 2026-07-20..30 incident: a post-submit GL rewrite deleted the
@@ -7318,8 +7472,15 @@ def validate_serial_for_sale(
     warehouse,
     allow_fifo_override=0,
     override_reason=None,
-    override_remarks=None) -> dict:
+    override_remarks=None,
+    in_cart_serials=None) -> dict:
     """Validate a serial number can be sold from this warehouse, enforcing FIFO.
+
+    ``in_cart_serials`` -- IMEIs already in this cart. They are not the "oldest
+    unit to sell first" any more (they are being sold now), so FIFO is judged
+    against the oldest unit NOT already in the cart. The bill is re-checked the
+    same way at creation (:func:`_assert_bill_fifo`), so a list sent here
+    cannot carry a skipped unit past billing.
 
     If a FIFO violation is detected and allow_fifo_override is falsy, returns
     ``{valid: False, fifo_violation: True, oldest_serial, oldest_date,
@@ -7395,19 +7556,13 @@ def validate_serial_for_sale(
 
     # ── FIFO enforcement ────────────────────────────────────────────────────
     if not fifo_override:
-        oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse)
+        if isinstance(in_cart_serials, str):
+            in_cart_serials = frappe.parse_json(in_cart_serials) if in_cart_serials.strip() else []
+        cart = [s for s in (in_cart_serials or []) if str(s or "").strip() != serial_no]
+        oldest_serial, oldest_date = _get_oldest_fifo_serial(item_code, warehouse, exclude=cart)
         if oldest_serial and oldest_serial != serial_no:
             # Determine the receipt date of the selected serial (for display in the dialog).
-            selected_date_row = frappe.db.sql("""
-                SELECT MIN(DATE(sbb.posting_datetime)) AS received_date
-                FROM `tabSerial and Batch Entry` sbe
-                JOIN `tabSerial and Batch Bundle` sbb
-                    ON sbe.parent = sbb.name
-                    AND sbb.type_of_transaction = 'Inward'
-                    AND sbb.docstatus = 1
-                WHERE sbe.serial_no = %s
-            """, serial_no, as_dict=True)
-            selected_date = selected_date_row[0].received_date if selected_date_row else None
+            selected_date = _serial_received_date(serial_no)
 
             # Only warn when the selected serial was received STRICTLY AFTER the
             # oldest one.  Same-day receipts belong to the same inward batch —
@@ -10414,9 +10569,11 @@ def scan_for_stock_transfer(barcode, from_warehouse):
 # reserved. After this grace window the reservation lapses and the device
 # returns to sellable stock (professional-ERP reservation-expiry behaviour).
 def _prebook_hold_grace_days() -> int:
+    # 0 (the default) releases an unbilled pre-booking's IMEIs the day after
+    # its Delivery Date; a positive value holds them that many days longer.
     return max(
         0,
-        min(cint(get_control_setting("prebook_hold_grace_days", 2) or 0), 365))
+        min(cint(get_control_setting("prebook_hold_grace_days", 0) or 0), 365))
 
 
 def _reserved_serials_on_so(so) -> set:
@@ -17244,8 +17401,67 @@ def _get_proforma_quotations(
 # FIFO Enforcement
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _get_oldest_fifo_serial(item_code, warehouse):
+def _serial_received_date(serial_no):
+    """First inward date of a serial -- the FIFO date of the unit being sold."""
+    row = frappe.db.sql("""
+        SELECT MIN(DATE(sbb.posting_datetime)) AS received_date
+        FROM `tabSerial and Batch Entry` sbe
+        JOIN `tabSerial and Batch Bundle` sbb
+            ON sbe.parent = sbb.name
+            AND sbb.type_of_transaction = 'Inward'
+            AND sbb.docstatus = 1
+        WHERE sbe.serial_no = %s
+    """, serial_no, as_dict=True)
+    return row[0].received_date if row else None
+
+
+def _assert_bill_fifo(inv):
+    """Bill-level FIFO check: every serial sold without a FIFO exception must
+    not skip an older unit that is NOT on this bill.
+
+    The cart check (validate_serial_for_sale) is told which IMEIs are already in
+    the cart, and that list comes from the browser. Re-judging here against the
+    bill's own serials keeps that honest: a bill carrying the oldest unit and a
+    newer one passes; a bill carrying only the newer one (oldest removed from
+    the cart afterwards, or a hand-made request) is refused unless that line
+    has a FIFO exception reason. Same-day receipts count as equal, as at cart.
+
+    Pre-booking pickups (sales_order) and exchange-order new devices are
+    skipped -- their unit was fixed when the order was taken.
+    """
+    on_bill = set()
+    for it in inv.items:
+        on_bill.update(_split_serials(it.serial_no or ""))
+    for it in inv.items:
+        if not it.serial_no or flt(it.qty) <= 0:
+            continue
+        if (it.get("custom_fifo_override_reason") or it.get("sales_order")
+                or not it.warehouse):
+            continue
+        for sn in _split_serials(it.serial_no):
+            if _is_exchange_order_new_device(sn):
+                continue
+            oldest, oldest_date = _get_oldest_fifo_serial(it.item_code, it.warehouse, exclude=on_bill)
+            if not oldest:
+                break
+            sold_date = _serial_received_date(sn)
+            if oldest_date and sold_date and getdate(sold_date) > getdate(oldest_date):
+                frappe.throw(
+                    _("Older stock exists for {0}: {1} (received {2}) must be sold before {3} "
+                      "(received {4}). Add {1} to this bill, or record a FIFO exception "
+                      "reason for {3}.").format(
+                        it.item_code, oldest, frappe.format(oldest_date, "Date"),
+                        sn, frappe.format(sold_date, "Date")),
+                    title=_("Older Stock Exists"))
+
+
+def _get_oldest_fifo_serial(item_code, warehouse, exclude=None):
     """Return (serial_no, received_date) for the oldest FIFO serial in the warehouse.
+
+    ``exclude`` -- serials already taken by the sale being built (in the cart,
+    or on the bill). They are still in stock until the bill is submitted, so
+    without this the unit already in the cart stays "the oldest" and every
+    further unit of the same item trips the FIFO exception.
 
     Uses SNBB net-balance to determine what is currently in stock, then finds
     the one whose **most recent** inward into THIS warehouse is the earliest.
@@ -17260,6 +17476,7 @@ def _get_oldest_fifo_serial(item_code, warehouse):
     warehouse and use the latest such inward as the received-date, then take
     the minimum across serials to find the FIFO leader.
     """
+    exclude = {str(s).strip() for s in (exclude or []) if str(s or "").strip()}
     # The FIFO leader must be a serial the cashier can actually pick, so this
     # applies the SAME gates as search.get_available_serials: Active Serial No
     # in this warehouse, Sellable (or untagged) CH Stock Bin, not reserved on
@@ -17295,8 +17512,8 @@ def _get_oldest_fifo_serial(item_code, warehouse):
         WHERE (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
         GROUP BY available.serial_no
         ORDER BY received_date ASC, available.serial_no ASC
-        LIMIT 10
-    """, (item_code, warehouse, warehouse, warehouse), as_dict=True)
+        LIMIT %s
+    """, (item_code, warehouse, warehouse, warehouse, 10 + len(exclude)), as_dict=True)
 
     if not rows:
         # Fallback: use Serial No document creation timestamp on sites that do
@@ -17308,10 +17525,12 @@ def _get_oldest_fifo_serial(item_code, warehouse):
             WHERE sn.item_code = %s AND sn.warehouse = %s AND sn.status = 'Active'
               AND (sb.bin_type IS NULL OR sb.bin_type = 'Sellable')
             ORDER BY sn.creation ASC, sn.name ASC
-            LIMIT 10
-        """, (item_code, warehouse), as_dict=True)
+            LIMIT %s
+        """, (item_code, warehouse, 10 + len(exclude)), as_dict=True)
 
     for row in rows:
+        if row.serial_no in exclude:
+            continue
         if _get_open_reserved_sales_order_for_serial(row.serial_no, warehouse):
             continue
         if _is_exchange_order_new_device(row.serial_no):
@@ -17554,7 +17773,7 @@ def get_bundle_items(item_code, warehouse=None, channel="POS") -> list:
         if row.item_code in (item_code, parent):
             continue
 
-        item_fields = ["item_name", "image", "item_group", "stock_uom", "has_serial_no"]
+        item_fields = ["item_name", "image", "item_group", "stock_uom", "has_serial_no", "is_stock_item"]
         if frappe.db.has_column("Item", "ch_item_type"):
             item_fields.append("ch_item_type")
         if frappe.db.has_column("Item", "ch_allow_zero_rate"):
@@ -17590,6 +17809,9 @@ def get_bundle_items(item_code, warehouse=None, channel="POS") -> list:
             "item_group": item.item_group,
             "stock_uom": item.stock_uom,
             "has_serial_no": cint(item.has_serial_no),
+            # Stock products must be scanned before they reach the cart; plans
+            # and services (non-stock) are added straight from the gift popup.
+            "is_stock_item": cint(item.is_stock_item),
             "ch_item_type": (item.get("ch_item_type") or "") if item else "",
             "ch_allow_zero_rate": cint(item.get("ch_allow_zero_rate")) if item else 0,
             "selling_price": selling_price,
@@ -17597,9 +17819,24 @@ def get_bundle_items(item_code, warehouse=None, channel="POS") -> list:
             "stock_qty": stock_qty,
             "bundle_qty": flt(row.qty),
             "is_free_bundle_item": 1,
+            # A warranty / protection plan's service item: the POS attaches it
+            # to the device as a free plan line (no stock involved).
+            **_bundle_gift_plan(row.item_code),
         })
 
     return result
+
+
+def _bundle_gift_plan(item_code) -> dict:
+    """The active, sellable plan whose service item is this bundle gift, if any."""
+    plan = frappe.db.get_value(
+        "CH Warranty Plan",
+        {"service_item": item_code, "status": "Active", "is_sellable": 1},
+        ["name", "plan_name", "plan_type"],
+        as_dict=True)
+    if not plan:
+        return {}
+    return {"warranty_plan": plan.name, "plan_name": plan.plan_name, "plan_type": plan.plan_type}
 
 
 def _post_free_sale_write_off(inv) -> None:
@@ -18147,6 +18384,37 @@ def list_my_proformas(pos_profile, status=None, search=None,
     for it in items:
         items_by_parent.setdefault(it.parent, []).append(it)
 
+    # What each proforma became: a pre-booking (Sales Order lines linked to
+    # it) and/or a bill -- billed directly from the proforma, or the pickup
+    # bill of its pre-booking.
+    prebooked = {}
+    for row in frappe.db.sql(
+        """SELECT DISTINCT soi.prevdoc_docname AS qtn, so.name
+             FROM `tabSales Order Item` soi JOIN `tabSales Order` so ON so.name = soi.parent
+            WHERE soi.prevdoc_docname IN %(p)s AND so.docstatus = 1""",
+        {"p": tuple(qtn_names)}, as_dict=True):
+        prebooked.setdefault(row.qtn, row.name)
+    billed = {}
+    if frappe.db.has_column("Sales Invoice", "custom_source_quotation"):
+        for row in frappe.db.sql(
+            """SELECT custom_source_quotation AS qtn, name FROM `tabSales Invoice`
+                WHERE custom_source_quotation IN %(p)s AND docstatus = 1 AND is_return = 0
+                ORDER BY creation""",
+            {"p": tuple(qtn_names)}, as_dict=True):
+            billed.setdefault(row.qtn, row.name)
+    so_names = tuple(set(prebooked.values()))
+    if so_names:
+        so_bill = {}
+        for row in frappe.db.sql(
+            """SELECT DISTINCT sii.sales_order AS so, si.name FROM `tabSales Invoice Item` sii
+                 JOIN `tabSales Invoice` si ON si.name = sii.parent
+                WHERE sii.sales_order IN %(s)s AND si.docstatus = 1 AND si.is_return = 0""",
+            {"s": so_names}, as_dict=True):
+            so_bill.setdefault(row.so, row.name)
+        for qtn, so in prebooked.items():
+            if qtn not in billed and so in so_bill:
+                billed[qtn] = so_bill[so]
+
     today = getdate(nowdate())
     out = []
     for r in rows:
@@ -18170,6 +18438,8 @@ def list_my_proformas(pos_profile, status=None, search=None,
             "contact_mobile": r.contact_mobile,
             "contact_email": r.contact_email,
             "items": items_by_parent.get(r.name, []),
+            "prebooked_so": prebooked.get(r.name),
+            "billed_invoice": billed.get(r.name),
             "print_format": "Proforma Invoice",
             "print_url": "/printview?doctype=Quotation"
                          f"&name={frappe.utils.escape_html(r.name)}"
