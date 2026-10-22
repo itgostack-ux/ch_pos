@@ -12359,10 +12359,26 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
 
 
 @frappe.whitelist()
+def _assert_transfer_access(se, ptype, warehouses) -> None:
+    """Stock Entry role permission + one of the transfer's own warehouses.
+
+    A store's User Permissions list only its own warehouses, so Frappe's
+    document check hides a hub-to-store transfer from the receiving store
+    (the item row's source is the hub). Being allowed to open one of the
+    transfer's warehouses (User Permissions + warehouse scope) is the
+    store-level test instead; other stores' transfers stay out of reach.
+    """
+    if not frappe.has_permission("Stock Entry", ptype):
+        frappe.throw(frappe._("You are not permitted to {0} Stock Entries.").format(ptype),
+                     frappe.PermissionError)
+    if not any(frappe.has_permission("Warehouse", "read", doc=w)
+               for w in dict.fromkeys(w for w in warehouses if w)):
+        frappe.throw(frappe._("This transfer is not for your store."), frappe.PermissionError)
+
+
 def get_stock_transfer_items(stock_entry) -> dict:
     """Return line items of a Stock Entry for the receive dialog."""
     se = frappe.get_doc("Stock Entry", stock_entry)
-    se.check_permission("read")
     warehouses = [se.from_warehouse, se.to_warehouse]
     warehouses.extend(
         value
@@ -12370,6 +12386,7 @@ def get_stock_transfer_items(stock_entry) -> dict:
         for value in (row.s_warehouse, row.t_warehouse)
         if value
     )
+    _assert_transfer_access(se, "read", warehouses)
     assert_any_warehouse_scope(warehouses, company=se.company)
     if se.stock_entry_type != "Material Transfer":
         frappe.throw(frappe._("Not a Material Transfer"))
@@ -12468,10 +12485,9 @@ def receive_stock_transfer(stock_entry, received_items) -> dict:
 def pos_scan_receive(stock_entry, barcode) -> dict:
     """Scan a barcode/IMEI during POS receive. Delegates to ch_erp15 transit workflow."""
     se = frappe.get_doc("Stock Entry", stock_entry)
-    se.check_permission("read")
-    assert_any_warehouse_scope(
-        [se.to_warehouse] + [row.t_warehouse for row in (se.items or []) if row.t_warehouse],
-        company=se.company)
+    destinations = [se.to_warehouse] + [row.t_warehouse for row in (se.items or []) if row.t_warehouse]
+    _assert_transfer_access(se, "read", destinations)
+    assert_any_warehouse_scope(destinations, company=se.company)
     from ch_erp15.ch_erp15.custom.stock_entry import pos_scan_receive as _scan
     return _scan(stock_entry=stock_entry, barcode=barcode)
 
@@ -12480,10 +12496,9 @@ def pos_scan_receive(stock_entry, barcode) -> dict:
 def pos_confirm_receive(stock_entry) -> dict:
     """Confirm receive after scanning. Delegates to ch_erp15 transit workflow."""
     se = frappe.get_doc("Stock Entry", stock_entry)
-    se.check_permission("submit")
-    assert_any_warehouse_scope(
-        [se.to_warehouse] + [row.t_warehouse for row in (se.items or []) if row.t_warehouse],
-        company=se.company)
+    destinations = [se.to_warehouse] + [row.t_warehouse for row in (se.items or []) if row.t_warehouse]
+    _assert_transfer_access(se, "submit", destinations)
+    assert_any_warehouse_scope(destinations, company=se.company)
     from ch_erp15.ch_erp15.custom.stock_entry import pos_confirm_receive as _confirm
     return _confirm(stock_entry=stock_entry)
 
