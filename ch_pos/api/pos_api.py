@@ -742,8 +742,9 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
                     })
 
         for serial in serials:
-            # Cross-row uniqueness within the same cart
-            if serial in seen_in_cart and seen_in_cart[serial] != item_code:
+            # Cross-row uniqueness within the same cart -- one unit, one row,
+            # whether the second row is the same item or another one.
+            if serial in seen_in_cart:
                 frappe.throw(
                     frappe._("IMEI {0} appears on more than one item in the cart.")
                     .format(serial),
@@ -995,12 +996,17 @@ def create_pre_booking(pos_profile, customer, items, advance_amount=0, notes=Non
     advance_pe_warning = None
 
     pay_rows: list[dict] = []
+    if flt(advance_amount) < 0:
+        frappe.throw(_("Advance amount cannot be negative."), title=_("Invalid Advance"))
     if payments:
         if isinstance(payments, str):
             payments = frappe.parse_json(payments)
         for r in (payments or []):
             mop = (r.get("mode_of_payment") or "").strip()
             amt = flt(r.get("amount"))
+            if amt < 0:
+                frappe.throw(_("Advance payment amount cannot be negative ({0}: {1}).").format(
+                    mop or _("no payment mode"), fmt_money(amt, currency=so.currency)), title=_("Invalid Advance"))
             if not mop or amt <= 0:
                 continue
             pay_rows.append({
@@ -3094,6 +3100,161 @@ def _allocate_customer_advances(inv, advance_amount, customer, company):
     return requested - max(remaining, 0.0)
 
 
+# Free Sale reason that, against a recent original invoice, needs no approval.
+FREE_GIFT_CLAIM_REASON = "Free Gift Not Given at Sale"
+# Something owed from the original sale, handed over later. Against an original
+# invoice inside the claim window these need no manager approval; any other
+# reason (Other) does. Must match the payment dialog's Reason options.
+FREE_GIFT_CLAIM_REASONS = (
+    FREE_GIFT_CLAIM_REASON,
+    "Free Gift Out of Stock at Sale",
+    "Bundle Item Not Given at Sale",
+    "Offer / Scheme Gift Pending",
+    "Accessory Missing in Box",
+    "Free Screen Guard / Cover Not Given",
+    "Wrong Free Gift Given at Sale",
+)
+
+
+def _refuse_vas_on_free_sale(items) -> None:
+    """Free Sale carries no VAS / Protection plans (sale-type matrix)."""
+    rows = frappe.parse_json(items) if isinstance(items, str) else (items or [])
+    plans = {r.get("warranty_plan") for r in rows if isinstance(r, dict) and r.get("warranty_plan")}
+    if plans and frappe.get_all("CH Warranty Plan",
+            filters={"name": ("in", list(plans)),
+                     "plan_type": ("in", ["Value Added Service", "Protection Plan"])},
+            limit=1):
+        frappe.throw(_("VAS and Protection plans cannot be given in a Free Sale. Remove the plan, "
+                       "or bill it with another sale type."), title=_("Not Allowed in Free Sale"))
+
+
+def _refuse_exception_on_free_sale(items, exception_request=None, label="Free Sale") -> None:
+    """Free, Finance and Supplier Sale carry no Bill Exception (sale-type rules)."""
+    rows = frappe.parse_json(items) if isinstance(items, str) else (items or [])
+    if exception_request or any(isinstance(r, dict) and (r.get("exception_request") or "").strip() for r in rows):
+        frappe.throw(_("Exceptions cannot be used in a {0}. Remove the exception, or bill it with "
+                       "another sale type.").format(_(label)), title=_("Not Allowed in {0}").format(_(label)))
+
+
+def _is_supplier_sale_type(sale_type):
+    """Supplier Sale (code SS) takes full, partial or zero payment."""
+    if not sale_type:
+        return False
+    return (frappe.db.get_value("CH Sale Type", sale_type, "code") or "").upper() == "SS"
+
+
+def _is_finance_sale_type(sale_type) -> bool:
+    """Finance Sale (code FS, or an EMI / finance type) -- same rule as the POS."""
+    if not sale_type:
+        return False
+    name = str(sale_type).lower()
+    code = (frappe.db.get_value("CH Sale Type", sale_type, "code") or "").upper()
+    return code == "FS" or "finance" in name or "emi" in name
+
+
+def _refuse_discounts_for_sale_type(items, coupon_code, voucher_code, add_pct, add_amt, label) -> None:
+    """No coupon / voucher, bill discount or item discount on a Free, Finance or Supplier Sale.
+
+    A line's MRP-to-selling-price gap is normal pricing, not a discount given,
+    so only a discount beyond that gap is refused.
+    """
+    title = _("Not Allowed in {0}").format(_(label))
+    if (coupon_code or "").strip() or (voucher_code or "").strip():
+        frappe.throw(_("Coupons and vouchers cannot be used in a {0}. Remove it, or choose another sale type.")
+                     .format(_(label)), title=title)
+    if flt(add_pct) > 0 or flt(add_amt) > 0:
+        frappe.throw(_("Bill discounts cannot be given in a {0}. Remove the discount, or choose another sale type.")
+                     .format(_(label)), title=title)
+    rows = frappe.parse_json(items) if isinstance(items, str) else (items or [])
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        list_price, rate = flt(r.get("price_list_rate")), flt(r.get("rate"))
+        given = flt(r.get("discount_amount")) or (list_price * flt(r.get("discount_percentage")) / 100)
+        if given - max(0.0, list_price - rate) > 0.01:
+            frappe.throw(_("Item discounts cannot be given in a {0}. Remove the discount on {1}, or choose another "
+                           "sale type.").format(_(label), r.get("item_code")), title=title)
+
+
+def _refuse_bundle_discount_coupon_on_free_sale(items, coupon_code=None, voucher_code=None) -> None:
+    """Free Sale: no bundle gift, no item discount, no coupon / voucher (sale-type rules).
+
+    A line's MRP-to-selling-price gap is normal pricing, not a discount given,
+    so only a discount beyond that gap is refused.
+    """
+    title = _("Not Allowed in Free Sale")
+    if (coupon_code or "").strip() or (voucher_code or "").strip():
+        frappe.throw(_("Coupons and vouchers cannot be used in a Free Sale. Remove it, or bill with "
+                       "another sale type."), title=title)
+    rows = frappe.parse_json(items) if isinstance(items, str) else (items or [])
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if cint(r.get("is_free_bundle_item")):
+            frappe.throw(_("Bundle gifts cannot be given in a Free Sale. Remove the bundled gift, or bill "
+                           "it with another sale type."), title=title)
+        list_price, rate = flt(r.get("price_list_rate")), flt(r.get("rate"))
+        given = flt(r.get("discount_amount")) or (list_price * flt(r.get("discount_percentage")) / 100)
+        if given - max(0.0, list_price - rate) > 0.01:
+            frappe.throw(_("Item discounts cannot be given in a Free Sale. Remove the discount on {0}, or "
+                           "bill it with another sale type.").format(r.get("item_code")), title=title)
+
+
+def _refuse_prebooking_on_free_sale(items, sales_order=None) -> None:
+    """A pre-booking (Sales Order) is never billed as a Free Sale (sale-type rules)."""
+    rows = frappe.parse_json(items) if isinstance(items, str) else (items or [])
+    if (sales_order or "").strip() or any(
+            isinstance(r, dict) and ((r.get("sales_order") or "").strip() or (r.get("so_detail") or "").strip())
+            for r in rows):
+        frappe.throw(_("A pre-booking (Sales Order) cannot be billed as a Free Sale. Bill it with its own "
+                       "sale type."), title=_("Not Allowed in Free Sale"))
+
+
+def _zero_free_sale_lines(inv) -> None:
+    """A free sale bills every line at ₹0: 100% discount off the list price.
+
+    Without this the lines kept their selling price and only the payment was
+    ₹0, so the "free" invoice carried full value, GST and an outstanding
+    balance against the customer. The list price stays on the line for
+    reference; the item cost is moved to promotional expense separately
+    (_post_free_sale_write_off).
+    """
+    inv.ignore_pricing_rule = 1
+    for it in inv.items:
+        list_price = flt(it.get("price_list_rate")) or flt(it.get("rate"))
+        it.price_list_rate = list_price
+        it.discount_percentage = 100
+        it.discount_amount = list_price
+        it.rate = 0
+
+
+def _free_gift_claim_days() -> int:
+    return max(0, min(cint(get_control_setting("free_gift_claim_days", 7) or 0), 365))
+
+
+def _free_gift_claim_window(original_invoice_doc) -> dict:
+    """Is this original invoice recent enough for an approval-free gift claim?"""
+    days = _free_gift_claim_days()
+    if not original_invoice_doc:
+        return {"ok": False, "days": days, "age_days": None, "posting_date": None}
+    posted = getdate(original_invoice_doc.posting_date)
+    age = (getdate(nowdate()) - posted).days
+    return {"ok": 0 <= age <= days, "days": days, "age_days": age, "posting_date": str(posted)}
+
+
+@frappe.whitelist()
+def check_free_gift_claim(original_invoice, customer=None) -> dict:
+    """Payment dialog: may this free gift be billed without manager approval?"""
+    doc = frappe.get_doc("Sales Invoice", original_invoice)
+    doc.check_permission("read")
+    assert_sales_invoice_scope(original_invoice)
+    res = _free_gift_claim_window(doc)
+    if doc.docstatus != 1 or doc.is_return or (customer and doc.customer != customer):
+        res["ok"] = False
+        res["invalid"] = 1
+    return res
+
+
 @frappe.whitelist()
 def create_pos_invoice(
     pos_profile, customer, items,
@@ -3174,6 +3335,24 @@ def create_pos_invoice(
 
     profile = frappe.get_cached_doc("POS Profile", pos_profile)
     from ch_pos.api.free_sale_api import canonicalize_cart_items
+
+    # Free, Finance and Supplier Sale take no discount of any kind (sale-type rules).
+    if cint(is_free_sale) or _is_finance_sale_type(sale_type) or _is_supplier_sale_type(sale_type):
+        _label = ("Free Sale" if cint(is_free_sale)
+                  else "Finance Sale" if _is_finance_sale_type(sale_type) else "Supplier Sale")
+        _refuse_discounts_for_sale_type(items, coupon_code, voucher_code,
+                                        additional_discount_percentage, additional_discount_amount, _label)
+        # Cart exceptions (Discount Override / Free Accessory) are price
+        # reductions too. FIFO overrides travel as fifo_override_*, not here.
+        _refuse_exception_on_free_sale(items, exception_request, _label)
+
+    # Before pricing: a VAS plan or an exception on a free sale is refused
+    # with its own reason.
+    if cint(is_free_sale):
+        _refuse_vas_on_free_sale(items)
+        _refuse_exception_on_free_sale(items, exception_request)
+        _refuse_bundle_discount_coupon_on_free_sale(items, coupon_code, voucher_code)
+        _refuse_prebooking_on_free_sale(items, sales_order)
 
     items = canonicalize_cart_items(
         items or [],
@@ -3763,6 +3942,17 @@ def create_pos_invoice(
                           "duplicate line and scan the second unit's own IMEI.").format(_sn),
                         title=_("Duplicate IMEI / Serial"))
                 seen_sale_serials.add(_sn)
+            # An IMEI held by an open pre-booking can only be billed on that
+            # pre-booking (Pickup / Bill), never on another customer's order
+            # or a normal sale.
+            if not item_is_plan:
+                _held, _exchange = _get_blocked_serials_for_sale(row_serials, include_exchange=False)
+                for _sn, _held_by in _held.items():
+                    if _held_by != _item_so:
+                        frappe.throw(
+                            _("IMEI / Serial {0} is reserved for pre-booking {1}. Bill it from that "
+                              "pre-booking, or ask a manager to release the IMEI first.").format(_sn, _held_by),
+                            title=_("IMEI Reserved"))
             # One serial per unit: the row cannot bill more units than the
             # IMEIs it carries, or a second unit rides out untracked.
             if len(row_serials) != int(flt(row["qty"])) or flt(row["qty"]) != int(flt(row["qty"])):
@@ -3861,7 +4051,25 @@ def create_pos_invoice(
         if exchange_credit > gross_item_total + 0.005:
             frappe.throw(_("Exchange credit cannot exceed the transaction value."))
 
-    if cint(is_free_sale):
+    # A gift that was due at the original sale, claimed within the window,
+    # is billed free without the category-manager approval round-trip.
+    gift_claim = None
+    if cint(is_free_sale) and (free_sale_reason or "").strip() in FREE_GIFT_CLAIM_REASONS and original_invoice_doc:
+        window = _free_gift_claim_window(original_invoice_doc)
+        if window["ok"]:
+            gift_claim = window
+
+    if gift_claim:
+        inv.custom_is_free_sale = 1
+        inv.custom_free_sale_reason = (free_sale_reason or "").strip()
+        inv.custom_free_sale_approved_by = _(
+            "No approval needed: gift claim within {0} days of {1}").format(
+                gift_claim["days"], original_invoice_doc.name)[:140]
+        inv.custom_free_sale_approved_at = frappe.utils.now_datetime()
+        _zero_free_sale_lines(inv)
+        inv.append("payments", {"mode_of_payment": default_profile_mop, "amount": 0})
+
+    elif cint(is_free_sale):
         from ch_pos.api.free_sale_api import compute_cart_hash
         from ch_pos.pos_core.doctype.ch_free_sale_approval.ch_free_sale_approval import (
             has_valid_server_signature)
@@ -3958,6 +4166,7 @@ def create_pos_invoice(
         if authoritative_approved_at:
             inv.custom_free_sale_approved_at = authoritative_approved_at
 
+        _zero_free_sale_lines(inv)
         inv.append("payments", {"mode_of_payment": default_profile_mop, "amount": 0})
 
     elif payments:
@@ -4030,15 +4239,8 @@ def create_pos_invoice(
         estimated_credit_total = sum(
             flt(row.rate) * flt(row.qty) for row in (inv.items or []) if not row.get("is_free_item")
         )
-        credit_info = get_customer_credit_info(customer, profile.company)
-        credit_override_required = bool(
-            estimated_credit_total > 0.005
-            and (
-                not credit_info
-                or estimated_credit_total > flt(credit_info.get("available")) + 0.005
-                or cint(credit_info.get("overdue_count")) > 0
-            )
-        )
+        # Every credit sale needs a manager's approval, even within the limit.
+        credit_override_required = estimated_credit_total > 0.005
         if credit_override_required and is_privileged_user():
             verified_credit_approver = frappe.session.user
         elif credit_override_required:
@@ -4325,9 +4527,13 @@ def create_pos_invoice(
             expected_paid = round(rt) - flt(allocated_advance_total) - redeemed_loyalty
             rounding_diff = expected_paid - total_paid
 
+            # Supplier Sale may be paid in full, in part or not at all; the
+            # rest stays on the customer's account.
+            _supplier_underpaid = rounding_diff > 1.0 and _is_supplier_sale_type(sale_type)
+
             # A genuine rounding gap is < 1 currency unit. Anything larger
             # is a payment mismatch and must fail loudly, not be absorbed.
-            if abs(rounding_diff) > 1.0:
+            if abs(rounding_diff) > 1.0 and not _supplier_underpaid:
                 frappe.throw(
                     _("Payments {0} + advances {1} + loyalty {2} do not add up to the "
                       "invoice total {3}.").format(
@@ -4337,7 +4543,7 @@ def create_pos_invoice(
                         fmt_money(rt)),
                     title=_("Payment Mismatch"))
 
-            if abs(rounding_diff) > 0.001:
+            if abs(rounding_diff) > 0.001 and not _supplier_underpaid:
                 for p in inv.payments:
                     if flt(p.amount) > 0:
                         frappe.db.set_value(
@@ -4382,6 +4588,16 @@ def create_pos_invoice(
         """ updated: """
 
         # ---------- 5. SUBMIT ----------
+        # Blank-tax_row detail rows (a ₹0 line, e.g. a free sale) are deleted
+        # in the DATABASE first: apply_workflow below reloads the invoice, so
+        # clearing them only in memory brought them straight back and submit
+        # failed with "MandatoryError: tax_row". Same cure as
+        # ch_erp15 delivery_note._purge_orphaned_item_wise_tax_details.
+        frappe.db.sql(
+            """DELETE FROM `tabItem Wise Tax Detail`
+                WHERE parenttype = 'Sales Invoice' AND parent = %s
+                  AND IFNULL(tax_row, '') = ''""",
+            inv.name)
         inv.reload()
         # A genuine zero-value invoice produces no tax rows. GST calculation
         # may still leave transient item-wise detail rows with blank tax_row;
@@ -13121,6 +13337,31 @@ def get_customer_sold_devices(customer, pos_profile) -> list:
                 "serial_no": serial_no,
                 "rate": flt(row.rate or row.amount),
             })
+
+    # What the VAS picker needs to offer a device only for plans that fit it:
+    # its classification, and the plan types it is already covered by.
+    if devices:
+        codes = sorted({d["item_code"] for d in devices})
+        meta = {r.name: r for r in frappe.get_all(
+            "Item", filters={"name": ("in", codes)},
+            fields=["name", "item_group", "ch_category", "ch_sub_category"],
+            limit_page_length=len(codes))}
+        covered = {}
+        for r in frappe.db.sql(
+            """SELECT sp.serial_no, wp.plan_type, sp.warranty_plan
+                 FROM `tabActive VAS Plans` sp
+                 JOIN `tabCH Warranty Plan` wp ON wp.name = sp.warranty_plan
+                WHERE sp.serial_no IN %(serials)s AND sp.status = 'Active'
+                  AND sp.docstatus < 2
+                  AND (sp.end_date IS NULL OR sp.end_date >= CURDATE())""",
+            {"serials": [d["serial_no"] for d in devices]}, as_dict=True):
+            covered.setdefault(r.serial_no, set()).add(r.plan_type or "Value Added Service")
+        for d in devices:
+            m = meta.get(d["item_code"]) or frappe._dict()
+            d["item_group"] = m.get("item_group") or ""
+            d["ch_category"] = m.get("ch_category") or ""
+            d["ch_sub_category"] = m.get("ch_sub_category") or ""
+            d["covered_plan_types"] = sorted(covered.get(d["serial_no"], ()))
     return devices
 
 
@@ -13484,6 +13725,8 @@ def get_vas_plans_with_rules(cart_items=None) -> dict:
 
         applicable_sub_categories = plan_sub_categories.get(plan.name, [])
         plan["applicable_sub_categories"] = applicable_sub_categories
+        plan["applicable_categories"] = plan_categories.get(plan.name, [])
+        plan["applicable_item_groups"] = applicable_item_groups
         plan["external_model_required"] = bool(applicable_sub_categories)
         if not plan.get("blocked") and applicable_sub_categories and device_sub_categories:
             if not device_sub_categories.intersection(applicable_sub_categories):
@@ -16937,6 +17180,10 @@ def _stamp_sales_invoice_print_metadata(rows, company=None):
     return rows
 
 
+# Sale types whose invoices carry an external order number (Sales Invoice View).
+ORDER_ID_SALE_TYPES = ("Finance Sale", "Online Sale")
+
+
 def _stamp_invoice_view_totals(rows):
     """Sales Invoice View columns: sub type, the customer's phone / email, and
     per-invoice sums of the line tax split (exempted, taxable, CGST, SGST,
@@ -16954,15 +17201,16 @@ def _stamp_invoice_view_totals(rows):
             select sii.parent,
                    sum({exempt}) as total_exempted, sum({taxable}) as total_taxable,
                    sum({tax['cgst_amount']}) as total_cgst, sum({tax['sgst_amount']}) as total_sgst,
-                   sum({tax['igst_amount']}) as total_igst,
-                   group_concat(distinct nullif(sii.sales_order, '') separator ', ') as order_ids
+                   sum({tax['igst_amount']}) as total_igst
               from `tabSales Invoice Item` sii
              where sii.parent in %(names)s
              group by sii.parent""", {"names": names}, as_dict=True)
     }
     head_fields = ["name", "customer", "contact_mobile", "contact_email"]
-    if frappe.get_meta("Sales Invoice").has_field("custom_ch_sale_sub_type"):
-        head_fields.append("custom_ch_sale_sub_type")
+    si_meta = frappe.get_meta("Sales Invoice")
+    for f in ("custom_ch_sale_sub_type", "custom_ch_sale_type", "custom_ch_sale_reference"):
+        if si_meta.has_field(f):
+            head_fields.append(f)
     heads = {r.name: r for r in frappe.get_all(
         "Sales Invoice", filters={"name": ("in", names)}, fields=head_fields)}
     customers = list({h.customer for h in heads.values() if h.customer})
@@ -16977,7 +17225,10 @@ def _stamp_invoice_view_totals(rows):
         row["email"] = h.get("contact_email") or c.get("email_id") or ""
         for key in ("total_exempted", "total_taxable", "total_cgst", "total_sgst", "total_igst"):
             row[key] = flt(t.get(key), 2)
-        row["order_ids"] = t.get("order_ids") or ""
+        # Order ID: the finance / online platform's order reference, entered
+        # at billing. Other sale types have none and show "-".
+        row["order_ids"] = (h.get("custom_ch_sale_reference") or ""
+                            if h.get("custom_ch_sale_type") in ORDER_ID_SALE_TYPES else "")
 
 
 @frappe.whitelist()
@@ -17896,8 +18147,10 @@ def _post_free_sale_write_off(inv) -> None:
                 "account": cogs_account,
                 "credit_in_account_currency": item_cost,
                 "cost_center": cost_center,
-                "reference_type": "Sales Invoice",
-                "reference_name": inv.name,
+                # No reference to the Sales Invoice: ERPNext reads a JE row
+                # referencing an SI as a receipt against it and demands the
+                # customer's Debit To account. The invoice is named in
+                # cheque_no / remark and stamped back as custom_promo_write_off_je.
             })
 
     if total_cost <= 0 or not je_accounts:
@@ -17908,8 +18161,6 @@ def _post_free_sale_write_off(inv) -> None:
         "account": promo_account,
         "debit_in_account_currency": total_cost,
         "cost_center": cost_center,
-        "reference_type": "Sales Invoice",
-        "reference_name": inv.name,
     })
 
     frappe.has_permission("Journal Entry", "create", throw=True)
@@ -17924,6 +18175,9 @@ def _post_free_sale_write_off(inv) -> None:
         "remark": frappe._("Free sale promotional write-off — {0}").format(inv.name),
         "accounts": je_accounts,
     })
+    # Code-generated from stock valuation, like the other automatic postings
+    # (transfer manifest, buyback, delivery claim): exempt from maker-checker.
+    je.flags.ch_system_generated_je = True
     je.insert()
     je.submit()
     frappe.db.set_value(

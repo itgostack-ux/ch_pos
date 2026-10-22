@@ -11,7 +11,7 @@
  * F. Footer CTA: Cancel · Hold · PAY
  */
 import { PosState, EventBus } from "../state.js";
-import { format_number, assert_india_phone } from "./helpers.js";
+import { format_number, assert_india_phone, is_free_sale_type, FREE_SALE_VAS_MSG, FREE_SALE_EXCEPTION_MSG, FREE_SALE_BUNDLE_MSG, FREE_SALE_COUPON_MSG, FREE_SALE_PREBOOK_MSG, cart_has_exception, cart_has_prebooking, is_no_discount_sale_type, no_discount_msg, exception_blocked_msg } from "./helpers.js";
 
 /**
  * Frappe's Link control appends synthetic action rows to the Awesomplete list
@@ -171,6 +171,7 @@ export class CartPanel {
 			: frappe.xcall("ch_pos.api.pos_api.get_sale_types", { company })
 				.then((rows) => {
 					PosState._sale_types_cache = rows || [];
+					window.cur_pos_state_sale_types = PosState._sale_types_cache;
 					return PosState._sale_types_cache;
 				}).catch(() => []);
 
@@ -192,9 +193,32 @@ export class CartPanel {
 					</button>`
 				);
 				pill.on("click", () => {
+					window.cur_pos_state_sale_types = rows;
+					if (is_free_sale_type(r.sale_type_name) && (PosState.cart || []).some((c) => c.is_vas)) {
+						frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_VAS_MSG) });
+						return;
+					}
+					if (is_no_discount_sale_type(r.sale_type_name) && cart_has_exception(PosState)) {
+						frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: exception_blocked_msg(r.sale_type_name) });
+						return;
+					}
+					if (is_free_sale_type(r.sale_type_name) && cart_has_prebooking(PosState)) {
+						frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_PREBOOK_MSG) });
+						return;
+					}
+					if (is_free_sale_type(r.sale_type_name) && (PosState.cart || []).some((c) => c.is_free_bundle_item)) {
+						frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_BUNDLE_MSG) });
+						return;
+					}
+					if (is_no_discount_sale_type(r.sale_type_name) && (PosState.coupon_code || PosState.voucher_code)) {
+						frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: no_discount_msg(r.sale_type_name) });
+						return;
+					}
 					PosState.sale_type = r.sale_type_name;
 					this._sync_sale_type_ui();
 					EventBus.emit("sale_type:changed", { sale_type: r.sale_type_name });
+					// Line buttons depend on the sale type (no Exception in Free Sale).
+					this.refresh();
 				});
 				pills.append(pill);
 			}
@@ -1047,6 +1071,10 @@ export class CartPanel {
 			// (VAS / accessories / plan rows). Without either we cannot
 			// anchor the exception to anything meaningful.
 			if (!item.serial_no && !item_code) return;
+			if (is_no_discount_sale_type(PosState.sale_type)) {
+				frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: exception_blocked_msg(PosState.sale_type) });
+				return;
+			}
 			if (item.exception_request) {
 				frappe.show_alert({
 					message: __("Exception {0} already linked to this line. Remove it before creating a new one.", [item.exception_request]),
@@ -1272,17 +1300,23 @@ export class CartPanel {
 		// Warranty rows (own-warranty fee lines) stay locked — pricing is
 		// derived from the device's plan, not exception-overridable here.
 		let inline_actions = "";
-		const _can_exception = !item.is_warranty && (item.serial_no || item.item_code);
-		const show_vas_action = !!item.serial_no && !item.is_warranty && !item.is_vas && item.has_vas_offer !== false;
+		// Free / Finance / Supplier Sale: no new exception (an existing one can still be removed).
+		const _no_new_exception = is_no_discount_sale_type(PosState.sale_type);
+		// Free Sale only: no VAS (Finance Sale keeps it).
+		const _no_vas = is_free_sale_type(PosState.sale_type);
+		const _can_exception = !item.is_warranty && (item.serial_no || item.item_code) && (!_no_new_exception || item.exception_request);
+		// No VAS in a Free Sale: the Add VAS button is not offered there.
+		const show_vas_action = !!item.serial_no && !item.is_warranty && !item.is_vas && item.has_vas_offer !== false
+			&& !_no_vas;
 		if (item.serial_no && !item.is_warranty && !item.is_vas) {
 			// Serialized device: keep both VAS-attach and Exception buttons.
 			const exception_action = item.exception_request
 				? `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-remove-exception" data-idx="${idx}" title="${__("Remove Exception")}">
 					<i class="fa fa-times-circle"></i>
 				</button>`
-				: `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-exception" data-idx="${idx}" title="${__("Exception")}">
+				: (_no_new_exception ? "" : `<button class="btn btn-xs cart-line-action ch-pos-line-action-exception ch-pos-line-exception" data-idx="${idx}" title="${__("Exception")}">
 					<i class="fa fa-exclamation-triangle"></i>
-				</button>`;
+				</button>`);
 			inline_actions = `
 				${show_vas_action ? `<button class="btn btn-xs cart-line-action ch-pos-line-action-vas ch-pos-line-vas" data-idx="${idx}" title="${__("Add VAS")}">
 					<i class="fa fa-shield"></i>

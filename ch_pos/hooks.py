@@ -122,7 +122,11 @@ doc_events = {
             "ch_pos.overrides.pos_invoice.deactivate_customer_devices",
             "ch_pos.overrides.pos_invoice.revert_kiosk_token_status",
             "ch_pos.overrides.pos_invoice.decrement_coupon_usage",
+            "ch_pos.overrides.pos_invoice.ignore_kiosk_token_link",
         ],
+    },
+    "Sales Order": {
+        "on_cancel": "ch_pos.overrides.pos_invoice.ignore_kiosk_token_link",
     },
 }
 

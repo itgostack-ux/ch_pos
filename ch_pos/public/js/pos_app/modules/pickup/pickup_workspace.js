@@ -73,12 +73,12 @@ export class PickupWorkspace {
 							<span class="mode-icon" style="background:#ecfdf5;color:#047857">
 								<i class="fa fa-cube"></i>
 							</span>
-							${__("Pickup / Bill")}
+							${__("Pre-Book Pickup / Bill")}
 						</h4>
 						<span class="ch-mode-hint">${__("Hand over goods and bill open pre-bookings \u2014 verify reserved IMEI, collect balance, generate Tax Invoice.")}</span>
 					</div>
-					<button class="btn btn-default btn-sm ch-pu-go-prebook" title="${__("Create new Proforma or Pre-Booking.")}">
-						<i class="fa fa-bookmark"></i> ${__("New Pre-Book / Proforma")}
+					<button class="btn btn-default btn-sm ch-pu-go-prebook" title="${__("Proformas and pre-bookings are raised from a walk-in at the Front Desk.")}">
+						<i class="fa fa-ticket"></i> ${__("New Pre-Book / Proforma")}
 					</button>
 				</div>
 
@@ -167,8 +167,9 @@ export class PickupWorkspace {
 			const tab = $(e.currentTarget).data("tab");
 			if (tab) this._switch_tab(tab);
 		});
+		// New ones are raised from a walk-in, so this opens the Front Desk queue.
 		panel.on("click", ".ch-pu-go-prebook", () => {
-			EventBus.emit("mode:switch", "prebook");
+			EventBus.emit("mode:switch", "queue");
 		});
 		// Proforma Open KPI is a deep-link into Prebook → My Proformas where
 		// the cashier can Convert → Sale or Convert → Pre-Booking.
@@ -805,6 +806,11 @@ export class PickupWorkspace {
 		reserved.forEach((s) => { reserved_by_key.set(_norm(s), s); });
 		const scanned = [];  // holds original reserved-form strings
 		const scanned_keys = () => new Set(scanned.map(_norm));
+		// Which item each reserved IMEI belongs to, so the cashier knows what to pick.
+		const item_by_key = new Map();
+		(row.items || []).forEach((it) => (it.reserved_serials || []).forEach((sn) => {
+			item_by_key.set(_norm(sn), it.item_name || it.item_code || "");
+		}));
 
 		const dlg = new frappe.ui.Dialog({
 			title: __("Confirm IMEI Hand-over — {0}", [row.customer_name]),
@@ -875,7 +881,9 @@ export class PickupWorkspace {
 			$w.find(".pk-imei-req").html(
 				[...reserved_by_key.entries()].map(([k, orig]) => {
 					const ok = done_keys.has(k);
-					return `<span style="margin-right:10px;color:${ok ? "#16a34a" : "#b91c1c"}">${ok ? "✔" : "○"} <code>${frappe.utils.escape_html(orig)}</code></span>`;
+					const item = item_by_key.get(k);
+					return `<div style="margin-top:3px;color:${ok ? "#16a34a" : "#b91c1c"}">${ok ? "✔" : "○"}
+						${item ? `<b style="color:var(--pos-text, #1f2937)">${frappe.utils.escape_html(item)}</b> · ` : ""}<code>${frappe.utils.escape_html(orig)}</code></div>`;
 				}).join("")
 			);
 			$w.find(".pk-imei-progress").html(

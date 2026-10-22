@@ -6,7 +6,7 @@
  * exchange and product-exchange flows, hold invoice.
  */
 import { PosState, EventBus } from "../state.js";
-import { format_number } from "../shared/helpers.js";
+import { format_number, is_free_sale_type, FREE_SALE_VAS_MSG, FREE_SALE_EXCEPTION_MSG, FREE_SALE_BUNDLE_MSG, FREE_SALE_COUPON_MSG, FREE_SALE_PREBOOK_MSG, cart_has_exception, cart_has_prebooking, is_no_discount_sale_type, no_discount_msg, exception_blocked_msg } from "../shared/helpers.js";
 import { print_invoice_pdf } from "../shared/print_helper.js";
 
 export class CartService {
@@ -530,6 +530,28 @@ export class CartService {
 
 		EventBus.on("cart:hold", () => this.hold_invoice());
 		EventBus.on("cart:pay", () => {
+			// Free Sale with a VAS / Protection plan: stopped here, before the
+			// payment window opens.
+			if (is_free_sale_type(PosState.sale_type) && (PosState.cart || []).some((c) => c.is_vas)) {
+				frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_VAS_MSG) });
+				return;
+			}
+			if (is_no_discount_sale_type(PosState.sale_type) && cart_has_exception(PosState)) {
+				frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: exception_blocked_msg(PosState.sale_type) });
+				return;
+			}
+			if (is_free_sale_type(PosState.sale_type) && (PosState.cart || []).some((c) => c.is_free_bundle_item)) {
+				frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_BUNDLE_MSG) });
+				return;
+			}
+			if (is_free_sale_type(PosState.sale_type) && cart_has_prebooking(PosState)) {
+				frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_PREBOOK_MSG) });
+				return;
+			}
+			if (is_no_discount_sale_type(PosState.sale_type) && (PosState.coupon_code || PosState.voucher_code)) {
+				frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: no_discount_msg(PosState.sale_type) });
+				return;
+			}
 			// Sale Type is mandatory before payment
 			if (!PosState.sale_type) {
 				frappe.show_alert({ message: __("Please select a Sale Type before proceeding to payment"), indicator: "red" });
@@ -561,6 +583,15 @@ export class CartService {
 		EventBus.on("reprint:open", () => this._show_reprint_dialog());
 
 		EventBus.on("coupon:apply", (code) => this._apply_coupon(code));
+		// Free / Finance Sale carry no offer discount on their lines; leaving them re-applies it.
+		EventBus.on("sale_type:changed", () => {
+			let changed = false;
+			(PosState.cart || []).forEach((c) => {
+				if (c.is_warranty || c.is_vas || c.is_free_bundle_item || c.is_service || c.exception_request) return;
+				if ((c.offers || []).length || c.applied_offer) { this._apply_best_offer(c); changed = true; }
+			});
+			if (changed) EventBus.emit("cart:updated");
+		});
 		EventBus.on("discount:changed", () => EventBus.emit("cart:updated"));
 		EventBus.on("customer:changed", () => {
 			if (PosState.exception_request_data) {
@@ -577,6 +608,10 @@ export class CartService {
 		EventBus.on("exception:applied", (payload) => {
 			const data = payload && payload.data ? payload.data : PosState.exception_request_data;
 			if (!data) return;
+			if (is_no_discount_sale_type(PosState.sale_type)) {
+				frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: exception_blocked_msg(PosState.sale_type) });
+				return;
+			}
 			this._apply_exception_pricing_to_cart(data);
 			EventBus.emit("cart:updated");
 		});
@@ -1348,6 +1383,8 @@ export class CartService {
 
 	/** Show a popup to add free bundle items (accessories) when a main device is added */
 	_prompt_bundle_items(item_data, device_row) {
+		// Free Sale gives no bundle gift with the device.
+		if (is_free_sale_type(PosState.sale_type)) return;
 		frappe.xcall("ch_pos.api.pos_api.get_bundle_items", {
 			item_code: item_data.item_code,
 			warehouse: PosState.warehouse,
@@ -1887,7 +1924,8 @@ export class CartService {
 			this._apply_exception_pricing_to_item(cart_item, cart_item.exception_request_data || PosState.exception_request_data);
 			return;
 		}
-		const offers = cart_item.offers || [];
+		// Free / Finance Sale: no offer discount on the line.
+		const offers = is_no_discount_sale_type(PosState.sale_type) ? [] : (cart_item.offers || []);
 		if (!offers.length) {
 			cart_item.applied_offer = null;
 			cart_item.discount_amount = 0;
@@ -2322,6 +2360,10 @@ export class CartService {
 
 	// ── Coupon / Voucher ────────────────────────────────
 	_apply_coupon(code) {
+		if (is_no_discount_sale_type(PosState.sale_type)) {
+			frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: no_discount_msg(PosState.sale_type) });
+			return;
+		}
 		// Try coupon first, then voucher
 		frappe.call({
 			method: "ch_pos.api.pos_api.validate_coupon",
@@ -2503,6 +2545,10 @@ export class CartService {
 
 	// ── VAS Dialog ──────────────────────────────────────
 	_show_vas_dialog(opts = {}) {
+		if (is_free_sale_type(PosState.sale_type)) {
+			frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_VAS_MSG) });
+			return;
+		}
 		// A stale target leaks across item changes when the cashier opens VAS,
 		// closes without adding, and then tries a different device. Use the
 		// current line item as the source of truth; never reuse the previous one.
@@ -2603,16 +2649,46 @@ export class CartService {
 		const device_options = device_items
 			.map((c) => c.item_code + (c.serial_no ? ` (${c.serial_no})` : ""))
 			.filter((value, index, list) => value && list.indexOf(value) === index);
+		// Earlier purchases are offered only for a plan that fits them: its
+		// category / sub-category / item group and device-price band -- and
+		// not when the device already has an active plan of the same type.
+		const live_plans = (plans || []).filter((p) => !p.blocked);
+		const device_fits = (plan, d) => {
+			if ((d.covered_plan_types || []).includes(plan.plan_type || "Value Added Service")) return false;
+			const cats = plan.applicable_categories || [];
+			const subs = plan.applicable_sub_categories || [];
+			const groups = plan.applicable_item_groups || [];
+			if (cats.length && !cats.includes(d.ch_category)) return false;
+			if (subs.length && !subs.includes(d.ch_sub_category)) return false;
+			if (groups.length && !groups.includes(d.item_group)) return false;
+			if (flt(plan.min_device_price) && flt(d.rate) < flt(plan.min_device_price)) return false;
+			if (flt(plan.max_device_price) && flt(d.rate) > flt(plan.max_device_price)) return false;
+			return true;
+		};
 		const historical_option_map = {};
-		const historical_options = (historical_devices || []).map((device) => {
-			const value = `${device.item_name || device.item_code} (${device.serial_no}) · ${device.invoice}`;
-			historical_option_map[value] = device;
-			return value;
-		}).filter((value, index, list) => value && list.indexOf(value) === index);
-		const prioritized_device_options = selected_device_value
-			? [selected_device_value, ...device_options.filter((value) => value !== selected_device_value), ...historical_options.filter((value) => value !== selected_device_value && !device_options.includes(value))]
-			: [...device_options, ...historical_options.filter((value) => !device_options.includes(value))];
-		const has_in_store_options = prioritized_device_options.length > 0;
+		const history_value = (device) => `${device.item_name || device.item_code} (${device.serial_no}) · ${device.invoice}`;
+		(historical_devices || []).forEach((device) => { historical_option_map[history_value(device)] = device; });
+		const historical_options_for = (plan) => (historical_devices || [])
+			.filter((d) => (plan ? device_fits(plan, d) : live_plans.some((p) => device_fits(p, d))))
+			.map(history_value)
+			.filter((value, index, list) => value && list.indexOf(value) === index);
+		const device_options_for = (plan) => {
+			const historical_options = historical_options_for(plan);
+			return selected_device_value
+				? [selected_device_value, ...device_options.filter((value) => value !== selected_device_value), ...historical_options.filter((value) => value !== selected_device_value && !device_options.includes(value))]
+				: [...device_options, ...historical_options.filter((value) => !device_options.includes(value))];
+		};
+		const historical_options = historical_options_for(null);
+		let prioritized_device_options = device_options_for(null);
+		let has_in_store_options = prioritized_device_options.length > 0;
+		// In-Store lists only phones on this bill or bought from us earlier by
+		// this customer -- never shop stock. Say plainly why it is empty.
+		const is_walkin = !PosState.customer || PosState.customer === PosState.default_customer;
+		const cust_label = (PosState.customer_info && PosState.customer_info.customer_name) || PosState.customer || "";
+		const no_in_store_msg = is_walkin
+			? __("No phone is on this bill, and a Walk-in customer has no purchase history. Add the phone to this bill, select the customer who bought it from us, or choose Customer-Provided Device.")
+			: __("No phone is on this bill, and {0} has not bought a phone from us before. Add the phone to this bill, or choose Customer-Provided Device for a phone bought elsewhere.",
+				[`<b>${frappe.utils.escape_html(cust_label)}</b>`]);
 
 		// Default mode: prefer in-store if cart has devices, else customer-owned.
 		const default_mode = has_in_store_options ? "in_store" : "customer";
@@ -2660,7 +2736,7 @@ export class CartService {
 		const subject_help_html = `
 			<div class="ch-vas-help" style="background:#f1f5f9;border:1px solid #cbd5e1;padding:10px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;color:#334155">
 				<div style="font-weight:600;margin-bottom:4px"><i class="fa fa-info-circle"></i> ${__("Coverage Subject")}</div>
-				<div>${__("Choose whether this plan covers a device on this bill (or from our inventory) or a device the customer already owns (e.g. an iPhone bought from Apple).")}</div>
+				<div>${__("Choose whether this plan covers a device on this bill (or bought from us earlier) or a device the customer already owns (e.g. an iPhone bought from Apple).")}</div>
 				<div style="margin-top:4px"><b>${__("Customer-provided IMEI is stored on the VAS plan only — it is never written as an inventory serial on this invoice.")}</b></div>
 			</div>`;
 
@@ -2721,9 +2797,9 @@ export class CartService {
 					options: prioritized_device_options.join("\n"),
 					depends_on: "eval:doc.coverage_mode === 'in_store'",
 					mandatory_depends_on: "eval:doc.coverage_mode === 'in_store'",
-					description: historical_options.length
+					description: has_in_store_options
 						? __("Pick a device on this bill or a device previously purchased by this customer.")
-						: __("No previous serialized purchase was found for this customer; add a device to this bill."),
+						: no_in_store_msg,
 				},
 				{
 					fieldname: "in_store_imei",
@@ -2817,6 +2893,21 @@ export class CartService {
 				}
 
 				// mode === "in_store"
+				if (!has_in_store_options) {
+					frappe.msgprint({
+						title: __("No In-Store Device"),
+						indicator: "red",
+						message: no_in_store_msg + (plan.allows_external_device ? ""
+							: "<br><br>" + __("Plan {0} covers only phones sold by us, so it cannot be added until the phone is on this bill or in the customer's purchase history.",
+								[`<b>${frappe.utils.escape_html(plan.plan_name)}</b>`])),
+					});
+					return;
+				}
+				if (!values.for_item) {
+					frappe.msgprint({ title: __("Select the Device"), indicator: "orange",
+						message: __("Select the phone this plan covers from In-Store Device.") });
+					return;
+				}
 				const for_raw = values.for_item || "";
 				const historical_device = historical_option_map[for_raw] || null;
 				for_item_code = historical_device ? historical_device.item_code : (for_raw.split(" (")[0] || null);
@@ -2841,11 +2932,39 @@ export class CartService {
 
 		// Plan card selection + auto-toggle coverage mode based on plan capability
 		dialog.$wrapper.on("click", ".ch-vas-card:not(.ch-vas-blocked)", function () {
+			const hint = dialog.$wrapper.find("#ch-vas-mode-hint");
+			const mode_field = dialog.fields_dict.coverage_mode;
+			// Locked by disabling the select, not read_only: read_only redraws it
+			// as plain text and showed the raw value ("customer").
+			const lock_mode = (on) => mode_field && mode_field.$input && mode_field.$input.prop("disabled", !!on);
+			// Device list follows the plan: only devices it fits and that lack it.
+			const refresh_devices = (plan) => {
+				prioritized_device_options = device_options_for(plan);
+				has_in_store_options = prioritized_device_options.length > 0;
+				const keep = prioritized_device_options.includes(dialog.get_value("for_item"))
+					? dialog.get_value("for_item") : "";
+				dialog.set_df_property("for_item", "options", prioritized_device_options.join("\n"));
+				dialog.set_df_property("for_item", "description", has_in_store_options
+					? __("Devices this plan covers, on this bill or bought from us earlier (already-covered devices are hidden).")
+					: no_in_store_msg);
+				dialog.set_value("for_item", keep);
+			};
+			// Clicking the selected plan again unselects it.
+			if ($(this).hasClass("ch-vas-selected")) {
+				$(this).removeClass("ch-vas-selected");
+				refresh_devices(null);
+				dialog.set_value("selected_plan", "");
+				dialog.set_value("external_model_required", 0);
+				lock_mode(false);
+				hint.css("color", "").text("");
+				return;
+			}
 			dialog.$wrapper.find(".ch-vas-card").removeClass("ch-vas-selected");
 			$(this).addClass("ch-vas-selected");
 			const plan_name = $(this).data("plan");
 			dialog.set_value("selected_plan", plan_name);
 			const selected_plan = plans.find((p) => p.name === plan_name);
+			refresh_devices(selected_plan);
 			dialog.set_value("external_model_required", selected_plan && selected_plan.external_model_required ? 1 : 0);
 
 			const allows_external = String($(this).data("allows-external")) === "1";
@@ -2862,24 +2981,41 @@ export class CartService {
 				dialog.set_value("coverage_mode", "customer");
 			}
 
-			// Update hint copy + lock the radio when only one mode is valid.
-			const hint = dialog.$wrapper.find("#ch-vas-mode-hint");
-			const mode_field = dialog.fields_dict.coverage_mode;
+			// Update hint copy + lock the select when only one mode is valid.
+			hint.css("color", "");
 			if (!allows_in_store && allows_external) {
 				hint.text(__("This plan is available only for customer-provided devices."));
-				mode_field && mode_field.df && (mode_field.df.read_only = 1);
+				lock_mode(true);
 			} else if (!allows_external) {
 				hint.text(__("This plan only covers devices sold by us — customer-provided IMEI is disabled."));
-				mode_field && mode_field.df && (mode_field.df.read_only = 1);
+				lock_mode(true);
 			} else if (!has_in_store_options) {
 				hint.text(__("No device on this bill — this plan will cover a customer-provided IMEI."));
-				mode_field && mode_field.df && (mode_field.df.read_only = 1);
+				lock_mode(true);
 			} else {
 				hint.text(__("This plan supports both in-store and customer-provided devices."));
-				mode_field && mode_field.df && (mode_field.df.read_only = 0);
+				lock_mode(false);
 			}
-			mode_field && mode_field.refresh && mode_field.refresh();
 		});
+
+		const warn_no_in_store = () => {
+			const $hint = dialog.$wrapper.find("#ch-vas-mode-hint");
+			if (dialog.get_value("coverage_mode") !== "in_store" || has_in_store_options) {
+				$hint.css("color", "");
+				return;
+			}
+			$hint.css("color", "#b91c1c").html(`<i class="fa fa-exclamation-triangle"></i> ${no_in_store_msg}`);
+			const plan = plans.find((p) => p.name === dialog.get_value("selected_plan"));
+			// Back to Customer-Provided when the chosen plan (or no plan yet) allows it.
+			if (!plan || plan.allows_external_device) {
+				setTimeout(() => {
+					dialog.set_value("coverage_mode", "customer");
+					frappe.show_alert({ message: __("No in-store device for this customer — switched to Customer-Provided Device."), indicator: "orange" }, 6);
+				}, 0);
+			}
+		};
+		dialog.fields_dict.coverage_mode.$input.on("change", warn_no_in_store);
+		dialog.$wrapper.on("click", ".ch-vas-card", () => setTimeout(warn_no_in_store, 0));
 
 		dialog.onhide = () => {
 			PosState.last_vas_target = null;
@@ -2909,7 +3045,7 @@ export class CartService {
 				&& dialog.fields_dict.coverage_mode.$input.get(0);
 			if (!select) return;
 			const labels = {
-				in_store: __("In-Store Device (on this bill or from our inventory)"),
+				in_store: __("In-Store Device (on this bill or bought from us earlier)"),
 				customer: __("Customer-Provided Device (IMEI from outside)"),
 			};
 			Array.from(select.options).forEach((opt) => {
@@ -2932,6 +3068,10 @@ export class CartService {
 	}
 
 	_add_vas_to_cart(dialog, plan, for_item_code, for_serial_no, external_device_model_item = null, external_intent = false, original_invoice = null) {
+		if (is_free_sale_type(PosState.sale_type) && ["Value Added Service", "Protection Plan"].includes(plan.plan_type)) {
+			frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_VAS_MSG) });
+			return;
+		}
 		// Prevent duplicate: same plan on same device/IMEI
 
 		if (plan.blocked) {

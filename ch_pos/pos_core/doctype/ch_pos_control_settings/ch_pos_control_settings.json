@@ -123,6 +123,7 @@
   "prebook_cancel_roles",
   "prebook_refund_roles",
   "prebook_hold_grace_days",
+  "free_gift_claim_days",
   "sb_stock_fifo_transfers_inbound",
   "cross_store_transfer_roles",
   "stock_transfer_roles",
@@ -1039,6 +1040,13 @@
    "label": "Pre-Book Hold Grace Days"
   },
   {
+   "default": "7",
+   "description": "A free gift not given at the sale can be billed free WITHOUT manager approval when the original invoice is at most this many days old. Older claims, and every other free sale, still need approval.",
+   "fieldname": "free_gift_claim_days",
+   "fieldtype": "Int",
+   "label": "Free Gift Claim Window (Days)"
+  },
+  {
    "fieldname": "sb_stock_fifo_transfers_inbound",
    "fieldtype": "Section Break",
    "label": "Transfers & Inbound",
@@ -1597,7 +1605,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-20 16:30:00.000000",
+ "modified": "2026-10-20 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "POS Core",
  "name": "CH POS Control Settings",

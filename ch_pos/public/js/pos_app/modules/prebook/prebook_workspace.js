@@ -70,12 +70,12 @@ export class PrebookWorkspace {
 							<span class="mode-icon" style="background:#e0f2fe;color:#0369a1">
 								<i class="fa fa-bookmark"></i>
 							</span>
-							${__("Pre-Book / Proforma")}
+							${__("Proforma")}
 						</h4>
 						<span class="ch-mode-hint">${__("Proformas and pre-bookings are raised from a walk-in in the Queue. Convert a proforma to a sale or a pre-booking here.")}</span>
 					</div>
-					<button class="btn btn-default btn-sm ch-pb-go-pickup" title="${__("Pickup / Bill is where pre-bookings are billed at handover.")}">
-						<i class="fa fa-cube"></i> ${__("Go to Pickup / Bill")}
+					<button class="btn btn-default btn-sm ch-pb-go-pickup" title="${__("Pre-Book Pickup / Bill is where pre-bookings are billed at handover.")}">
+						<i class="fa fa-cube"></i> ${__("Go to Pre-Book Pickup / Bill")}
 					</button>
 				</div>
 
@@ -899,6 +899,22 @@ export class PrebookWorkspace {
 					return;
 				}
 
+				const advance_entered = flt(v.advance_amount);
+				if (advance_entered < 0) {
+					frappe.show_alert({ message: __("Advance amount cannot be negative. Enter 0 for no advance, or the amount the customer paid."), indicator: "red" });
+					return;
+				}
+				const prebook_total = table_rows.reduce((s, r) => s + flt(r.qty) * flt(r.rate), 0);
+				if (advance_entered > prebook_total + 0.01) {
+					frappe.show_alert({
+						message: __("Advance ₹{0} can't be more than the pre-booking total ₹{1}.", [
+							format_number(advance_entered), format_number(prebook_total),
+						]),
+						indicator: "red",
+					});
+					return;
+				}
+
 				// Parse split-tender rows from the inline UI's hidden payload
 				let payments = [];
 				try { payments = JSON.parse(v.payments_json || "[]"); } catch (e) { payments = []; }
@@ -1092,7 +1108,7 @@ export class PrebookWorkspace {
 			title: __("Pre-Booking Created"),
 			size: "large",
 			fields: [{ fieldtype: "HTML", fieldname: "summary" }],
-			primary_action_label: __("Open Pickup / Bill Queue"),
+			primary_action_label: __("Open Pre-Book Pickup / Bill"),
 			primary_action: () => {
 				done.hide();
 				EventBus.emit("pickup:focus_so", so_name);
@@ -1211,6 +1227,10 @@ export class PrebookWorkspace {
 
 		const add_row = (mop) => {
 			const advance = flt(dlg.get_value("advance_amount"));
+			if (advance < 0) {
+				frappe.show_alert({ message: __("Advance amount cannot be negative. Enter 0 for no advance, or the amount the customer paid."), indicator: "red" });
+				return;
+			}
 			if (advance <= 0) {
 				frappe.show_alert({
 					message: __("Enter Advance Amount first."),
@@ -1307,6 +1327,11 @@ export class PrebookWorkspace {
 		if (dlg.fields_dict.advance_amount) {
 			dlg.fields_dict.advance_amount.df.onchange = () => {
 				const advance = flt(dlg.get_value("advance_amount"));
+				if (advance < 0) {
+					frappe.show_alert({ message: __("Advance amount cannot be negative. Enter 0 for no advance, or the amount the customer paid."), indicator: "red" });
+					dlg.set_value("advance_amount", 0);
+					return;
+				}
 				if (advance <= 0) {
 					rows = [];
 				} else if (rows.length === 0) {
@@ -1336,7 +1361,11 @@ export class PrebookWorkspace {
 		$wrap.on("input change", ".ch-pb-row-amt", (e) => {
 			const i = parseInt($(e.currentTarget).closest("tr").data("idx"), 10);
 			if (rows[i]) {
-				rows[i].amount = flt($(e.currentTarget).val());
+				if (flt($(e.currentTarget).val()) < 0) {
+					frappe.show_alert({ message: __("A payment row can't be negative. Enter the amount received in this mode."), indicator: "red" });
+					$(e.currentTarget).val(0);
+				}
+				rows[i].amount = Math.max(0, flt($(e.currentTarget).val()));
 				update_totals_only();
 				sync_payload();
 			}

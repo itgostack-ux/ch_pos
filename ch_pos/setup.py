@@ -1326,6 +1326,17 @@ SALE_TYPE_SEED = [
         "requires_customer": 1, "requires_payment": 1,
     },
     {
+        # Orders taken online and billed at the store; the platform's order
+        # number is the sub type's reference (Sales Invoice View: Order ID).
+        "name": "Online Sale", "code": "OS", "is_default": 0,
+        "requires_customer": 1, "requires_payment": 1,
+        "sub_types": [
+            {"sale_sub_type": "Gogizmo Website", "requires_reference": 1},
+            {"sale_sub_type": "Amazon", "requires_reference": 1},
+            {"sale_sub_type": "Flipkart", "requires_reference": 1},
+        ],
+    },
+    {
         "name": "Free Sale", "code": "FREE", "is_default": 0,
         "requires_customer": 0, "requires_payment": 0,
         "sub_types": [

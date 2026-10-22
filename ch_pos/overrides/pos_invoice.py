@@ -708,6 +708,19 @@ def revert_kiosk_token_status(doc, method=None):
             frappe.log_error(frappe.get_traceback(), f"Failed to release held queue tokens after cancel of invoice {doc.name}")
 
 
+def ignore_kiosk_token_link(doc, method=None):
+    """Hook: on_cancel — a walk-in token only records how the visit ended.
+
+    It points at the pre-booking or bill it led to, but must not stop that
+    document from being cancelled. Runs after the controller's own on_cancel,
+    which sets ignore_linked_doctypes afresh, and before Frappe's link check.
+    """
+    ignored = list(doc.get("ignore_linked_doctypes") or [])
+    if "POS Kiosk Token" not in ignored:
+        ignored.append("POS Kiosk Token")
+    doc.ignore_linked_doctypes = tuple(ignored)
+
+
 # ── Coupon usage counter (Pricing Rule integration) ─────────────────
 
 

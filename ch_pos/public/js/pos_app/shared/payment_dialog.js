@@ -16,6 +16,19 @@ import { format_number } from "./helpers.js";
 import { pos_warning, pos_info } from "./toast.js";
 import { print_invoice_pdf } from "./print_helper.js";
 
+// Free Sale reasons for something owed from the original sale. Against an
+// original invoice inside the claim window they need no manager approval.
+// Mirrors FREE_GIFT_CLAIM_REASONS in ch_pos/api/pos_api.py.
+const GIFT_CLAIM_REASONS = [
+	"Free Gift Not Given at Sale",
+	"Free Gift Out of Stock at Sale",
+	"Bundle Item Not Given at Sale",
+	"Offer / Scheme Gift Pending",
+	"Accessory Missing in Box",
+	"Free Screen Guard / Cover Not Given",
+	"Wrong Free Gift Given at Sale",
+];
+
 // Share of the bill loyalty points may pay for -- the label, the box and the
 // check all use this one value.
 const LOYALTY_MAX_PCT = 0.50;
@@ -397,17 +410,18 @@ export class PaymentDialog {
 		if (this._is_free_sale) {
 			ov.find("#ch-pay-free-chk").prop("checked", true);
 			ov.find("#ch-pay-free-section").show();
+			this._sync_free_sale_commercials();
 			ov.find("#ch-pay-mop-section").hide();
 			ov.find("#ch-pay-rows").hide();
 			ov.find("#ch-pay-quick-cash").hide();
-			ov.find("#ch-pay-free-reason").val(this._free_sale_reason);
+			this._show_free_reason(ov);
 			// Restore Original Invoice fields
 			ov.find("#ch-pay-original-invoice-reason").val(this._original_invoice_reason || "");
 			this._mount_original_invoice_field();
 			// Restore approval status
 			if (this._free_sale_approval_name && this._required_managers.length) {
 				ov.find("#ch-pay-free-request-btn").hide();
-				ov.find("#ch-pay-free-reason").prop("readonly", true);
+				ov.find("#ch-pay-free-reason-sel, #ch-pay-free-reason-note").prop("disabled", true);
 				this._render_approval_status(this._required_managers);
 				// Resume polling if not yet approved
 				if (!this._free_sale_approved_by) {
@@ -416,6 +430,7 @@ export class PaymentDialog {
 			} else {
 				this._load_category_managers();
 				ov.find("#ch-pay-free-request-btn").prop("disabled", !this._free_sale_reason);
+				this._check_gift_claim();
 			}
 		}
 	}
@@ -575,8 +590,19 @@ export class PaymentDialog {
 					</div>
 					<div class="ch-pay-free-field">
 						<label>${__("Reason")} <span class="text-danger">*</span></label>
-						<input type="text" class="form-control form-control-sm" id="ch-pay-free-reason"
-							placeholder="${__("e.g. Warranty replacement, Display damage compensation")}">
+						<select class="form-control form-control-sm" id="ch-pay-free-reason-sel">
+							<option value="">${__("-- Select --")}</option>
+							<option value="Free Gift Not Given at Sale">${__("Free Gift Not Given at Sale")}</option>
+							<option value="Free Gift Out of Stock at Sale">${__("Free Gift Out of Stock at Sale")}</option>
+							<option value="Bundle Item Not Given at Sale">${__("Bundle Item Not Given at Sale")}</option>
+							<option value="Offer / Scheme Gift Pending">${__("Offer / Scheme Gift Pending")}</option>
+							<option value="Accessory Missing in Box">${__("Accessory Missing in Box")}</option>
+							<option value="Free Screen Guard / Cover Not Given">${__("Free Screen Guard / Cover Not Given")}</option>
+							<option value="Wrong Free Gift Given at Sale">${__("Wrong Free Gift Given at Sale")}</option>
+							<option value="Other">${__("Other")}</option>
+						</select>
+						<input type="text" class="form-control form-control-sm" id="ch-pay-free-reason-note"
+							placeholder="${__("Describe the reason")}" style="display:none;margin-top:6px">
 					</div>
 					<!-- Original Invoice link (Late Free Gift / VAS After Sale) -->
 					<div class="ch-pay-free-field" style="margin-top:8px">
@@ -592,6 +618,7 @@ export class PaymentDialog {
 							<option value="Other">${__("Other")}</option>
 						</select>
 					</div>
+					<div id="ch-pay-free-claim" style="display:none;margin-top:8px;padding:8px 10px;border-radius:6px;font-size:12px"></div>
 					<div id="ch-pay-free-managers" class="ch-pay-free-managers"></div>
 					<button class="btn btn-sm btn-primary ch-pay-free-request-btn" id="ch-pay-free-request-btn" style="margin-top:8px" disabled>
 						<i class="fa fa-paper-plane"></i> ${__("Request Approval")}
@@ -1008,9 +1035,21 @@ placeholder="${__("Enter code...")}">
 		});
 
 		// Amount edit (not for Finance row — it is read-only/auto-calculated)
+		// Finance row: the financed amount is typed; the rest of the bill becomes
+		// the down payment (partial, or zero when the whole bill is financed).
+		// Applied live as it is typed; on change (Enter / leaving the box) the
+		// final value is tidied up (capped at the bill).
+		ov.on("change", ".ch-pay-row-amount", e => {
+			const idx = parseInt($(e.currentTarget).data("idx"));
+			if (this._mop_type(this._payments[idx]?.mode) !== "finance") return;
+			this._set_financed_amount(idx, flt($(e.currentTarget).val()) || 0);
+		});
 		ov.on("input", ".ch-pay-row-amount", e => {
 			const idx = parseInt($(e.currentTarget).data("idx"));
-			if (this._mop_type(this._payments[idx]?.mode) === "finance") return; // read-only
+			if (this._mop_type(this._payments[idx]?.mode) === "finance") {
+				this._set_financed_amount_live(idx, $(e.currentTarget));
+				return;
+			}
 			this._payments[idx].amount = flt($(e.currentTarget).val()) || 0;
 			if (this._is_finance_sale_type(PosState.sale_type)) {
 				this._sync_finance_payments();
@@ -1171,6 +1210,7 @@ placeholder="${__("Enter code...")}">
 		ov.on("change", "#ch-pay-free-chk", e => {
 			this._is_free_sale = $(e.currentTarget).is(":checked");
 			ov.find("#ch-pay-free-section").toggle(this._is_free_sale);
+			this._sync_free_sale_commercials();
 			if (this._is_free_sale) {
 				// Uncheck credit sale — mutually exclusive
 				this._is_credit_sale = false;
@@ -1187,11 +1227,14 @@ placeholder="${__("Enter code...")}">
 					this._original_invoice_reason = "Late Free Gift";
 				}
 				this._mount_original_invoice_field();
+				// Approval list only once the reason says it is needed.
+				this._check_gift_claim();
 			} else {
 				ov.find("#ch-pay-mop-section").show();
 				ov.find("#ch-pay-rows").show();
 				this._free_sale_approval_name = null;
 				this._free_sale_approved_by = "";
+				this._gift_claim_ok = false;
 				clearInterval(this._approval_poll);
 				this._original_invoice = "";
 				this._original_invoice_reason = "";
@@ -1199,11 +1242,18 @@ placeholder="${__("Enter code...")}">
 			}
 			this._update_totals();
 		});
-		ov.on("input", "#ch-pay-free-reason", e => {
-			this._free_sale_reason = $(e.currentTarget).val().trim();
+		// Reason: a gift-claim reason (GIFT_CLAIM_REASONS) or "Other" (with a typed note).
+		const read_reason = () => {
+			const sel = ov.find("#ch-pay-free-reason-sel").val() || "";
+			const note = (ov.find("#ch-pay-free-reason-note").val() || "").trim();
+			ov.find("#ch-pay-free-reason-note").toggle(sel === "Other");
+			this._free_sale_reason = sel === "Other" ? (note ? `Other: ${note}` : "") : sel;
 			ov.find("#ch-pay-free-request-btn").prop("disabled", !this._free_sale_reason);
+			this._check_gift_claim();
 			this._update_totals();
-		});
+		};
+		ov.on("change", "#ch-pay-free-reason-sel", read_reason);
+		ov.on("input", "#ch-pay-free-reason-note", read_reason);
 		ov.on("change", "#ch-pay-original-invoice-reason", e => {
 			this._original_invoice_reason = $(e.currentTarget).val();
 		});
@@ -1333,7 +1383,8 @@ placeholder="${__("Enter code...")}">
 
 			tenure_sel.hide();
 			const opt = $(e.currentTarget).find(":selected");
-			if (opt.data("ref")) { ref.attr("placeholder", __("Reference No...")).show().val(""); } else { ref.hide().val(""); }
+			const ref_label = PosState.sale_type === "Online Sale" ? __("Online Order ID") : __("Reference No...");
+			if (opt.data("ref")) { ref.attr("placeholder", ref_label).show().val(""); } else { ref.hide().val(""); }
 		});
 		ov.on("change", "#ch-pay-sale-fin-tenure", e => {
 			PosState.finance_tenure = $(e.currentTarget).val() || null;
@@ -1521,6 +1572,11 @@ this._update_discount_auth_ui();
 ov.on("click", "#ch-pay-coupon-apply", () => {
 const code = ov.find("#ch-pay-coupon-code").val().trim();
 if (!code) return;
+if (this._no_discount_now()) {
+	frappe.msgprint({ title: __("Not Allowed"), indicator: "orange",
+		message: __("Discounts, coupons and vouchers do not apply to a Free or Finance Sale. Choose another sale type to use them.") });
+	return;
+}
 frappe.xcall("ch_pos.api.pos_api.apply_coupon_or_voucher", {
 code,
 customer: PosState.customer,
@@ -1653,6 +1709,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	 *  Shared by the dialog's own sale-type pills and by the sale_type:changed
 	 *  listener that reacts to the cart panel's separate pills. */
 	_apply_sale_type_change(type) {
+		setTimeout(() => { this._sync_free_sale_commercials(); this._update_totals(); }, 0);
 		if (!this._overlay) return;
 		const ov = this._overlay;
 
@@ -1859,6 +1916,77 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		this._overlay?.find(".ch-pay-totals-block").html(this._build_totals_html());
 	}
 
+	_finance_net_payable() {
+		const grand = this._calc_grand_total();
+		const loyalty = this._redeem_loyalty ? Math.min(this._loyalty_amount || 0, grand) : 0;
+		return Math.max(0, grand - loyalty);
+	}
+
+	// Financed amount typed on the Finance row: clamp to the bill, and put the
+	// difference (the down payment) on the first non-finance row -- adding a
+	// Cash row when there is none. Other down-payment rows keep their amounts.
+	// While the Finance box is typed in: move the difference to the down
+	// payment row and refresh the totals without redrawing the rows, so the
+	// cashier's cursor stays put. A Cash row is added (and the box refocused)
+	// only when there is none to carry the down payment.
+	_set_financed_amount_live(fin_idx, $input) {
+		const raw = String($input.val() || "");
+		const net = this._finance_net_payable();
+		const financed = Math.min(Math.max(0, flt(raw, 2)), net);
+		const others = this._payments.map((_p, i) => i).filter((i) => i !== fin_idx);
+		const down = flt(net - financed, 2);
+		if (!others.length && down > 0.005) {
+			this._payments.splice(fin_idx, 0, {
+				mode: "Cash", amount: down, is_down_payment: true,
+				upi_transaction_id: "", card_reference: "", card_last_four: "",
+				finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0,
+			});
+			this._payments[fin_idx + 1].amount = financed;
+			this._payments[fin_idx + 1].finance_down_payment = down;
+			this._render_payments();
+			const $fin = this._overlay.find(`.ch-pay-row-amount[data-idx="${fin_idx + 1}"]`);
+			$fin.val(raw).trigger("focus");
+			try { const el = $fin[0]; el.setSelectionRange && el.setSelectionRange(raw.length, raw.length); } catch (e) { /* number inputs */ }
+			this._update_totals();
+			return;
+		}
+		if (others.length) {
+			const first = others[0];
+			const rest = others.slice(1).reduce((s, i) => s + flt(this._payments[i].amount), 0);
+			const amt = Math.max(0, flt(down - rest, 2));
+			this._payments[first].amount = amt;
+			this._payments[first].is_down_payment = true;
+			this._overlay.find(`.ch-pay-row-amount[data-idx="${first}"]`).val(flt(amt, 2));
+		}
+		this._payments[fin_idx].amount = financed;
+		this._payments[fin_idx].finance_down_payment = down;
+		this._update_totals();
+	}
+
+	_set_financed_amount(fin_idx, typed) {
+		const net = this._finance_net_payable();
+		const financed = Math.min(Math.max(0, flt(typed, 2)), net);
+		const others = this._payments.map((_p, i) => i).filter((i) => i !== fin_idx);
+		const down = flt(net - financed, 2);
+		if (others.length) {
+			const first = others[0];
+			const rest = others.slice(1).reduce((s, i) => s + flt(this._payments[i].amount), 0);
+			this._payments[first].amount = Math.max(0, flt(down - rest, 2));
+			this._payments[first].is_down_payment = true;
+		} else if (down > 0.005) {
+			this._payments.splice(fin_idx, 0, {
+				mode: "Cash", amount: down, is_down_payment: true,
+				upi_transaction_id: "", card_reference: "", card_last_four: "",
+				finance_provider: "", finance_tenure: "", finance_approval_id: "", finance_down_payment: 0,
+			});
+		}
+		// Recomputes Finance from the down payment -- equal to `financed` unless
+		// other rows already exceeded the bill.
+		this._sync_finance_payments();
+		this._render_payments();
+		this._update_totals();
+	}
+
 	_sync_finance_payments() {
 		if (!this._is_finance_sale_type(PosState.sale_type) || this._is_free_sale) return;
 
@@ -1874,10 +2002,14 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const financed_amount = Math.max(0, net_payable - non_finance_paid);
 
 		if (finance_idx >= 0) {
-			// Finance row exists — just update amount (it is non-editable / auto-calc)
+			// Finance row exists — keep it equal to the bill less the down payment
 			this._payments[finance_idx].amount = financed_amount;
+			// Recorded on the invoice's finance payment row (custom_finance_down_payment).
+			this._payments[finance_idx].finance_down_payment = flt(Math.min(non_finance_paid, net_payable), 2);
 			// Sync DOM input immediately so Finance row always shows the correct amount
-			this._overlay?.find(`.ch-pay-row-amount[data-idx="${finance_idx}"]`).val(flt(financed_amount, 2).toFixed(2));
+			// ...except while the cashier is typing in it (live entry).
+			const $fin = this._overlay?.find(`.ch-pay-row-amount[data-idx="${finance_idx}"]`);
+			if ($fin && $fin.length && $fin[0] !== document.activeElement) $fin.val(flt(financed_amount, 2).toFixed(2));
 			return;
 		}
 
@@ -2114,6 +2246,10 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			this._sale_types = types || [];
 			if (this._sale_types.length) {
 				this._render_sale_type_pills();
+				// The sale type may have been chosen in the cart before this
+				// window opened: apply the Free / Finance no-discount rule now.
+				this._sync_free_sale_commercials();
+				this._update_totals();
 			} else {
 				// Show "not configured" hint so users know why pills are missing
 				const pills = this._overlay.find("#ch-pay-sale-type-pills");
@@ -2174,6 +2310,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (!st) return false;
 		const code = (st.code || "").toUpperCase();
 		return code === "FS" || type_name.toLowerCase().includes("finance") || type_name.toLowerCase().includes("emi");
+	}
+
+	// Supplier Sale (SS) takes full, partial or zero payment.
+	_is_supplier_sale_type(type_name) {
+		const st = this._sale_types.find(t => t.sale_type_name === type_name);
+		return !!st && (st.code || "").toUpperCase() === "SS";
 	}
 
 	_is_replacement_sale_type(type_name) {
@@ -2318,8 +2460,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 						</div>
 					</div>`;
 			} else if (type === "finance") {
-				// Amount is auto-calculated (net_payable - down payments); show as read-only.
-				ref_html = `<div class="ch-pay-fin-auto-note"><i class="fa fa-info-circle"></i> ${__("Auto-calculated. Add Cash/UPI/Card rows above for down payment.")}</div>`;
+				// Editable: the rest of the bill becomes the down payment (or 0).
+				ref_html = `<div class="ch-pay-fin-auto-note"><i class="fa fa-info-circle"></i> ${__("Enter the financed amount — the balance becomes the down payment (0 for zero down payment). Or edit the Cash/UPI/Card rows above.")}</div>`;
 			}
 
 			// Finance row: amount is read-only (auto-calc). All other rows are editable.
@@ -2332,10 +2474,10 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 							? `<button class="ch-pay-row-remove" data-idx="${idx}" title="${__("Remove")}"><i class="fa fa-times-circle"></i></button>`
 							: ""}
 					</div>
-					<div class="ch-pay-row-amt-group${is_finance_row ? " ch-pay-row-amt-readonly" : ""}">
+					<div class="ch-pay-row-amt-group">
 						<span class="ch-pay-amt-prefix">₹</span>
 						<input type="number" class="ch-pay-row-amount" data-idx="${idx}"
-							value="${flt(p.amount, 2)}" min="0" step="0.01"${is_finance_row ? " readonly tabindex=\"-1\"" : ""}>
+							value="${flt(p.amount, 2)}" min="0" step="0.01">
 					</div>
 					${ref_html}
 				</div>`);
@@ -2422,8 +2564,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		// - Normal: balance <= 0 + refs valid
 		let ready = false;
 		if (this._is_free_sale) {
-			ready = !!(this._free_sale_reason && this._free_sale_approved_by);
-		} else if (this._is_credit_sale || has_finance_row) {
+			ready = !!(this._free_sale_reason && (this._free_sale_approved_by || this._gift_claim_ok));
+		} else if (this._is_credit_sale || has_finance_row || this._is_supplier_sale_type(PosState.sale_type)) {
 			ready = refs_valid && cash_paid >= 0;
 		} else {
 			ready = balance <= 0.005 && refs_valid;
@@ -2491,6 +2633,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			$lbl.text(finance_amount > 0.005 ? __("Confirm Finance Sale — ₹{0} financed", [format_number(finance_amount)]) : __("Confirm Finance Sale"));
 		} else if (this._is_credit_sale) {
 			$lbl.text(balance > 0.005 ? __("Confirm Credit Sale — ₹{0} on credit", [format_number(balance)]) : __("Confirm Payment"));
+		} else if (this._is_supplier_sale_type(PosState.sale_type) && balance > 0.005) {
+			$lbl.text(__("Confirm Supplier Sale — ₹{0} due", [format_number(balance)]));
 		} else {
 			$lbl.text(__("Confirm Payment"));
 		}
@@ -3038,16 +3182,49 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 		// Free sale validations
 		if (this._is_free_sale) {
-			if (!this._free_sale_reason) {
-				return this._block(__("Enter reason for free sale"), "#ch-pay-free-reason", "orange");
+			if ((PosState.cart || []).some((c) => c.is_vas)) {
+				return this._block(__("VAS and Protection plans cannot be given in a Free Sale. Remove the plan, or bill it with another sale type."), null, "red");
 			}
-			if (!this._free_sale_approved_by) {
+			if (PosState.exception_request || (PosState.cart || []).some((c) => c.exception_request)) {
+				return this._block(__("Exceptions cannot be used in a Free Sale. Remove the exception, or bill it with another sale type."), null, "red");
+			}
+			if ((PosState.cart || []).some((c) => c.is_free_bundle_item)) {
+				return this._block(__("Bundle gifts cannot be given in a Free Sale. Remove the bundled gift, or bill it with another sale type."), null, "red");
+			}
+			if (PosState.sales_order_reference || (PosState.cart || []).some((c) => c.sales_order || c.so_detail)) {
+				return this._block(__("A pre-booking (Sales Order) cannot be billed as a Free Sale. Bill it with its own sale type."), null, "red");
+			}
+			if (flt(PosState.additional_discount_pct) > 0 || flt(PosState.additional_discount_amt) > 0) {
+				return this._block(__("Discounts do not apply to a Free Sale. Remove the discount, or choose another sale type."), null, "red");
+			}
+			if (PosState.coupon_code || PosState.voucher_code || this._dlg_coupon_code || this._dlg_voucher_code) {
+				return this._block(__("Coupons and vouchers cannot be used in a Free Sale. Remove it, or bill with another sale type."), null, "red");
+			}
+			if (!this._free_sale_reason) {
+				return this._block(__("Select the reason for free sale"), "#ch-pay-free-reason-sel", "orange");
+			}
+			if (!this._free_sale_approved_by && !this._gift_claim_ok) {
 				return this._block(__("Enter manager name who approved this free sale"), null, "orange");
 			}
 		}
 
+		// Finance and Supplier Sale take no exception (Discount Override / Free Accessory).
+		const _no_disc_label = this._is_finance_sale_type(PosState.sale_type) ? __("Finance Sale")
+			: (this._is_supplier_sale_type(PosState.sale_type) ? __("Supplier Sale") : "");
+		if (!this._is_free_sale && _no_disc_label
+			&& (PosState.exception_request || (PosState.cart || []).some((c) => c.exception_request))) {
+			return this._block(__("Exceptions cannot be used in a {0}. Remove the exception, or choose another sale type.", [_no_disc_label]), null, "red");
+		}
+		// Finance and Supplier Sale take no discount, coupon or voucher.
+		if (!this._is_free_sale && _no_disc_label
+			&& (flt(PosState.additional_discount_pct) > 0 || flt(PosState.additional_discount_amt) > 0
+				|| PosState.coupon_code || PosState.voucher_code)) {
+			return this._block(__("Discounts, coupons and vouchers do not apply to a {0}. Remove them, or choose another sale type.", [_no_disc_label]), null, "red");
+		}
+
 		// Normal/credit sale validations
-		if (!this._is_free_sale && !this._is_credit_sale && !this._is_finance_sale_type(PosState.sale_type) && balance > 0.005) {
+		if (!this._is_free_sale && !this._is_credit_sale && !this._is_finance_sale_type(PosState.sale_type)
+			&& !this._is_supplier_sale_type(PosState.sale_type) && balance > 0.005) {
 			return this._block(__("Payment not complete — ₹{0} still due", [format_number(balance)]),
 				".ch-pay-mop-btns");
 		}
@@ -3098,7 +3275,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			}
 			const credit_exposure = this._calc_credit_exposure();
 			if (credit_exposure > 0.005 && !this._credit_approved) {
-				frappe.show_alert({ message: __("Manager approval required — credit limit exceeded or overdue invoices"), indicator: "orange" });
+				frappe.show_alert({ message: __("Manager approval is required for every credit sale"), indicator: "orange" });
 				this._submitting = false;
 				return;
 			}
@@ -3718,14 +3895,12 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			</div>
 		`);
 
-		this._credit_approved = exposure <= 0.005 || (!over_limit && overdue_count === 0) || !!this._credit_approved_by;
-		if (this._credit_approved && !this._credit_approved_by) {
-			this._overlay.find("#ch-pay-credit-approved-by").val(__("Auto-approved within credit policy"));
-		}
+		// Every credit sale needs a manager's approval, even within the limit.
+		this._credit_approved = exposure <= 0.005 || !!this._credit_approved_by;
 
-		if ((over_limit || overdue_count > 0) && !this._credit_approved_by && exposure > 0.005) {
+		if (!this._credit_approved_by && exposure > 0.005) {
 			this._overlay.find("#ch-pay-credit-approved-by").val("");
-			const reasons = [];
+			const reasons = [__("every credit sale")];
 			if (over_limit) reasons.push(__("exceeds available credit by ₹{0}", [format_number(exposure - available)]));
 			if (overdue_count > 0) reasons.push(__("{0} overdue invoice(s)", [overdue_count]));
 			this._render_credit_override($approval, reasons, exposure, available, overdue_count);
@@ -3820,6 +3995,101 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 
 	// ── Original Invoice Picker (Late Free Gift / VAS After Sale) ──
 
+	// Free, Finance and Supplier Sale take no bill discount, coupon or voucher
+	// (sale-type rules): the Commercial Controls block is hidden and anything
+	// already applied is cleared. It comes back when another sale type is chosen.
+	_no_discount_now() {
+		const name = String(PosState.sale_type || "").toLowerCase();
+		return this._is_free_sale || this._is_finance_sale_type(PosState.sale_type)
+			|| this._is_supplier_sale_type(PosState.sale_type)
+			|| name.includes("finance") || name.includes("emi");
+	}
+
+	_sync_free_sale_commercials() {
+		const ov = this._overlay;
+		if (!ov) return;
+		const off = this._no_discount_now();
+		ov.find("#ch-pay-commercials").toggle(!off);
+		if (!off) return;
+		const $reason = ov.find("#ch-pay-disc-reason");
+		if ($reason.val()) $reason.val("").trigger("change");  // the dialog's own discount reset
+		this._disc_pct = 0;
+		this._disc_amt = 0;
+		PosState.additional_discount_pct = 0;
+		PosState.additional_discount_amt = 0;
+		PosState.discount_reason = "";
+		this._dlg_coupon_code = "";
+		this._dlg_coupon_discount = 0;
+		this._dlg_voucher_code = "";
+		this._dlg_voucher_amount = 0;
+		this._dlg_voucher_name = "";
+		this._dlg_voucher_balance = 0;
+		PosState.coupon_code = null;
+		PosState.coupon_discount = 0;
+		PosState.voucher_code = null;
+		PosState.voucher_amount = 0;
+		ov.find("#ch-pay-coupon-code").val("");
+		ov.find("#ch-pay-coupon-msg").empty();
+	}
+
+	_show_free_reason(ov) {
+		const r = this._free_sale_reason || "";
+		const is_other = r.startsWith("Other");
+		ov.find("#ch-pay-free-reason-sel").val(is_other ? "Other" : r);
+		ov.find("#ch-pay-free-reason-note").toggle(is_other).val(is_other ? r.replace(/^Other:\s*/, "") : "");
+	}
+
+	// "Free Gift Not Given at Sale" against an original invoice inside the
+	// claim window (CH POS Control Settings, default 7 days) needs no manager
+	// approval -- the server applies the same rule when the bill is saved.
+	_check_gift_claim() {
+		const ov = this._overlay;
+		if (!ov) return;
+		const $claim = ov.find("#ch-pay-free-claim");
+		const show_approval = (on) => {
+			ov.find("#ch-pay-free-managers").toggle(on);
+			ov.find("#ch-pay-free-request-btn").toggle(on && !this._free_sale_approval_name);
+		};
+		// need_approval: show the manager list / Request Approval only when this
+		// free sale really needs one (Other, or a claim outside the window).
+		const done = (ok, html, tone, need_approval = !ok) => {
+			this._gift_claim_ok = ok;
+			if (html) {
+				const c = tone === "ok" ? ["#ecfdf5", "#a7f3d0", "#065f46"] : ["#fffbeb", "#fde68a", "#92400e"];
+				$claim.css({ background: c[0], border: `1px solid ${c[1]}`, color: c[2] }).html(html).show();
+			} else {
+				$claim.hide();
+			}
+			show_approval(need_approval);
+			this._update_totals();
+		};
+		const sel = ov.find("#ch-pay-free-reason-sel").val() || "";
+		if (!sel) {
+			return done(false, `<i class="fa fa-info-circle"></i> ${__("Select a reason. A free gift not given at the sale, claimed within the window, needs no approval.")}`, null, false);
+		}
+		if (!GIFT_CLAIM_REASONS.includes(sel)) return done(false);
+		if (!this._original_invoice) {
+			return done(false, `<i class="fa fa-info-circle"></i> ${__("Select the Original Invoice the gift was due on. Within the claim window no approval is needed.")}`, null, false);
+		}
+		this._original_invoice_reason = "Late Free Gift";
+		ov.find("#ch-pay-original-invoice-reason").val("Late Free Gift");
+		const inv = this._original_invoice;
+		frappe.xcall("ch_pos.api.pos_api.check_free_gift_claim", {
+			original_invoice: inv, customer: PosState.customer || null,
+		}).then((r) => {
+			if (inv !== this._original_invoice) return;   // changed meanwhile
+			if (r && r.ok) {
+				done(true, `<i class="fa fa-check-circle"></i> ${__("No approval needed — gift claim within {0} days of {1} (dated {2}).",
+					[r.days, frappe.utils.escape_html(inv), frappe.datetime.str_to_user(r.posting_date)])}`, "ok");
+			} else if (r && r.invalid) {
+				done(false, `<i class="fa fa-exclamation-triangle"></i> ${__("{0} is not a valid sale of this customer.", [frappe.utils.escape_html(inv)])}`);
+			} else {
+				done(false, `<i class="fa fa-exclamation-triangle"></i> ${__("{0} is {1} days old — beyond the {2}-day claim window. Approval needed.",
+					[frappe.utils.escape_html(inv), r ? r.age_days : "?", r ? r.days : 7])}`);
+			}
+		}).catch(() => done(false));
+	}
+
 	_mount_original_invoice_field() {
 		if (!this._overlay) return;
 		const wrap = this._overlay.find("#ch-pay-original-invoice-wrap");
@@ -3841,6 +4111,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				},
 				change: () => {
 					this._original_invoice = this._original_invoice_field.get_value() || "";
+					this._check_gift_claim();
 				},
 			},
 			parent: wrap,
@@ -3931,7 +4202,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			this._free_sale_approval_name = result.approval_name;
 			this._required_managers = result.managers || [];
 			this._overlay.find("#ch-pay-free-request-btn").hide();
-			this._overlay.find("#ch-pay-free-reason").prop("readonly", true);
+			this._overlay.find("#ch-pay-free-reason-sel, #ch-pay-free-reason-note").prop("disabled", true);
 
 			frappe.show_alert({ message: __("Approval request sent to category managers"), indicator: "blue" });
 			this._render_approval_status(result.managers);

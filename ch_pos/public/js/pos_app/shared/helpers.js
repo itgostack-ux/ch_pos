@@ -9,6 +9,73 @@
  * @param {number|string} val
  * @returns {string}
  */
+// Free Sale has no VAS / Protection plans (sale-type matrix). One rule for the
+// cart, the VAS window and PAY.
+export const FREE_SALE_VAS_MSG = "VAS and Protection plans cannot be given in a Free Sale. Remove the plan, or bill it with another sale type.";
+
+export const FREE_SALE_PREBOOK_MSG = "A pre-booking (Sales Order) cannot be billed as a Free Sale. Bill it with its own sale type.";
+
+// A pre-booking being billed at Pickup: the cart carries its Sales Order.
+export function cart_has_prebooking(state) {
+	return !!(state.sales_order_reference || (state.cart || []).some((c) => c.sales_order || c.so_detail));
+}
+
+export const FREE_SALE_BUNDLE_MSG = "Bundle gifts cannot be given in a Free Sale. Remove the bundled gift, or bill it with another sale type.";
+export const FREE_SALE_COUPON_MSG = "Coupons and vouchers cannot be used in a Free Sale. Remove it, or bill with another sale type.";
+export const FREE_SALE_EXCEPTION_MSG = "Exceptions cannot be used in a Free Sale. Remove the exception, or bill it with another sale type.";
+
+// Any exception linked to the bill or to one of its lines.
+export function cart_has_exception(state) {
+	return !!(state.exception_request || (state.cart || []).some((c) => c.exception_request));
+}
+
+// Finance Sale (code FS / an EMI type) -- same rule as the payment dialog.
+export function is_finance_sale_type(name) {
+	if (!name) return false;
+	const row = (window.cur_pos_state_sale_types || []).find((r) => r.sale_type_name === name);
+	const code = String((row && row.code) || "").toUpperCase();
+	const nm = String(name).toLowerCase();
+	return code === "FS" || nm.includes("finance") || nm.includes("emi");
+}
+
+// Supplier Sale (code SS).
+export function is_supplier_sale_type(name) {
+	if (!name) return false;
+	const row = (window.cur_pos_state_sale_types || []).find((r) => r.sale_type_name === name);
+	return String((row && row.code) || "").toUpperCase() === "SS";
+}
+
+// Free, Finance and Supplier sales take no discount of any kind: no offer on a
+// line, no bill discount, no coupon or voucher (sale-type rules).
+export function is_no_discount_sale_type(name) {
+	return is_free_sale_type(name) || is_finance_sale_type(name) || is_supplier_sale_type(name);
+}
+
+function no_discount_label(name) {
+	if (is_free_sale_type(name)) return __("Free Sale");
+	if (is_supplier_sale_type(name)) return __("Supplier Sale");
+	return __("Finance Sale");
+}
+
+// Cart exceptions (Discount Override, Free Accessory) are price reductions:
+// not on a Free, Finance or Supplier Sale. FIFO overrides are separate and unaffected.
+export function exception_blocked_msg(name) {
+	return __("Exceptions cannot be used in a {0}. Remove the exception, or choose another sale type.",
+		[no_discount_label(name)]);
+}
+
+export function no_discount_msg(name) {
+	return __("Discounts, coupons and vouchers do not apply to a {0}. Remove them, or choose another sale type.",
+		[no_discount_label(name)]);
+}
+
+export function is_free_sale_type(name) {
+	if (!name) return false;
+	const row = (window.cur_pos_state_sale_types || []).find((r) => r.sale_type_name === name);
+	const code = String((row && row.code) || "").toUpperCase();
+	return code === "FREE" || name === "Free Sale";
+}
+
 export function format_number(val) {
 	const num = parseFloat(val) || 0;
 	return num.toLocaleString("en-IN", {
