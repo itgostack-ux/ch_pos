@@ -69,7 +69,7 @@ app_include_css = [
     # copy its browser already cached. Bump the version when one changes.
     # pos_components.css had no version at all, which is why the Request
     # Stock header colours landed in the file and nowhere else.
-    "/assets/ch_pos/css/pos_components.css?v=9",
+    "/assets/ch_pos/css/pos_components.css?v=11",
     "/assets/ch_pos/css/front_desk.css?v=7",
     "/assets/ch_pos/css/stock_transfer.css?v=2",
 ]

@@ -69,6 +69,18 @@ export function no_discount_msg(name) {
 		[no_discount_label(name)]);
 }
 
+export const FREE_SALE_NEW_WALKIN_MSG = "A Free Sale is not allowed for a new customer billed from a walk-in. Bill it as a normal sale.";
+
+// Billing a walk-in whose customer has never bought from us (or the default
+// walk-in customer): no Free Sale. Unknown yet (info not loaded) = allowed
+// here; the server makes the final check.
+export function free_sale_blocked_for_new_walkin(state) {
+	if (!state.kiosk_token) return false;
+	if (!state.customer || state.customer === state.default_customer) return true;
+	const info = state.customer_info;
+	return !!(info && info.customer === state.customer && info.has_purchases === false);
+}
+
 export function is_free_sale_type(name) {
 	if (!name) return false;
 	const row = (window.cur_pos_state_sale_types || []).find((r) => r.sale_type_name === name);

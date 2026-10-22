@@ -12,7 +12,7 @@
  *          bank offers, loyalty, quick-cash, success screen
  */
 import { PosState, EventBus } from "../state.js";
-import { format_number } from "./helpers.js";
+import { format_number, FREE_SALE_NEW_WALKIN_MSG, free_sale_blocked_for_new_walkin, cart_has_exception } from "./helpers.js";
 import { pos_warning, pos_info } from "./toast.js";
 import { print_invoice_pdf } from "./print_helper.js";
 
@@ -284,6 +284,7 @@ export class PaymentDialog {
 		if (this._payments[0]) this._load_bank_offers(this._payments[0].mode);
 		this._load_sale_types();
 		this._restore_payment_ui();
+		this._sync_coupon_ui();
 		this._load_disc_reasons();
 		this._load_finance_partners();
 		this._load_payment_machines();
@@ -383,6 +384,23 @@ export class PaymentDialog {
 				${_mop_icon(p.mode_of_payment)}
 				<span>${frappe.utils.escape_html(p.mode_of_payment)}</span>
 			</button>`).join(""));
+		this._sync_mop_selection();
+	}
+
+	/** The modes in this payment show as selected (redrawn buttons included).
+	 *  A finance mode is offered only in a Finance Sale. */
+	_sync_mop_selection() {
+		if (!this._overlay) return;
+		const in_use = new Set(this._payments.map(p => p.mode));
+		// A Finance line on the bill means a Finance Sale even before the sale
+		// types have loaded (they arrive after the buttons are drawn).
+		const finance_sale = this._is_finance_sale_type(PosState.sale_type)
+			|| this._payments.some(p => this._mop_type(p.mode) === "finance");
+		this._overlay.find(".ch-pay-mop-btn").each((_, el) => {
+			const mop = $(el).data("mop");
+			$(el).toggleClass("selected", in_use.has(mop));
+			$(el).toggle(finance_sale || this._mop_type(mop) !== "finance");
+		});
 	}
 
 	/** Restore saved payment UI state (checkboxes, sections) after overlay mounts */
@@ -706,6 +724,7 @@ const coupon_html = `
 <input type="text" class="form-control form-control-sm" id="ch-pay-coupon-code"
 placeholder="${__("Enter code...")}">
 <button class="btn btn-sm btn-outline-primary" id="ch-pay-coupon-apply">${__("Apply")}</button>
+<button class="btn btn-sm btn-outline-danger" id="ch-pay-coupon-remove" style="display:none"><i class="fa fa-times"></i> ${__("Remove")}</button>
 </div>
 <div id="ch-pay-coupon-msg" class="ch-pay-field-hint"></div>
 </div>
@@ -963,6 +982,17 @@ placeholder="${__("Enter code...")}">
 		ov.on("click", ".ch-pay-mop-btn", e => {
 			const mop = $(e.currentTarget).data("mop");
 			const is_finance_mode = this._is_finance_sale_type(PosState.sale_type);
+
+			// A mode already in the payment is selected: clicking it again takes it
+			// out. The Finance line of a Finance Sale is required and stays.
+			if (this._payments.some(p => p.mode === mop)) {
+				if (this._mop_type(mop) === "finance") return;
+				this._payments = this._payments.filter(p => p.mode !== mop);
+				if (is_finance_mode) this._sync_finance_payments();
+				this._render_payments();
+				this._update_totals();
+				return;
+			}
 
 			if (is_finance_mode) {
 				// In Finance mode: MOP buttons add/top-up DOWN PAYMENT rows (never touch Finance row)
@@ -1571,10 +1601,16 @@ this._update_discount_auth_ui();
 // ── Coupon / Voucher apply ────────────────────────────────────────────
 ov.on("click", "#ch-pay-coupon-apply", () => {
 const code = ov.find("#ch-pay-coupon-code").val().trim();
-if (!code) return;
+if (!code) {
+	frappe.show_alert({ message: __("Enter a coupon or voucher code first."), indicator: "orange" });
+	ov.find("#ch-pay-coupon-code").focus();
+	return;
+}
 if (this._no_discount_now()) {
 	frappe.msgprint({ title: __("Not Allowed"), indicator: "orange",
-		message: __("Discounts, coupons and vouchers do not apply to a Free or Finance Sale. Choose another sale type to use them.") });
+		message: cart_has_exception(PosState)
+			? __("Bill discounts, coupons and vouchers cannot be used when the bill has an exception. Remove the exception, or the discount.")
+			: __("Discounts, coupons and vouchers do not apply to a Free or Finance Sale. Choose another sale type to use them.") });
 	return;
 }
 frappe.xcall("ch_pos.api.pos_api.apply_coupon_or_voucher", {
@@ -1623,6 +1659,7 @@ PosState.voucher_amount  = 0;
 $msg.html(`<span style="color:var(--pos-success)">🏷️ ${__("Coupon")} — ${disc_label}</span>`).show();
 }
 this._update_totals();
+this._sync_coupon_ui();
 }).catch(err => {
 const msg = err && err.message ? frappe.utils.strip_html(err.message) : __("Invalid code");
 ov.find("#ch-pay-coupon-msg")
@@ -1630,7 +1667,20 @@ ov.find("#ch-pay-coupon-msg")
 });
 });
 ov.on("keydown", "#ch-pay-coupon-code", e => {
-if (e.key === "Enter") ov.find("#ch-pay-coupon-apply").trigger("click");
+if (e.key === "Enter" && !ov.find("#ch-pay-coupon-apply").prop("disabled")) ov.find("#ch-pay-coupon-apply").trigger("click");
+});
+// Typed, pasted or scanned: Apply follows what is in the box.
+ov.on("input change keyup paste", "#ch-pay-coupon-code", () => setTimeout(() => this._sync_coupon_ui(), 0));
+// Remove the applied coupon / voucher, after asking.
+ov.on("click", "#ch-pay-coupon-remove", () => {
+const code = this._dlg_voucher_code || this._dlg_coupon_code;
+if (!code) return;
+const kind = this._dlg_voucher_code ? __("voucher") : __("coupon");
+frappe.confirm(__("Remove {0} {1} from this bill?", [kind, `<b>${frappe.utils.escape_html(code)}</b>`]), () => {
+	this._clear_coupon_voucher();
+	this._update_totals();
+	frappe.show_alert({ message: __("{0} removed", [code]), indicator: "orange" });
+});
 });
 
 // ── Confirm on Enter when balance == 0 ───────────────────────────────
@@ -2303,6 +2353,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			this._render_payments();
 			this._update_totals();
 		}
+		// Sale types are known now: show or hide the Finance mode for this one.
+		this._sync_mop_selection();
 	}
 
 	_is_finance_sale_type(type_name) {
@@ -2377,6 +2429,7 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	_render_payments() {
 		const container = this._overlay.find("#ch-pay-rows");
 		container.empty();
+		this._sync_mop_selection();
 
 		this._payments.forEach((p, idx) => {
 			const type = this._mop_type(p.mode);
@@ -2483,11 +2536,8 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 				</div>`);
 		});
 
-		// Show/hide quick cash section — hide in Finance mode (down payment amounts are entered directly)
-		const has_cash = this._payments.some(p => this._mop_type(p.mode) === "cash");
-		const show_quick_cash = has_cash && !this._is_free_sale && !this._is_finance_sale_type(PosState.sale_type);
-		this._overlay.find("#ch-pay-quick-cash").toggle(show_quick_cash);
-		if (show_quick_cash) this._render_quick_cash();
+		// Quick Cash suggestions are not shown at this till.
+		this._overlay.find("#ch-pay-quick-cash").hide();
 	}
 
 	_render_quick_cash() {
@@ -2639,9 +2689,6 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 			$lbl.text(__("Confirm Payment"));
 		}
 
-		// Refresh quick cash buttons if cash row present
-		const has_cash = this._payments.some(p => this._mop_type(p.mode) === "cash");
-		if (has_cash && !this._is_free_sale) this._render_quick_cash();
 
 		if (this._is_credit_sale) {
 			this._render_credit_info(this._credit_info);
@@ -3181,6 +3228,9 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		const balance = this._calc_balance_due();
 
 		// Free sale validations
+		if (this._is_free_sale && free_sale_blocked_for_new_walkin(PosState)) {
+			return this._block(__(FREE_SALE_NEW_WALKIN_MSG), "#ch-pay-sale-type-pills", "red");
+		}
 		if (this._is_free_sale) {
 			if ((PosState.cart || []).some((c) => c.is_vas)) {
 				return this._block(__("VAS and Protection plans cannot be given in a Free Sale. Remove the plan, or bill it with another sale type."), null, "red");
@@ -3556,7 +3606,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (!this._overlay) return;
 
 		const inv_name  = result.name;
-		const grand     = this._calc_grand_total();
+		// The total the server saved (as printed on the bill); the cart's own
+		// sum only when the server did not send one back.
+		const saved     = result.rounded_total != null && flt(result.rounded_total) > 0
+			? result.rounded_total : result.grand_total;
+		const grand     = saved != null ? flt(saved) : this._calc_grand_total();
 		const incentive = flt(result.incentive_earned || 0);
 		const incentive_warning = result.incentive_warning || "";
 		const vouchers  = result.generated_vouchers || [];
@@ -3998,11 +4052,14 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 	// Free, Finance and Supplier Sale take no bill discount, coupon or voucher
 	// (sale-type rules): the Commercial Controls block is hidden and anything
 	// already applied is cleared. It comes back when another sale type is chosen.
+	// A bill with an exception takes none either: the exception is already the
+	// approved price, and a discount on top would stack on it.
 	_no_discount_now() {
 		const name = String(PosState.sale_type || "").toLowerCase();
 		return this._is_free_sale || this._is_finance_sale_type(PosState.sale_type)
 			|| this._is_supplier_sale_type(PosState.sale_type)
-			|| name.includes("finance") || name.includes("emi");
+			|| name.includes("finance") || name.includes("emi")
+			|| cart_has_exception(PosState);
 	}
 
 	_sync_free_sale_commercials() {
@@ -4010,6 +4067,13 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		if (!ov) return;
 		const off = this._no_discount_now();
 		ov.find("#ch-pay-commercials").toggle(!off);
+		// Say why the controls are gone when it is the exception, not the sale type.
+		ov.find("#ch-pay-commercials-exc-note").remove();
+		if (off && cart_has_exception(PosState)) {
+			ov.find("#ch-pay-commercials").after(`<div id="ch-pay-commercials-exc-note" class="text-muted"
+				style="font-size:12px;padding:8px 14px"><i class="fa fa-info-circle"></i>
+				${__("Bill discount, coupon and voucher: not available — an exception is applied.")}</div>`);
+		}
 		if (!off) return;
 		const $reason = ov.find("#ch-pay-disc-reason");
 		if ($reason.val()) $reason.val("").trigger("change");  // the dialog's own discount reset
@@ -4018,6 +4082,11 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		PosState.additional_discount_pct = 0;
 		PosState.additional_discount_amt = 0;
 		PosState.discount_reason = "";
+		this._clear_coupon_voucher();
+	}
+
+	/** Take the applied coupon / voucher off the bill and empty the box. */
+	_clear_coupon_voucher() {
 		this._dlg_coupon_code = "";
 		this._dlg_coupon_discount = 0;
 		this._dlg_voucher_code = "";
@@ -4028,8 +4097,25 @@ if (!$btn.prop("disabled")) $btn.trigger("click");
 		PosState.coupon_discount = 0;
 		PosState.voucher_code = null;
 		PosState.voucher_amount = 0;
-		ov.find("#ch-pay-coupon-code").val("");
-		ov.find("#ch-pay-coupon-msg").empty();
+		if (this._overlay) {
+			this._overlay.find("#ch-pay-coupon-code").val("");
+			this._overlay.find("#ch-pay-coupon-msg").empty();
+		}
+		this._sync_coupon_ui();
+	}
+
+	/** Apply is on only with a code typed and none applied yet; once applied the
+	 *  code is locked, Apply is off and Remove takes it off. */
+	_sync_coupon_ui() {
+		const ov = this._overlay;
+		if (!ov) return;
+		const applied = this._dlg_voucher_code || this._dlg_coupon_code;
+		const $input = ov.find("#ch-pay-coupon-code");
+		if (applied && !$input.val()) $input.val(applied);
+		$input.prop("readonly", !!applied);
+		const typed = String($input.val() || "").trim();
+		ov.find("#ch-pay-coupon-apply").prop("disabled", !!applied || !typed);
+		ov.find("#ch-pay-coupon-remove").toggle(!!applied);
 	}
 
 	_show_free_reason(ov) {

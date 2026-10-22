@@ -3176,6 +3176,22 @@ def _refuse_discounts_for_sale_type(items, coupon_code, voucher_code, add_pct, a
                            "sale type.").format(_(label), r.get("item_code")), title=title)
 
 
+def _refuse_discounts_with_exception(items, exception_request, coupon_code, voucher_code, add_pct, add_amt) -> None:
+    """No bill discount, coupon or voucher on a bill that carries an exception.
+
+    The exception is already the approved price; a discount on top would
+    stack on it. FIFO overrides are not price exceptions and travel apart.
+    """
+    rows = frappe.parse_json(items) if isinstance(items, str) else (items or [])
+    has_exception = bool((exception_request or "").strip()) or any(
+        isinstance(r, dict) and (r.get("exception_request") or "").strip() for r in rows)
+    if not has_exception:
+        return
+    if (flt(add_pct) > 0 or flt(add_amt) > 0
+            or (coupon_code or "").strip() or (voucher_code or "").strip()):
+        frappe.throw(_("Bill discounts, coupons and vouchers cannot be used when the bill has an exception. Remove the exception, or the discount."), title=_("Not Allowed with an Exception"))
+
+
 def _refuse_bundle_discount_coupon_on_free_sale(items, coupon_code=None, voucher_code=None) -> None:
     """Free Sale: no bundle gift, no item discount, no coupon / voucher (sale-type rules).
 
@@ -3346,6 +3362,9 @@ def create_pos_invoice(
         # reductions too. FIFO overrides travel as fifo_override_*, not here.
         _refuse_exception_on_free_sale(items, exception_request, _label)
 
+    _refuse_discounts_with_exception(items, exception_request, coupon_code, voucher_code,
+                                     additional_discount_percentage, additional_discount_amount)
+
     # Before pricing: a VAS plan or an exception on a free sale is refused
     # with its own reason.
     if cint(is_free_sale):
@@ -3353,6 +3372,7 @@ def create_pos_invoice(
         _refuse_exception_on_free_sale(items, exception_request)
         _refuse_bundle_discount_coupon_on_free_sale(items, coupon_code, voucher_code)
         _refuse_prebooking_on_free_sale(items, sales_order)
+        _refuse_free_sale_for_new_walkin(customer, kiosk_token, profile)
 
     items = canonicalize_cart_items(
         items or [],
@@ -13213,7 +13233,26 @@ def get_customer_pos_info(customer, company=None, pos_profile=None) -> dict:
         "mobile_no": cust.mobile_no or "",
         "email_id": cust.email_id or "",
         "territory": cust.territory or "",
+        # Has bought before (a new customer cannot be given a Free Sale from a walk-in).
+        "has_purchases": _customer_has_purchases(customer, company),
     }
+
+
+def _customer_has_purchases(customer, company=None) -> bool:
+    """A submitted, non-return sale to this customer (in this company, when given)."""
+    filters = {"customer": customer, "docstatus": 1, "is_return": 0}
+    if company:
+        filters["company"] = company
+    return bool(frappe.db.exists("Sales Invoice", filters))
+
+
+def _refuse_free_sale_for_new_walkin(customer, kiosk_token, profile) -> None:
+    """A walk-in who has never bought from us is billed as a normal sale, not free."""
+    if not (kiosk_token or "").strip():
+        return
+    if (not customer or customer == profile.get("customer")
+            or not _customer_has_purchases(customer, profile.company)):
+        frappe.throw(_("A Free Sale is not allowed for a new customer billed from a walk-in. Bill it as a normal sale."), title=_("Not Allowed in Free Sale"))
 
 
 # ── Swap Eligibility ──────────────────────────────────────────

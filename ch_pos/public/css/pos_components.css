@@ -4024,6 +4024,16 @@ body > .desk-alert-container,
 .ch-pay-mop-btn:active {
   transform: translateY(0);
 }
+/* A mode in this payment: selected; click again to take it out. */
+.ch-pay-mop-btn.selected {
+  background: #1e40af;
+  border-color: #1e40af;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(30,64,175,0.25);
+}
+.ch-pay-mop-btn.selected i {
+  color: #fff !important;
+}
 
 /* ── Bank/card offers ────────────────────────────────────────────────── */
 .ch-pay-bank-offers {
@@ -6533,4 +6543,12 @@ body > .desk-alert-container,
 	display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 10px;
 	background: #ffedd5; color: #c2410c; border: 1px solid #fdba74;
 	font-size: 10.5px; font-weight: 700; white-space: nowrap;
+}
+
+/* Coupon / Voucher Apply: clearly off until a code is typed, and once applied. */
+#ch-pay-coupon-apply:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+  background: transparent;
 }

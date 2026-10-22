@@ -11,6 +11,7 @@
  * F. Footer CTA: Cancel · Hold · PAY
  */
 import { PosState, EventBus } from "../state.js";
+import { FREE_SALE_NEW_WALKIN_MSG, free_sale_blocked_for_new_walkin } from "./helpers.js";
 import { format_number, assert_india_phone, is_free_sale_type, FREE_SALE_VAS_MSG, FREE_SALE_EXCEPTION_MSG, FREE_SALE_BUNDLE_MSG, FREE_SALE_COUPON_MSG, FREE_SALE_PREBOOK_MSG, cart_has_exception, cart_has_prebooking, is_no_discount_sale_type, no_discount_msg, exception_blocked_msg } from "./helpers.js";
 
 /**
@@ -194,6 +195,17 @@ export class CartPanel {
 				);
 				pill.on("click", () => {
 					window.cur_pos_state_sale_types = rows;
+					// Whether this walk-in's customer has bought before is not known yet: wait for it.
+					if (is_free_sale_type(r.sale_type_name) && PosState.kiosk_token && PosState.customer
+						&& PosState.customer !== PosState.default_customer
+						&& !(PosState.customer_info && PosState.customer_info.customer === PosState.customer)) {
+						frappe.show_alert({ message: __("Customer details are still loading — try again in a moment."), indicator: "orange" });
+						return;
+					}
+					if (is_free_sale_type(r.sale_type_name) && free_sale_blocked_for_new_walkin(PosState)) {
+						frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_NEW_WALKIN_MSG) });
+						return;
+					}
 					if (is_free_sale_type(r.sale_type_name) && (PosState.cart || []).some((c) => c.is_vas)) {
 						frappe.msgprint({ title: __("Not Allowed in Free Sale"), indicator: "orange", message: __(FREE_SALE_VAS_MSG) });
 						return;
@@ -231,6 +243,21 @@ export class CartPanel {
 	 *  pay check reads. The chips used to be coloured only when drawn, so a
 	 *  reset that cleared the value left DS lit while PAY refused "select a
 	 *  Sale Type". Now PAY stays disabled until a Sale Type is picked. */
+	_enforce_free_sale_walkin_rule() {
+		if (!is_free_sale_type(PosState.sale_type) || !free_sale_blocked_for_new_walkin(PosState)) return;
+		const types = window.cur_pos_state_sale_types || PosState._sale_types_cache || [];
+		const direct = types.find((t) => String(t.code || "").toUpperCase() === "DS")
+			|| types.find((t) => t.is_default && !is_free_sale_type(t.sale_type_name));
+		PosState.sale_type = direct ? direct.sale_type_name : null;
+		this._sync_sale_type_ui();
+		EventBus.emit("sale_type:changed", { sale_type: PosState.sale_type });
+		this.refresh();
+		frappe.show_alert({
+			message: __(FREE_SALE_NEW_WALKIN_MSG) + (direct ? " " + __("Sale type set to {0}.", [direct.code || direct.sale_type_name]) : ""),
+			indicator: "orange",
+		}, 8);
+	}
+
 	_sync_sale_type_ui() {
 		const current = PosState.sale_type || "";
 		$(".ch-pos-cart-saletype-btn").each((_, el) => {
@@ -1172,6 +1199,10 @@ export class CartPanel {
 		EventBus.on("sale_type:changed", () => this._sync_sale_type_ui());
 		EventBus.on("cart:updated", () => this._sync_sale_type_ui());
 		EventBus.on("customer:changed", () => this._sync_sale_type_ui());
+		// However Free Sale was reached (restored cart, customer changed or loaded
+		// after it was picked), a new walk-in customer is not kept on it.
+		["customer:changed", "customer:info_loaded", "cart:updated", "sale_type:changed"].forEach((ev) =>
+			EventBus.on(ev, () => this._enforce_free_sale_walkin_rule()));
 		EventBus.on("customer:set", () => setTimeout(() => this._sync_sale_type_ui(), 0));
 
 		// Re-render executive bar when access data arrives or company changes
@@ -1300,8 +1331,9 @@ export class CartPanel {
 		// Warranty rows (own-warranty fee lines) stay locked — pricing is
 		// derived from the device's plan, not exception-overridable here.
 		let inline_actions = "";
-		// Free / Finance / Supplier Sale: no new exception (an existing one can still be removed).
-		const _no_new_exception = is_no_discount_sale_type(PosState.sale_type);
+		// Free / Finance / Supplier Sale, or a bundle's free gift (already ₹0): no new
+		// exception (an existing one can still be removed).
+		const _no_new_exception = is_no_discount_sale_type(PosState.sale_type) || !!item.is_free_bundle_item;
 		// Free Sale only: no VAS (Finance Sale keeps it).
 		const _no_vas = is_free_sale_type(PosState.sale_type);
 		const _can_exception = !item.is_warranty && (item.serial_no || item.item_code) && (!_no_new_exception || item.exception_request);
@@ -1342,8 +1374,11 @@ export class CartPanel {
 						${offer_tag}${uom_tag}${serial_tag}${margin_tag}${exception_tag}
 					</span>
 					<span class="cart-item-amount">
-						${computed_discount_amt > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);margin-right:6px">₹${format_number(base_amount)}</span>` : ""}
-						₹${format_number(final_amount)}
+						${is_free_sale_type(PosState.sale_type) && final_amount > 0
+							// Free Sale bills every line at ₹0: show it now, the price struck out.
+							? `<span style="text-decoration:line-through;color:var(--text-muted);margin-right:6px">₹${format_number(final_amount)}</span>₹0`
+							: `${computed_discount_amt > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);margin-right:6px">₹${format_number(base_amount)}</span>` : ""}
+						₹${format_number(final_amount)}`}
 					</span>
 				</div>
 				<div class="cart-line-bottom">
@@ -1547,7 +1582,12 @@ export class CartPanel {
 		const so_row = s.find(".sales-order-advance");
 		so_advance > 0 ? so_row.show().find(".value").text(`-₹${format_number(so_advance)}`) : so_row.hide();
 
-		s.find(".grand-total .value").text(`₹${format_number(grand_total)}`);
+		if (is_free_sale_type(PosState.sale_type) && grand_total > 0) {
+			s.find(".grand-total .value").html(
+				`<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.55em;margin-right:8px;vertical-align:middle">₹${format_number(grand_total)}</span>₹0`);
+		} else {
+			s.find(".grand-total .value").text(`₹${format_number(grand_total)}`);
+		}
 	}
 
 	_update_sales_order_banner() {
@@ -1604,9 +1644,17 @@ export class CartPanel {
 	}
 
 	_refresh_held_count(w) {
+		// Counted the way the Held Bills list shows them: this company's, this till's.
+		const here = PosState.active_company || PosState.company || "";
+		const till = PosState.pos_profile || "";
 		let count = 0;
 		for (let i = 0; i < localStorage.length; i++) {
-			if (localStorage.key(i).startsWith("ch_pos_held_")) count++;
+			const k = localStorage.key(i);
+			if (!k.startsWith("ch_pos_held_")) continue;
+			try {
+				const d = JSON.parse(localStorage.getItem(k)) || {};
+				if (here && d.company === here && !(till && d.pos_profile && d.pos_profile !== till)) count++;
+			} catch (_) { /* corrupt entry: not listed, not counted */ }
 		}
 		const badge = (w || this.wrapper).find(".ch-held-count");
 		const show = (n) => (n > 0 ? badge.text(n).show() : badge.hide());

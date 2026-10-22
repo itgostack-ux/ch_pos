@@ -2200,15 +2200,21 @@ def find_customer_by_phone(phone: str, pos_profile: str = None) -> dict:
     contact_scope_clause = ""
     profile_params = []
     if pos_profile:
+        # This store's customers: billed here, or created by this store's own
+        # staff (a new customer has no bill yet and must still be found).
+        from ch_pos.api.pos_api import _own_store_users
+        own_users = _own_store_users(frappe.db.get_value("POS Profile", pos_profile, "warehouse"))
         customer_scope_clause = (
-            " AND EXISTS (SELECT 1 FROM `tabSales Invoice` si "
+            " AND (EXISTS (SELECT 1 FROM `tabSales Invoice` si "
             "WHERE si.customer = c.name AND si.docstatus = 1 AND si.pos_profile = %s)"
+            " OR c.owner IN %s)"
         )
         contact_scope_clause = (
-            " AND EXISTS (SELECT 1 FROM `tabSales Invoice` si "
+            " AND (EXISTS (SELECT 1 FROM `tabSales Invoice` si "
             "WHERE si.customer = dl.link_name AND si.docstatus = 1 AND si.pos_profile = %s)"
+            " OR (SELECT cu.owner FROM `tabCustomer` cu WHERE cu.name = dl.link_name) IN %s)"
         )
-        profile_params.append(pos_profile)
+        profile_params.extend([pos_profile, own_users])
     direct = frappe.db.sql(
         f"SELECT c.name FROM `tabCustomer` c WHERE c.mobile_no = %s {customer_scope_clause} LIMIT 1",
         [phone, *profile_params],
@@ -3054,6 +3060,31 @@ def _customer_name_for_phone(phone):
         {"tail": f"%{tail10}"},
     )
     return row[0][0] if row else None
+
+
+@frappe.whitelist(methods=["POST"])
+def link_token_customer(token_name: str, customer: str) -> dict:
+    """Record the customer a walk-in turned out to be.
+
+    Set when the counter creates the customer (or picks the existing one) on
+    Bill, Proforma or Pre-Book, so the next step on the same visit uses them
+    instead of asking again.
+    """
+    _ensure_can_operate_token()
+    _assert_token_scope(token_name)
+    customer = (customer or "").strip()
+    if not customer or not frappe.db.exists("Customer", customer):
+        frappe.throw(_("Customer {0} does not exist.").format(customer or "-"))
+    token = frappe.db.get_value("POS Kiosk Token", token_name, ["pos_profile", "linked_customer"], as_dict=True)
+    if token.linked_customer == customer:
+        return {"token": token_name, "linked_customer": customer}
+    from ch_pos.api.pos_api import _assert_customer_pos_access, _own_store_users
+    owner = frappe.db.get_value("Customer", customer, "owner")
+    store_users = _own_store_users(frappe.db.get_value("POS Profile", token.pos_profile, "warehouse"))
+    if owner not in store_users:
+        _assert_customer_pos_access(customer, token.pos_profile, action=_("link"))
+    frappe.db.set_value("POS Kiosk Token", token_name, "linked_customer", customer)
+    return {"token": token_name, "linked_customer": customer}
 
 
 @frappe.whitelist(methods=["POST"])

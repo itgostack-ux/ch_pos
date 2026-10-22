@@ -61,6 +61,8 @@ export class QueueWorkspace {
 		});
 		// Held Bills → Bill on a walk-in the queue put on Hold.
 		EventBus.on("queue:bill_token", (token) => this._startBilling(token));
+		// Any item found out of stock while billing (grid, search, scan).
+		EventBus.on("stock:out_of_stock", (items) => this._show_out_of_stock(items || []));
 	}
 
 	_startAutoRefresh() {
@@ -1078,6 +1080,8 @@ export class QueueWorkspace {
 			pos_profile: PosState.pos_profile,
 				sales_executive: PosState.sales_executive || "",
 		}).then((result) => {
+			// This visit is now In Progress or on Hold: the Held Bills badge follows.
+			EventBus.emit("held_bills:updated");
 			if (result && result.action === "held") {
 				this._offer_switch(token, result.active_token);
 				return;
@@ -1133,6 +1137,7 @@ export class QueueWorkspace {
 			secondary_action: () => {
 				d.hide();
 				frappe.show_alert({ message: __("{0} is on Hold until {1} is finished.", [this_label, active_label]), indicator: "orange" }, 6);
+				EventBus.emit("held_bills:updated");
 				done();
 			},
 		});
@@ -1171,10 +1176,18 @@ export class QueueWorkspace {
 			{ doctype: "POS Kiosk Token", name: token.name }).catch(() => null);
 		if (!doc) return;
 		let picked = (doc.items || []).filter((r) => r.item_code);
+		// The customer may have changed their mind since the walk-in was logged:
+		// ask before billing what they asked for (not after a variant list,
+		// which is already the cashier's own choice).
+		let ask = picked.length > 0;
 		if (!picked.length) {
 			// No catalogue item picked at Log Walk-in: go by what the customer said.
 			picked = await this._items_from_walkin_text(doc);
-			if (!picked) return;
+			if (!picked) {
+				this._pick_new_item(doc);
+				return;
+			}
+			ask = !picked.from_variant_list;
 		}
 		// Bill pressed again for the same visit: skip what is already in the cart.
 		const in_cart = new Set((PosState.cart || []).map((c) => c.item_code));
@@ -1198,6 +1211,11 @@ export class QueueWorkspace {
 			} else {
 				out.push({ item_code: line.item_code, item_name: (row && row.item_name) || line.item_name || line.item_code });
 			}
+		}
+
+		if (ask && !(await this._ask_bill_or_pick(doc, ready, out))) {
+			this._pick_new_item(doc);
+			return;
 		}
 
 		const next = () => {
@@ -1226,8 +1244,8 @@ export class QueueWorkspace {
 		}
 		if (doc.device_model) {
 			const chosen = await this._pick_model_variant(doc);
-			if (chosen) return chosen;
-			return null;
+			if (chosen) chosen.from_variant_list = true;
+			return chosen || null;
 		}
 		frappe.msgprint({
 			title: __("No item selected"),
@@ -1279,6 +1297,8 @@ export class QueueWorkspace {
 					finish(chosen.map(as_line));
 					d.hide();
 				},
+				secondary_action_label: __("Pick a different item"),
+				secondary_action: () => d.hide(),
 			});
 			d.onhide = () => finish(null);
 			d.fields_dict.list.$wrapper.html(`
@@ -1316,7 +1336,59 @@ export class QueueWorkspace {
 		});
 	}
 
+	// The walk-in's item(s), with price and stock here: bill them, or pick
+	// another item. Resolves true for "bill", false otherwise (closing too).
+	_ask_bill_or_pick(doc, ready, out) {
+		return new Promise((resolve) => {
+			const esc = frappe.utils.escape_html;
+			let settled = false;
+			const finish = (val) => { if (!settled) { settled = true; resolve(val); } };
+			const in_stock = ready.map((r) => ({ name: r.item_name || r.item_code, code: r.item_code,
+				rate: flt(r.selling_price || r.mrp), stock: flt(r.stock_qty) - flt(r.prebooked_qty), ok: true }));
+			const no_stock = out.map((r) => ({ name: r.item_name || r.item_code, code: r.item_code, ok: false }));
+			const lines = in_stock.concat(no_stock);
+			const d = new frappe.ui.Dialog({
+				title: __("Bill — {0}", [doc.customer_name || doc.name]),
+				fields: [{ fieldtype: "HTML", fieldname: "msg" }],
+				primary_action_label: lines.length > 1 ? __("Bill these items") : __("Bill this item"),
+				primary_action: () => { if (!ready.length) return; finish(true); d.hide(); },
+				secondary_action_label: __("Pick a different item"),
+				secondary_action: () => d.hide(),
+			});
+			d.onhide = () => finish(false);
+			d.fields_dict.msg.$wrapper.html(`
+				<p>${__("{0} asked about:", [`<b>${esc(doc.customer_name || __("The customer"))}</b>`])}</p>
+				<table class="table table-sm" style="margin:0 0 10px">
+					<tbody>${lines.map((l) => `<tr>
+						<td><b>${esc(l.name)}</b><div class="text-muted small">${esc(l.code)}</div></td>
+						<td class="text-right">${l.ok && l.rate ? format_currency(l.rate) : ""}</td>
+						<td class="text-right">${l.ok
+							? `<span class="text-success">${__("In stock ({0})", [l.stock])}</span>`
+							: `<span class="text-danger">${__("Out of Stock")}</span>`}</td>
+					</tr>`).join("")}</tbody>
+				</table>
+				${ready.length ? (out.length ? `<p class="text-muted small">${__("Only the items in stock are billed; the rest are listed as out of stock.")}</p>` : "")
+					: `<div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:6px;padding:8px 12px;">
+						<i class="fa fa-exclamation-triangle"></i>
+						${__("Out of stock. Pick another item, or Pre-Book / raise a Material Request.")}
+					</div>`}
+				<p style="margin-top:10px">${__("Has the customer changed their mind? Pick a different item to search or scan it instead.")}</p>`);
+			d.show();
+			if (!ready.length) d.get_primary_btn().prop("disabled", true).addClass("disabled");
+		});
+	}
+
+	// Cart left empty for this walk-in: search or scan the item they want now.
+	_pick_new_item(doc) {
+		frappe.show_alert({
+			message: __("Search or scan the item {0} wants.", [doc.customer_name || __("the customer")]),
+			indicator: "blue",
+		}, 6);
+		setTimeout(() => EventBus.emit("search:focus"), 150);
+	}
+
 	_show_out_of_stock(items) {
+		if (!items.length) return;
 		const esc = frappe.utils.escape_html;
 		const d = new frappe.ui.Dialog({
 			title: __("Out of Stock"),
@@ -1329,6 +1401,23 @@ export class QueueWorkspace {
 			secondary_action_label: __("Close"),
 			secondary_action: () => d.hide(),
 		});
+		// Keep the sale: pre-book the item for the customer on this bill.
+		if (PosState.customer) {
+			d.add_custom_action(__("Pre-Book"), () => {
+				d.hide();
+				const kiosk_token = (PosState.cart || []).length ? null : (PosState.kiosk_token || null);
+				const customer = PosState.customer;
+				Promise.all(items.map((it) => frappe.xcall("ch_pos.api.search.get_item_detail_for_pos",
+					{ item_code: it.item_code, warehouse: PosState.warehouse || null })
+					.then((r) => ({ item_code: it.item_code, item_name: it.item_name, qty: 1, rate: flt(r && (r.selling_price || r.mrp)) }))
+					.catch(() => ({ item_code: it.item_code, item_name: it.item_name, qty: 1, rate: 0 }))))
+					.then((lines) => {
+						EventBus.emit("mode:set", "prebook");
+						EventBus.emit("mode:switch", "prebook");
+						setTimeout(() => EventBus.emit("prebook:start_with", { items: lines, customer, kiosk_token }), 300);
+					});
+			}, "btn-default");
+		}
 		d.fields_dict.msg.$wrapper.html(`
 			<p>${__("Not available at this store:")}</p>
 			<ul style="margin:0 0 12px 18px;padding:0">
@@ -1336,7 +1425,9 @@ export class QueueWorkspace {
 			</ul>
 			<div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:6px;padding:8px 12px;">
 				<i class="fa fa-exclamation-triangle"></i>
-				${__("Out of Stock — please procure, or raise a Material Request.")}
+				${PosState.customer
+					? __("Out of Stock — please procure, raise a Material Request, or Pre-Book it for the customer.")
+					: __("Out of Stock — please procure, or raise a Material Request.")}
 			</div>`);
 		d.show();
 	}
@@ -1361,12 +1452,20 @@ export class QueueWorkspace {
 				return;
 			}
 			frappe.show_alert({ message: __("New customer — create the customer first"), indicator: "blue" }, 4);
+			// The customer is kept on the walk-in, so the next Bill / Proforma /
+			// Pre-Book on this visit uses them without asking again.
+			const keep = (name) => {
+				token.linked_customer = name;
+				frappe.xcall("ch_pos.api.token_api.link_token_customer", { token_name: token.name, customer: name })
+					.catch(() => null);
+				resolve(name);
+			};
 			window.ch_open_new_customer_dialog({
 				company: PosState.company,
 				prefill_name: token.customer_name || "",
 				prefill_mobile: token.customer_phone || "",
-				on_success: (name) => { if (name) resolve(name); },
-				on_use_existing: (existing) => { if (existing) resolve(existing); },
+				on_success: (name) => { if (name) keep(name); },
+				on_use_existing: (existing) => { if (existing) keep(existing); },
 			});
 		}));
 	}

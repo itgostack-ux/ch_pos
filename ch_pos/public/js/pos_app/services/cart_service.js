@@ -14,6 +14,7 @@ export class CartService {
 		this._serial_claims = new Set();
 		this._exception_status_inflight = new Set();
 		this._exception_status_seen = {};
+		this._vas_reprice_asked = new Set();  // exceptions whose VAS re-price was already put to the cashier
 		this._exception_status_poll_ms = 8000;
 		this._exception_status_timer = null;
 		this._bind_events();
@@ -486,7 +487,8 @@ export class CartService {
 		EventBus.on("cart:qty_set", ({ idx, qty }) => this.set_cart_qty(idx, qty));
 
 		EventBus.on("cart:remove", (idx) => {
-			PosState.cart.splice(idx, 1);
+			const [removed] = PosState.cart.splice(idx, 1);
+			this._remove_lines_attached_to(removed);
 			EventBus.emit("cart:updated");
 		});
 
@@ -494,6 +496,7 @@ export class CartService {
 			const item = PosState.cart[idx];
 			if (!item || !item.exception_request) return;
 			this._remove_exception_from_item(item);
+			this._reprice_vas_to_devices();
 			EventBus.emit("cart:updated");
 		});
 
@@ -504,6 +507,7 @@ export class CartService {
 				this._remove_exception_from_item(item);
 				changed = true;
 			});
+			if (changed) this._reprice_vas_to_devices();
 			if (changed) EventBus.emit("cart:updated");
 		});
 
@@ -614,6 +618,7 @@ export class CartService {
 			}
 			this._apply_exception_pricing_to_cart(data);
 			EventBus.emit("cart:updated");
+			this._confirm_vas_reprice((payload && payload.name) || data.name);
 		});
 		EventBus.on("cart:exception_invalid", (payload) => {
 			this._invalidate_exception_link(
@@ -625,6 +630,7 @@ export class CartService {
 
 		EventBus.on("state:transaction_reset", () => {
 			this._exception_status_seen = {};
+			this._vas_reprice_asked.clear();
 			this._serial_claims.clear();
 		});
 
@@ -767,6 +773,7 @@ export class CartService {
 		EventBus.emit("cart:updated");
 		if ((status === "Approved" || status === "Auto-Approved") && data.valid) {
 			EventBus.emit("exception:applied", { name: exception_name, data });
+			this._confirm_vas_reprice(exception_name);
 		}
 
 		if (just_approved && this._exception_status_seen[exception_name] !== status) {
@@ -794,6 +801,7 @@ export class CartService {
 		}
 		if (!changed) return false;
 
+		this._reprice_vas_to_devices();
 		EventBus.emit("cart:updated");
 		EventBus.emit("exception:invalidated", {
 			exception_name,
@@ -862,7 +870,7 @@ export class CartService {
 
 		// Pre-checks (mirrors add_to_cart)
 		if (item_data.stock_qty <= 0) {
-			frappe.show_alert({ message: __("Item {0} is out of stock", [item_data.item_name]), indicator: "red" });
+			EventBus.emit("stock:out_of_stock", [{ item_code: item_data.item_code, item_name: item_data.item_name || item_data.item_code }]);
 			return;
 		}
 		// Zero-price guard: block ONLY when no price AND zero-rate is NOT explicitly allowed.
@@ -1067,10 +1075,7 @@ export class CartService {
 		// and are always available for walk-up sale — the server-side
 		// ``pos_item_search`` mirrors this.
 		if (cint(item_data.is_stock_item) && item_data.stock_qty <= 0) {
-			frappe.show_alert({
-				message: __("Item {0} is out of stock", [item_data.item_name]),
-				indicator: "red",
-			});
+			EventBus.emit("stock:out_of_stock", [{ item_code: item_data.item_code, item_name: item_data.item_name || item_data.item_code }]);
 			return;
 		}
 
@@ -1638,9 +1643,9 @@ export class CartService {
 			size: "large",
 			primary_action_label: __("Add to Cart"),
 			primary_action: (values) => {
-				const serial = String(values.serial_no || "").trim();
-				const selected = dlg.$wrapper.find(".ch-imei-row.selected").attr("data-serial") || "";
-				const final_serial = selected || serial;
+				// The box is the one source: clicking a row fills it, clearing it
+				// clears the choice (a highlighted row alone adds nothing).
+				const final_serial = String(values.serial_no || "").trim();
 				if (!final_serial) {
 					frappe.show_alert({ message: __("Select or scan an IMEI"), indicator: "orange" });
 					return;
@@ -1701,6 +1706,19 @@ export class CartService {
 			dlg.onhide = () => { if (!done) { done = true; on_done(); } };
 		}
 		dlg.show();
+
+		// Add to Cart only once an IMEI is chosen; the highlighted row follows the box.
+		const sync_choice = () => {
+			const typed = String(dlg.get_value("serial_no") || "").trim();
+			dlg.$wrapper.find(".ch-imei-row").each(function () {
+				$(this).toggleClass("selected", !!typed && $(this).attr("data-serial") === typed);
+			});
+			// Frappe's disable only greys the button; the button itself must refuse clicks too.
+			if (typed) dlg.enable_primary_action(); else dlg.disable_primary_action();
+			dlg.get_primary_btn().prop("disabled", !typed);
+		};
+		dlg.fields_dict.serial_no.$input.on("input change", sync_choice);
+		sync_choice();
 
 		// Inject scoped CSS once for picker alignment + hover/selected styles
 		if (!document.getElementById("ch-imei-picker-styles")) {
@@ -1888,9 +1906,7 @@ export class CartService {
 
 			// Click to select
 			area.on("click", ".ch-imei-row", function () {
-				area.find(".ch-imei-row").removeClass("selected");
-				$(this).addClass("selected");
-				dlg.set_value("serial_no", $(this).attr("data-serial") || "");
+				Promise.resolve(dlg.set_value("serial_no", $(this).attr("data-serial") || "")).then(sync_choice);
 			});
 		});
 	}
@@ -2054,6 +2070,134 @@ export class CartService {
 			}
 		});
 		return summary;
+	}
+
+	// A phone taken off the bill takes its VAS / plans and its bundle gift with
+	// it: a plan left behind points at a device no longer sold (refused at
+	// payment), and a gift without its phone is not free.
+	_remove_lines_attached_to(device) {
+		if (!device || device.warranty_plan || device.is_free_bundle_item || device.is_vas) return;
+		const cart = PosState.cart || [];
+		const sn = String(device.serial_no || "").split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+		const same_model_left = cart.some((c) => !c.warranty_plan && !c.is_free_bundle_item && !c.is_vas && c.item_code === device.item_code);
+		const attached = cart.filter((c) => {
+			if (c.warranty_plan && !c.customer_imei) {
+				const for_sn = String(c.for_serial_no || "").trim();
+				return for_sn ? sn.includes(for_sn) : (c.for_item_code === device.item_code && !same_model_left);
+			}
+			return !!c.is_free_bundle_item && c.bundle_parent === device.item_code && !same_model_left;
+		});
+		if (!attached.length) return;
+		PosState.cart = cart.filter((c) => !attached.includes(c));
+		frappe.show_alert({
+			message: __("Also removed with {0}: {1}", [frappe.utils.escape_html(device.item_name || device.item_code),
+				attached.map((c) => frappe.utils.escape_html((c.item_name || c.item_code).replace(/^✦\s*/, ""))).join(", ")]),
+			indicator: "blue",
+		}, 8);
+	}
+
+	// ── VAS priced on its device ─────────────────────────
+	// A "Percentage of Device Price" plan costs a share of the device it covers,
+	// and the server prices it on that device's rate in the bill. When the
+	// device's price moves (an exception applied or removed), the plan line has
+	// to move with it, or the bill is refused at payment.
+
+	/** Plan lines whose price no longer matches their device: [{line, from, to}]. */
+	_vas_price_changes() {
+		const cart = PosState.cart || [];
+		const devices = cart.filter((c) => !c.warranty_plan && flt(c.rate) > 0);
+		const serials = (c) => String(c.serial_no || "").split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+		const changes = [];
+		cart.forEach((line) => {
+			if (!line.warranty_plan || line.customer_imei || line.is_free_bundle_item || line.exception_request) return;
+			if (line.pricing_mode !== "Percentage of Device Price" || !(flt(line.percentage_value) > 0)) return;
+			const by_serial = line.for_serial_no
+				? devices.find((c) => serials(c).includes(String(line.for_serial_no).trim()))
+				: null;
+			const by_item = devices.filter((c) => c.item_code === line.for_item_code);
+			const device_rate = by_serial
+				? flt(by_serial.rate)
+				: (by_item.length ? Math.max(...by_item.map((c) => flt(c.rate))) : 0);
+			if (!(device_rate > 0)) return;
+			const to = Math.round(device_rate * flt(line.percentage_value)) / 100;
+			if (Math.abs(flt(line.rate) - to) > 0.005) changes.push({ line, from: flt(line.rate), to });
+		});
+		return changes;
+	}
+
+	_apply_vas_price_changes(changes) {
+		changes.forEach(({ line, to }) => {
+			line.rate = to;
+			line.price_list_rate = to;
+			line.mrp = to;
+		});
+	}
+
+	/** Plan lines added before their pricing was kept on the line: look it up once. */
+	async _ensure_vas_pricing_info() {
+		const missing = (PosState.cart || []).filter((l) => l.warranty_plan && l.pricing_mode === undefined);
+		for (const line of missing) {
+			try {
+				const plan = await frappe.xcall("frappe.client.get_value", {
+					doctype: "CH Warranty Plan", filters: { name: line.warranty_plan },
+					fieldname: ["pricing_mode", "percentage_value"],
+				});
+				line.pricing_mode = (plan && plan.pricing_mode) || "";
+				line.percentage_value = flt(plan && plan.percentage_value);
+			} catch (e) {
+				line.pricing_mode = "";
+			}
+		}
+	}
+
+	/** Device price went back (exception removed / rejected / expired): the VAS follows. */
+	_reprice_vas_to_devices() {
+		const changes = this._vas_price_changes();
+		if (!changes.length) return;
+		this._apply_vas_price_changes(changes);
+		frappe.show_alert({
+			message: changes.map((c) => __("{0}: ₹{1} → ₹{2}", [
+				frappe.utils.escape_html((c.line.item_name || c.line.item_code).replace(/^✦\s*/, "")),
+				format_number(c.from), format_number(c.to)])).join("<br>"),
+			indicator: "blue",
+		}, 8);
+	}
+
+	/** An exception changed a device's price: ask before the attached VAS price changes. */
+	async _confirm_vas_reprice(exception_name) {
+		if (!exception_name || this._vas_reprice_asked.has(exception_name)) return;
+		await this._ensure_vas_pricing_info();
+		const changes = this._vas_price_changes();
+		if (!changes.length) return;
+		this._vas_reprice_asked.add(exception_name);
+		const esc = frappe.utils.escape_html;
+		const device = (PosState.cart || []).find((c) => c.exception_request === exception_name && !c.warranty_plan);
+		const rows = changes.map((c) => `<tr>
+				<td>${esc((c.line.item_name || c.line.item_code).replace(/^✦\s*/, ""))}</td>
+				<td style="text-align:right">₹${format_number(c.from)}</td>
+				<td style="text-align:right"><b>₹${format_number(c.to)}</b></td>
+			</tr>`).join("");
+		const message = `
+			<p>${__("Exception {0} changes the price of {1} to ₹{2}. The VAS attached to it is priced on the device, so its amount changes too:", [
+				`<b>${esc(exception_name)}</b>`, `<b>${esc(device ? (device.item_name || device.item_code) : __("the device"))}</b>`,
+				format_number(device ? device.rate : 0)])}</p>
+			<table class="table table-sm" style="margin:0">
+				<thead><tr><th>${__("VAS")}</th><th style="text-align:right">${__("Was")}</th><th style="text-align:right">${__("Now")}</th></tr></thead>
+				<tbody>${rows}</tbody>
+			</table>
+			<p style="margin-top:8px">${__("Do you want to continue?")}</p>`;
+		frappe.confirm(message, () => {
+			this._apply_vas_price_changes(this._vas_price_changes());
+			EventBus.emit("cart:updated");
+			frappe.show_alert({ message: __("VAS amount updated"), indicator: "green" });
+		}, () => {
+			// No: keep the VAS as it was, so the exception comes off the device.
+			(PosState.cart || []).forEach((item) => {
+				if (item.exception_request === exception_name) this._remove_exception_from_item(item);
+			});
+			EventBus.emit("cart:updated");
+			frappe.show_alert({ message: __("Exception {0} removed; the device and VAS keep their original prices.", [exception_name]), indicator: "orange" }, 8);
+		}, __("Yes, continue"), __("No"));
 	}
 
 	_remove_exception_from_item(cart_item) {
@@ -2360,6 +2504,10 @@ export class CartService {
 
 	// ── Coupon / Voucher ────────────────────────────────
 	_apply_coupon(code) {
+		if (cart_has_exception(PosState)) {
+			frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: __("Bill discounts, coupons and vouchers cannot be used when the bill has an exception. Remove the exception, or the discount.") });
+			return;
+		}
 		if (is_no_discount_sale_type(PosState.sale_type)) {
 			frappe.msgprint({ title: __("Not Allowed"), indicator: "orange", message: no_discount_msg(PosState.sale_type) });
 			return;
@@ -3131,6 +3279,9 @@ export class CartService {
 			offers: [],
 			applied_offer: null,
 			warranty_plan: plan.name,
+			// Kept so the line can follow its device's price (see _vas_price_changes).
+			pricing_mode: plan.pricing_mode || "",
+			percentage_value: flt(plan.percentage_value) || 0,
 			for_item_code,
 			for_serial_no,
 			customer_imei: external_intent ? for_serial_no : null,
@@ -3337,6 +3488,8 @@ export class CartService {
 		bills.sort((a, b) => (b.timestamp > a.timestamp ? 1 : -1));
 
 		if (!bills.length && !queue_holds.length) {
+			// The badge may still show an older count: put it right.
+			EventBus.emit("held_bills:updated");
 			frappe.show_alert({
 				message: hidden
 					? __("No held bills for this company ({0} held elsewhere)", [hidden])
