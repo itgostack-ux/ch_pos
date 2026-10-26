@@ -12358,7 +12358,6 @@ def create_cross_store_transfer(pos_profile, source_pos_profile, items, notes=No
     }
 
 
-@frappe.whitelist()
 def _assert_transfer_access(se, ptype, warehouses) -> None:
     """Stock Entry role permission + one of the transfer's own warehouses.
 
@@ -12376,6 +12375,7 @@ def _assert_transfer_access(se, ptype, warehouses) -> None:
         frappe.throw(frappe._("This transfer is not for your store."), frappe.PermissionError)
 
 
+@frappe.whitelist()
 def get_stock_transfer_items(stock_entry) -> dict:
     """Return line items of a Stock Entry for the receive dialog."""
     se = frappe.get_doc("Stock Entry", stock_entry)
