@@ -278,6 +278,20 @@ def get_pos_context(all_companies=0) -> dict:
             },
             ["name", "user", "status", "opening_cash", "pos_profile"],
             as_dict=True)
+    elif store and business_date:
+        # No device: the store's till for today is the session, whoever
+        # opened it — a colleague at this store resumes it instead of being
+        # asked for opening cash again (assert_session_operator allows them).
+        existing_session = frappe.db.get_value(
+            "CH POS Session",
+            {
+                "store": store,
+                "business_date": business_date,
+                "status": ("in", ["Open", "Locked", "Suspended"]),
+                "docstatus": 1,
+            },
+            ["name", "user", "status", "opening_cash", "pos_profile"],
+            as_dict=True)
 
     # Check if day is closed
     day_closed = False
